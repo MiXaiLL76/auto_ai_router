@@ -68,7 +68,7 @@ func TestReaderMaterializesAndLiftsBans(t *testing.T) {
 	seedBanDetails(t, client, cfg, "cred1|gpt-4o", 429, "status 429")
 
 	f2b := fail2ban.New(3, 0, []int{})
-	r := New(client, cfg, f2b, []string{"openai"}, slog.Default())
+	r := New(client, cfg, f2b, []string{"openai"}, 200*time.Millisecond, slog.Default())
 	r.sync(context.Background())
 
 	assert.True(t, f2b.IsBanned("cred1", "gpt-4o"), "model ban materialized into fail2ban")

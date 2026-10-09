@@ -203,7 +203,7 @@ func main() {
 	if cfg.AccountEvents.Enabled {
 		if redisBackend != nil {
 			banReader = banreader.New(redisBackend.Client(), cfg.Redis, f2b,
-				credentialProviderTypes(cfg), log)
+				credentialProviderTypes(cfg), cfg.AccountEvents.ReaderInterval, log)
 			bal.SetHealthChecker(banReader)
 			// The local fail2ban counters may now step aside: an external
 			// source of bans is really connected. Only then.

@@ -2568,3 +2568,29 @@ credentials:
 	assert.Equal(t, VisionFallbackReject, cfg.VisionFallback.Mode)
 	assert.Equal(t, DefaultVisionMaxImages, cfg.VisionFallback.MaxImages, "absent section still gets the default limit")
 }
+
+func TestConfigAccountEventsReaderInterval(t *testing.T) {
+	configPath := t.TempDir() + "config.yaml"
+	err := os.WriteFile(configPath, []byte(`server:
+  port: 8080
+  master_key: "sk-test-master-key"
+
+credentials:
+  - name: "provider_1"
+    type: "openai"
+    api_key: "sk-xxxx"
+    base_url: "https://api.openai.com"
+
+account_events:
+  enabled: true
+  topic: "account-events"
+  reader_interval: 750ms
+`), 0644)
+	require.NoError(t, err)
+
+	cfg, err := Load(configPath)
+	require.NoError(t, err)
+	assert.True(t, cfg.AccountEvents.Enabled)
+	assert.Equal(t, "account-events", cfg.AccountEvents.Topic)
+	assert.Equal(t, 750*time.Millisecond, cfg.AccountEvents.ReaderInterval)
+}

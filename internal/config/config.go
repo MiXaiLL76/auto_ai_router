@@ -521,16 +521,21 @@ type AccountEventsConfig struct {
 	Enabled bool `yaml:"enabled"`
 	// Topic is the account-events topic (e.g. "account-events").
 	Topic string `yaml:"topic"`
+	// ReaderInterval is how often the ban reader polls the worker's bans
+	// from Redis. Its own knob, deliberately not redis.sync_interval: that
+	// one is shared by the budget/rate-limit hybrid backends.
+	ReaderInterval time.Duration `yaml:"reader_interval,omitempty"` // default: 2s
 }
 
 func defaultAccountEventsConfig() AccountEventsConfig {
-	return AccountEventsConfig{Enabled: false, Topic: "account-events"}
+	return AccountEventsConfig{Enabled: false, Topic: "account-events", ReaderInterval: 2 * time.Second}
 }
 
 func (a *AccountEventsConfig) UnmarshalYAML(value *yaml.Node) error {
 	type temp struct {
-		Enabled string `yaml:"enabled"`
-		Topic   string `yaml:"topic"`
+		Enabled        string `yaml:"enabled"`
+		Topic          string `yaml:"topic"`
+		ReaderInterval string `yaml:"reader_interval,omitempty"`
 	}
 	var t temp
 	if err := value.Decode(&t); err != nil {
@@ -543,6 +548,9 @@ func (a *AccountEventsConfig) UnmarshalYAML(value *yaml.Node) error {
 	a.Topic = resolveEnvString(t.Topic)
 	if a.Topic == "" {
 		a.Topic = "account-events"
+	}
+	if a.ReaderInterval, err = parseField(t.ReaderInterval, 2*time.Second, time.ParseDuration, "account_events.reader_interval"); err != nil {
+		return err
 	}
 	return nil
 }

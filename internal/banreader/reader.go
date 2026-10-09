@@ -48,9 +48,10 @@ type Reader struct {
 // The reader keys live under cfg.HealthKeyPrefix (default "hc:"), a
 // namespace dedicated to the health worker — deliberately NOT cfg.KeyPrefix,
 // which other subsystems (budget, auth, response store, rate limits, hybrid
-// sync) share for their own keys.
-func New(client valkey.Client, cfg config.RedisConfig, f2b *fail2ban.Fail2Ban, localTypes []string, logger *slog.Logger) *Reader {
-	interval := cfg.SyncInterval
+// sync) share for their own keys. Likewise, the poll interval comes from the
+// caller (account_events.reader_interval), not from redis.sync_interval,
+// which the budget/rate-limit hybrid backends share.
+func New(client valkey.Client, cfg config.RedisConfig, f2b *fail2ban.Fail2Ban, localTypes []string, interval time.Duration, logger *slog.Logger) *Reader {
 	if interval <= 0 {
 		interval = 2 * time.Second
 	}
