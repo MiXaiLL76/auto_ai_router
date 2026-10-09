@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/healthclient"
 	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
 
@@ -236,6 +237,11 @@ func (p *Proxy) recordProviderResponse(
 		p.bedrockDailyQuota.reset(credential.Name, bedrockDailyQuotaProviderModelKey(model, providerModel))
 	}
 	p.balancer.RecordResponse(credential.Name, model, statusCode)
+	retryAfter := 0
+	if headers != nil {
+		retryAfter = healthclient.RetryAfterSeconds(headers.Get("Retry-After"))
+	}
+	p.reportHealth(credential.Name, model, statusCode, retryAfter)
 	return false
 }
 

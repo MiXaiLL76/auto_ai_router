@@ -23,6 +23,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/fail2ban"
 	"github.com/mixaill76/auto_ai_router/internal/health"
+	"github.com/mixaill76/auto_ai_router/internal/healthclient"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
@@ -176,6 +177,13 @@ func main() {
 	if hybridBackend != nil {
 		defer hybridBackend.Close()
 	}
+
+	// Health-check service client: mirrors the shared alive/dead state of
+	// upstream accounts (kept in Redis by the healthcheck-service). When
+	// disabled, the no-op checker leaves the balancer behavior unchanged.
+	healthClient := healthclient.New(&cfg.HealthService, log)
+	bal.SetHealthChecker(healthClient)
+
 	modelManager := initializeModelManager(log, cfg, rateLimiter, bal)
 
 	// ==================== Apply Initial DB Model Table ====================
@@ -261,6 +269,7 @@ func main() {
 		RawBodyStoreOnlyErrors:       cfg.Kafka.RawBodies.StoreOnlyErrors,
 		RawBodyRedactSensitiveFields: cfg.Kafka.RawBodies.RedactSensitiveFields,
 		HealthChecker:                healthChecker,
+		Health:                       healthClient,
 		PriceRegistry:                priceRegistry,
 		OrganizationPolicies:         organizationPolicies,
 		MaxProviderRetries:           cfg.Server.MaxProviderRetries,
@@ -294,6 +303,7 @@ func main() {
 	defer bgCancel()
 
 	prx.Start(bgCtx)
+	healthClient.Start(bgCtx)
 
 	var wg sync.WaitGroup
 	videoRuntime.start(bgCtx, &wg)

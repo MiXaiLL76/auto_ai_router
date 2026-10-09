@@ -26,6 +26,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	promanutils "github.com/mixaill76/auto_ai_router/internal/converter/proman/utils"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
+	"github.com/mixaill76/auto_ai_router/internal/healthclient"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
@@ -402,6 +403,7 @@ type Config struct {
 	RawBodyStoreOnlyErrors       bool                       // Mirrors KafkaRawBodiesConfig.StoreOnlyErrors
 	RawBodyRedactSensitiveFields bool                       // Mirrors KafkaRawBodiesConfig.RedactSensitiveFields
 	HealthChecker                HealthChecker              // Optional: cached DB health status (updated by health monitor)
+	Health                       *healthclient.Client       // Optional: account liveness reporter (nil = disabled)
 	PriceRegistry                *models.ModelPriceRegistry // Model pricing information (optional)
 	OrganizationPolicies         *models.OrganizationPolicyRegistry
 	MaxProviderRetries           int                 // Max same-type credential retries (default: 2)
@@ -450,6 +452,7 @@ type Proxy struct {
 	rawBodyStoreOnlyErrors           bool                       // Mirrors KafkaRawBodiesConfig.StoreOnlyErrors
 	rawBodyRedactSensitiveFields     bool                       // Mirrors KafkaRawBodiesConfig.RedactSensitiveFields
 	healthChecker                    HealthChecker              // Cached DB health status (optional)
+	health                          *healthclient.Client       // Account liveness reporter (health-check service; nil when disabled)
 	priceRegistry                    *models.ModelPriceRegistry // Model pricing information (optional)
 	organizationPolicies             *models.OrganizationPolicyRegistry
 	maxProviderRetries               int                 // Max same-type credential retries on provider errors
@@ -800,6 +803,7 @@ func (p *Proxy) executeProxyRequest(
 		// Their 429/5xx reflect downstream capacity, not a permanent credential failure.
 		if !cred.IsProxyLike() {
 			p.balancer.RecordResponse(cred.Name, modelID, statusCode)
+			p.reportHealth(cred.Name, modelID, statusCode, 0)
 		}
 		// Per-attempt failure — tracked separately from the client-facing
 		// RequestsTotal/RequestDuration metrics, which the caller records exactly
@@ -810,6 +814,8 @@ func (p *Proxy) executeProxyRequest(
 	// Proxy/AIR credentials are dynamic relays — don't record them in fail2ban.
 	if !cred.IsProxyLike() {
 		p.balancer.RecordResponse(cred.Name, modelID, resp.StatusCode)
+		p.reportHealth(cred.Name, modelID, resp.StatusCode,
+			healthclient.RetryAfterSeconds(resp.Header.Get("Retry-After")))
 	}
 	if resp.StatusCode != http.StatusOK {
 		p.metrics.RecordCredentialAttemptError(cred.Name)
@@ -1849,6 +1855,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				shouldRetry = true
 				retryReason = RetryReasonAuthErr
 				p.balancer.RecordResponse(cred.Name, modelID, http.StatusInternalServerError)
+				p.reportHealth(cred.Name, modelID, http.StatusInternalServerError, 0)
 				// Per-attempt failure only — the client-facing RequestsTotal/RequestDuration
 				// metrics are recorded exactly once at the final outcome below.
 				p.metrics.RecordCredentialAttemptError(cred.Name)
@@ -2012,6 +2019,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 					"credential", cred.Name, "model", modelID, "error", doErr, "url", targetURL)
 			}
 			p.balancer.RecordResponse(cred.Name, modelID, statusCode)
+			p.reportHealth(cred.Name, modelID, statusCode, 0)
 			// Per-attempt failure only — the client-facing RequestsTotal/RequestDuration
 			// metrics are recorded exactly once at the final outcome below.
 			p.metrics.RecordCredentialAttemptError(cred.Name)
@@ -2104,6 +2112,8 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		if readErr != nil {
 			closeBody()
 			p.balancer.RecordResponse(cred.Name, modelID, resp.StatusCode)
+			p.reportHealth(cred.Name, modelID, resp.StatusCode,
+				healthclient.RetryAfterSeconds(resp.Header.Get("Retry-After")))
 			// This attempt genuinely failed (got a response, then lost the body).
 			// Only record here if the earlier `resp.StatusCode != http.StatusOK`
 			// check didn't already count it — status 200 with a failed body read
@@ -2937,5 +2947,13 @@ func (p *Proxy) HandleGetResponse(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	if encErr := json.NewEncoder(w).Encode(resp); encErr != nil {
 		p.logger.ErrorContext(r.Context(), "HandleGetResponse: failed to encode response", "id", responseID, "error", encErr)
+	}
+}
+
+// reportHealth forwards one outcome observation to the health-check service
+// unless the feature is disabled (no client constructed).
+func (p *Proxy) reportHealth(credential, model string, statusCode int, retryAfterSeconds int) {
+	if p.health != nil {
+		p.health.Report(credential, model, statusCode, retryAfterSeconds)
 	}
 }

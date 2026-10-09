@@ -46,6 +46,20 @@ monitoring:
   log_errors: false
   errors_log_path: "logs/logs.jsonl"
 
+# Optional external health-check service: a shared, Redis-backed view of
+# which upstream accounts are alive/dead across all router replicas.
+# Router reports every attempt outcome there (429 = account dead, with the
+# upstream Retry-After as its wait time) and pulls the merged status back, so
+# one replica's bad account is dead for the others too. Disabled by default.
+health_service:
+  enabled: false
+  url: "http://health-check.production.svc.cluster.local"
+  # auth_token: "os.environ/HEALTH_API_TOKEN"  # mirror of the service's api.auth_token
+  # sync_interval: 2s     # how often the local alive/dead mirror refreshes
+  # cache_ttl: 5s         # mirror entries older than this are treated as alive (fail-open)
+  # report_queue_size: 1024  # fire-and-forget report queue bound
+  # http_timeout: 3s      # per-request timeout to the service
+
 # OpenTelemetry export (logs + distributed traces), disabled by default
 otel:
   enabled: false
