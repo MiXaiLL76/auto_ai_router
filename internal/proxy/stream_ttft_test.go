@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net/http"
@@ -114,4 +115,72 @@ func TestStreamToClient_NilLogCtx(t *testing.T) {
 		err := prx.streamToClient(context.Background(), w, reader, "cred1", "gpt-4o", "/v1/chat/completions", http.StatusOK, nil, nil, nil)
 		require.NoError(t, err)
 	})
+}
+
+// TestTTFTScanState_ResponsesEchoBytesNotChargedToLimit verifies that the
+// response.created / response.in_progress metadata echoes — which repeat the
+// full request, instructions and tools — do not consume the
+// streamTTFTDetectionLimit byte budget, so a long agent instruction cannot
+// exhaust the budget before the first real content delta exists.
+func TestTTFTScanState_ResponsesEchoBytesNotChargedToLimit(t *testing.T) {
+	var s ttftScanState
+
+	// Long agent instruction, well beyond the 64KB detection limit.
+	createdLine := []byte(`data: {"type":"response.created","response":{"instructions":"`)
+	createdLine = append(createdLine, bytes.Repeat([]byte("long-instruction-segment-"), 4096)...)
+	createdLine = append(createdLine, []byte(`","tools":[]}}`)...)
+	createdLine = append(createdLine, '\n')
+	require.Greater(t, len(createdLine), streamTTFTDetectionLimit,
+		"metadata echo must exceed the detection limit for this test to be meaningful")
+
+	buf := createdLine
+	for len(buf) > 0 {
+		n := min(len(buf), 8192) // feed in 8KB pieces, as reader.Read would
+		assert.False(t, s.observe(buf[:n]), "metadata echo must not be mistaken for content")
+		buf = buf[n:]
+	}
+	assert.Zero(t, s.total, "response.created echo bytes must not count toward the TTFT limit")
+
+	delta := []byte(`data: {"type":"response.output_text.delta","delta":"hi"}` + "\n")
+	assert.True(t, s.observe(delta), "first real content delta must be detected after the echo")
+}
+
+// TestTTFTScanState_ContentFreeLinesStillCountTowardLimit guards that the
+// Responses metadata exemption did not disable the byte budget for other
+// content-free streams: chat keep-alive deltas and SSE comments must still
+// count, so error-only / keep-alive-only streams keep bailing out at the cap.
+func TestTTFTScanState_ContentFreeLinesStillCountTowardLimit(t *testing.T) {
+	var s ttftScanState
+
+	s.observe([]byte(`data: {"choices":[{"delta":{"role":"assistant"}}]}` + "\n"))
+	require.Positive(t, s.total, "content-free chat deltas must still count toward the limit")
+
+	s.observe([]byte(": ping\n"))
+	require.Positive(t, s.total, "SSE comment lines must still count toward the limit")
+}
+
+// TestStreamToClient_CapturesTTFT_ResponsesLongInstruction reproduces the
+// reported gap: a Responses API stream whose response.created / in_progress
+// events echo an instruction larger than streamTTFTDetectionLimit. TTFT must
+// be stamped on the first real content delta even though the metadata exceeded
+// the former byte budget on its own.
+func TestStreamToClient_CapturesTTFT_ResponsesLongInstruction(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	w := httptest.NewRecorder()
+
+	start := time.Now()
+	logCtx := &RequestLogContext{StartTime: start}
+	echo := strings.Repeat("long-instruction-segment-", 4096) // > 64KB
+	stream := "data: {\"type\":\"response.created\",\"response\":{\"instructions\":\"" + echo +
+		"\",\"tools\":[]}}\n\n" +
+		"data: {\"type\":\"response.in_progress\",\"response\":{}}\n\n" +
+		"data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n"
+	reader := strings.NewReader(stream)
+
+	err := prx.streamToClient(context.Background(), w, reader, "cred1", "gpt-4o", "/v1/responses", http.StatusOK, nil, nil, logCtx)
+	require.NoError(t, err)
+
+	require.False(t, logCtx.CompletionStartTime.IsZero(),
+		"TTFT must be stamped for a Responses stream whose metadata echo exceeds the 64KB detection limit")
+	assert.False(t, logCtx.CompletionStartTime.Before(start), "TTFT timestamp should be after the request start time")
 }

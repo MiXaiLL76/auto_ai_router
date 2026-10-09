@@ -36,6 +36,11 @@ const streamDrainTimeout = 60 * time.Second
 // Streams that never produce a detectable content delta within this many bytes
 // (error-only or keep-alive-only streams) stop being scanned; CompletionStartTime
 // stays zero, matching existing "never reached" semantics.
+//
+// Responses API metadata echoes (response.created / response.in_progress) are
+// excluded from the byte count — they repeat the full request (instructions,
+// tools) and can exceed this limit on their own before the first real delta
+// exists; see ttftScanState.observe.
 const streamTTFTDetectionLimit = 64 * 1024
 
 // streamInitialCommitBufferLimit bounds how much of a successful upstream SSE
@@ -67,11 +72,15 @@ type ttftScanState struct {
 }
 
 // observe feeds a newly read chunk into the scan and reports whether a
-// detectable content delta was found. total tracks cumulative bytes observed
-// (not just the still-unprocessed tail in pending) so streamTTFTDetectionLimit
-// keeps its original "give up after this many bytes with no match" meaning.
+// detectable content delta was found. total counts the bytes of completed lines
+// (not the still-unprocessed tail in pending) that count toward
+// streamTTFTDetectionLimit, so the limit keeps its original "give up after this
+// many bytes with no match" meaning. Responses API metadata echoes
+// (response.created / response.in_progress) are not charged to total: they
+// repeat the full request — instructions, tools, input — and for an agent with a
+// long instruction they alone can exceed the limit before the first real delta,
+// which would abandon a healthy stream and leave CompletionStartTime unset.
 func (s *ttftScanState) observe(chunk []byte) bool {
-	s.total += len(chunk)
 	s.pending = append(s.pending, chunk...)
 	for {
 		idx := bytes.IndexByte(s.pending, '\n')
@@ -80,11 +89,28 @@ func (s *ttftScanState) observe(chunk []byte) bool {
 		}
 		line := s.pending[:idx]
 		s.pending = s.pending[idx+1:]
+		if !responsesMetadataEcho(line) {
+			s.total += idx + 1
+		}
 		if extractCompletionDeltaText(line) != "" {
 			return true
 		}
 	}
 	return false
+}
+
+// responsesMetadataEcho reports whether an SSE line is a Responses-API event
+// that merely echoes the request back before any output exists:
+// response.created and response.in_progress carry the full response object,
+// including instructions, tools and input. Their bytes must not count toward
+// streamTTFTDetectionLimit (see ttftScanState.observe). The quoted-value
+// substring deliberately matches the compact `"type":"response.created"` JSON
+// current Responses providers emit; a match inside delta text is harmless,
+// because a line that yields content ends the scan immediately, making whether
+// it was charged irrelevant.
+func responsesMetadataEcho(line []byte) bool {
+	return bytes.Contains(line, []byte(`"response.created"`)) ||
+		bytes.Contains(line, []byte(`"response.in_progress"`))
 }
 
 // streamFlushCoalesceWindow throttles how often streamToClient calls Flush().
