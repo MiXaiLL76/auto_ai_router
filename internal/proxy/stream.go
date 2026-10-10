@@ -36,7 +36,23 @@ const streamDrainTimeout = 60 * time.Second
 // Streams that never produce a detectable content delta within this many bytes
 // (error-only or keep-alive-only streams) stop being scanned; CompletionStartTime
 // stays zero, matching existing "never reached" semantics.
+//
+// Responses API metadata echoes (response.created / response.in_progress) are
+// excluded from the byte count — they repeat the full request (instructions,
+// tools) and can exceed this limit on their own before the first real delta
+// exists; see ttftScanState.observe.
 const streamTTFTDetectionLimit = 64 * 1024
+
+// streamTTFTPendingLimit caps how many bytes of a single not-yet-newline-
+// terminated SSE line ttftScanState will hold before giving up. Without it,
+// per-line accounting (bytes are charged to total only once their line ends
+// with '\n') would let one unterminated line grow in pending without bound —
+// the pre-fix code bounded it implicitly because total grew with every chunk.
+// Responses-API metadata echoes — the one case a line legitimately grows past
+// streamTTFTDetectionLimit — are themselves bounded by the request they repeat
+// (observed ~200KB of metadata for a 105KB instruction); 8MiB leaves large
+// headroom for instructions/tools while capping per-request memory.
+const streamTTFTPendingLimit = 8 * 1024 * 1024
 
 // streamInitialCommitBufferLimit bounds how much of a successful upstream SSE
 // response we hold before committing downstream headers. This small preflight
@@ -56,22 +72,28 @@ const streamInitialCommitBufferLimit = 64 * 1024
 // real SSE framing (every current caller feeds streamToClient real "data:
 // ...\n\n" events). This is NOT a universal guarantee: a hypothetical stream
 // whose final content line never terminates with '\n' would leave that line
-// stuck in s.pending forever, and TTFT would never be stamped for it. Narrow
-// in practice (only the CompletionStartTime metric is affected — no
-// correctness/billing impact — and no current caller produces such a
-// stream), but worth knowing before reusing this pattern somewhere newline
-// termination isn't guaranteed.
+// stuck in s.pending (up to streamTTFTPendingLimit, see exceededBudget), and
+// TTFT would never be stamped for it. Narrow in practice (only the
+// CompletionStartTime metric is affected — no correctness/billing impact — and
+// no current caller produces such a stream), but worth knowing before reusing
+// this pattern somewhere newline termination isn't guaranteed.
 type ttftScanState struct {
 	pending []byte
 	total   int
 }
 
 // observe feeds a newly read chunk into the scan and reports whether a
-// detectable content delta was found. total tracks cumulative bytes observed
-// (not just the still-unprocessed tail in pending) so streamTTFTDetectionLimit
-// keeps its original "give up after this many bytes with no match" meaning.
+// detectable content delta was found. total counts the bytes of completed lines
+// (not the still-unprocessed tail in pending) that count toward
+// streamTTFTDetectionLimit, so the limit keeps its original "give up after this
+// many bytes with no match" meaning. Responses API metadata echoes
+// (response.created / response.in_progress) are not charged to total: they
+// repeat the full request — instructions, tools, input — and for an agent with a
+// long instruction they alone can exceed the limit before the first real delta,
+// which would abandon a healthy stream and leave CompletionStartTime unset. The
+// tail in pending is bounded separately by streamTTFTPendingLimit (see
+// exceededBudget), so an unterminated line cannot grow without bound.
 func (s *ttftScanState) observe(chunk []byte) bool {
-	s.total += len(chunk)
 	s.pending = append(s.pending, chunk...)
 	for {
 		idx := bytes.IndexByte(s.pending, '\n')
@@ -80,11 +102,36 @@ func (s *ttftScanState) observe(chunk []byte) bool {
 		}
 		line := s.pending[:idx]
 		s.pending = s.pending[idx+1:]
+		if !responsesMetadataEcho(line) {
+			s.total += idx + 1
+		}
 		if extractCompletionDeltaText(line) != "" {
 			return true
 		}
 	}
 	return false
+}
+
+// exceededBudget reports whether the scan should give up without a match:
+// either more than streamTTFTDetectionLimit bytes of content-eligible lines
+// have accumulated, or a single line grew past streamTTFTPendingLimit before
+// terminating with '\n'.
+func (s *ttftScanState) exceededBudget() bool {
+	return s.total > streamTTFTDetectionLimit || len(s.pending) > streamTTFTPendingLimit
+}
+
+// responsesMetadataEcho reports whether an SSE line is a Responses-API event
+// that merely echoes the request back before any output exists:
+// response.created and response.in_progress carry the full response object,
+// including instructions, tools and input. Their bytes must not count toward
+// streamTTFTDetectionLimit (see ttftScanState.observe). The quoted-value
+// substring deliberately matches the compact `"type":"response.created"` JSON
+// current Responses providers emit; a match inside delta text is harmless,
+// because a line that yields content ends the scan immediately, making whether
+// it was charged irrelevant.
+func responsesMetadataEcho(line []byte) bool {
+	return bytes.Contains(line, []byte(`"response.created"`)) ||
+		bytes.Contains(line, []byte(`"response.in_progress"`))
 }
 
 // streamFlushCoalesceWindow throttles how often streamToClient calls Flush().
@@ -1615,7 +1662,7 @@ func (p *Proxy) streamToClient(
 				if ttftScan.observe(chunk) {
 					logCtx.CompletionStartTime = time.Now()
 					ttftPending = false
-				} else if ttftScan.total > streamTTFTDetectionLimit {
+				} else if ttftScan.exceededBudget() {
 					ttftPending = false
 				}
 				if !ttftPending {
