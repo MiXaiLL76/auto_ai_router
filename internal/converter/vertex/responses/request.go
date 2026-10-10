@@ -147,21 +147,41 @@ func inputToContents(input interface{}) ([]*genai.Content, error) {
 			arguments, _ := itemMap["arguments"].(string)
 			var argsMap map[string]interface{}
 			_ = json.Unmarshal([]byte(arguments), &argsMap)
-			contents = append(contents, &genai.Content{
-				Role: "model",
-				Parts: []*genai.Part{{
-					FunctionCall: &genai.FunctionCall{
-						ID:   callID,
-						Name: name,
-						Args: argsMap,
-					},
-				}},
-			})
+			// Gemini 3 rejects a replayed function call without its thoughtSignature;
+			// the response side embeds it into call_id, otherwise use the dummy.
+			baseID, signature := converterutil.SplitToolCallIDSignature(callID)
+			if signature == nil {
+				signature = converterutil.SkipThoughtSignatureValidator
+			}
+			part := &genai.Part{
+				FunctionCall: &genai.FunctionCall{
+					ID:   baseID,
+					Name: name,
+					Args: argsMap,
+				},
+				ThoughtSignature: signature,
+			}
+			// Parallel calls arrive as consecutive items but are one model turn for
+			// Gemini, matched against the single user turn of responses that follows.
+			if last := lastContent(contents); last != nil && last.Role == "model" && allFunctionCalls(last.Parts) {
+				last.Parts = append(last.Parts, part)
+			} else {
+				contents = append(contents, &genai.Content{
+					Role:  "model",
+					Parts: []*genai.Part{part},
+				})
+			}
 
 		case "function_call_output":
 			// Tool result → accumulate as FunctionResponse parts (flushed as user content).
-			callID, _ := itemMap["call_id"].(string)
+			rawCallID, _ := itemMap["call_id"].(string)
+			callID, _ := converterutil.SplitToolCallIDSignature(rawCallID)
 			name, _ := itemMap["name"].(string)
+			if name == "" {
+				// function_call_output carries no name; Gemini matches the response
+				// to its FunctionDeclaration by name, so take it from the call.
+				name = findFunctionCallName(items, rawCallID)
+			}
 			if name == "" {
 				name = callID
 			}
@@ -324,4 +344,40 @@ func buildGenConfig(req *responses.Request, model string) *genai.GenerationConfi
 		return nil
 	}
 	return cfg
+}
+
+func lastContent(contents []*genai.Content) *genai.Content {
+	if len(contents) == 0 {
+		return nil
+	}
+	return contents[len(contents)-1]
+}
+
+func allFunctionCalls(parts []*genai.Part) bool {
+	for _, p := range parts {
+		if p.FunctionCall == nil {
+			return false
+		}
+	}
+	return len(parts) > 0
+}
+
+// findFunctionCallName returns the name of the function_call input item with the
+// given call_id, or "" if there is none (e.g. the call lives in a stored
+// previous response).
+func findFunctionCallName(items []interface{}, callID string) string {
+	if callID == "" {
+		return ""
+	}
+	for _, item := range items {
+		itemMap, ok := item.(map[string]interface{})
+		if !ok || itemMap["type"] != "function_call" {
+			continue
+		}
+		if id, _ := itemMap["call_id"].(string); id == callID {
+			name, _ := itemMap["name"].(string)
+			return name
+		}
+	}
+	return ""
 }

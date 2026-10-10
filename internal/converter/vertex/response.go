@@ -339,7 +339,9 @@ func convertGenaiToOpenAIFunctionCall(genaiCall *genai.FunctionCall, thoughtSign
 	}
 
 	toolCall := openai.OpenAIToolCall{
-		ID:   converterutil.GenerateID(),
+		// The signature is also embedded into the id: clients that drop
+		// provider_specific_fields still echo the id back (see tools.go).
+		ID:   converterutil.EncodeToolCallIDWithSignature(converterutil.GenerateID(), thoughtSignature),
 		Type: "function",
 		Function: openai.OpenAIToolFunction{
 			Name:      genaiCall.Name,
