@@ -684,6 +684,12 @@ func convertPricingToModelPrice(p *queries.CustomPricingLiteLLMParams) *manager.
 	if p.OutputCostPerTokenAbove32kTokens != nil {
 		price.OutputCostPerTokenAbove32k = *p.OutputCostPerTokenAbove32kTokens
 	}
+	if p.InputCostPerTokenAbove100kTokens != nil {
+		price.InputCostPerTokenAbove100k = *p.InputCostPerTokenAbove100kTokens
+	}
+	if p.OutputCostPerTokenAbove100kTokens != nil {
+		price.OutputCostPerTokenAbove100k = *p.OutputCostPerTokenAbove100kTokens
+	}
 	if p.InputCostPerTokenAbove128kTokens != nil {
 		price.InputCostPerTokenAbove128k = *p.InputCostPerTokenAbove128kTokens
 	}
@@ -734,6 +740,15 @@ func convertPricingToModelPrice(p *queries.CustomPricingLiteLLMParams) *manager.
 	}
 	if p.CacheCreationInputTokenCostAbove32kTokens != nil {
 		price.CacheCreationInputTokenCostAbove32k = *p.CacheCreationInputTokenCostAbove32kTokens
+	}
+	if p.CacheReadInputTokenCostAbove100kTokens != nil {
+		price.CacheReadInputTokenCostAbove100k = *p.CacheReadInputTokenCostAbove100kTokens
+	}
+	if p.CacheCreationInputTokenCostAbove100kTokens != nil {
+		price.CacheCreationInputTokenCostAbove100k = *p.CacheCreationInputTokenCostAbove100kTokens
+	}
+	if p.CacheCreationInputTokenCostAbove1hrAbove100kTokens != nil {
+		price.CacheCreationInputTokenCostAbove1hrAbove100k = *p.CacheCreationInputTokenCostAbove1hrAbove100kTokens
 	}
 	if p.CacheReadInputTokenCostAbove128kTokens != nil {
 		price.CacheReadInputTokenCostAbove128k = *p.CacheReadInputTokenCostAbove128kTokens
