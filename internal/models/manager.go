@@ -47,6 +47,15 @@ type ModelPrice struct {
 	CacheReadInputTokenCostAbove32k     float64 `json:"cache_read_input_token_cost_above_32k_tokens,omitempty"`
 	CacheCreationInputTokenCostAbove32k float64 `json:"cache_creation_input_token_cost_above_32k_tokens,omitempty"`
 
+	// 100k tier (Claude Haiku 5.5): once the prompt exceeds 100,000 tokens the
+	// whole request moves to a second rate card. Unlike the other full-session
+	// tiers it prices 1-hour cache writes separately from 5-minute ones.
+	InputCostPerTokenAbove100k                   float64 `json:"input_cost_per_token_above_100k_tokens,omitempty"`
+	OutputCostPerTokenAbove100k                  float64 `json:"output_cost_per_token_above_100k_tokens,omitempty"`
+	CacheReadInputTokenCostAbove100k             float64 `json:"cache_read_input_token_cost_above_100k_tokens,omitempty"`
+	CacheCreationInputTokenCostAbove100k         float64 `json:"cache_creation_input_token_cost_above_100k_tokens,omitempty"`
+	CacheCreationInputTokenCostAbove1hrAbove100k float64 `json:"cache_creation_input_token_cost_above_1hr_above_100k_tokens,omitempty"`
+
 	InputCostPerTokenAbove128k           float64 `json:"input_cost_per_token_above_128k_tokens,omitempty"`
 	OutputCostPerTokenAbove128k          float64 `json:"output_cost_per_token_above_128k_tokens,omitempty"`
 	CacheReadInputTokenCostAbove128k     float64 `json:"cache_read_input_token_cost_above_128k_tokens,omitempty"`
