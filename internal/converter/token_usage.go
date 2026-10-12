@@ -224,6 +224,8 @@ func (tu *TokenUsage) IsZero() bool {
 // chunk had set (since a later chunk's zero value for that field replaces
 // it) — this method fixes that by only ever raising a field, never
 // resetting one to zero because a later read didn't happen to touch it.
+//
+//nolint:gocyclo // flat field-by-field mapping, one branch per field
 func (tu *TokenUsage) MergeNonZero(src *TokenUsage) {
 	if tu == nil || src == nil {
 		return

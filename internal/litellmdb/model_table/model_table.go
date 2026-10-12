@@ -558,6 +558,8 @@ func hasInlineEndpoint(params *queries.GenericLiteLLMParams) bool {
 }
 
 // mapProviderType converts a LiteLLM custom_llm_provider string to config.ProviderType
+//
+//nolint:gocyclo // flat lookup table, one branch per case
 func mapProviderType(provider string) config.ProviderType {
 	p := strings.ToLower(provider)
 	switch {
@@ -663,6 +665,8 @@ func hasInlineCredentials(params *queries.CredentialLiteLLMParams) bool {
 
 // convertPricingToModelPrice converts CustomPricingLiteLLMParams to a ModelPrice.
 // Returns nil if no pricing data is present.
+//
+//nolint:gocyclo // flat field-by-field mapping, one branch per field
 func convertPricingToModelPrice(p *queries.CustomPricingLiteLLMParams) *manager.ModelPrice {
 	if p == nil {
 		return nil

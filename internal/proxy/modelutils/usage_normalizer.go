@@ -17,6 +17,7 @@ import (
 
 const maxSSEUsageLineBytes = 1 << 20
 
+//nolint:gocyclo // linear guard clauses with early returns, no nested logic
 func NormalizeCompletionUsage(body []byte, modelID string) ([]byte, bool) {
 	var response map[string]json.RawMessage
 	if json.Unmarshal(body, &response) != nil {
@@ -101,6 +102,8 @@ func NormalizeCompletionUsage(body []byte, modelID string) ([]byte, bool) {
 // cache_creation.ephemeral_*), so synthesizing the standard name for them
 // would risk double-counting. Returns the (possibly unchanged) body and
 // whether it changed.
+//
+//nolint:gocyclo // linear guard clauses with early returns, no nested logic
 func NormalizeCacheCreationUsage(body []byte) ([]byte, bool) {
 	// Cheap gate: the only Requesty fields this reads (caching_tokens,
 	// caching_token_details, caching_5m/1h_tokens) all contain the substring
