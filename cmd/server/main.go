@@ -209,7 +209,7 @@ func main() {
 			// source of bans is really connected. Only then.
 			banDecisionsExternal = true
 			log.Info("Health worker ban reader active",
-				"interval", cfg.Redis.SyncInterval)
+				"interval", cfg.AccountEvents.ReaderInterval)
 		} else {
 			log.Warn("account_events enabled but redis disabled: ban reader inactive, local fail2ban stays active")
 		}
