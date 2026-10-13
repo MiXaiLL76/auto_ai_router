@@ -277,10 +277,15 @@ type Config struct {
 	OrganizationPolicies []OrganizationPolicyConfig `yaml:"organization_policies,omitempty"`
 	LiteLLMDB            LiteLLMDBConfig            `yaml:"litellm_db,omitempty"`
 	Redis                RedisConfig                `yaml:"redis,omitempty"`
-	OTEL                 OTELConfig                 `yaml:"otel,omitempty"`
-	Kafka                KafkaConfig                `yaml:"kafka,omitempty"`
-	Video                VideoConfig                `yaml:"video,omitempty"`
-	VisionFallback       VisionFallbackConfig       `yaml:"vision_fallback,omitempty"`
+	// AccountEvents configures publishing outcome events to the health
+	// worker's Kafka topic (brokers/SASL/TLS come from the kafka section);
+	// with it enabled the router reads the worker's bans from Redis for
+	// the ban reader (see internal/banreader).
+	AccountEvents  AccountEventsConfig  `yaml:"account_events,omitempty"`
+	OTEL           OTELConfig           `yaml:"otel,omitempty"`
+	Kafka          KafkaConfig          `yaml:"kafka,omitempty"`
+	Video          VideoConfig          `yaml:"video,omitempty"`
+	VisionFallback VisionFallbackConfig `yaml:"vision_fallback,omitempty"`
 	// ModelTemplates stores x-model-templates entries as raw interface{} so that
 	// both single-model mappings and lists of models can be defined as YAML anchors
 	// without type errors. The actual model data is extracted via anchor expansion.
@@ -311,6 +316,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		OrganizationPolicies []OrganizationPolicyConfig `yaml:"organization_policies,omitempty"`
 		LiteLLMDB            LiteLLMDBConfig            `yaml:"litellm_db,omitempty"`
 		Redis                RedisConfig                `yaml:"redis,omitempty"`
+		AccountEvents        AccountEventsConfig        `yaml:"account_events,omitempty"`
 		OTEL                 OTELConfig                 `yaml:"otel,omitempty"`
 		Kafka                KafkaConfig                `yaml:"kafka,omitempty"`
 		Video                VideoConfig                `yaml:"video,omitempty"`
@@ -337,6 +343,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.OrganizationPolicies = raw.OrganizationPolicies
 	c.LiteLLMDB = raw.LiteLLMDB
 	c.Redis = raw.Redis
+	c.AccountEvents = raw.AccountEvents
 	c.OTEL = raw.OTEL
 	c.Kafka = raw.Kafka
 	c.Video = raw.Video
@@ -469,6 +476,14 @@ type RedisConfig struct {
 	// shared (never deleted) only where BalancerKeyPrefix != KeyPrefix.
 	BalancerKeyPrefix string `yaml:"balancer_key_prefix,omitempty"`
 
+	// HealthKeyPrefix is the namespace under which the ban reader looks for
+	// the health worker's keys ({prefix}{provider}:bans + {prefix}providers).
+	// It deliberately overrides KeyPrefix for this subsystem only: budget,
+	// auth, response-store, rate-limit and hybrid keys keep their own
+	// namespace (default KeyPrefix). Defaults to "hc:" (the worker's scheme),
+	// so it must differ from KeyPrefix when other subsystems use "hc:".
+	HealthKeyPrefix string `yaml:"health_key_prefix,omitempty"`
+
 	TLSEnabled bool `yaml:"tls_enabled,omitempty"`
 
 	ConnectTimeout   time.Duration `yaml:"connect_timeout,omitempty"`    // default: 5s
@@ -498,6 +513,47 @@ type RedisConfig struct {
 	SyncInterval time.Duration `yaml:"sync_interval,omitempty"`
 }
 
+// AccountEventsConfig enables publishing upstream outcome events to the
+// health worker's Kafka topic. Broker/SASL/TLS settings are inherited from
+// the kafka section; only the topic is specific to account events.
+type AccountEventsConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// Topic is the account-events topic (e.g. "account-events").
+	Topic string `yaml:"topic"`
+	// ReaderInterval is how often the ban reader polls the worker's bans
+	// from Redis. Its own knob, deliberately not redis.sync_interval: that
+	// one is shared by the budget/rate-limit hybrid backends.
+	ReaderInterval time.Duration `yaml:"reader_interval,omitempty"` // default: 2s
+}
+
+func defaultAccountEventsConfig() AccountEventsConfig {
+	return AccountEventsConfig{Enabled: false, Topic: "account-events", ReaderInterval: 2 * time.Second}
+}
+
+func (a *AccountEventsConfig) UnmarshalYAML(value *yaml.Node) error {
+	type temp struct {
+		Enabled        string `yaml:"enabled"`
+		Topic          string `yaml:"topic"`
+		ReaderInterval string `yaml:"reader_interval,omitempty"`
+	}
+	var t temp
+	if err := value.Decode(&t); err != nil {
+		return err
+	}
+	var err error
+	if a.Enabled, err = parseField(t.Enabled, false, strconv.ParseBool, "account_events.enabled"); err != nil {
+		return err
+	}
+	a.Topic = resolveEnvString(t.Topic)
+	if a.Topic == "" {
+		a.Topic = "account-events"
+	}
+	if a.ReaderInterval, err = parseField(t.ReaderInterval, 2*time.Second, time.ParseDuration, "account_events.reader_interval"); err != nil {
+		return err
+	}
+	return nil
+}
+
 // UnmarshalYAML implements custom unmarshaling for RedisConfig with env variable support.
 func (r *RedisConfig) UnmarshalYAML(value *yaml.Node) error {
 	type tempConfig struct {
@@ -508,6 +564,7 @@ func (r *RedisConfig) UnmarshalYAML(value *yaml.Node) error {
 		SelectDB          string   `yaml:"select_db,omitempty"`
 		KeyPrefix         string   `yaml:"key_prefix,omitempty"`
 		BalancerKeyPrefix string   `yaml:"balancer_key_prefix,omitempty"`
+		HealthKeyPrefix   string   `yaml:"health_key_prefix,omitempty"`
 		TLSEnabled        string   `yaml:"tls_enabled,omitempty"`
 		ConnectTimeout    string   `yaml:"connect_timeout,omitempty"`
 		ConnWriteTimeout  string   `yaml:"conn_write_timeout,omitempty"`
@@ -542,6 +599,7 @@ func (r *RedisConfig) UnmarshalYAML(value *yaml.Node) error {
 	r.Password = resolveEnvString(temp.Password)
 	r.KeyPrefix = resolveEnvString(temp.KeyPrefix)
 	r.BalancerKeyPrefix = resolveEnvString(temp.BalancerKeyPrefix)
+	r.HealthKeyPrefix = resolveEnvString(temp.HealthKeyPrefix)
 
 	if r.SelectDB, err = parseField(temp.SelectDB, 0, strconv.Atoi, "redis.select_db"); err != nil {
 		return err
@@ -593,6 +651,9 @@ func (r *RedisConfig) UnmarshalYAML(value *yaml.Node) error {
 	}
 	if r.BalancerKeyPrefix == "" {
 		r.BalancerKeyPrefix = r.KeyPrefix
+	}
+	if r.HealthKeyPrefix == "" {
+		r.HealthKeyPrefix = "hc:"
 	}
 
 	return nil
@@ -1835,6 +1896,10 @@ func Load(path string) (*Config, error) {
 		cfg.Redis = defaultRedisConfig()
 	}
 
+	if !hasMappingKey(&root, "account_events") {
+		cfg.AccountEvents = defaultAccountEventsConfig()
+	}
+
 	if !hasMappingKey(&root, "litellm_db") {
 		cfg.LiteLLMDB = defaultLiteLLMDBConfig()
 	}
@@ -1976,6 +2041,7 @@ func defaultRedisConfig() RedisConfig {
 		CommandTimeout:    3 * time.Second,
 	}
 	r.BalancerKeyPrefix = r.KeyPrefix
+	r.HealthKeyPrefix = "hc:"
 	return r
 }
 
