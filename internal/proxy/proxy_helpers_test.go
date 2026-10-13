@@ -248,6 +248,26 @@ func TestBuildMetadata(t *testing.T) {
 		assert.Equal(t, "hashed123", m["user_api_key"])
 		assert.Equal(t, "", m["user_api_key_user_id"])
 		assert.Equal(t, "success", m["status"])
+		require.Contains(t, m, "billed_tokens")
+		assert.Nil(t, m["billed_tokens"])
+	})
+
+	t.Run("billed_tokens", func(t *testing.T) {
+		costs := &converter.TokenCosts{
+			BilledInputTokens:      12,
+			BilledOutputTokens:     85,
+			BilledImageTokens:      258,
+			BilledVideoInputTokens: 660,
+		}
+		result := buildMetadata("hashed123", nil, "", 0, nil, "", costs, "", 0, 0, "")
+		var m map[string]interface{}
+		require.NoError(t, json.Unmarshal([]byte(result), &m))
+		assert.Equal(t, map[string]interface{}{
+			"input_tokens":       float64(12),
+			"output_tokens":      float64(85),
+			"image_tokens":       float64(258),
+			"video_input_tokens": float64(660),
+		}, m["billed_tokens"])
 	})
 
 	t.Run("with_tokenInfo_and_aliases", func(t *testing.T) {

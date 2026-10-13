@@ -95,6 +95,10 @@ func TestProxyRequest_XAIChatBillingMatchesAcrossRoutes(t *testing.T) {
 		wantProviderCost   float64
 		wantPromptTokens   int
 		wantCompletionToks int
+		// The same answer is billed the same output on both routes, whatever
+		// completion_tokens says.
+		wantBilledInput  int
+		wantBilledOutput int
 	}{
 		{
 			name:       "xai direct",
@@ -107,6 +111,8 @@ func TestProxyRequest_XAIChatBillingMatchesAcrossRoutes(t *testing.T) {
 			wantProviderCost:   0.0037756,
 			wantPromptTokens:   1000,
 			wantCompletionToks: 50,
+			wantBilledInput:    800,
+			wantBilledOutput:   50,
 		},
 		{
 			name:       "requesty fallback",
@@ -119,6 +125,8 @@ func TestProxyRequest_XAIChatBillingMatchesAcrossRoutes(t *testing.T) {
 			wantProviderCost:   0.0042,
 			wantPromptTokens:   1000,
 			wantCompletionToks: 350,
+			wantBilledInput:    800,
+			wantBilledOutput:   50,
 		},
 		{
 			name:       "xai at exactly 200k prompt tokens",
@@ -129,6 +137,8 @@ func TestProxyRequest_XAIChatBillingMatchesAcrossRoutes(t *testing.T) {
 			wantAccounting:     "additive",
 			wantPromptTokens:   200000,
 			wantCompletionToks: 10,
+			wantBilledInput:    100000,
+			wantBilledOutput:   10,
 		},
 		{
 			name:       "requesty at 199999 prompt tokens",
@@ -139,6 +149,8 @@ func TestProxyRequest_XAIChatBillingMatchesAcrossRoutes(t *testing.T) {
 			wantAccounting:     "included",
 			wantPromptTokens:   199999,
 			wantCompletionToks: 110,
+			wantBilledInput:    99999,
+			wantBilledOutput:   10,
 		},
 	}
 
@@ -170,6 +182,11 @@ func TestProxyRequest_XAIChatBillingMatchesAcrossRoutes(t *testing.T) {
 			}
 			costBreakdown := metadata["cost_breakdown"].(map[string]interface{})
 			assert.InDelta(t, tt.wantSpend, costBreakdown["total_cost"], 1e-12, "...but never added to the price")
+			billedTokens := metadata["billed_tokens"].(map[string]interface{})
+			assert.Equal(t, float64(tt.wantBilledInput), billedTokens["input_tokens"])
+			assert.Equal(t, float64(tt.wantBilledOutput), billedTokens["output_tokens"])
+			assert.Equal(t, float64(0), billedTokens["image_tokens"])
+			assert.Equal(t, float64(0), billedTokens["video_input_tokens"])
 		})
 	}
 }

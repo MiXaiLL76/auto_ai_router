@@ -262,6 +262,7 @@ func CalculateTokenCostsWithResolver(usage *converter.TokenUsage, price *ModelPr
 	if regularInputTokens < 0 {
 		regularInputTokens = 0
 	}
+	costs.BilledInputTokens = regularInputTokens
 
 	// Image tokens live inside PromptTokens, but a provider that serves a cached
 	// image reports the same tokens inside CachedInputTokens as well (some model
@@ -319,6 +320,7 @@ func CalculateTokenCostsWithResolver(usage *converter.TokenUsage, price *ModelPr
 	if regularOutputTokens < 0 {
 		regularOutputTokens = 0
 	}
+	costs.BilledOutputTokens = regularOutputTokens
 
 	// Regular output with full-session or 200k tiering
 	switch {
@@ -493,6 +495,7 @@ func CalculateTokenCostsWithResolver(usage *converter.TokenUsage, price *ModelPr
 		inputImageCost = inputCostPerToken
 	}
 	costs.ImageCost = float64(billableImageTokens) * inputImageCost
+	costs.BilledImageTokens = billableImageTokens
 
 	// Input video tokens: own rate when configured, otherwise the image rate
 	// (video used to be reported inside the image counter).
@@ -501,6 +504,7 @@ func CalculateTokenCostsWithResolver(usage *converter.TokenUsage, price *ModelPr
 		inputVideoCost = inputImageCost
 	}
 	costs.VideoInputCost = float64(billableVideoTokens) * inputVideoCost
+	costs.BilledVideoInputTokens = billableVideoTokens
 
 	// Generated image tokens are part of CompletionTokens and must not also be
 	// charged as text. Prefer the token-based image rate when the provider reports

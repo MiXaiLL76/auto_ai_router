@@ -107,6 +107,10 @@ CREATE TABLE air.spend_logs_kafka
     tool_usage_cost Float64,
     total_cost Float64,
     provider_reported_cost Nullable(Float64),
+    billed_input_tokens UInt32,
+    billed_output_tokens UInt32,
+    billed_image_tokens UInt32,
+    billed_video_input_tokens UInt32,
 
     api_key_hash String,
     user_id String,
@@ -242,6 +246,10 @@ CREATE TABLE air.spend_logs
     tool_usage_cost Float64,
     total_cost Float64,
     provider_reported_cost Nullable(Float64),
+    billed_input_tokens UInt32,
+    billed_output_tokens UInt32,
+    billed_image_tokens UInt32,
+    billed_video_input_tokens UInt32,
 
     api_key_hash String,
     user_id String,

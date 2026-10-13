@@ -45,6 +45,9 @@ func TestCalculateTokenCosts_GeneratedImageTokensUseImageRate(t *testing.T) {
 	assert.Zero(t, costs.OutputCost, "image tokens must not also be charged as text")
 	assert.InDelta(t, 0.06048, costs.ImageCost, 1e-12)
 	assert.InDelta(t, 0.0604899, costs.TotalCost, 1e-12)
+	assert.Equal(t, 22, costs.BilledInputTokens)
+	assert.Zero(t, costs.BilledOutputTokens)
+	assert.Zero(t, costs.BilledImageTokens, "generated image tokens are billed as reported")
 }
 
 func TestCalculateTokenCosts_ImagenUsesPerImageRate(t *testing.T) {
@@ -55,6 +58,7 @@ func TestCalculateTokenCosts_ImagenUsesPerImageRate(t *testing.T) {
 	require.NotNil(t, costs)
 	assert.InDelta(t, 0.036, costs.ImageCost, 1e-12)
 	assert.InDelta(t, 0.036, costs.TotalCost, 1e-12)
+	assert.Zero(t, costs.BilledImageTokens, "priced per image, not per token")
 }
 
 func TestCalculateTokenCosts_Vertex_WithAudioAndCached(t *testing.T) {
@@ -85,6 +89,8 @@ func TestCalculateTokenCosts_Vertex_WithAudioAndCached(t *testing.T) {
 
 	// Regular output: 50 - 2 = 48 tokens at $0.02
 	assert.Equal(t, 0.96, costs.OutputCost)
+	assert.Equal(t, 75, costs.BilledInputTokens)
+	assert.Equal(t, 48, costs.BilledOutputTokens)
 
 	// Audio input: 5 tokens at $0.001
 	assert.Equal(t, 0.005, costs.AudioInputCost)
@@ -230,6 +236,7 @@ func TestCalculateTokenCosts_ClampsToExplicitOutputTextTokens(t *testing.T) {
 	assert.InDelta(t, 0.05, costs.ReasoningCost, 1e-12)
 	assert.InDelta(t, 0.02, costs.InputCost, 1e-12)
 	assert.InDelta(t, 0.17, costs.TotalCost, 1e-12)
+	assert.Equal(t, 100, costs.BilledOutputTokens)
 }
 
 func TestCalculateTokenCosts_WithPrediction(t *testing.T) {
@@ -256,6 +263,7 @@ func TestCalculateTokenCosts_WithPrediction(t *testing.T) {
 
 	// Regular output: 100 - 20 - 5 = 75 tokens at $0.02
 	assert.Equal(t, 1.5, costs.OutputCost)
+	assert.Equal(t, 75, costs.BilledOutputTokens)
 
 	// Accepted prediction: 20 tokens at $0.03 = 0.6
 	// Rejected prediction: 5 tokens at $0.02 (fallback) = 0.1
@@ -393,6 +401,9 @@ func TestCalculateTokenCosts_NegativeBreakdownFieldsAreIgnored(t *testing.T) {
 	assert.Zero(t, costs.PredictionCost)
 	assert.Zero(t, costs.ImageCost)
 	assert.Equal(t, 50.0, costs.TotalCost)
+	assert.Equal(t, 10, costs.BilledInputTokens)
+	assert.Equal(t, 20, costs.BilledOutputTokens)
+	assert.Zero(t, costs.BilledImageTokens)
 }
 
 func TestCalculateTokenCosts_NilUsage(t *testing.T) {
@@ -495,6 +506,7 @@ func TestCalculateTokenCosts_Above200k_WithAudio(t *testing.T) {
 	// regularAbove cost: 90_000 * 0.0005 = 45.0
 	// Total regular input: 225.0
 	assert.InDelta(t, 225.0, costs.InputCost, 0.0001)
+	assert.Equal(t, 270_000, costs.BilledInputTokens, "both tiers together")
 
 	// audio input: 30_000 * 0.0001 = 3.0
 	assert.InDelta(t, 3.0, costs.AudioInputCost, 0.0001)
@@ -531,6 +543,7 @@ func TestCalculateTokenCosts_Above200k_Output(t *testing.T) {
 	// above200k cost: 50_000 * 0.001 = 50.0
 	// Total output: 450.0
 	assert.InDelta(t, 450.0, costs.OutputCost, 0.0001)
+	assert.Equal(t, 250_000, costs.BilledOutputTokens, "both tiers together")
 
 	// Total: 0.1 + 450.0 = 450.1
 	assert.InDelta(t, 450.1, costs.TotalCost, 0.0001)
@@ -618,6 +631,7 @@ func TestCalculateTokenCosts_CacheCreationTokens(t *testing.T) {
 	assert.NotNil(t, costs)
 	// Regular: 1000 - 300 - 200 = 500 tokens × $0.000003 = $0.0015
 	assert.InDelta(t, 0.0015, costs.InputCost, 1e-9)
+	assert.Equal(t, 500, costs.BilledInputTokens)
 	// Cache read: 300 × $0.0000003 = $0.00009
 	assert.InDelta(t, 0.00009, costs.CachedInputCost, 1e-9)
 	// Cache creation: 200 × $0.00000375 = $0.00075
@@ -1253,6 +1267,8 @@ func TestCalculateTokenCosts_Gemini200k_FullSession(t *testing.T) {
 	require.NotNil(t, costs)
 	// regular input = 300_000 - 50_000 (cached) - 10_000 (cache creation) = 240_000
 	assert.InDelta(t, 240_000*0.00000325, costs.InputCost, 1e-9, "ALL regular input tokens at the long-context rate, not just the excess")
+	assert.Equal(t, 240_000, costs.BilledInputTokens)
+	assert.Equal(t, 1_000, costs.BilledOutputTokens)
 	assert.InDelta(t, 1_000*0.0000195, costs.OutputCost, 1e-9, "output also billed fully at the long-context rate")
 	assert.InDelta(t, 50_000*0.00000025, costs.CachedInputCost, 1e-9, "cache read also billed fully at the long-context rate")
 	assert.InDelta(t, 10_000*0.00000025, costs.CacheCreationCost, 1e-9, "cache creation also billed fully at the long-context rate")

@@ -185,6 +185,10 @@ func (p *Proxy) buildKafkaSpendEvent(
 		event.CollectionsSearchCost = tokenCosts.CollectionsSearchCost
 		event.ImageToolCost = tokenCosts.ImageGenerationToolCost
 		event.ToolUsageCost = tokenCosts.ToolUsageCost
+		event.BilledInputTokens = tokenCosts.BilledInputTokens
+		event.BilledOutputTokens = tokenCosts.BilledOutputTokens
+		event.BilledImageTokens = tokenCosts.BilledImageTokens
+		event.BilledVideoInputTokens = tokenCosts.BilledVideoInputTokens
 	}
 	if usage.ProviderCostUSD > 0 {
 		providerCost := usage.ProviderCostUSD

@@ -113,6 +113,12 @@ type SpendEvent struct {
 	// (NULL in ClickHouse) when the provider did not report one. Not part of
 	// total_cost.
 	ProviderReportedCost *float64 `json:"provider_reported_cost,omitempty"`
+	// Billed* are the token counts the cost calculator derives itself instead
+	// of taking them from the usage fields above; see converter.TokenCosts.
+	BilledInputTokens      int `json:"billed_input_tokens"`
+	BilledOutputTokens     int `json:"billed_output_tokens"`
+	BilledImageTokens      int `json:"billed_image_tokens"`
+	BilledVideoInputTokens int `json:"billed_video_input_tokens"`
 
 	APIKeyHash     string `json:"api_key_hash"`
 	UserID         string `json:"user_id"`

@@ -386,6 +386,15 @@ type TokenCosts struct {
 	MarginPercent     float64
 	MarginFixedAmount float64
 	MarginTotalAmount float64
+	// Billed* are the token counts the calculator derives itself instead of
+	// taking them from TokenUsage: the regular input and output left after the
+	// specialized buckets are carved out, and the input image and video tokens
+	// left after a cached-media overlap is dropped. They are logged as
+	// billed_tokens; docs/litellm-integration/pricing.md gives the exact rules.
+	BilledInputTokens      int
+	BilledOutputTokens     int
+	BilledImageTokens      int
+	BilledVideoInputTokens int
 }
 
 func NormalizeWebSearchContextSize(size string) string {

@@ -338,7 +338,7 @@ Most providers include reasoning inside `completion_tokens`:
 
 The subtraction ensures reasoning is billed at `output_cost_per_reasoning_token` (not double-charged at the base output rate as well).
 
-xAI reports reasoning **on top of** `completion_tokens` (`total_tokens = prompt + completion + reasoning`), while aggregators serving the same models (Requesty) fold it in. `reasoning_tokens_additive: true` skips the subtraction for a model, but one price row is shared by every credential serving it, so a fixed flag misbills one of the routes. With `reasoning_tokens_accounting: "auto"` AIR decides per response from the provider's `total_tokens`: equal to prompt + completion + reasoning means additive, equal to prompt + completion means included. A response that does not settle it (no `total_tokens`, e.g. an estimated aborted stream) falls back to `reasoning_tokens_additive`. In a stream the verdict comes from the chunk that last reported reasoning tokens, so an inconclusive final chunk also falls back rather than keeping an earlier chunk's verdict. The detected value is logged as `reasoning_tokens_accounting` in spend metadata.
+xAI reports reasoning **on top of** `completion_tokens` (`total_tokens = prompt + completion + reasoning`), while aggregators serving the same models (Requesty) fold it in. `reasoning_tokens_additive: true` skips the subtraction for a model, but one price row is shared by every credential serving it, so a fixed flag misbills one of the routes. With `reasoning_tokens_accounting: "auto"` AIR decides per response from the provider's `total_tokens`: equal to prompt + completion + reasoning means additive, equal to prompt + completion means included. A response that does not settle it (no `total_tokens`, e.g. an estimated aborted stream) falls back to `reasoning_tokens_additive`. In a stream the verdict comes from the chunk that last reported reasoning tokens, so an inconclusive final chunk also falls back rather than keeping an earlier chunk's verdict. The detected value is logged as `reasoning_tokens_accounting` in spend metadata. It is logged whenever AIR could tell, including for rows that use neither option, so it describes the provider's response rather than the mode the cost was calculated with; the output tokens actually billed are in `billed_tokens.output_tokens` (see [Spend storage contract](#spend-storage-contract)).
 
 ### Tiered pricing (200k threshold)
 
@@ -433,6 +433,14 @@ Alibaba/Qwen reports explicit-cache mode in `usage.prompt_tokens_details.cache_t
 ### Spend storage contract
 
 AIR keeps LiteLLM's upstream PostgreSQL schema unchanged. `LiteLLM_SpendLogs.spend` and the daily user, team, organization, and end-user tables contain the total cost. Cache, Web Search and input modality breakdowns are stored in `LiteLLM_SpendLogs.metadata` (`usage_object.prompt_tokens_details.image_tokens` / `audio_tokens` / `video_tokens`, `cost_breakdown.image_cost` / `audio_input_cost` / `video_input_cost`).
+
+`metadata.billed_tokens` holds the token counts AIR derives itself instead of taking them from `usage_object`:
+
+- `input_tokens`: `prompt_tokens` minus audio, cached, cache-creation, image and video input tokens;
+- `output_tokens`: `completion_tokens` minus audio, reasoning, prediction and output image tokens, capped by the reported text tokens when there are any. Reasoning billed on top of `completion_tokens` is not subtracted (see [Regular output tokens](#regular-output-tokens));
+- `image_tokens`, `video_input_tokens`: input image and video tokens minus the excess when audio, cache, image and video tokens add up to more than a non-zero `prompt_tokens` (a provider counting a cached image twice), taken from images first.
+
+No count goes below 0. Other token counts are billed as reported, at most split between rates (cached audio, cache-creation TTLs); `usage_object` carries all of them except cached output tokens, the Kafka event carries all. A count can be priced across rate tiers (200k), so it is not always a cost divided by one rate. For a grok answer, `output_tokens` is `completion_tokens` when reasoning was billed on top of it and `completion_tokens - reasoning_tokens` when reasoning was carved out.
 
 Kafka and ClickHouse expose the same breakdown as typed fields, including `web_search_requests` and `web_search_cost`. Use that analytics path when structured reconciliation by usage type is required.
 

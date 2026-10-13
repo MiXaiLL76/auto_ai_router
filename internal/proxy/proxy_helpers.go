@@ -825,7 +825,7 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 	}
 
 	// Build cost_breakdown
-	var costBreakdown interface{}
+	var costBreakdown, billedTokens interface{}
 	if costs != nil {
 		costBreakdown = map[string]interface{}{
 			"input_cost":               costs.InputCost,
@@ -854,6 +854,12 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 			"margin_fixed_amount":        costs.MarginFixedAmount,
 			"margin_total_amount":        costs.MarginTotalAmount,
 		}
+		billedTokens = map[string]interface{}{
+			"input_tokens":       costs.BilledInputTokens,
+			"output_tokens":      costs.BilledOutputTokens,
+			"image_tokens":       costs.BilledImageTokens,
+			"video_input_tokens": costs.BilledVideoInputTokens,
+		}
 	}
 
 	metadata := map[string]interface{}{
@@ -861,6 +867,7 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 		"usage_object":                  usageObject,
 		"user_api_key":                  hashedToken,
 		"cost_breakdown":                costBreakdown,
+		"billed_tokens":                 billedTokens,
 		"applied_guardrails":            []interface{}{},
 		"user_api_key_org_id":           organizationID,
 		"requester_ip_address":          requesterIP,

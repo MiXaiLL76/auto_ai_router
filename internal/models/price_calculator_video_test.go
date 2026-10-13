@@ -49,6 +49,9 @@ func TestCalculateTokenCosts_GeminiEmbedding2PricesEachModality(t *testing.T) {
 	assert.InDelta(t, 660*0.0000156, costs.VideoInputCost, 1e-15)
 	assert.Zero(t, costs.OutputCost, "embedding vectors are not output tokens")
 	assert.InDelta(t, 132*0.00000026+258*0.000000585+250*0.00000845+660*0.0000156, costs.TotalCost, 1e-15)
+	assert.Equal(t, 132, costs.BilledInputTokens)
+	assert.Equal(t, 258, costs.BilledImageTokens)
+	assert.Equal(t, 660, costs.BilledVideoInputTokens)
 }
 
 func TestCalculateTokenCosts_TextOnlyEmbeddingUsesTextRate(t *testing.T) {
@@ -89,4 +92,7 @@ func TestCalculateTokenCosts_CachedMediaOverlapIsNotBilledTwice(t *testing.T) {
 	assert.Equal(t, 0.0, costs.ImageCost)
 	assert.Equal(t, 120.0, costs.VideoInputCost) // (45 - (10 - 5)) * 3
 	assert.Equal(t, 150.0, costs.TotalCost)
+	assert.Zero(t, costs.BilledInputTokens)
+	assert.Zero(t, costs.BilledImageTokens)
+	assert.Equal(t, 40, costs.BilledVideoInputTokens)
 }

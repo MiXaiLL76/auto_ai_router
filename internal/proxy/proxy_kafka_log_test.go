@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -271,6 +272,31 @@ func TestBuildKafkaSpendEvent_TokenCostsMapped(t *testing.T) {
 	assert.Equal(t, 0.00027, event.OutputCost)
 	assert.Equal(t, 0.00011, event.WebSearchCost)
 	assert.Equal(t, 0.00068, event.TotalCost)
+}
+
+func TestBuildKafkaSpendEvent_BilledTokensMapped(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	logCtx := testLogCtx(t)
+	costs := &converter.TokenCosts{
+		BilledInputTokens:      800,
+		BilledOutputTokens:     50,
+		BilledImageTokens:      40,
+		BilledVideoInputTokens: 660,
+	}
+
+	event := prx.buildKafkaSpendEvent(logCtx, "cred", "cred:model", "hash",
+		"", "", "", "", "api.openai.com", "success", 0, costs, 0, logCtx.StartTime)
+
+	assert.Equal(t, 800, event.BilledInputTokens)
+	assert.Equal(t, 50, event.BilledOutputTokens)
+	assert.Equal(t, 40, event.BilledImageTokens)
+	assert.Equal(t, 660, event.BilledVideoInputTokens)
+	encoded, err := json.Marshal(event)
+	require.NoError(t, err)
+	assert.Contains(t, string(encoded), `"billed_input_tokens":800`)
+	assert.Contains(t, string(encoded), `"billed_output_tokens":50`)
+	assert.Contains(t, string(encoded), `"billed_image_tokens":40`)
+	assert.Contains(t, string(encoded), `"billed_video_input_tokens":660`)
 }
 
 func TestBuildKafkaSpendEvent_ErrorClassOnlyOnFailure(t *testing.T) {

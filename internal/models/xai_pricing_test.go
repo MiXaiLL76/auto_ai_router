@@ -101,6 +101,26 @@ func TestGrokPricing_LongContextAppliesToEveryTokenCategory(t *testing.T) {
 	assert.InDelta(t, 400*0.0000156, costs.ReasoningCost, 1e-12)
 }
 
+func TestGrokPricing_BilledOutputTokensMatchAcrossRoutes(t *testing.T) {
+	price := loadGrokTestPrices(t)["grok-4.7"]
+	// The same answer, 50 visible tokens and 300 reasoning, from xAI
+	// (reasoning on top) and from Requesty (reasoning inside).
+	xai := price.CalculateCosts(&converter.TokenUsage{
+		PromptTokens: 1_000, CompletionTokens: 50, CachedInputTokens: 200,
+		ReasoningTokens: 300, ReasoningAccounting: converter.ReasoningAccountingAdditive,
+	})
+	requesty := price.CalculateCosts(&converter.TokenUsage{
+		PromptTokens: 1_000, CompletionTokens: 350, CachedInputTokens: 200,
+		ReasoningTokens: 300, ReasoningAccounting: converter.ReasoningAccountingIncluded,
+	})
+
+	for route, costs := range map[string]*converter.TokenCosts{"xAI": xai, "Requesty": requesty} {
+		require.NotNil(t, costs, route)
+		assert.Equal(t, 800, costs.BilledInputTokens, route)
+		assert.Equal(t, 50, costs.BilledOutputTokens, route)
+	}
+}
+
 func TestGrokPricing_ReasoningAccountingFallsBackToFixedFlag(t *testing.T) {
 	price := loadGrokTestPrices(t)["grok-4.7"]
 	// No total_tokens-based verdict (e.g. a locally estimated aborted
@@ -108,6 +128,7 @@ func TestGrokPricing_ReasoningAccountingFallsBackToFixedFlag(t *testing.T) {
 	usage := &converter.TokenUsage{PromptTokens: 1_000, CompletionTokens: 50, ReasoningTokens: 200}
 
 	assert.InDelta(t, 1_000*0.0000026+250*0.0000078, price.CalculateCost(usage), 1e-12)
+	assert.Equal(t, 50, price.CalculateCosts(usage).BilledOutputTokens)
 
 	fixed := *price
 	fixed.ReasoningTokensAccounting = ""
@@ -116,6 +137,9 @@ func TestGrokPricing_ReasoningAccountingFallsBackToFixedFlag(t *testing.T) {
 	// Without "auto" the per-response verdict is ignored: the historical
 	// included semantics apply (visible output 50 - 200 clamps to 0).
 	assert.InDelta(t, 1_000*0.0000026+200*0.0000078, fixed.CalculateCost(usage), 1e-12)
+	// billed_tokens shows what reasoning_tokens_accounting can't: the
+	// response was additive, yet no visible output was billed.
+	assert.Zero(t, fixed.CalculateCosts(usage).BilledOutputTokens)
 }
 
 func TestGrokPricing_ServerSideTools(t *testing.T) {
