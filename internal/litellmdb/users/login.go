@@ -40,6 +40,8 @@ const SessionJWTDuration = 24 * time.Hour
 // AuthenticateUser validates credentials against admin config and DB users.
 // Admin path: compares with UI_USERNAME/UI_PASSWORD env vars.
 // DB user path: looks up user by email in LiteLLM_UserTable.
+//
+//nolint:gocyclo // linear guard clauses with early returns, no nested logic
 func AuthenticateUser(ctx context.Context, req LoginRequest, masterKey string, pool *pgxpool.Pool) (*LoginResult, error) {
 	if req.Username == "" || req.Password == "" {
 		return nil, ErrInvalidCredentials

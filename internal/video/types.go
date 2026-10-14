@@ -128,6 +128,7 @@ const (
 
 var digestPattern = regexp.MustCompile(`^[a-fA-F0-9]{64}$`)
 
+//nolint:gocyclo // flat sequence of independent validation checks
 func (r CreateRequest) normalized() (CreateRequest, error) {
 	r.Model = strings.TrimSpace(r.Model)
 	r.Prompt = strings.TrimSpace(r.Prompt)

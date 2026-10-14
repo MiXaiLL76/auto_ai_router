@@ -244,6 +244,8 @@ func DownloadAndEncodeImage(imgURL string) *ContentBlock {
 }
 
 // detectImageMediaType detects image format from magic bytes, falling back to URL extension.
+//
+//nolint:gocyclo // flat lookup table, one branch per case
 func detectImageMediaType(data []byte, imgURL string) string {
 	if len(data) >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF {
 		return "image/jpeg"

@@ -26,6 +26,7 @@ func clientResponseBodyForCredential(statusCode int, body []byte, _ *config.Cred
 	return body, false, false
 }
 
+//nolint:gocyclo // linear guard clauses with early returns, no nested logic
 func statusCodeFromProviderBodyError(statusCode int, body []byte) (int, bool) {
 	if len(body) == 0 {
 		return 0, false

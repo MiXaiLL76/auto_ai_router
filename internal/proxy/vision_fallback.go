@@ -68,6 +68,8 @@ type visionFallbackResult struct {
 // answers from the conversation of any vLLM-only model. Bodies without images or
 // markers, models that support images (or never declared supports_vision) and models
 // served by any non-vLLM credential are returned unchanged.
+//
+//nolint:gocyclo // linear guard clauses with early returns, no nested logic
 func (p *Proxy) applyVisionFallback(w http.ResponseWriter, r *http.Request, body []byte, modelID string, format visionBodyFormat) visionFallbackResult {
 	unchanged := visionFallbackResult{body: body}
 	if p.modelManager == nil {
