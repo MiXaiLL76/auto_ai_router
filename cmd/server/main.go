@@ -271,6 +271,7 @@ func main() {
 		SessionStickyAutoCacheCtrl:   cfg.Server.SessionStickyAutoCacheCtrl,
 		SessionStoreTTL:              time.Duration(cfg.Server.SessionStickyTTL) * time.Minute,
 		DrainUpstreamOnAbort:         cfg.Server.DrainUpstreamOnAbort,
+		ForceStreamForTTFT:           cfg.Server.ForceStreamForTTFT,
 		ResponseCompatibility:        cfg.Server.ResponseCompatibility,
 		TiktokenEnabled:              cfg.Server.TiktokenEnabled,
 		StrictAllTeamModelsACL:       cfg.Server.StrictAllTeamModelsACL,

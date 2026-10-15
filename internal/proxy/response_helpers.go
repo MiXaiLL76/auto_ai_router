@@ -872,3 +872,21 @@ func injectStreamOptions(body []byte) []byte {
 	}
 	return modified
 }
+
+// setStreamTrue force-sets "stream": true in a JSON request body. Used by the
+// force_stream_for_ttft toggle to make the upstream respond with SSE even when
+// the client asked for a non-stream response. Non-JSON bodies (or bodies the
+// marshal round-trip would corrupt) are returned unchanged, which makes the
+// toggle a no-op for such requests.
+func setStreamTrue(body []byte) []byte {
+	var raw map[string]interface{}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return body
+	}
+	raw["stream"] = true
+	modified, err := json.Marshal(raw)
+	if err != nil {
+		return body
+	}
+	return modified
+}

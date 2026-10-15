@@ -404,6 +404,58 @@ func (p *Proxy) buildCredentialRequest(
 	prevEntryHandled bool,
 	stickyCacheEligible bool,
 ) (credentialPreparedRequest, error) {
+	req, err := p.buildCredentialRequestInner(r, baseBody, baseProxyBody, modelID, baseRealModelID,
+		basePath, streaming, cred, isResponsesAPI, prevEntryHandled, stickyCacheEligible)
+	if err != nil {
+		return req, err
+	}
+	return p.applyForceStream(req, streaming, cred, r), nil
+}
+
+// applyForceStream mutates the outbound body to force "stream": true when the
+// force_stream_for_ttft toggle is on and the client asked for a non-stream
+// response. The upstream then responds with SSE, which the response path
+// reassembles back into the non-stream JSON the client expects (see
+// handleSimulatedNonStream). Only chat-shaped requests are eligible: every
+// provider this router already streams to understands stream:true. Native and
+// passthrough Responses API requests (native provider formats), responses_only
+// conversions and Anthropic-wire AIR-proxy chains are left untouched — they
+// keep their existing behavior and merely miss the TTFT.
+func (p *Proxy) applyForceStream(req credentialPreparedRequest, streaming bool, cred *config.CredentialConfig, r *http.Request) credentialPreparedRequest {
+	if !p.forceStreamForTTFT || streaming || req.nativeResponses || req.passthroughResponses || req.convertedToResponses {
+		return req
+	}
+	if req.path == "/v1/messages" && cred.IsProxyLike() {
+		return req
+	}
+	req.body = setStreamTrue(req.body)
+	req.proxyBody = setStreamTrue(req.proxyBody)
+	// Chat-shaped upstream bodies additionally ask for usage in the stream
+	// (OpenAI-compatible providers honor stream_options.include_usage; the
+	// Anthropic-native body is never touched here because its field set is
+	// different and unknown fields must not be sent to Anthropic).
+	if req.path == "/v1/chat/completions" {
+		req.body = injectStreamOptions(req.body)
+		req.proxyBody = injectStreamOptions(req.proxyBody)
+	}
+	p.logger.DebugContext(r.Context(), "Forced streaming upstream for non-streaming request",
+		"credential", cred.Name, "path", req.path, "model", req.realModelID)
+	return req
+}
+
+func (p *Proxy) buildCredentialRequestInner(
+	r *http.Request,
+	baseBody []byte,
+	baseProxyBody []byte,
+	modelID string,
+	baseRealModelID string,
+	basePath string,
+	streaming bool,
+	cred *config.CredentialConfig,
+	isResponsesAPI bool,
+	prevEntryHandled bool,
+	stickyCacheEligible bool,
+) (credentialPreparedRequest, error) {
 	body := baseBody
 	proxyBody := baseProxyBody
 	realModelID := baseRealModelID
