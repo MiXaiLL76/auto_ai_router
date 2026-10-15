@@ -13,10 +13,65 @@ permissions:
   actions: read
 
 jobs:
-  # 0. Проверка качества кода (fmt, lint, tests)
-  quality-check:
-    name: Quality Check
-    uses: ./.github/workflows/lint.yml
+  # 0. Lint, тесты и статические сканы уже прошли в PR (ci.yml). Здесь только
+  # убеждаемся, что релизим код из main, т.е. прошедший через PR.
+  verify:
+    name: Verify commit is in main
+    runs-on: ubuntu-latest
+    steps:
+      # Ручной запуск может собирать ветку (образы dev-latest / <ветка>-latest),
+      # поэтому проверка только для тегов. Пропускаем шаги, а не всю джобу:
+      # пропущенная джоба пропустила бы и все джобы, которые от неё зависят.
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        if: github.event_name != 'workflow_dispatch'
+        with:
+          fetch-depth: 0
+      - name: Commit is reachable from main
+        if: github.event_name != 'workflow_dispatch'
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error title=release::${GITHUB_REF_NAME} (${GITHUB_SHA}) is not in main — release only commits merged via PR"
+            exit 1
+          fi
+
+  # 0b. Сканы по базам уязвимостей: база обновляется, поэтому код, чистый на
+  # момент PR, к релизу может получить новые CVE.
+  vuln-scan:
+    needs: verify
+    name: Vulnerability Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: govulncheck
+        if: ${{ !cancelled() }}
+        run: |
+          status=0
+          docker run --rm -v "$PWD:/src" -w /src golang:1.27 sh -c \
+            'go install golang.org/x/vuln/cmd/govulncheck@latest && govulncheck ./...' \
+            > govulncheck.log 2>&1 || status=$?
+          cat govulncheck.log
+          if [ "$status" -ne 0 ]; then
+            { echo "### ❌ govulncheck"; echo '```'; cat govulncheck.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error title=govulncheck::vulnerability reachable from our code (or govulncheck failed) — bump the module under 'Fixed in'; see log"
+            exit 1
+          fi
+          echo "### ✅ govulncheck" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: trivy fs
+        if: ${{ !cancelled() }}
+        run: |
+          status=0
+          docker run --rm -v "$PWD:/src:ro" aquasec/trivy:latest fs \
+            --no-progress --exit-code 1 --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed \
+            /src > trivy.log 2>&1 || status=$?
+          cat trivy.log
+          if [ "$status" -ne 0 ]; then
+            { echo "### ❌ trivy fs: HIGH/CRITICAL"; echo '```'; cat trivy.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error title=trivy fs::HIGH/CRITICAL vulnerability in dependencies — bump the dep to the 'Fixed Version'; see log"
+            exit 1
+          fi
+          echo "### ✅ trivy fs" >> "$GITHUB_STEP_SUMMARY"
 
   # 0b. Security-сканы исходников (trufflehog, semgrep, trivy fs, clamav)
   security-check:
@@ -25,7 +80,7 @@ jobs:
 
   # 1. Сборка бинарников (только для тегов)
   build-binaries:
-    needs: quality-check
+    needs: verify
     if: startsWith(github.ref, 'refs/tags/')
     name: Build Release Binaries
     runs-on: baremetal-mixaill
@@ -58,7 +113,7 @@ jobs:
 
   # 2. Сборка Docker (для веток и для тегов).
   build-docker:
-    needs: quality-check
+    needs: verify
     name: Build Docker Image
     runs-on: ubuntu-latest
     outputs:
@@ -173,7 +228,7 @@ jobs:
 
   # 3. Публикация: пушим в GHCR ровно тот tar, который прошёл проверки
   publish-docker:
-    needs: [build-docker, security-check, scan-image]
+    needs: [build-docker, vuln-scan, scan-image]
     name: Push Docker Image
     runs-on: ubuntu-latest
     steps:
@@ -196,7 +251,7 @@ jobs:
 
   upload-assets:
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [build-binaries, security-check, scan-image, publish-docker]
+    needs: [build-binaries, vuln-scan, scan-image, publish-docker]
     runs-on: baremetal-mixaill
     container:
       image: ubuntu:24.04
