@@ -395,6 +395,15 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	metadata = addOrganizationPolicySpendMetadata(metadata, logCtx)
 
 	var completionStartTime *time.Time
+	if logCtx.CompletionStartTime.IsZero() {
+		// A response that was never streamed delivers its first (and only)
+		// token when the response completes: TTFT equals total latency by
+		// definition. Filling the gap here gives every request a measurable
+		// CompletionStartTime; streaming paths (including the simulated
+		// force_stream_for_ttft reassembly) stamp the real first-delta time
+		// themselves and are never overwritten thanks to the IsZero guard.
+		logCtx.CompletionStartTime = endTime
+	}
 	if !logCtx.CompletionStartTime.IsZero() {
 		completionStartTime = &logCtx.CompletionStartTime
 	}

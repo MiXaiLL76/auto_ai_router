@@ -20,6 +20,7 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -80,7 +81,6 @@ func (p *Proxy) handleSimulatedNonStream(
 	})
 	providerLabel := streamingProviderLabel(cred, prepared.convertedMessages)
 	tokenUsageOptions := tokenUsageExtractionOptionsForResponse(cred, resp.Header)
-	audioInputAlreadyExcludesCachedAudio := !tokenUsageOptions.AudioInputIncludesCachedAudio
 
 	pr, pw := io.Pipe()
 	defer func() { _ = pr.Close() }()
@@ -112,7 +112,11 @@ func (p *Proxy) handleSimulatedNonStream(
 			onChunk: func(chunk []byte, payloads [][]byte, hasUsage bool) {
 				outputStreamError.Observe(chunk)
 				if logCtx != nil && hasUsage {
-					if usage := extractTokenUsageFromPayloads(payloads, converter.TokenUsageExtractionOptions{}); usage != nil {
+					// The same header-derived options the non-streaming path's
+					// token extraction uses (Kimi/Moonshot cache-write TTL
+					// splits, audio-cached-input flags) — a zero-value options
+					// struct would silently drop those from the billing merge.
+					if usage := extractTokenUsageFromPayloads(payloads, tokenUsageOptions); usage != nil {
 						if logCtx.TokenUsage == nil {
 							logCtx.TokenUsage = &converter.TokenUsage{}
 						}
@@ -148,6 +152,7 @@ func (p *Proxy) handleSimulatedNonStream(
 	ttftPending := logCtx != nil && logCtx.CompletionStartTime.IsZero()
 	readBuf := make([]byte, 8192)
 	overflow := false
+	var lastReadErr error
 	for {
 		n, readErr := clientReader.Read(readBuf)
 		if n > 0 {
@@ -165,6 +170,7 @@ func (p *Proxy) handleSimulatedNonStream(
 			}
 		}
 		if readErr != nil {
+			lastReadErr = readErr
 			break
 		}
 	}
@@ -176,9 +182,17 @@ func (p *Proxy) handleSimulatedNonStream(
 		logTokens = completion.TokenCount()
 	}
 
+	// A genuine mid-stream error (transport drop, converter failure) must be
+	// classified as a failure, same as the live streaming path: EOF means the
+	// provider finished its stream, anything else means it did not.
+	readErrForResolve := lastReadErr
+	if errors.Is(readErrForResolve, io.EOF) {
+		readErrForResolve = nil
+	}
+
 	var streamErr error
 	var chatBody []byte
-	if streamErr = resolveCapturedProviderStreamError(logCtx, resp.StatusCode, nil, rawProviderStreamError, outputStreamError); streamErr != nil {
+	if streamErr = resolveCapturedProviderStreamError(logCtx, resp.StatusCode, readErrForResolve, rawProviderStreamError, outputStreamError); streamErr != nil {
 		markStreamFailure(logCtx, streamErr)
 	} else if overflow {
 		streamErr = ErrResponseBodyTooLarge
@@ -196,7 +210,7 @@ func (p *Proxy) handleSimulatedNonStream(
 			"credential", cred.Name, "provider", providerLabel, "model", modelID,
 			"error", streamErr, "request_id", logCtx.RequestID)
 		p.setPromptTokensEstimate(logCtx, requestBody, realModelID)
-		p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerLabel, resp.StatusCode, audioInputAlreadyExcludesCachedAudio)
+		p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerLabel, resp.StatusCode, !tokenUsageOptions.AudioInputIncludesCachedAudio)
 		p.writeSimulatedError(w, logCtx, http.StatusBadGateway, targetURL)
 		return
 	}
@@ -225,6 +239,9 @@ func (p *Proxy) handleSimulatedNonStream(
 				"request_id", logCtx.RequestID)
 		} else {
 			finalBody = messagesBody
+			// Same contract reset the plain non-stream path applies after any
+			// client-format conversion (proxy.go "Process final response").
+			tokenUsageOptions.AudioInputIncludesCachedAudio = false
 		}
 	} else if prepared.convertedResp {
 		responsesBody, convErr := responses.ChatToResponse(
@@ -252,6 +269,8 @@ func (p *Proxy) handleSimulatedNonStream(
 				}
 			}
 			finalBody = responsesBody
+			// Same contract reset as the plain non-stream path.
+			tokenUsageOptions.AudioInputIncludesCachedAudio = false
 		}
 	}
 
@@ -267,6 +286,19 @@ func (p *Proxy) handleSimulatedNonStream(
 		finalBody = normalizedBody
 		dropRepresentationIntegrityHeaders(resp.Header)
 	}
+
+	// web_search travels in the reassembled body unless the request hides it,
+	// mirroring the plain non-stream path (strip only when HideWebSearchResults).
+	if logCtx.HideWebSearchResults {
+		if stripped, ok := stripWebSearchResults(finalBody); ok {
+			finalBody = stripped
+			dropRepresentationIntegrityHeaders(resp.Header)
+		}
+	}
+	// Correlate billing/analytics rows with the provider's own completion id,
+	// same as the plain non-stream and streaming paths.
+	logCtx.captureClientResponseID(finalBody)
+	audioInputAlreadyExcludesCachedAudio := !tokenUsageOptions.AudioInputIncludesCachedAudio
 
 	// Stream-domain logging: usage extraction from the stream, spend log, TTFT
 	// metric and kafka event — all keyed off CompletionStartTime / lastChunk.
@@ -427,6 +459,7 @@ type simChoiceState struct {
 	content      strings.Builder
 	refusal      strings.Builder
 	reasoning    strings.Builder
+	images       []openai.ImageData
 	toolCalls    map[int]*simToolCallState
 	toolOrder    []int
 	finishReason *string
@@ -448,6 +481,7 @@ func reassembleChatCompletion(stream []byte) []byte {
 		id, model, systemFingerprint, serviceTier string
 		createdAt                                 int64
 		usage                                     json.RawMessage
+		webSearch                                 json.RawMessage
 		choices                                   = map[int]*simChoiceState{}
 		choiceOrder                               []int
 	)
@@ -464,6 +498,19 @@ func reassembleChatCompletion(stream []byte) []byte {
 		var chunk openai.OpenAIStreamingChunk
 		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
 			continue
+		}
+		// Top-level "web_search" (search citations) rides in a chunk of its
+		// own, outside the OpenAIStreamingChunk struct (no such field there).
+		// The cheap substring prefilter avoids an extra unmarshal on ordinary
+		// content chunks; a false positive (the key in delta text) costs one
+		// harmless unmarshal that finds nothing.
+		if bytes.Contains([]byte(payload), []byte(`"web_search"`)) {
+			var withSearch struct {
+				WebSearch json.RawMessage `json:"web_search"`
+			}
+			if err := json.Unmarshal([]byte(payload), &withSearch); err == nil && len(withSearch.WebSearch) > 0 && string(withSearch.WebSearch) != "null" {
+				webSearch = withSearch.WebSearch
+			}
 		}
 		if chunk.ID != "" {
 			id = chunk.ID
@@ -498,6 +545,11 @@ func reassembleChatCompletion(stream []byte) []byte {
 			}
 			if c.Delta.ReasoningContent != "" {
 				st.reasoning.WriteString(c.Delta.ReasoningContent)
+			}
+			if len(c.Delta.Images) > 0 {
+				// Gemini image generation streams its images as deltas
+				// (vertex/streaming.go) — mirror the non-stream message shape.
+				st.images = append(st.images, c.Delta.Images...)
 			}
 			for _, tc := range c.Delta.ToolCalls {
 				idx := tc.Index
@@ -544,16 +596,19 @@ func reassembleChatCompletion(stream []byte) []byte {
 		} `json:"function"`
 	}
 	type simMessage struct {
-		Role             string        `json:"role"`
-		Content          string        `json:"content"`
-		Refusal          *string       `json:"refusal,omitempty"`
-		ReasoningContent *string       `json:"reasoning_content,omitempty"`
-		ToolCalls        []simToolCall `json:"tool_calls,omitempty"`
+		Role             string             `json:"role"`
+		Content          string             `json:"content"`
+		Refusal          *string            `json:"refusal,omitempty"`
+		ReasoningContent *string            `json:"reasoning_content,omitempty"`
+		Images           []openai.ImageData `json:"images,omitempty"`
+		ToolCalls        []simToolCall      `json:"tool_calls,omitempty"`
 	}
 	type simChoice struct {
-		Index        int        `json:"index"`
-		Message      simMessage `json:"message"`
-		FinishReason *string    `json:"finish_reason"`
+		Index   int        `json:"index"`
+		Message simMessage `json:"message"`
+		// finish_reason is omitted (never null) when the stream ended without
+		// ever carrying one: the native non-stream contract is a string.
+		FinishReason *string `json:"finish_reason,omitempty"`
 	}
 	type simCompletion struct {
 		ID                string          `json:"id"`
@@ -562,6 +617,7 @@ func reassembleChatCompletion(stream []byte) []byte {
 		Model             string          `json:"model"`
 		SystemFingerprint string          `json:"system_fingerprint,omitempty"`
 		ServiceTier       string          `json:"service_tier,omitempty"`
+		WebSearch         json.RawMessage `json:"web_search,omitempty"`
 		Choices           []simChoice     `json:"choices"`
 		Usage             json.RawMessage `json:"usage,omitempty"`
 	}
@@ -573,6 +629,7 @@ func reassembleChatCompletion(stream []byte) []byte {
 		Model:             model,
 		SystemFingerprint: systemFingerprint,
 		ServiceTier:       serviceTier,
+		WebSearch:         webSearch,
 		Usage:             usage,
 	}
 	if out.ID == "" {
@@ -583,6 +640,7 @@ func reassembleChatCompletion(stream []byte) []byte {
 		msg := simMessage{
 			Role:    st.role,
 			Content: st.content.String(),
+			Images:  st.images,
 		}
 		if msg.Role == "" {
 			msg.Role = "assistant"

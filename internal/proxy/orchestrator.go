@@ -419,13 +419,17 @@ func (p *Proxy) buildCredentialRequest(
 // handleSimulatedNonStream). Only chat-shaped requests are eligible: every
 // provider this router already streams to understands stream:true. Native and
 // passthrough Responses API requests (native provider formats), responses_only
-// conversions and Anthropic-wire AIR-proxy chains are left untouched — they
+// conversions and proxy-like (AIR-to-AIR) chains are left untouched — they
 // keep their existing behavior and merely miss the TTFT.
 func (p *Proxy) applyForceStream(req credentialPreparedRequest, streaming bool, cred *config.CredentialConfig, r *http.Request) credentialPreparedRequest {
 	if !p.forceStreamForTTFT || streaming || req.nativeResponses || req.passthroughResponses || req.convertedToResponses {
 		return req
 	}
-	if req.path == "/v1/messages" && cred.IsProxyLike() {
+	if cred.IsProxyLike() {
+		// Proxy-like (AIR-to-AIR) chains forward the body as-is and their
+		// response path streams SSE straight to this router's client without
+		// ever reaching handleSimulatedNonStream's reassembly — forcing
+		// stream:true would hand a non-streaming client raw SSE.
 		return req
 	}
 	req.body = setStreamTrue(req.body)

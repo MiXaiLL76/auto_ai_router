@@ -367,3 +367,163 @@ data: {"type":"message_stop"}
 	assert.Equal(t, "text", out.Content[0].Type)
 	assert.Equal(t, "Hi there", out.Content[0].Text)
 }
+
+// errReader returns up to len(data) bytes, then a transport error instead of
+// io.EOF — simulating a mid-stream upstream connection drop.
+type errReader struct {
+	data []byte
+	err  error
+	pos  int
+}
+
+func (r *errReader) Read(p []byte) (int, error) {
+	if r.pos >= len(r.data) {
+		return 0, r.err
+	}
+	n := copy(p, r.data[r.pos:])
+	r.pos += n
+	return n, nil
+}
+
+// TestHandleSimulatedNonStream_MidStreamTransportError verifies a real
+// mid-stream error (not EOF) is classified as a failure and returns a masked
+// 502 instead of silently serving the truncated partial content as 200.
+func TestHandleSimulatedNonStream_MidStreamTransportError(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+
+	sse := openAIChatSSE(
+		`{"id":"chatcmpl-1","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}`,
+	)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(&errReader{data: []byte(sse), err: io.ErrUnexpectedEOF}),
+	}
+	start := time.Now().Add(-time.Second)
+	logCtx := &RequestLogContext{StartTime: start, RequestID: "test-req", Request: req}
+	cred := &config.CredentialConfig{Name: "openai", Type: config.ProviderTypeOpenAI}
+	prepared := &orchestratedRequest{streaming: false}
+	w := httptest.NewRecorder()
+
+	prx.handleSimulatedNonStream(w, req, resp, prepared, cred, "gpt-4o", "gpt-4o",
+		logCtx, nil, "http://upstream", []byte(`{"model":"gpt-4o","messages":[]}`))
+
+	require.Equal(t, http.StatusBadGateway, w.Code)
+	assert.Equal(t, "failure", logCtx.Status)
+	assert.Equal(t, "stream_error", logCtx.StreamOutcome)
+}
+
+// TestReassembleChatCompletion_Images verifies streamed image deltas (Gemini
+// image generation) survive the reassembly, mirroring the non-stream message
+// shape instead of being dropped.
+func TestReassembleChatCompletion_Images(t *testing.T) {
+	stream := openAIChatSSE(
+		`{"id":"chatcmpl-img","object":"chat.completion.chunk","model":"gemini-2.0-flash","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`,
+		`{"id":"chatcmpl-img","object":"chat.completion.chunk","model":"gemini-2.0-flash","choices":[{"index":0,"delta":{"images":[{"b64_json":"AAAA","type":"image/png"}]},"finish_reason":"stop"}]}`,
+	)
+	body := reassembleChatCompletion([]byte(stream))
+	require.NotNil(t, body)
+
+	var out struct {
+		Choices []struct {
+			Message struct {
+				Images []map[string]any `json:"images"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	require.NoError(t, json.Unmarshal(body, &out))
+	require.Len(t, out.Choices, 1)
+	require.Len(t, out.Choices[0].Message.Images, 1)
+	assert.Equal(t, "AAAA", out.Choices[0].Message.Images[0]["b64_json"])
+	assert.Equal(t, "image/png", out.Choices[0].Message.Images[0]["type"])
+}
+
+// TestReassembleChatCompletion_WebSearch verifies the top-level web_search
+// payload of a chunk survives reassembly (it has no field on
+// OpenAIStreamingChunk and would otherwise be silently dropped).
+func TestReassembleChatCompletion_WebSearch(t *testing.T) {
+	stream := openAIChatSSE(
+		`{"id":"chatcmpl-ws","object":"chat.completion.chunk","model":"gpt-4o","web_search":[{"title":"Result title","url":"https://example.com"}],"choices":[{"index":0,"delta":{"content":"found"},"finish_reason":"stop"}]}`,
+	)
+	body := reassembleChatCompletion([]byte(stream))
+	require.NotNil(t, body)
+
+	var out map[string]any
+	require.NoError(t, json.Unmarshal(body, &out))
+	ws, ok := out["web_search"].([]any)
+	require.True(t, ok, "web_search must survive reassembly")
+	require.Len(t, ws, 1)
+}
+
+// TestHandleSimulatedNonStream_WebSearchHidden verifies HideWebSearchResults
+// strips web_search (mirroring the plain non-stream path) and that
+// ClientResponseID is captured for billing correlation.
+func TestHandleSimulatedNonStream_WebSearchHiddenAndClientResponseID(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+
+	stream := openAIChatSSE(
+		`{"id":"chatcmpl-ws","object":"chat.completion.chunk","created":1700000000,"model":"gpt-4o","web_search":[{"title":"Result title"}],"choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`,
+		`{"id":"chatcmpl-ws","object":"chat.completion.chunk","created":1700000000,"model":"gpt-4o","choices":[{"index":0,"delta":{"content":"found"},"finish_reason":"stop"}]}`,
+	)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(stream)),
+	}
+	logCtx := &RequestLogContext{StartTime: time.Now().Add(-time.Second), RequestID: "test-req", Request: req, HideWebSearchResults: true}
+	cred := &config.CredentialConfig{Name: "openai", Type: config.ProviderTypeOpenAI}
+	prepared := &orchestratedRequest{streaming: false}
+	w := httptest.NewRecorder()
+
+	prx.handleSimulatedNonStream(w, req, resp, prepared, cred, "gpt-4o", "gpt-4o",
+		logCtx, nil, "http://upstream", []byte(`{"model":"gpt-4o","messages":[]}`))
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.NotContains(t, w.Body.String(), "web_search", "hidden web_search must be stripped")
+	assert.Equal(t, "chatcmpl-ws", logCtx.ClientResponseID, "ClientResponseID must be captured for billing correlation")
+}
+
+// TestReassembleChatCompletion_NoNullFinishReason verifies a choice that never
+// received a terminal finish_reason is emitted without a null value, matching
+// the string-only non-stream contract.
+func TestReassembleChatCompletion_NoNullFinishReason(t *testing.T) {
+	stream := openAIChatSSE(
+		`{"id":"chatcmpl-nf","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"hi"}}]}`,
+	)
+	body := reassembleChatCompletion([]byte(stream))
+	require.NotNil(t, body)
+	assert.NotContains(t, string(body), `"finish_reason":null`)
+}
+
+// TestSetStreamTrue_PreservesLargeIntegers verifies the JSON round-trip used by
+// applyForceStream does not round integers beyond float64 precision (it must
+// only add stream/stream_options, never rewrite other fields).
+func TestSetStreamTrue_PreservesLargeIntegers(t *testing.T) {
+	body := []byte(`{"model":"gpt-4o","seed":9007199254740993,"stream":false}`)
+	out := setStreamTrue(body)
+	assert.Contains(t, string(out), `"seed":9007199254740993`, "large integer must survive byte-for-byte")
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(out, &raw))
+	assert.Equal(t, true, raw["stream"])
+
+	withOptions := injectStreamOptions(out)
+	assert.Contains(t, string(withOptions), `"seed":9007199254740993`, "injectStreamOptions must preserve large integers too")
+}
+
+// TestApplyForceStream_SkipsProxyLike verifies AIR-to-AIR chains are never
+// force-streamed: their response path streams SSE straight to the client
+// without reassembly, which would break the non-stream contract.
+func TestApplyForceStream_SkipsProxyLike(t *testing.T) {
+	prx := NewTestProxyBuilder().WithForceStreamForTTFT(true).Build()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{}`))
+	body := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`)
+	cred := &config.CredentialConfig{Name: "air", Type: config.ProviderTypeAIR, BaseURL: "http://peer"}
+
+	out := prx.applyForceStream(credentialPreparedRequest{body: body, proxyBody: body, path: "/v1/chat/completions"}, false, cred, req)
+	assert.Equal(t, string(body), string(out.body), "proxy-like bodies must be left untouched")
+	assert.NotContains(t, string(out.body), `"stream":true`)
+}
