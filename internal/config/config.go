@@ -625,6 +625,7 @@ type ServerConfig struct {
 	ModelPricesSyncInterval    time.Duration         `yaml:"model_prices_sync_interval"`        // How often model prices are re-fetched from model_prices_link (default: 5m)
 	ShutdownDelay              time.Duration         `yaml:"shutdown_delay"`                    // Delay between readiness=false and server.Shutdown (default: 5s)
 	DrainUpstreamOnAbort       bool                  `yaml:"drain_upstream_on_abort"`           // When true, keep reading upstream after client disconnect to capture real usage chunk (default: false — estimate from delta text)
+	ForceStreamForTTFT         bool                  `yaml:"force_stream_for_ttft"`             // Force `"stream": true` upstream for non-streaming chat-shaped requests and reassemble the response back into non-stream JSON so every request gets a measurable TTFT (default: false)
 	TiktokenEnabled            bool                  `yaml:"tiktoken_enabled"`                  // Enable local tiktoken-based prompt/completion token estimation as a fallback when a provider omits usage (default: true; disable if all configured providers always report usage)
 	StrictAllTeamModelsACL     bool                  `yaml:"strict_all_team_models_acl"`        // Enforce key/team/user model ACLs (default: false)
 	CredentialNameAsTeamID     bool                  `yaml:"credential_name_as_team_id"`        // Use provider credential name as team_id when auth has no team_id (default: false)
@@ -729,6 +730,7 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		ModelPricesSyncInterval    string                `yaml:"model_prices_sync_interval"`
 		ShutdownDelay              string                `yaml:"shutdown_delay"`
 		DrainUpstreamOnAbort       string                `yaml:"drain_upstream_on_abort"`
+		ForceStreamForTTFT         string                `yaml:"force_stream_for_ttft"`
 		TiktokenEnabled            string                `yaml:"tiktoken_enabled"`
 		StrictAllTeamModelsACL     string                `yaml:"strict_all_team_models_acl"`
 		CredentialNameAsTeamID     string                `yaml:"credential_name_as_team_id"`
@@ -813,6 +815,9 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if s.DrainUpstreamOnAbort, err = parseField(temp.DrainUpstreamOnAbort, false, strconv.ParseBool, "drain_upstream_on_abort"); err != nil {
+		return err
+	}
+	if s.ForceStreamForTTFT, err = parseField(temp.ForceStreamForTTFT, false, strconv.ParseBool, "force_stream_for_ttft"); err != nil {
 		return err
 	}
 	if s.TiktokenEnabled, err = parseField(temp.TiktokenEnabled, true, strconv.ParseBool, "tiktoken_enabled"); err != nil {
