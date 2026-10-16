@@ -229,7 +229,7 @@ func convertVertexFunctionCallToStreamingOpenAI(genaiCall *genai.FunctionCall, t
 
 	toolCall := openai.OpenAIStreamingToolCall{
 		Index: index,
-		ID:    converterutil.GenerateID(),
+		ID:    converterutil.EncodeToolCallIDWithSignature(converterutil.GenerateID(), thoughtSignature),
 		Type:  "function",
 		Function: &openai.OpenAIStreamingToolFunction{
 			Name:      genaiCall.Name,

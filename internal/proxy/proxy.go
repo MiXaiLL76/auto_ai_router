@@ -753,6 +753,7 @@ func (p *Proxy) executeProxyRequest(
 	// knows to include the X-Credential-Name response header.
 	proxyReq.Header.Set(HeaderAIRProxyClient, "1")
 	proxyReq.Header.Set(HeaderLegacyAIRProxyClient, "1")
+	setForwardedSessionHeader(proxyReq.Header, cred, logCtx)
 	if carriesCredentialDenylist(cred) {
 		if err := setCredentialDenylistHeader(proxyReq.Header, effectiveCredentialDenylist(r.Context())); err != nil {
 			return nil, err

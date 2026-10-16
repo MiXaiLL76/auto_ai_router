@@ -159,7 +159,8 @@ func convertGoogleSearchRetrieval(toolMap map[string]interface{}) *genai.GoogleS
 }
 
 // convertToolCallsToGenaiParts converts OpenAI tool_calls to genai.Part with FunctionCall.
-// Restores thoughtSignature from provider_specific_fields for Gemini 3 multi-turn conversations.
+// Restores thoughtSignature from provider_specific_fields, or from the tool call id
+// suffix, for Gemini 3 multi-turn conversations.
 func convertToolCallsToGenaiParts(toolCalls []interface{}) []*genai.Part {
 	if len(toolCalls) == 0 {
 		return nil
@@ -223,11 +224,20 @@ func convertToolCallsToGenaiParts(toolCalls []interface{}) []*genai.Part {
 			}
 		}
 
+		// Clients (like the OpenAI Agents SDK or LangChain) often drop provider_specific_fields
+		// but keep the id, which carries the signature since the response side embeds it.
+		if !foundThoughtSignature {
+			id, _ := toolCallMap["id"].(string)
+			if _, sig := converterutil.SplitToolCallIDSignature(id); sig != nil {
+				part.ThoughtSignature = sig
+				foundThoughtSignature = true
+			}
+		}
+
 		// Fallback: If no thoughtSignature provided, add dummy value.
-		// Per litellm and Google docs, clients (like LangChain) may not preserve provider_specific_fields.
 		// The dummy validator allows Gemini 3 to accept the request without validation errors.
 		if !foundThoughtSignature {
-			part.ThoughtSignature = []byte("skip_thought_signature_validator")
+			part.ThoughtSignature = converterutil.SkipThoughtSignatureValidator
 		}
 
 		parts = append(parts, part)

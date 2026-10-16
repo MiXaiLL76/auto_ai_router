@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -337,4 +338,40 @@ func TestTransformVertexStreamToResponses_AccumulatesDistinctSearchesAcrossChunk
 		return
 	}
 	t.Fatal("missing response.completed event")
+}
+
+func TestTransformVertexStreamToResponses_FunctionCallEmbedsThoughtSignature(t *testing.T) {
+	signature := []byte("stream-signature")
+	stream := buildVertexSSEStream([]map[string]interface{}{
+		{
+			"candidates": []map[string]interface{}{{
+				"content": map[string]interface{}{
+					"role": "model",
+					"parts": []map[string]interface{}{{
+						"functionCall":     map[string]interface{}{"name": "get_weather", "args": map[string]interface{}{}},
+						"thoughtSignature": base64.StdEncoding.EncodeToString(signature),
+					}},
+				},
+				"finishReason": "STOP",
+			}},
+		},
+	})
+
+	var out bytes.Buffer
+	require.NoError(t, TransformVertexStreamToResponses(strings.NewReader(stream), &out, "gemini-test", "", nil, nil))
+
+	var callIDs []string
+	for _, e := range parseVertexSSEEvents(out.String()) {
+		if e["type"] != "response.output_item.added" && e["type"] != "response.output_item.done" {
+			continue
+		}
+		if item, _ := e["item"].(map[string]interface{}); item["type"] == "function_call" {
+			callIDs = append(callIDs, item["call_id"].(string))
+		}
+	}
+	require.NotEmpty(t, callIDs)
+	for _, id := range callIDs {
+		_, decoded := converterutil.SplitToolCallIDSignature(id)
+		assert.Equal(t, signature, decoded)
+	}
 }

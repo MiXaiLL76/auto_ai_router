@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/genai"
@@ -325,4 +326,27 @@ func TestVertexToResponsesResponse_RequiredSchemaFields(t *testing.T) {
 	assert.Equal(t, float64(1), parsed["top_p"])
 	_, hasText := parsed["text"]
 	assert.True(t, hasText)
+}
+
+// TestCandidatesToOutputItems_FunctionCallEmbedsThoughtSignature: Responses has no
+// provider_specific_fields, so the signature must travel in call_id (#266).
+func TestCandidatesToOutputItems_FunctionCallEmbedsThoughtSignature(t *testing.T) {
+	signature := []byte("real-signature")
+	vertexResp := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{{
+			Content: &genai.Content{
+				Role: "model",
+				Parts: []*genai.Part{{
+					FunctionCall:     &genai.FunctionCall{ID: "call_1", Name: "get_weather"},
+					ThoughtSignature: signature,
+				}},
+			},
+		}},
+	}
+
+	output := candidatesToOutputItems(vertexResp)
+	require.Len(t, output, 1)
+	baseID, decoded := converterutil.SplitToolCallIDSignature(output[0].CallID)
+	assert.Equal(t, "call_1", baseID)
+	assert.Equal(t, signature, decoded)
 }

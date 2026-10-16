@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
 	"github.com/mixaill76/auto_ai_router/internal/converter/vertex"
 	"google.golang.org/genai"
@@ -120,6 +121,9 @@ func candidatesToOutputItems(vertexResp *genai.GenerateContentResponse) []respon
 				if callID == "" {
 					callID = responses.GenerateItemID("call_")
 				}
+				// Embed the thoughtSignature: Responses has no provider_specific_fields,
+				// and call_id is what clients replay in the follow-up function_call.
+				callID = converterutil.EncodeToolCallIDWithSignature(callID, part.ThoughtSignature)
 				output = append(output, responses.OutputItem{
 					Type:      "function_call",
 					ID:        responses.GenerateItemID("fc_"),
