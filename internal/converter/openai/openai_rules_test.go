@@ -829,6 +829,23 @@ func TestConvertWebSearchTools_NonOpenAIModelPreservesWebSearchWithFunctions(t *
 	assert.Equal(t, "required", result["tool_choice"])
 }
 
+// TestConvertWebSearchTools_GoogleSearchDroppedForOpenAICompatibleUpstreams pins
+// that google_search, a Gemini-only tool, never reaches an OpenAI-compatible
+// upstream (a Gemini model behind a proxy-like credential is forwarded before this
+// conversion runs), while search_types on a web_search tool is kept as sent.
+func TestConvertWebSearchTools_GoogleSearchDroppedForOpenAICompatibleUpstreams(t *testing.T) {
+	for _, model := range []string{"gpt-5.4", "deepseek-chat", "gpt-oss-120b", "Qwen/Qwen3-32B"} {
+		body := `{"model":"` + model + `","tools":[{"type":"google_search"},{"type":"function","function":{"name":"f"}}]}`
+		result := bodyToMap(t, ConvertWebSearchTools([]byte(body)))
+		tools := result["tools"].([]any)
+		require.Len(t, tools, 1, model)
+		assert.Equal(t, "function", tools[0].(map[string]any)["type"], model)
+	}
+
+	body := `{"model":"gemini-nano-banana-2.1","tools":[{"type":"web_search","search_types":["image_search"]}],"tool_choice":{"type":"web_search"}}`
+	assert.Equal(t, body, string(ConvertWebSearchTools([]byte(body))))
+}
+
 // TestConvertWebSearchTools_NoWebSearch verifies that bodies with only function
 // tools are returned unchanged.
 func TestConvertWebSearchTools_NoWebSearch(t *testing.T) {

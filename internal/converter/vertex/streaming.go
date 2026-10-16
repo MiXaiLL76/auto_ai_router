@@ -31,6 +31,11 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 	isFirstChunk := true
 	doneWritten := false // track if [DONE] was sent
 	webSearchQueries := make(map[string]struct{})
+	var toolUse ToolUseSources
+	finished := false // a candidate has reported its finish reason
+	// Candidates (by index) that have streamed a function call. Gemini may send the
+	// call and its finish reason in different chunks, and that finish reason is STOP.
+	calledTools := make(map[int32]bool)
 
 	vertexLineCount := 0
 	vertexChunkCount := 0
@@ -64,6 +69,12 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 		}
 		AddWebSearchQueries(webSearchQueries, vertexChunk.Candidates)
 		webSearchRequests := len(webSearchQueries)
+		toolUse.Add(vertexChunk.Candidates, vertexChunk.ModelVersion)
+		for _, candidate := range vertexChunk.Candidates {
+			if HasFinishReason(candidate) {
+				finished = true
+			}
+		}
 
 		// Skip chunks with no candidates
 		if len(vertexChunk.Candidates) == 0 {
@@ -77,7 +88,7 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 					Created: timestamp,
 					Model:   model,
 					Choices: []openai.OpenAIStreamingChoice{},
-					Usage:   convertVertexUsageMetadata(vertexChunk.UsageMetadata),
+					Usage:   convertVertexUsageMetadata(streamUsageMetadata(vertexChunk.UsageMetadata, toolUse, model, finished)),
 				}
 				setVertexWebSearchUsage(openAIChunk.Usage, webSearchRequests)
 				chunkJSON, err := json.Marshal(openAIChunk)
@@ -154,17 +165,20 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 			}
 			if len(toolCalls) > 0 {
 				choice.Delta.ToolCalls = toolCalls
+				calledTools[candidate.Index] = true
 			}
 			if len(images) > 0 {
 				choice.Delta.Images = images
 			}
 
 			// Handle finish reason
-			if candidate.FinishReason != genai.FinishReasonUnspecified {
+			// An absent finish reason is "", not FINISH_REASON_UNSPECIFIED.
+			if HasFinishReason(candidate) {
 				finishReason := mapFinishReason(string(candidate.FinishReason))
 				// Vertex returns "STOP" even with function calls (Gemini 3+).
-				// Override for OpenAI compatibility.
-				if len(toolCalls) > 0 && finishReason != "tool_calls" {
+				// Override for OpenAI compatibility, also when the calls came in
+				// earlier chunks than the finish reason.
+				if calledTools[candidate.Index] {
 					finishReason = "tool_calls"
 				}
 				choice.FinishReason = &finishReason
@@ -181,7 +195,7 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 			// 	"total_tokens", vertexChunk.UsageMetadata.TotalTokenCount,
 			// 	"cached_tokens", vertexChunk.UsageMetadata.CachedContentTokenCount,
 			// )
-			openAIChunk.Usage = convertVertexUsageMetadata(vertexChunk.UsageMetadata)
+			openAIChunk.Usage = convertVertexUsageMetadata(streamUsageMetadata(vertexChunk.UsageMetadata, toolUse, model, finished))
 			setVertexWebSearchUsage(openAIChunk.Usage, webSearchRequests)
 		}
 
@@ -207,6 +221,12 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 	}
 
 	return scanner.Err()
+}
+
+// HasFinishReason reports whether a candidate carries Gemini's finish reason; it
+// is absent on every stream chunk but the last.
+func HasFinishReason(candidate *genai.Candidate) bool {
+	return candidate != nil && candidate.FinishReason != "" && candidate.FinishReason != genai.FinishReasonUnspecified
 }
 
 func setVertexWebSearchUsage(usage *openai.OpenAIUsage, requests int) {

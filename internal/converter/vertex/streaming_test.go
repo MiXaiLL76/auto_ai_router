@@ -197,3 +197,42 @@ func TestConvertVertexFunctionCallToStreamingOpenAI(t *testing.T) {
 		assert.Equal(t, 5, result.Index)
 	})
 }
+
+// TestTransformVertexStreamToOpenAI_ToolCallsFinishInLaterChunk: Gemini 3 may
+// stream a function call in one chunk and its STOP in a later chunk that carries
+// no call (empty text, a thought signature). The choice must still finish with
+// "tool_calls", or an agent loop stops instead of running the tool.
+func TestTransformVertexStreamToOpenAI_ToolCallsFinishInLaterChunk(t *testing.T) {
+	finishReasons := func(stream string) []string {
+		var out bytes.Buffer
+		require.NoError(t, TransformVertexStreamToOpenAI(strings.NewReader(stream), "gemini-3-flash-preview", &out))
+		var reasons []string
+		for _, line := range strings.Split(out.String(), "\n") {
+			payload, ok := strings.CutPrefix(line, "data: ")
+			if !ok || payload == "[DONE]" {
+				continue
+			}
+			var chunk openai.OpenAIStreamingChunk
+			require.NoError(t, json.Unmarshal([]byte(payload), &chunk))
+			for _, choice := range chunk.Choices {
+				if choice.FinishReason != nil {
+					reasons = append(reasons, *choice.FinishReason)
+				}
+			}
+		}
+		return reasons
+	}
+	call := `data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"get_weather","args":{"city":"Paris"}}}]}}]}` + "\n\n"
+	stop := `data: {"candidates":[{"content":{"role":"model","parts":[{"text":"","thoughtSignature":"c2ln"}]},"finishReason":"STOP"}]}` + "\n\n"
+	text := `data: {"candidates":[{"content":{"role":"model","parts":[{"text":"Sunny"}]}}]}` + "\n\n"
+
+	assert.Equal(t, []string{"tool_calls"}, finishReasons(call+stop), "call and STOP in different chunks")
+	assert.Equal(t, []string{"stop"}, finishReasons(text+stop), "no call: STOP stays stop")
+
+	// Candidates are tracked apart: only the one that called a tool finishes with tool_calls.
+	twoCandidates := `data: {"candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"Sunny"}]}},` +
+		`{"index":1,"content":{"role":"model","parts":[{"functionCall":{"name":"get_weather","args":{}}}]}}]}` + "\n\n" +
+		`data: {"candidates":[{"index":0,"content":{"role":"model","parts":[{"text":""}]},"finishReason":"STOP"},` +
+		`{"index":1,"content":{"role":"model","parts":[{"text":""}]},"finishReason":"STOP"}]}` + "\n\n"
+	assert.Equal(t, []string{"stop", "tool_calls"}, finishReasons(twoCandidates))
+}

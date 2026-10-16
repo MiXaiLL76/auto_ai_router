@@ -59,6 +59,11 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, isImageEdit bool,
 
 	// Generation config
 	vertexReq.GenerationConfig = buildGenerationConfig(&req, model)
+	if vertexReq.GenerationConfig != nil {
+		if err := validateGeminiImageConfig(model, vertexReq.GenerationConfig.ImageConfig); err != nil {
+			return nil, err
+		}
+	}
 
 	// Messages → Contents + SystemInstruction
 	for _, msg := range req.Messages {
@@ -173,11 +178,17 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, isImageEdit bool,
 			Parts: []*genai.Part{{Text: "."}},
 		})
 	}
+	if err := ValidateInputImages(model, vertexReq.Contents); err != nil {
+		return nil, err
+	}
 
 	// Tools
 	var hasUserFunctions bool
 	if len(req.Tools) > 0 {
-		toolsResult := convertOpenAIToolsToVertex(req.Tools)
+		toolsResult, err := convertOpenAIToolsToVertex(req.Tools)
+		if err != nil {
+			return nil, err
+		}
 		if len(toolsResult.Tools) > 0 {
 			vertexReq.Tools = toolsResult.Tools
 		}
@@ -201,6 +212,47 @@ func partsHaveText(parts []*genai.Part) bool {
 		if p != nil && p.Text != "" {
 			return true
 		}
+	}
+	return false
+}
+
+// ValidateInputImages rejects a request with more images than the model accepts,
+// counting every image part of every turn: the upstream limit is per request.
+func ValidateInputImages(model string, contents []*genai.Content) error {
+	profile := lookupGeminiModelProfile(model)
+	if profile == nil || profile.maxInputImages <= 0 {
+		return nil
+	}
+	images := 0
+	for _, content := range contents {
+		if content == nil {
+			continue
+		}
+		for _, part := range content.Parts {
+			if isImagePart(part) {
+				images++
+			}
+		}
+	}
+	if images <= profile.maxInputImages {
+		return nil
+	}
+	return &converterutil.RequestValidationError{
+		Param: "image",
+		Code:  "too_many_images",
+		Message: fmt.Sprintf("Too many input images: %d were sent, this model accepts at most %d per request",
+			images, profile.maxInputImages),
+	}
+}
+
+func isImagePart(part *genai.Part) bool {
+	switch {
+	case part == nil:
+		return false
+	case part.InlineData != nil:
+		return IsImageMIME(part.InlineData.MIMEType)
+	case part.FileData != nil:
+		return IsImageMIME(part.FileData.MIMEType)
 	}
 	return false
 }

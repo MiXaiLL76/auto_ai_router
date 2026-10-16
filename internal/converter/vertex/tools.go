@@ -2,6 +2,8 @@ package vertex
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
 
 	converterutil "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"google.golang.org/genai"
@@ -58,20 +60,22 @@ type vertexToolsResult struct {
 }
 
 // convertOpenAIToolsToVertex converts OpenAI tools to genai.Tool slice.
-// Functions are grouped in one Tool; special tools each get their own Tool object.
+// Functions are grouped in one Tool; special tools each get their own Tool object,
+// except search tools, which merge into one GoogleSearch tool.
 // Gemini API does NOT allow combining built-in tools (GoogleSearch, CodeExecution, etc.)
 // with function declarations in the same request. When both are present, built-in tools
 // take priority and function declarations are dropped.
-func convertOpenAIToolsToVertex(openAITools []interface{}) vertexToolsResult {
+func convertOpenAIToolsToVertex(openAITools []interface{}) (vertexToolsResult, error) {
 	result := vertexToolsResult{}
 	if len(openAITools) == 0 {
-		return result
+		return result, nil
 	}
 
 	var builtinTools []*genai.Tool
 	var functionDecls []*genai.FunctionDeclaration
+	var search GoogleSearchTypes
 
-	for _, toolInterface := range openAITools {
+	for i, toolInterface := range openAITools {
 		toolMap, ok := toolInterface.(map[string]interface{})
 		if !ok {
 			continue
@@ -89,10 +93,14 @@ func convertOpenAIToolsToVertex(openAITools []interface{}) vertexToolsResult {
 			builtinTools = append(builtinTools, &genai.Tool{
 				ComputerUse: &genai.ComputerUse{},
 			})
-		case "web_search", "web_search_preview":
-			builtinTools = append(builtinTools, &genai.Tool{
-				GoogleSearch: &genai.GoogleSearch{},
-			})
+		case "web_search", "web_search_preview", "google_search":
+			tool, err := search.Add(toolMap["search_types"], fmt.Sprintf("tools[%d].search_types", i))
+			if err != nil {
+				return vertexToolsResult{}, err
+			}
+			if tool != nil {
+				builtinTools = append(builtinTools, tool)
+			}
 		case "google_search_retrieval":
 			retrieval := convertGoogleSearchRetrieval(toolMap)
 			builtinTools = append(builtinTools, &genai.Tool{
@@ -124,7 +132,100 @@ func convertOpenAIToolsToVertex(openAITools []interface{}) vertexToolsResult {
 		result.Tools = []*genai.Tool{{FunctionDeclarations: functionDecls}}
 	}
 
-	return result
+	return result, nil
+}
+
+// GoogleSearchTypes merges a request's search tools into one GoogleSearch tool
+// enabling the union of their search types. Exported for vertex/responses.
+type GoogleSearchTypes struct {
+	tool       *genai.Tool
+	web, image bool
+}
+
+// Add reads one tool's search_types: ["web_search", "image_search"] or Gemini's
+// {"webSearch": {}, "imageSearch": {}}; absent means web search. The first call
+// returns the tool to add to the request, later ones widen it and return nil.
+// Web-only search is sent without searchTypes, as for models that predate them.
+func (s *GoogleSearchTypes) Add(searchTypes interface{}, param string) (*genai.Tool, error) {
+	web, image, err := parseGoogleSearchTypes(searchTypes, param)
+	if err != nil {
+		return nil, err
+	}
+	s.web, s.image = s.web || web, s.image || image
+	var added *genai.Tool
+	if s.tool == nil {
+		s.tool = &genai.Tool{GoogleSearch: &genai.GoogleSearch{}}
+		added = s.tool
+	}
+	s.tool.GoogleSearch.SearchTypes = nil
+	if s.image {
+		s.tool.GoogleSearch.SearchTypes = &genai.SearchTypes{ImageSearch: &genai.ImageSearch{}}
+		if s.web {
+			s.tool.GoogleSearch.SearchTypes.WebSearch = &genai.WebSearch{}
+		}
+	}
+	return added, nil
+}
+
+// parseGoogleSearchTypes reads search_types; an unknown type is an error, not a
+// silent web search.
+func parseGoogleSearchTypes(raw interface{}, param string) (web, image bool, err error) {
+	enable := func(name string) error {
+		switch strings.ToLower(name) {
+		case "web_search", "websearch":
+			web = true
+		case "image_search", "imagesearch":
+			image = true
+		default:
+			return unsupportedSearchTypeError(param, name)
+		}
+		return nil
+	}
+	switch value := raw.(type) {
+	case nil:
+	case []interface{}:
+		for _, item := range value {
+			name, ok := item.(string)
+			if !ok {
+				return false, false, converterutil.NewInvalidTypeError(param)
+			}
+			if err := enable(name); err != nil {
+				return false, false, err
+			}
+		}
+	case map[string]interface{}:
+		for name, config := range value {
+			switch config := config.(type) {
+			case nil:
+				// {"imageSearch": null}: listed, not enabled.
+				continue
+			case bool:
+				if !config {
+					continue
+				}
+			case map[string]interface{}:
+			default:
+				return false, false, converterutil.NewInvalidTypeError(param + "." + name)
+			}
+			if err := enable(name); err != nil {
+				return false, false, err
+			}
+		}
+	default:
+		return false, false, converterutil.NewInvalidTypeError(param)
+	}
+	if !web && !image {
+		web = true
+	}
+	return web, image, nil
+}
+
+func unsupportedSearchTypeError(param, value string) error {
+	return &converterutil.RequestValidationError{
+		Param:   param,
+		Code:    "invalid_value",
+		Message: fmt.Sprintf("Unsupported search type %q; supported values: web_search, image_search", value),
+	}
 }
 
 // convertToFunctionDecl converts OpenAI function definition to genai.FunctionDeclaration

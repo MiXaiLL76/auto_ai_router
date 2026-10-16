@@ -1,10 +1,13 @@
 package vertex
 
 import (
+	"fmt"
 	"math"
+	"slices"
 	"strings"
 
 	converterutil "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
+	"google.golang.org/genai"
 )
 
 type geminiImageRatio struct {
@@ -105,6 +108,9 @@ var (
 )
 
 func geminiImageProfileForModel(model string) geminiImageProfile {
+	if profile := lookupGeminiModelProfile(model); profile != nil && profile.imageGeneration {
+		return profile.image
+	}
 	lower := strings.ToLower(model)
 	switch {
 	case strings.Contains(lower, "gemini-3.1-flash-lite-image"):
@@ -223,6 +229,67 @@ func nearestGeminiImageResolution(
 		}
 	}
 	return nearest
+}
+
+// validateGeminiImageConfig upper-cases imageSize ("2k" → "2K") and, for a profiled
+// model, rejects an aspectRatio / imageSize outside its grid before Google does.
+func validateGeminiImageConfig(model string, imageConfig *genai.ImageConfig) error {
+	if imageConfig == nil {
+		return nil
+	}
+	imageConfig.AspectRatio = strings.TrimSpace(imageConfig.AspectRatio)
+	imageConfig.ImageSize = strings.ToUpper(strings.TrimSpace(imageConfig.ImageSize))
+	profile := lookupGeminiModelProfile(model)
+	if profile == nil || !profile.imageGeneration {
+		return nil
+	}
+	if ratios := profile.image.ratioValues(); imageConfig.AspectRatio != "" && !slices.Contains(ratios, imageConfig.AspectRatio) {
+		return unsupportedImageConfigError("aspect_ratio", imageConfig.AspectRatio, ratios)
+	}
+	if sizes := profile.image.resolutionValues(); imageConfig.ImageSize != "" && !slices.Contains(sizes, imageConfig.ImageSize) {
+		return unsupportedImageConfigError("image_size", imageConfig.ImageSize, sizes)
+	}
+	return nil
+}
+
+func (p geminiImageProfile) ratioValues() []string {
+	values := make([]string, 0, len(p.ratios))
+	for _, ratio := range p.ratios {
+		values = append(values, ratio.value)
+	}
+	return values
+}
+
+func (p geminiImageProfile) resolutionValues() []string {
+	values := make([]string, 0, len(p.resolutions))
+	for _, resolution := range p.resolutions {
+		if resolution.value != "" {
+			values = append(values, resolution.value)
+		}
+	}
+	return values
+}
+
+func unsupportedImageConfigError(param, value string, supported []string) error {
+	return imageValidationError(param,
+		fmt.Sprintf("Unsupported %s %q for this model; supported values: %s", param, value, strings.Join(supported, ", ")),
+		"invalid_value")
+}
+
+// ImageConfigForSize maps an OpenAI image size ("1024x1536", "16:9") to the model's
+// Gemini imageConfig as the images endpoints do, checked like an explicit one; nil
+// for an empty or "auto" size.
+// Exported for use by sub-packages (e.g. vertex/responses).
+func ImageConfigForSize(model, size string) (*genai.ImageConfig, error) {
+	config, err := mapGeminiImageSize(model, size)
+	if err != nil || config == nil {
+		return nil, err
+	}
+	imageConfig := &genai.ImageConfig{AspectRatio: config.aspectRatio, ImageSize: config.imageSize}
+	if err := validateGeminiImageConfig(model, imageConfig); err != nil {
+		return nil, err
+	}
+	return imageConfig, nil
 }
 
 func applyGeminiImageSize(genConfig map[string]interface{}, model, size string) error {

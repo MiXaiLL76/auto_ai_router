@@ -182,6 +182,8 @@ type Tool struct {
 	// web_search_preview
 	UserLocation      interface{} `json:"user_location,omitempty"`
 	SearchContextSize string      `json:"search_context_size,omitempty"`
+	// Gemini-only search types (see vertex.GoogleSearchTypes).
+	SearchTypes interface{} `json:"search_types,omitempty"`
 
 	// Anthropic-specific web_search restriction fields, carried through as-is
 	// for a Responses-shaped request that targets an Anthropic backend (see
@@ -205,6 +207,10 @@ type Tool struct {
 
 	// code_interpreter
 	Container interface{} `json:"container,omitempty"`
+
+	// image_generation: "1024x1536", "auto", ... Untyped, so that a value of another
+	// type fails no request; only the Gemini route reads it (a string).
+	Size interface{} `json:"size,omitempty"`
 
 	// mcp
 	ServerLabel     string      `json:"server_label,omitempty"`

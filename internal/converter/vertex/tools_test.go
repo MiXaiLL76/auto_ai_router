@@ -217,7 +217,8 @@ func TestConvertOpenAIToolsToVertex_FunctionGrouping(t *testing.T) {
 		},
 	}
 
-	result := convertOpenAIToolsToVertex(openAITools)
+	result, err := convertOpenAIToolsToVertex(openAITools)
+	require.NoError(t, err)
 
 	assert.True(t, result.HasFunctionDecls, "should have function declarations")
 	assert.False(t, result.HasBuiltinTools, "should not have builtin tools")
@@ -244,7 +245,8 @@ func TestConvertOpenAIToolsToVertex_BuiltinToolsOnly(t *testing.T) {
 		map[string]interface{}{"type": "web_search"},
 	}
 
-	result := convertOpenAIToolsToVertex(openAITools)
+	result, err := convertOpenAIToolsToVertex(openAITools)
+	require.NoError(t, err)
 
 	assert.False(t, result.HasFunctionDecls, "should not have function declarations")
 	assert.True(t, result.HasBuiltinTools, "should have builtin tools")
@@ -257,7 +259,8 @@ func TestConvertOpenAIToolsToVertex_URLContext(t *testing.T) {
 		map[string]interface{}{"type": "url_context"},
 	}
 
-	result := convertOpenAIToolsToVertex(openAITools)
+	result, err := convertOpenAIToolsToVertex(openAITools)
+	require.NoError(t, err)
 
 	assert.False(t, result.HasFunctionDecls, "should not have function declarations")
 	assert.True(t, result.HasBuiltinTools, "url_context is a builtin tool")
@@ -283,7 +286,8 @@ func TestConvertOpenAIToolsToVertex_MixedToolsDropsFunctions(t *testing.T) {
 		},
 	}
 
-	result := convertOpenAIToolsToVertex(openAITools)
+	result, err := convertOpenAIToolsToVertex(openAITools)
+	require.NoError(t, err)
 
 	assert.True(t, result.HasFunctionDecls, "should detect function declarations")
 	assert.True(t, result.HasBuiltinTools, "should detect builtin tools")
