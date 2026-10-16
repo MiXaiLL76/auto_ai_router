@@ -117,6 +117,10 @@ type OpenAIResponseMessage struct {
 	Refusal          string           `json:"refusal,omitempty"`
 	ReasoningContent string           `json:"reasoning_content,omitempty"`
 	Images           []ImageData      `json:"images,omitempty"` // custom extension for Gemini image responses
+	// ThinkingBlocks carries Anthropic thinking/redacted_thinking blocks with their
+	// signature/data and list index, for the client to echo back as
+	// OpenAIMessage.ThinkingBlocks.
+	ThinkingBlocks interface{} `json:"thinking_blocks,omitempty"`
 }
 
 type OpenAIToolCall struct {
@@ -241,6 +245,7 @@ type OpenAIStreamingDelta struct {
 	Refusal          string                    `json:"refusal,omitempty"`
 	ReasoningContent string                    `json:"reasoning_content,omitempty"`
 	Images           []ImageData               `json:"images,omitempty"`
+	ThinkingBlocks   interface{}               `json:"thinking_blocks,omitempty"` // see OpenAIResponseMessage.ThinkingBlocks
 }
 
 type OpenAIStreamingToolCall struct {

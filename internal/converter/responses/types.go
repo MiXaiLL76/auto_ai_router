@@ -364,6 +364,20 @@ type OutputItem struct {
 	Input interface{} `json:"input,omitempty"`
 }
 
+// MarshalJSON keeps "summary":[] on a reasoning item with no summary (one carrying
+// only encrypted_content): the schema requires the list, and strict clients such as
+// Codex drop a reasoning item without it.
+func (o OutputItem) MarshalJSON() ([]byte, error) {
+	type plain OutputItem
+	if o.Type != "reasoning" || len(o.Summary) > 0 {
+		return json.Marshal(plain(o))
+	}
+	return json.Marshal(struct {
+		plain
+		Summary []OutputContent `json:"summary"`
+	}{plain(o), []OutputContent{}})
+}
+
 // ===== Response Types =====
 
 // Response represents an OpenAI Responses API response object.

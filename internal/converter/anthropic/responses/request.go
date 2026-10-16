@@ -75,8 +75,8 @@ func buildAnthropicRequest(req *responses.Request, model string) (*anthropic.Ant
 		ar.System = inst
 	}
 
-	// Reasoning → extended thinking
-	if req.Reasoning != nil && req.Reasoning.Effort != "" && req.Reasoning.Effort != "none" {
+	// Reasoning → extended thinking ("none" maps to between_tools on Sonnet 5.5, to nothing elsewhere)
+	if req.Reasoning != nil && req.Reasoning.Effort != "" {
 		tc, oc := anthropic.MapThinkingConfigFromEffort(req.Reasoning.Effort, ar.Model)
 		if tc != nil {
 			ar.Thinking = tc
@@ -84,7 +84,7 @@ func buildAnthropicRequest(req *responses.Request, model string) (*anthropic.Ant
 			ar.MaxTokens = anthropic.EnsureMaxTokensForThinking(ar.MaxTokens, tc)
 			if oc != nil {
 				ar.AnthropicBeta = appendUnique(ar.AnthropicBeta, "effort-2025-11-24")
-			} else {
+			} else if tc.Type == "enabled" {
 				ar.AnthropicBeta = appendUnique(ar.AnthropicBeta, "interleaved-thinking-2025-05-14")
 			}
 		}
@@ -272,17 +272,10 @@ func inputToAnthropicMessages(input interface{}) ([]anthropic.AnthropicMessage, 
 		case "reasoning":
 			// Include reasoning as a thinking block in an assistant message.
 			flushPendingToolUse()
-			thinkingText := responses.ReasoningItemText(itemMap)
-			encContent, _ := itemMap["encrypted_content"].(string)
-			if thinkingText != "" || encContent != "" {
-				// The signature (encrypted_content, see anthropicContentToOutputItems) is
-				// verified against the thinking text it was issued for, so the
-				// text travels with it: anthropicContentToOutputItems put the full
-				// thinking into the summary.
-				block := anthropic.ContentBlock{Type: "thinking", Thinking: thinkingText, Signature: encContent}
+			if block := reasoningItemToThinking(itemMap); block != nil {
 				messages = append(messages, anthropic.AnthropicMessage{
 					Role:    "assistant",
-					Content: []anthropic.ContentBlock{block},
+					Content: []anthropic.ContentBlock{*block},
 				})
 			}
 

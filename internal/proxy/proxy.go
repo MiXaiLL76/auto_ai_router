@@ -1300,7 +1300,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 					Header:     proxyResp.Headers,
 					Body:       proxyResp.StreamBody,
 				}
-				if err := p.handleMessagesAPIStreaming(w, fakeResp, cred, realModelID, logCtx, prepared.messagesMetadata); err != nil {
+				if err := p.handleMessagesAPIStreaming(w, fakeResp, cred, realModelID, logCtx, prepared.messagesMetadata, prepared.passthroughMessages); err != nil {
 					p.logStreamHandlerError(r.Context(), "Failed to handle proxy Messages API streaming", err,
 						"credential", cred.Name, "model", modelID, "request_id", logCtx.RequestID)
 				} else {
@@ -2358,7 +2358,12 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Handle Responses API response body.
-		if prepared.convertedMessages && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		if prepared.passthroughMessages && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			// The provider answered in the Messages API format already: return its body
+			// as is, so thinking signatures, block order, server tool blocks and
+			// input_transformations survive. Billing keeps reading the Chat form above.
+			finalResponseBody = rewriteResponseModelAlias([]byte(decodedBody), realModelID, clientVisibleResponseModel(logCtx, modelID))
+		} else if prepared.convertedMessages && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			messagesBody, convErr := anthropicconv.ChatToMessages(finalResponseBody, prepared.messagesMetadata,
 				tokenUsageOptions.CacheWriteTTLHeader5mTokens, tokenUsageOptions.CacheWriteTTLHeader1hTokens)
 			if convErr != nil {
@@ -2678,7 +2683,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		streamCompleted := false
 		if prepared.convertedMessages {
 			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-				err := p.handleMessagesAPIStreaming(w, resp, cred, modelID, logCtx, prepared.messagesMetadata)
+				err := p.handleMessagesAPIStreaming(w, resp, cred, modelID, logCtx, prepared.messagesMetadata, prepared.passthroughMessages)
 				if err != nil {
 					p.logStreamHandlerError(r.Context(), "Failed to handle Messages API streaming", err,
 						"credential", cred.Name, "model", modelID, "request_id", logCtx.RequestID)

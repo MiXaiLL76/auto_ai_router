@@ -426,6 +426,15 @@ func (p *Proxy) buildCredentialRequest(
 			realModelID = credRealName
 		}
 	}
+	requestAPI := anthropicconv.ChatAPI
+	if basePath == "/v1/messages" {
+		requestAPI = anthropicconv.MessagesAPI
+	} else if isResponsesAPI {
+		requestAPI = anthropicconv.ResponsesAPI
+	}
+	if err := anthropicconv.ValidateToolChoice(body, realModelID, requestAPI); err != nil {
+		return credentialPreparedRequest{}, err
+	}
 
 	effectiveType := cred.EffectiveProviderType()
 	if p.stickyAutoCacheCtrl &&
@@ -455,10 +464,10 @@ func (p *Proxy) buildCredentialRequest(
 			// trip and forward body (already carrying realModelID) as-is, aside from
 			// the thinking/anthropic_beta normalization real Anthropic API requests
 			// still need (see NormalizeMessagesForPassthrough).
-			// The response is still converted back through ChatToMessages downstream
-			// (convertedMessages stays true) because ResponseTo/StreamTo for this
-			// provider always normalize the native Anthropic response to Chat shape
-			// first regardless of how the request was built.
+			// The response goes back to the client as the provider sent it (model
+			// renamed): proxy.go and handleMessagesAPIStreaming skip ChatToMessages
+			// when passthroughMessages is set; non-stream billing still reads the
+			// Chat form ResponseTo builds.
 			passthroughBody, err := anthropicconv.NormalizeMessagesForPassthrough(body, realModelID, cred.Type == config.ProviderTypeAnthropic)
 			if err != nil {
 				return req, err

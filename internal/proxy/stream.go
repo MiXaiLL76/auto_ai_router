@@ -1810,8 +1810,17 @@ func (p *Proxy) handleMessagesAPIStreaming(
 	modelID string,
 	logCtx *RequestLogContext,
 	metadata anthropicconv.MessagesAdapterMetadata,
+	passthrough bool,
 ) error {
 	publicModel := clientVisibleResponseModel(logCtx, modelID)
+	if passthrough {
+		// Already a Messages API stream: relay it rather than round-trip it through
+		// Chat Completions, which loses thinking signatures and other blocks.
+		transformer := func(reader io.Reader, _ string, writer io.Writer) error {
+			return anthropicconv.PassthroughMessagesStream(reader, writer, publicModel)
+		}
+		return p.handleTransformedStreaming(w, resp, cred.Name, modelID, "messages", transformer, logCtx)
+	}
 	converterModelID := modelID
 	if logCtx != nil && logCtx.RealModelID != "" {
 		converterModelID = logCtx.RealModelID

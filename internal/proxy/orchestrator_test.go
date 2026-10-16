@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
@@ -1035,6 +1036,44 @@ func TestPrepareRequestForCredential_ResponsesRecomputesProviderMode(t *testing.
 	// primary attempt used.
 	require.Contains(t, string(anthropicReq.proxyBody), `"messages"`)
 	require.NotContains(t, string(anthropicReq.proxyBody), `"input"`)
+}
+
+// A forced tool_choice for a model that rejects it is answered by the router as a 400
+// on every dispatch path, in the request's own API shape: the upstream 400 would come
+// back masked and be retried on other credentials.
+func TestPrepareRequestForCredential_RejectsForcedToolChoice(t *testing.T) {
+	cred := config.CredentialConfig{Name: "anthropic", Type: config.ProviderTypeAnthropic, APIKey: "key", BaseURL: "http://anthropic.local", RPM: 100}
+	prx := NewTestProxyBuilder().WithCredentials(cred).Build()
+
+	tests := []struct {
+		name, path, model, body string
+		isResponsesAPI, wantErr bool
+	}{
+		{name: "chat required", path: "/v1/chat/completions", model: "claude-sonnet-5-5", wantErr: true,
+			body: `{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"f"}}],"tool_choice":"required"}`},
+		{name: "messages any", path: "/v1/messages", model: "claude-opus-5-5", wantErr: true,
+			body: `{"model":"m","max_tokens":100,"messages":[{"role":"user","content":"hi"}],"tools":[{"name":"f","input_schema":{"type":"object"}}],"tool_choice":{"type":"any"}}`},
+		// The Responses function form has no "function" object: read as Chat it would pass.
+		{name: "responses function", path: "/v1/responses", model: "claude-fable-5-1", isResponsesAPI: true, wantErr: true,
+			body: `{"model":"m","input":"hi","tools":[{"type":"function","name":"f","parameters":{"type":"object"}}],"tool_choice":{"type":"function","name":"f"}}`},
+		{name: "older model passes", path: "/v1/chat/completions", model: "claude-sonnet-4-5",
+			body: `{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"f"}}],"tool_choice":"required"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest("POST", tt.path, nil)
+			body := []byte(tt.body)
+			_, err := prx.prepareRequestForCredential(req, body, body, tt.model, tt.model, tt.path,
+				false, &cred, tt.isResponsesAPI, false, false)
+			if !tt.wantErr {
+				require.NoError(t, err)
+				return
+			}
+			var validationErr *converterutil.RequestValidationError
+			require.ErrorAs(t, err, &validationErr)
+			assert.Contains(t, err.Error(), "tool_choice")
+		})
+	}
 }
 
 func TestProxyRequest_ResponsesRetryRecomputesProviderMode(t *testing.T) {

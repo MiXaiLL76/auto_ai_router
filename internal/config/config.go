@@ -164,7 +164,8 @@ type ModelRPMConfig struct {
 	// nil (omitted in config) = provider default: true for ProviderTypeAnthropic, and
 	// for a plain ProviderTypeCometAPI credential (neither openai_proto nor
 	// google_proto set); false otherwise.
-	// Explicit true/false overrides the default.
+	// Explicit true/false overrides the default, except that Bedrock, Vertex AI and
+	// Gemini credentials never pass through.
 	PassthroughMessages *bool `yaml:"passthrough_messages,omitempty"`
 
 	// ReasoningEffortMap rewrites the client's reasoning effort (chat

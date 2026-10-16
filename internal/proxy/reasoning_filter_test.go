@@ -25,6 +25,7 @@ func TestRequestUsesReasoning(t *testing.T) {
 		{name: "anthropic thinking", body: `{"thinking":{"type":"enabled","budget_tokens":1024}}`, want: true, wantSource: "thinking", wantThinkingMode: thinkingModeEnabled},
 		{name: "adaptive thinking", body: `{"thinking":{"type":"adaptive"}}`, want: true, wantSource: "thinking", wantThinkingMode: thinkingModeAdaptive},
 		{name: "disabled thinking", body: `{"thinking":{"type":"disabled"}}`, wantThinkingMode: thinkingModeDisabled},
+		{name: "between_tools thinking", body: `{"thinking":{"type":"between_tools"}}`, wantThinkingMode: thinkingModeDisabled},
 		{name: "unknown thinking", body: `{"thinking":{"type":"automatic"}}`, want: true, wantSource: "thinking", wantThinkingMode: thinkingModeUnknown},
 		{name: "missing thinking type", body: `{"thinking":{"display":"summarized"}}`, want: true, wantSource: "thinking", wantThinkingMode: thinkingModeUnknown},
 		{name: "gemini budget", body: `{"thinking_budget":-1}`, want: true, wantSource: "thinking_budget", wantThinkingMode: thinkingModeUnspecified},

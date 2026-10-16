@@ -719,3 +719,121 @@ func TestNormalizeMessagesForPassthrough_NoThinkingLeavesRealAnthropicBodyUntouc
 	require.NoError(t, json.Unmarshal(out, &got))
 	assert.NotContains(t, got, "thinking")
 }
+
+// normalizePassthrough runs NormalizeMessagesForPassthrough on a one-message request with
+// the extra top-level fields given (each starting with a comma).
+func normalizePassthrough(t *testing.T, model string, realBackend bool, fields string) (map[string]interface{}, error) {
+	t.Helper()
+	body := `{"model":"m","max_tokens":100,"messages":[{"role":"user","content":"hi"}]` + fields + `}`
+	out, err := NormalizeMessagesForPassthrough([]byte(body), model, realBackend)
+	if err != nil {
+		return nil, err
+	}
+	var got map[string]interface{}
+	require.NoError(t, json.Unmarshal(out, &got))
+	return got, nil
+}
+
+// An effort the client set explicitly is kept, for adaptive thinking and for a legacy
+// budget upgraded to adaptive; none is injected over the model default.
+func TestNormalizeMessagesForPassthrough_ExplicitEffortKept(t *testing.T) {
+	for _, thinking := range []string{`{"type":"adaptive"}`, `{"type":"enabled","budget_tokens":2000}`} {
+		got, err := normalizePassthrough(t, "claude-opus-4-8", true, `,"thinking":`+thinking+`,"output_config":{"effort":"xhigh"}`)
+		require.NoError(t, err)
+		assert.Equal(t, map[string]interface{}{"effort": "xhigh"}, got["output_config"], thinking)
+	}
+	got, err := normalizePassthrough(t, "claude-opus-4-8", true, `,"thinking":{"type":"adaptive"}`)
+	require.NoError(t, err)
+	assert.NotContains(t, got, "output_config", "no effort injected over the model default")
+}
+
+func TestNormalizeMessagesForPassthrough_BlockBindingKeptWithBeta(t *testing.T) {
+	got, err := normalizePassthrough(t, "claude-sonnet-5-5", true,
+		`,"thinking":{"type":"adaptive","block_binding":{"prefix_mismatch_behavior":"drop_block"}},"output_config":{"effort":"medium"}`)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]interface{}{"prefix_mismatch_behavior": "drop_block"}, got["thinking"].(map[string]interface{})["block_binding"])
+	assert.Equal(t, []interface{}{thinkingBindingBeta}, got["anthropic_beta"])
+}
+
+// Thinking off the way each model takes it: Sonnet 5.5's "disabled" becomes
+// between_tools, another model's between_tools becomes its own way to turn thinking off,
+// and a model that can't run without thinking at that effort gets no thinking field (it
+// runs adaptive) rather than a 400.
+func TestNormalizeMessagesForPassthrough_ThinkingOffPerModel(t *testing.T) {
+	betweenTools := map[string]interface{}{"type": "between_tools"}
+	tests := []struct {
+		name, model string
+		realBackend bool
+		fields      string
+		want        interface{} // the thinking field; nil when absent
+	}{
+		{"sonnet 5.5 disabled", "claude-sonnet-5-5", true, `,"thinking":{"type":"disabled"},"output_config":{"effort":"high"}`, betweenTools},
+		{"sonnet 5.5 between_tools", "claude-sonnet-5-5", true, `,"thinking":{"type":"between_tools"}`, betweenTools},
+		{"sonnet 5 between_tools", "claude-sonnet-5", true, `,"thinking":{"type":"between_tools"}`, map[string]interface{}{"type": "disabled"}},
+		{"opus 5.5 between_tools", "claude-opus-5-5", true, `,"thinking":{"type":"between_tools"}`, nil},
+		{"opus 5 between_tools at max", "claude-opus-5", true, `,"thinking":{"type":"between_tools"},"output_config":{"effort":"max"}`, nil},
+		{"gateway default-off sonnet 5.5", "claude-sonnet-5-5", false, ``, betweenTools},
+		{"gateway default-off sonnet 5.5 at max", "claude-sonnet-5-5", false, `,"output_config":{"effort":"max"}`, nil},
+		{"gateway default-off opus 5.5", "claude-opus-5-5", false, ``, nil},
+		{"gateway default-off fable", "claude-fable-5-1", false, ``, nil},
+		{"gateway default-off haiku 5.5 at xhigh", "claude-haiku-5-5", false, `,"output_config":{"effort":"xhigh"}`, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := normalizePassthrough(t, tt.model, tt.realBackend, tt.fields)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got["thinking"])
+		})
+	}
+}
+
+// What the API rejects with Sonnet 5.5's between_tools is a router 400.
+func TestNormalizeMessagesForPassthrough_InvalidThinkingOffRejected(t *testing.T) {
+	for _, tt := range []struct{ fields, param string }{
+		{`,"thinking":{"type":"between_tools"},"output_config":{"effort":"xhigh"}`, "output_config.effort"},
+		{`,"thinking":{"type":"disabled"},"output_config":{"effort":"max"}`, "output_config.effort"},
+		{`,"thinking":{"type":"between_tools","display":"summarized"}`, "thinking"},
+		{`,"thinking":{"type":"between_tools","block_binding":{"prefix_mismatch_behavior":"error"}}`, "thinking"},
+	} {
+		_, err := normalizePassthrough(t, "claude-sonnet-5-5", true, tt.fields)
+		testhelpers.RequireValidationError(t, err, tt.param, "")
+	}
+}
+
+// The Messages API effort reaches Anthropic through the Chat adapter (Bedrock) next to a
+// thinking config that thinks, over a budget-derived effort, and with thinking omitted on
+// a model that thinks by default. It never travels as reasoning_effort beside disabled
+// thinking: an OpenAI-compatible provider would read that as a request to reason.
+func TestMessagesToChat_EffortThroughChatAdapter(t *testing.T) {
+	convert := func(t *testing.T, model, fields string) (chat, anthropic map[string]interface{}) {
+		t.Helper()
+		body := `{"model":"` + model + `","max_tokens":100,"messages":[{"role":"user","content":"hi"}]` + fields + `}`
+		chatBody, _, err := MessagesToChat([]byte(body))
+		require.NoError(t, err)
+		require.NoError(t, json.Unmarshal(chatBody, &chat))
+		out, err := OpenAIToAnthropic(chatBody, model, true)
+		require.NoError(t, err)
+		require.NoError(t, json.Unmarshal(out, &anthropic))
+		return chat, anthropic
+	}
+
+	_, got := convert(t, "claude-opus-4-7", `,"thinking":{"type":"adaptive"},"output_config":{"effort":"low"}`)
+	assert.Equal(t, map[string]interface{}{"effort": "low"}, got["output_config"])
+
+	_, got = convert(t, "claude-opus-4-7", `,"thinking":{"type":"enabled","budget_tokens":2000},"output_config":{"effort":"xhigh"}`)
+	assert.Equal(t, map[string]interface{}{"effort": "xhigh"}, got["output_config"], "the explicit effort wins over the budget")
+
+	_, got = convert(t, "claude-sonnet-5-5", `,"output_config":{"effort":"low"}`)
+	assert.Equal(t, map[string]interface{}{"type": "adaptive"}, got["thinking"], "omitting thinking runs adaptive on Sonnet 5.5")
+	assert.Equal(t, map[string]interface{}{"effort": "low"}, got["output_config"])
+
+	chat, got := convert(t, "claude-opus-4-7", `,"thinking":{"type":"disabled"},"output_config":{"effort":"high"}`)
+	assert.NotContains(t, chat, "reasoning_effort")
+	assert.NotContains(t, got, "thinking")
+
+	// Without thinking on a model where that means off, thinking stays off: the effort
+	// can't travel without turning it on.
+	chat, got = convert(t, "claude-opus-4-7", `,"output_config":{"effort":"low"}`)
+	assert.NotContains(t, chat, "reasoning_effort")
+	assert.NotContains(t, got, "thinking")
+}
