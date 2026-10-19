@@ -214,11 +214,11 @@ func extractSessionIDFromRawBody(reqBody map[string]goccyjson.RawMessage) string
 // and the session headers: binding to it pins every conversation of a client
 // to one credential instead of balancing each one.
 func extractClientIDFromRawBody(reqBody map[string]goccyjson.RawMessage) string {
-	if sid, ok := rawJSONString(reqBody["safety_identifier"]); ok && sid != "" {
-		return sid
+	if cid, ok := rawJSONString(reqBody["safety_identifier"]); ok && cid != "" {
+		return cid
 	}
-	if uid, ok := rawJSONString(reqBody["user"]); ok && uid != "" {
-		return uid
+	if cid, ok := rawJSONString(reqBody["user"]); ok && cid != "" {
+		return cid
 	}
 	return ""
 }
