@@ -208,16 +208,17 @@ func extractSessionIDFromRawBody(reqBody map[string]goccyjson.RawMessage) string
 	return ""
 }
 
-// extractClientIDFromRawBody returns the per-client identifier (user,
-// safety_identifier). It is the last-resort session key, after the body
-// session fields and the session headers: binding to it pins every
-// conversation of a client to one credential instead of balancing each one.
+// extractClientIDFromRawBody returns the per-client identifier
+// (safety_identifier, then the user field it replaces, the precedence OpenAI
+// applies). It is the last-resort session key, after the body session fields
+// and the session headers: binding to it pins every conversation of a client
+// to one credential instead of balancing each one.
 func extractClientIDFromRawBody(reqBody map[string]goccyjson.RawMessage) string {
-	if uid, ok := rawJSONString(reqBody["user"]); ok && uid != "" {
-		return uid
-	}
 	if sid, ok := rawJSONString(reqBody["safety_identifier"]); ok && sid != "" {
 		return sid
+	}
+	if uid, ok := rawJSONString(reqBody["user"]); ok && uid != "" {
+		return uid
 	}
 	return ""
 }

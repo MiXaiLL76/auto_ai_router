@@ -149,12 +149,13 @@ The proxy extracts a session ID from the request body in the following priority 
 | `session_id`                    | top-level field                   |
 | `prompt_cache_key`              | top-level field                   |
 | session headers                 | see [Header Fallback](#header-fallback) |
-| `user`                          | top-level field (OpenAI standard) |
 | `safety_identifier`             | top-level field                   |
+| `user`                          | top-level field (OpenAI standard) |
 
 `user` and `safety_identifier` identify a client, not a conversation, so they come last: binding
 to them pins every conversation of a client to one credential instead of balancing each one.
-Codex and other agents send the conversation id as `prompt_cache_key`, which wins over `user`.
+`prompt_cache_key` is OpenAI's cache routing key: requests that share it are meant to share a prompt
+cache, so they share a credential too. Codex sends the conversation id there.
 
 When the client has no conversation id, `user` still works as a session key:
 
