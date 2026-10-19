@@ -147,11 +147,16 @@ The proxy extracts a session ID from the request body in the following priority 
 | `extra_body.chat_id`            | nested in `extra_body`            |
 | `extra_body.session_id`         | nested in `extra_body`            |
 | `session_id`                    | top-level field                   |
+| `prompt_cache_key`              | top-level field                   |
+| session headers                 | see [Header Fallback](#header-fallback) |
 | `user`                          | top-level field (OpenAI standard) |
 | `safety_identifier`             | top-level field                   |
-| `prompt_cache_key`              | top-level field                   |
 
-The simplest approach — compatible with the standard OpenAI SDK — is to pass `user`:
+`user` and `safety_identifier` identify a client, not a conversation, so they come last: binding
+to them pins every conversation of a client to one credential instead of balancing each one.
+Codex and other agents send the conversation id as `prompt_cache_key`, which wins over `user`.
+
+When the client has no conversation id, `user` still works as a session key:
 
 ```python
 response = client.chat.completions.create(
@@ -165,8 +170,8 @@ For multipart requests the proxy reads `session_id` or `user` from the form fiel
 
 ### Header Fallback
 
-If none of the body fields above yield a session ID, the proxy falls back to scanning request
-headers whose name matches `^(x-.+-)?session[-_]id$` (case-insensitive), e.g. `Session-Id`,
+If none of the body session fields above (everything before `user`) yield a session ID, the proxy
+scans request headers whose name matches `^(x-.+-)?session[-_]id$` (case-insensitive), e.g. `Session-Id`,
 `Session_Id`, or `X-Codex-Session-Id`. This covers agents/SDKs that attach a session identifier
 to a header instead of the JSON body. When multiple matching headers are present, a bare
 `Session-Id` takes priority over any `X-...-Session-Id` variant.
