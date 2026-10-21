@@ -46,6 +46,22 @@ monitoring:
   log_errors: false
   errors_log_path: "logs/logs.jsonl"
 
+# Outcome events for the health worker (the shared, Redis-backed view of
+# which upstream accounts are alive/dead). When enabled, every upstream
+# outcome (including successes — the worker uses them to reset counters)
+# is published to the account-events Kafka topic; broker/SASL/TLS settings
+# are inherited from the kafka section above. The health worker consumes
+# these and applies the ban rules.
+account_events:
+  enabled: false
+  topic: "account-events"
+  # reader_interval: 2s   # как часто читать баны из Redis (свой, не redis.sync_interval)
+
+# NOTE: with account_events enabled the router reads the worker's bans
+# straight from Redis — the redis section must be enabled and point at the
+# same instance/key_prefix the health worker uses, otherwise bans are not
+# applied (fail-open).
+
 # OpenTelemetry export (logs + distributed traces), disabled by default
 otel:
   enabled: false

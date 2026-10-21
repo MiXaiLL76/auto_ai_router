@@ -39,6 +39,36 @@ docker pull ghcr.io/mixaill76/auto_ai_router:latest
 docker run -p 8080:8080 -v $(pwd)/config.yaml:/app/config.yaml ghcr.io/mixaill76/auto_ai_router:latest
 ```
 
+## Health-check integration (fork)
+
+Общие баны upstream-аккаунтов вынесены в отдельный воркер
+(healthcheck-service): решения принимаются по событиям из Kafka и живут в
+Redis, а этот роутер работает в режиме «публикуй и слушай»:
+
+- **`account_events`** — при включении каждый исход запроса (успех и ошибка,
+  с провайдером и `Retry-After`) публикуется в топик Kafka `account-events`;
+  решение о бане роутер локально не принимает (`recordBanSignal` пропускает
+  собственные fail2ban-счётчики).
+- **Ban reader** — раз в `account_events.reader_interval` роутер читает баны
+  воркера из Redis (`redis.health_key_prefix` — отдельный namespace, не общий
+  `key_prefix`) и материализует их в локальный fail2ban-кэш: модельные баны
+  снимают с ротации конкретные модели, wildcard-баны — весь аккаунт.
+  Снапшот атомарен: при сбое чтения баны не снимаются.
+- Если Redis недоступен — ридер не подключается, локальные баны остаются
+  активными (безопасная деградация); через `fail2ban.error_codes: []`
+  локальные решения можно отключить сознательно.
+
+```yaml
+account_events:
+  enabled: true
+  topic: "account-events"
+  reader_interval: 2s
+redis:
+  enabled: true
+  addresses: ["valkey.valkey.svc:6379"]
+  health_key_prefix: "hc:"   # ключи воркера — в отдельном namespace
+```
+
 ## Documentation
 
 Full documentation is available at **[mixaill76.github.io/auto_ai_router](https://mixaill76.github.io/auto_ai_router/)**.
