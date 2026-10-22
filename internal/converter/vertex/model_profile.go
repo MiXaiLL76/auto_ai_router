@@ -42,6 +42,18 @@ type geminiModelProfile struct {
 	// longDecode: generation past the single-request output cap stops with finish
 	// reason CONTINUATION and goes on in requests carrying its continuation token.
 	longDecode bool
+	// functionCallIDs: a function response must carry its call's ID, and the call
+	// its own thought signature. The chat route keeps the IDs Gemini gives calls and
+	// sends them back on calls and responses; the Responses route carries the
+	// signature in call_id (see vertex/responses/call_id.go). Without it the chat
+	// route makes up tool call IDs and sends none, and a call_id stays the bare ID
+	// (with a signature it runs past the 64 characters OpenAI takes).
+	functionCallIDs bool
+	// billsRepeatedSearches: every Google Search query the model runs is billed, a
+	// second run with the same text too; without it a response's queries count once
+	// per text. A longDecode model needs it: the queries of its merged requests
+	// (see MergeContinuationResponses) are then counted as the stream counts them.
+	billsRepeatedSearches bool
 }
 
 var geminiModelProfiles = []geminiModelProfile{
@@ -77,6 +89,8 @@ var geminiModelProfiles = []geminiModelProfile{
 		noModelPrefill:        true,
 		tokenLimit:            1048576,
 		longDecode:            true,
+		functionCallIDs:       true,
+		billsRepeatedSearches: true,
 	},
 }
 

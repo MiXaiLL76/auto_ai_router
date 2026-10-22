@@ -48,6 +48,7 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, isImageEdit bool,
 		Contents: make([]*genai.Content, 0),
 	}
 	var pendingToolParts []*genai.Part
+	callIDs := UsesFunctionCallIDs(model)
 
 	flushPendingToolParts := func() {
 		if len(pendingToolParts) == 0 {
@@ -119,11 +120,15 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, isImageEdit bool,
 			} else {
 				responseData = map[string]interface{}{"output": ""}
 			}
+			// The call's own ID: Gemini 4 matches a response to its call by ID and
+			// name, see convertToolCallsToGenaiParts.
+			var responseID string
+			if callIDs {
+				responseID = msg.ToolCallID
+			}
 			pendingToolParts = append(pendingToolParts, &genai.Part{
 				FunctionResponse: &genai.FunctionResponse{
-					// The call's own ID: Gemini 4 matches a response to its call by
-					// ID and name, see convertToolCallsToGenaiParts.
-					ID:       msg.ToolCallID,
+					ID:       responseID,
 					Name:     funcName,
 					Response: responseData,
 				},
@@ -157,7 +162,7 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, isImageEdit bool,
 				}
 			}
 			if len(msg.ToolCalls) > 0 && role == "model" {
-				parts = append(parts, convertToolCallsToGenaiParts(msg.ToolCalls)...)
+				parts = append(parts, convertToolCallsToGenaiParts(msg.ToolCalls, callIDs)...)
 			}
 			// Gemini requires at least one text Part in user-role content.
 			// Multimodal messages with only images/audio/files will fail with

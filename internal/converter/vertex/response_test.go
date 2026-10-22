@@ -615,9 +615,8 @@ func TestVertexToOpenAI_UsesGroundingQueriesForWebSearchUsage(t *testing.T) {
 	if response.Usage == nil || response.Usage.ServerToolUse == nil {
 		t.Fatalf("expected web search usage, got %#v", response.Usage)
 	}
-	// Google bills every query it ran, the repeated one too.
-	if response.Usage.ServerToolUse.WebSearchRequests != 3 {
-		t.Fatalf("expected three search queries, got %d", response.Usage.ServerToolUse.WebSearchRequests)
+	if response.Usage.ServerToolUse.WebSearchRequests != 2 {
+		t.Fatalf("expected two distinct search queries, got %d", response.Usage.ServerToolUse.WebSearchRequests)
 	}
 }
 

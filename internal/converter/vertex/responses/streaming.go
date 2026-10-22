@@ -283,7 +283,7 @@ func processFunctionCallPart(w io.Writer, acc *vertexStreamAccumulator, fc *gena
 			argsJSON = string(b)
 		}
 	}
-	callID := encodeCallID(fc, thoughtSignature)
+	callID := encodeCallID(fc, thoughtSignature, acc.toolUse.AnsweringModel(acc.model))
 	itemID := generateItemID("fc_")
 	outputIdx := currentOutputIndex(acc)
 
@@ -635,7 +635,7 @@ func buildVertexCompletedResponse(acc *vertexStreamAccumulator) *responses.Respo
 			usage.InputTokensDetails.InitialPromptTokens = int(acc.usage.InitialPromptTokens)
 		}
 	}
-	webSearchRequests := acc.webSearch.Count()
+	webSearchRequests := acc.webSearch.Count(acc.toolUse.AnsweringModel(acc.model))
 	if usage == nil && webSearchRequests > 0 {
 		usage = &responses.Usage{}
 	}

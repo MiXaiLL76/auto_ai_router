@@ -299,13 +299,13 @@ func TestOpenAIToVertex_ToolRoleMessage_MultipleToolCalls_ResolvesCorrectName(t 
 	// The results go in the order of the calls, whatever order the client sent:
 	// first "get_weather" (call_1), then "get_time" (call_2).
 	fr1 := toolResponses.Parts[0].FunctionResponse
-	if fr1 == nil || fr1.Name != "get_weather" || fr1.ID != "call_1" {
-		t.Fatalf("expected first tool result get_weather/call_1, got %+v", fr1)
+	if fr1 == nil || fr1.Name != "get_weather" {
+		t.Fatalf("expected first tool result Name = %q, got %+v", "get_weather", fr1)
 	}
 
 	fr2 := toolResponses.Parts[1].FunctionResponse
-	if fr2 == nil || fr2.Name != "get_time" || fr2.ID != "call_2" {
-		t.Fatalf("expected second tool result get_time/call_2, got %+v", fr2)
+	if fr2 == nil || fr2.Name != "get_time" {
+		t.Fatalf("expected second tool result Name = %q, got %+v", "get_time", fr2)
 	}
 }
 

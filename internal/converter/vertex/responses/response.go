@@ -38,11 +38,11 @@ func buildResponsesResponse(
 	createdAt int64,
 ) *responses.Response {
 	status, incompleteDetails := finishReasonToStatus(vertexResp)
-	output := candidatesToOutputItems(vertexResp)
 	var toolUse vertex.ToolUseSources
 	toolUse.Add(vertexResp.Candidates, vertexResp.ModelVersion)
+	output := candidatesToOutputItems(vertexResp, toolUse.AnsweringModel(model))
 	usage := usageMetadataToUsage(vertex.BillableUsageMetadata(vertexResp.UsageMetadata, toolUse, model))
-	webSearchRequests := vertex.CountWebSearchRequests(vertexResp.Candidates)
+	webSearchRequests := vertex.CountWebSearchRequests(vertexResp.Candidates, toolUse.AnsweringModel(model))
 	if usage == nil && webSearchRequests > 0 {
 		usage = &responses.Usage{}
 	}
@@ -67,8 +67,9 @@ func setWebSearchUsage(usage *responses.Usage, requests int) {
 	usage.ServerToolUse = &responses.ServerToolUseDetails{WebSearchRequests: requests}
 }
 
-// candidatesToOutputItems converts Vertex candidates to Responses API OutputItems.
-func candidatesToOutputItems(vertexResp *genai.GenerateContentResponse) []responses.OutputItem {
+// candidatesToOutputItems converts Vertex candidates to Responses API OutputItems;
+// model is the model that answered (see encodeCallID).
+func candidatesToOutputItems(vertexResp *genai.GenerateContentResponse, model string) []responses.OutputItem {
 	var output []responses.OutputItem
 
 	for _, candidate := range vertexResp.Candidates {
@@ -126,7 +127,7 @@ func candidatesToOutputItems(vertexResp *genai.GenerateContentResponse) []respon
 					Type:      "function_call",
 					ID:        responses.GenerateItemID("fc_"),
 					Status:    "completed",
-					CallID:    encodeCallID(part.FunctionCall, part.ThoughtSignature),
+					CallID:    encodeCallID(part.FunctionCall, part.ThoughtSignature, model),
 					Name:      part.FunctionCall.Name,
 					Arguments: argsJSON,
 				})

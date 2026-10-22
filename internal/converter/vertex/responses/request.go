@@ -44,7 +44,7 @@ func buildVertexRequest(req *responses.Request, model string) (*vertex.VertexReq
 	}
 
 	// Convert input items to contents.
-	contents, err := inputToContents(req.Input)
+	contents, err := inputToContents(req.Input, model)
 	if err != nil {
 		return nil, err
 	}
@@ -85,7 +85,8 @@ func buildVertexRequest(req *responses.Request, model string) (*vertex.VertexReq
 }
 
 // inputToContents converts the Responses API input (string | []InputItem) to genai.Content slice.
-func inputToContents(input interface{}) ([]*genai.Content, error) {
+// model decides whether the thought signature in a call_id is sent (see encodeCallID).
+func inputToContents(input interface{}, model string) ([]*genai.Content, error) {
 	if input == nil {
 		return nil, nil
 	}
@@ -177,7 +178,9 @@ func inputToContents(input interface{}) ([]*genai.Content, error) {
 			flushToolParts()
 			callID, _ := itemMap["call_id"].(string)
 			id, signature := decodeCallID(callID)
-			if signature == nil {
+			if signature == nil || !vertex.UsesFunctionCallIDs(model) {
+				// Only a model that wants its signatures back put one in a call_id;
+				// another model cannot validate it (the history switched models).
 				signature = skipThoughtSignature
 			}
 			name, _ := itemMap["name"].(string)

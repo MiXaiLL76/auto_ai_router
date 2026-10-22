@@ -182,12 +182,113 @@ const finalResponsesSegment = `data: {"candidates":[{"content":{"role":"model","
 
 func streamToResponses(t *testing.T, stream string) (*responses.Response, string) {
 	t.Helper()
+	return streamToResponsesFor(t, stream, argon)
+}
+
+func streamToResponsesFor(t *testing.T, stream, model string) (*responses.Response, string) {
+	t.Helper()
 	var out strings.Builder
 	var completed *responses.Response
-	require.NoError(t, TransformVertexStreamToResponses(strings.NewReader(stream), &out, argon, "", nil,
+	require.NoError(t, TransformVertexStreamToResponses(strings.NewReader(stream), &out, model, "", nil,
 		func(r *responses.Response) { completed = r }))
 	require.NotNil(t, completed)
 	return completed, out.String()
+}
+
+func functionCallItems(output []responses.OutputItem) []responses.OutputItem {
+	var calls []responses.OutputItem
+	for _, item := range output {
+		if item.Type == "function_call" {
+			calls = append(calls, item)
+		}
+	}
+	return calls
+}
+
+// The thought signature rides in call_id only on argon, known behind an alias by
+// Gemini's modelVersion: another model's call_id is the bare call ID, and a
+// signature found in a call_id is sent to argon only.
+func TestResponsesCallIDSignatureOnlyOnArgon(t *testing.T) {
+	const other = "gemini-3.1-pro-preview"
+	signedCallID := "fc-1__thought__" + base64.RawURLEncoding.EncodeToString([]byte("sig"))
+	turn1 := func(modelVersion string) []byte {
+		body, err := json.Marshal(genai.GenerateContentResponse{
+			Candidates: []*genai.Candidate{{
+				Content: &genai.Content{Role: "model", Parts: []*genai.Part{
+					{FunctionCall: &genai.FunctionCall{ID: "fc-1", Name: "get_weather", Args: map[string]any{}},
+						ThoughtSignature: []byte("sig")},
+				}},
+				FinishReason: genai.FinishReasonStop,
+			}},
+			ModelVersion: modelVersion,
+		})
+		require.NoError(t, err)
+		return body
+	}
+	for _, tt := range []struct {
+		name, model, modelVersion, wantCallID string
+	}{
+		{"another model", other, "", "fc-1"},
+		{"another model behind an argon name", argon, other, "fc-1"},
+		{"argon behind an alias", "my-alias", argon, signedCallID},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			resp, err := VertexToResponsesResponse(turn1(tt.modelVersion), tt.model, "", 0)
+			require.NoError(t, err)
+			calls := functionCallItems(resp.Output)
+			require.Len(t, calls, 1)
+			assert.Equal(t, tt.wantCallID, calls[0].CallID)
+
+			completed, sse := streamToResponsesFor(t, "data: "+string(turn1(tt.modelVersion))+"\n\n", tt.model)
+			calls = functionCallItems(completed.Output)
+			require.Len(t, calls, 1)
+			assert.Equal(t, tt.wantCallID, calls[0].CallID, "streamed")
+			assert.Equal(t, tt.wantCallID == signedCallID, strings.Contains(sse, "__thought__"))
+		})
+	}
+
+	input, err := json.Marshal([]map[string]any{
+		{"role": "user", "content": "Weather?"},
+		{"type": "function_call", "call_id": signedCallID, "name": "get_weather", "arguments": "{}"},
+		{"type": "function_call_output", "call_id": signedCallID, "output": "20C"},
+	})
+	require.NoError(t, err)
+	for model, wantSignature := range map[string]string{argon: "sig", other: "skip_thought_signature_validator"} {
+		out, err := ResponsesRequestToVertex([]byte(`{"model": "g", "input": `+string(input)+`}`), model)
+		require.NoError(t, err)
+		var req vertex.VertexRequest
+		require.NoError(t, json.Unmarshal(out, &req))
+		require.Len(t, req.Contents, 3, model)
+		call := req.Contents[1].Parts[0]
+		assert.Equal(t, "fc-1", call.FunctionCall.ID, model)
+		assert.Equal(t, []byte(wantSignature), call.ThoughtSignature, model)
+		assert.Equal(t, "fc-1", req.Contents[2].Parts[0].FunctionResponse.ID, model)
+		assert.Equal(t, "get_weather", req.Contents[2].Parts[0].FunctionResponse.Name, model)
+	}
+}
+
+// A query text a response lists twice is two billed queries on argon and one on
+// any other model.
+func TestResponsesRepeatedSearchQueriesBilledOnlyOnArgon(t *testing.T) {
+	body, err := json.Marshal(genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{{
+			Content:           &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "Found."}}},
+			FinishReason:      genai.FinishReasonStop,
+			GroundingMetadata: &genai.GroundingMetadata{WebSearchQueries: []string{"q", "q"}},
+		}},
+		UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 5, CandidatesTokenCount: 2},
+	})
+	require.NoError(t, err)
+	for model, want := range map[string]int{argon: 2, "gemini-3.1-pro-preview": 1} {
+		resp, err := VertexToResponsesResponse(body, model, "", 0)
+		require.NoError(t, err)
+		require.NotNil(t, resp.Usage.ServerToolUse, model)
+		assert.Equal(t, want, resp.Usage.ServerToolUse.WebSearchRequests, model)
+
+		completed, _ := streamToResponsesFor(t, "data: "+string(body)+"\n\n", model)
+		require.NotNil(t, completed.Usage.ServerToolUse, model)
+		assert.Equal(t, want, completed.Usage.ServerToolUse.WebSearchRequests, model+", streamed")
+	}
 }
 
 func TestArgonResponsesContinuedStream(t *testing.T) {

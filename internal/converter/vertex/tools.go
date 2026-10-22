@@ -259,9 +259,19 @@ func convertGoogleSearchRetrieval(toolMap map[string]interface{}) *genai.GoogleS
 	return retrieval
 }
 
+// UsesFunctionCallIDs reports whether model pairs a function response with its call
+// by the call's ID, and so has Gemini's call IDs kept and sent back (see
+// geminiModelProfile.functionCallIDs). Exported for use by sub-packages (e.g.
+// vertex/responses).
+func UsesFunctionCallIDs(model string) bool {
+	profile := lookupGeminiModelProfile(model)
+	return profile != nil && profile.functionCallIDs
+}
+
 // convertToolCallsToGenaiParts converts OpenAI tool_calls to genai.Part with FunctionCall.
 // Restores thoughtSignature from provider_specific_fields for Gemini 3 multi-turn conversations.
-func convertToolCallsToGenaiParts(toolCalls []interface{}) []*genai.Part {
+// keepIDs sends each call's ID back, see UsesFunctionCallIDs.
+func convertToolCallsToGenaiParts(toolCalls []interface{}, keepIDs bool) []*genai.Part {
 	if len(toolCalls) == 0 {
 		return nil
 	}
@@ -306,12 +316,14 @@ func convertToolCallsToGenaiParts(toolCalls []interface{}) []*genai.Part {
 
 		part := &genai.Part{
 			FunctionCall: &genai.FunctionCall{
-				// The ID Gemini gave the call (see convertGenaiToOpenAIFunctionCall):
-				// Gemini 4 checks that every function response carries its call's ID.
-				ID:   converterutil.GetString(toolCallMap, "id"),
 				Name: funcName,
 				Args: args,
 			},
+		}
+		if keepIDs {
+			// The ID Gemini gave the call (see functionCallID): Gemini 4 checks
+			// that every function response carries its call's ID.
+			part.FunctionCall.ID = converterutil.GetString(toolCallMap, "id")
 		}
 
 		// Restore thoughtSignature from provider_specific_fields if present.

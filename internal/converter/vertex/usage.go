@@ -13,11 +13,12 @@ import (
 // Google Search queries and the tool-use prompt tokens a model does not charge.
 
 // CountWebSearchRequests returns the number of Google Search queries confirmed by
-// the grounding metadata of one response, web and image search together.
-func CountWebSearchRequests(candidates []*genai.Candidate) int {
+// the grounding metadata of one response, web and image search together, as
+// model (the model that answered) is billed for them; see WebSearchQueries.
+func CountWebSearchRequests(candidates []*genai.Candidate, model string) int {
 	var queries WebSearchQueries
 	queries.Add(candidates)
-	return queries.Count()
+	return queries.Count(model)
 }
 
 // imageSearchQueryKey keeps image queries apart from web ones: the same text searched
@@ -25,14 +26,18 @@ func CountWebSearchRequests(candidates []*genai.Candidate) int {
 const imageSearchQueryKey = "\x00image_search\x00"
 
 // WebSearchQueries counts the Google Search queries a generation ran, web and
-// image search together, as Google bills them: one per query run, even when two
-// runs share their text. A stream repeats grounding metadata it already sent, so
-// within one upstream response a query text counts as many times as a single
-// chunk lists it at most; the responses of a continued generation (see
-// continuation.go) ran their own queries, so theirs add up.
+// image search together. A model billed for every query run (see
+// geminiModelProfile.billsRepeatedSearches) has each run counted, even when two
+// runs share their text; for any other model a query text counts once per
+// response. A stream repeats grounding metadata it already sent, so within one
+// upstream response a query text counts as many times as a single chunk lists it
+// at most; the responses of a continued generation (see continuation.go) ran
+// their own queries, so theirs add up.
 type WebSearchQueries struct {
 	response map[string]int // per query, the most times one chunk of the current response listed it
-	closed   int            // queries of the earlier responses of a continued generation
+	// The queries of the earlier responses of a continued generation, counted
+	// as runs and as texts.
+	closedRuns, closedTexts int
 }
 
 // Add records the queries listed by one response or stream chunk.
@@ -64,13 +69,24 @@ func (q *WebSearchQueries) Add(candidates []*genai.Candidate) {
 // CloseResponse ends the current upstream response of a continued generation:
 // queries listed after it are new ones.
 func (q *WebSearchQueries) CloseResponse() {
-	q.closed = q.Count()
+	q.closedRuns, q.closedTexts = q.count(true), q.count(false)
 	q.response = nil
 }
 
-// Count returns the number of queries recorded so far.
-func (q *WebSearchQueries) Count() int {
-	count := q.closed
+// Count returns the number of queries recorded so far, as model (the model that
+// answered) is billed for them.
+func (q *WebSearchQueries) Count(model string) int {
+	profile := lookupGeminiModelProfile(model)
+	return q.count(profile != nil && profile.billsRepeatedSearches)
+}
+
+// count returns the number of queries recorded so far: every run, or each text
+// once per response.
+func (q *WebSearchQueries) count(runs bool) int {
+	if !runs {
+		return q.closedTexts + len(q.response)
+	}
+	count := q.closedRuns
 	for _, times := range q.response {
 		count += times
 	}
@@ -123,12 +139,20 @@ func (s *ToolUseSources) Add(candidates []*genai.Candidate, modelVersion string)
 	}
 }
 
+// AnsweringModel returns the model that answered: Gemini's modelVersion, or model,
+// the router's, when the response carries none. The router may know the model by
+// an alias, so a model profile is looked up by this name on the response side.
+// Exported for use by sub-packages (e.g. vertex/responses).
+func (s ToolUseSources) AnsweringModel(model string) string {
+	return cmp.Or(s.modelVersion, model)
+}
+
 // unbilledSearchContext reports whether the answering model does not charge Google
 // Search context as input. Gemini's modelVersion names that model; the router's model
 // is only the fallback when the response carries none, so an alias answered by a
 // model that charges the context stays billed.
 func (s ToolUseSources) unbilledSearchContext(model string) bool {
-	profile := lookupGeminiModelProfile(cmp.Or(s.modelVersion, model))
+	profile := lookupGeminiModelProfile(s.AnsweringModel(model))
 	return profile != nil && profile.unbilledSearchContext
 }
 

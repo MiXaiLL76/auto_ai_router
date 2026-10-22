@@ -75,9 +75,11 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 				"error", err, "json_prefix", jsonData[:min(len(jsonData), 200)])
 			continue // Skip malformed chunks
 		}
-		webSearch.Add(vertexChunk.Candidates)
-		webSearchRequests := webSearch.Count()
 		toolUse.Add(vertexChunk.Candidates, vertexChunk.ModelVersion)
+		answeringModel := toolUse.AnsweringModel(model)
+		keepCallIDs := UsesFunctionCallIDs(answeringModel)
+		webSearch.Add(vertexChunk.Candidates)
+		webSearchRequests := webSearch.Count(answeringModel)
 		requestContinues := false // this chunk ends an upstream request that goes on
 		for _, candidate := range vertexChunk.Candidates {
 			switch {
@@ -167,7 +169,7 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 					}
 					// Handle function calls
 					if part.FunctionCall != nil {
-						toolCall := convertVertexFunctionCallToStreamingOpenAI(part.FunctionCall, part.ThoughtSignature, toolCallCounts[candidate.Index])
+						toolCall := convertVertexFunctionCallToStreamingOpenAI(part.FunctionCall, part.ThoughtSignature, toolCallCounts[candidate.Index], keepCallIDs)
 						toolCalls = append(toolCalls, toolCall)
 						toolCallCounts[candidate.Index]++
 					}
@@ -302,7 +304,7 @@ func setVertexWebSearchUsage(usage *openai.OpenAIUsage, requests int) {
 
 // convertVertexFunctionCallToStreamingOpenAI converts Vertex function call to OpenAI streaming tool call format.
 // Preserves thoughtSignature in provider_specific_fields for Gemini 3.x multi-turn streaming.
-func convertVertexFunctionCallToStreamingOpenAI(genaiCall *genai.FunctionCall, thoughtSignature []byte, index int) openai.OpenAIStreamingToolCall {
+func convertVertexFunctionCallToStreamingOpenAI(genaiCall *genai.FunctionCall, thoughtSignature []byte, index int, keepID bool) openai.OpenAIStreamingToolCall {
 	// Convert args to JSON string
 	argsJSON := "{}"
 	if genaiCall.Args != nil {
@@ -313,7 +315,7 @@ func convertVertexFunctionCallToStreamingOpenAI(genaiCall *genai.FunctionCall, t
 
 	toolCall := openai.OpenAIStreamingToolCall{
 		Index: index,
-		ID:    functionCallID(genaiCall),
+		ID:    functionCallID(genaiCall, keepID),
 		Type:  "function",
 		Function: &openai.OpenAIStreamingToolFunction{
 			Name:      genaiCall.Name,

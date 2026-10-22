@@ -242,6 +242,105 @@ func TestArgonStreamedCallsKeepIDsAndIndexes(t *testing.T) {
 	assert.Equal(t, 1, calls[1].Index)
 }
 
+// Gemini's call IDs reach the client and go back only on argon: another model's
+// tool calls get router-made IDs, and its calls and responses go without IDs.
+func TestFunctionCallIDsOnlyOnArgon(t *testing.T) {
+	const other = "gemini-3.1-pro-preview"
+	turn1, err := json.Marshal(genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{{
+			Content: &genai.Content{Role: "model", Parts: []*genai.Part{
+				{FunctionCall: &genai.FunctionCall{ID: "fc-1", Name: "get_weather", Args: map[string]any{}}},
+			}},
+			FinishReason: genai.FinishReasonStop,
+		}},
+	})
+	require.NoError(t, err)
+	converted, err := VertexToOpenAI(turn1, other)
+	require.NoError(t, err)
+	var resp openai.OpenAIResponse
+	require.NoError(t, json.Unmarshal(converted, &resp))
+	require.Len(t, resp.Choices, 1)
+	require.Len(t, resp.Choices[0].Message.ToolCalls, 1)
+	id := resp.Choices[0].Message.ToolCalls[0].ID
+	assert.NotEmpty(t, id)
+	assert.NotEqual(t, "fc-1", id)
+
+	stream := sseChunk(t, `{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"id":"fc-1","name":"get_weather","args":{}}}]},"finishReason":"STOP"}]}`)
+	var streamed []openai.OpenAIStreamingToolCall
+	for _, chunk := range transformStreamFor(t, stream, other) {
+		for _, choice := range chunk.Choices {
+			streamed = append(streamed, choice.Delta.ToolCalls...)
+		}
+	}
+	require.Len(t, streamed, 1)
+	assert.NotEmpty(t, streamed[0].ID)
+	assert.NotEqual(t, "fc-1", streamed[0].ID)
+
+	body := `{"model": "g", "messages": [{"role": "user", "content": "Weather?"}, ` +
+		`{"role": "assistant", "tool_calls": [{"id": "fc-1", "type": "function", "function": {"name": "get_weather", "arguments": "{}"}}]}, ` +
+		`{"role": "tool", "tool_call_id": "fc-1", "content": "{\"temp\": 20}"}]}`
+	for model, wantID := range map[string]string{other: "", argon: "fc-1"} {
+		out, err := OpenAIToVertex([]byte(body), false, false, model, "application/json")
+		require.NoError(t, err)
+		var req VertexRequest
+		require.NoError(t, json.Unmarshal(out, &req))
+		require.Len(t, req.Contents, 3, model)
+		assert.Equal(t, wantID, req.Contents[1].Parts[0].FunctionCall.ID, model)
+		assert.Equal(t, wantID, req.Contents[2].Parts[0].FunctionResponse.ID, model)
+		assert.Equal(t, "get_weather", req.Contents[2].Parts[0].FunctionResponse.Name, model)
+	}
+}
+
+// Behind an alias, argon is known by Gemini's modelVersion: its call IDs are kept
+// and every search run is billed.
+func TestArgonResponseRulesFollowModelVersion(t *testing.T) {
+	body, err := json.Marshal(genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{{
+			Content: &genai.Content{Role: "model", Parts: []*genai.Part{
+				{FunctionCall: &genai.FunctionCall{ID: "fc-1", Name: "lookup", Args: map[string]any{}}},
+			}},
+			FinishReason:      genai.FinishReasonStop,
+			GroundingMetadata: &genai.GroundingMetadata{WebSearchQueries: []string{"q", "q"}},
+		}},
+		UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 5, CandidatesTokenCount: 2},
+		ModelVersion:  argon,
+	})
+	require.NoError(t, err)
+	converted, err := VertexToOpenAI(body, "my-alias")
+	require.NoError(t, err)
+	var resp openai.OpenAIResponse
+	require.NoError(t, json.Unmarshal(converted, &resp))
+	require.Len(t, resp.Choices[0].Message.ToolCalls, 1)
+	assert.Equal(t, "fc-1", resp.Choices[0].Message.ToolCalls[0].ID)
+	require.NotNil(t, resp.Usage.ServerToolUse)
+	assert.Equal(t, 2, resp.Usage.ServerToolUse.WebSearchRequests)
+}
+
+// A query text a response lists twice is two billed queries on argon and one on
+// any other model; the responses of a continued generation add up either way.
+func TestRepeatedSearchQueriesBilledOnlyOnArgon(t *testing.T) {
+	const other = "gemini-3.1-pro-preview"
+	grounded := []*genai.Candidate{{GroundingMetadata: &genai.GroundingMetadata{
+		WebSearchQueries: []string{"x", "x", "y"}, ImageSearchQueries: []string{"x", "x"}}}}
+	assert.Equal(t, 5, CountWebSearchRequests(grounded, argon))
+	assert.Equal(t, 3, CountWebSearchRequests(grounded, other))
+	assert.Equal(t, 3, CountWebSearchRequests(grounded, ""))
+
+	var queries WebSearchQueries
+	queries.Add(grounded)
+	queries.CloseResponse()
+	queries.Add(grounded)
+	assert.Equal(t, 10, queries.Count(argon))
+	assert.Equal(t, 6, queries.Count(other))
+
+	stream := sseChunk(t, `{"candidates":[{"content":{"parts":[{"text":"a"}]},"groundingMetadata":{"webSearchQueries":["x","x"]}}]}`) +
+		sseChunk(t, `{"candidates":[{"content":{"parts":[{"text":"b"}]},"finishReason":"STOP","groundingMetadata":{"webSearchQueries":["x","x","y"]}}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":2}}`)
+	usage := lastUsage(transformStreamFor(t, stream, other))
+	require.NotNil(t, usage)
+	require.NotNil(t, usage.ServerToolUse)
+	assert.Equal(t, 2, usage.ServerToolUse.WebSearchRequests)
+}
+
 func sseChunk(t *testing.T, payload string) string {
 	t.Helper()
 	require.True(t, json.Valid([]byte(payload)), payload)
@@ -250,8 +349,13 @@ func sseChunk(t *testing.T, payload string) string {
 
 func transformStream(t *testing.T, stream string) []openai.OpenAIStreamingChunk {
 	t.Helper()
+	return transformStreamFor(t, stream, argon)
+}
+
+func transformStreamFor(t *testing.T, stream, model string) []openai.OpenAIStreamingChunk {
+	t.Helper()
 	var out strings.Builder
-	require.NoError(t, TransformVertexStreamToOpenAI(strings.NewReader(stream), argon, &out))
+	require.NoError(t, TransformVertexStreamToOpenAI(strings.NewReader(stream), model, &out))
 	var chunks []openai.OpenAIStreamingChunk
 	for _, frame := range strings.Split(out.String(), "\n\n") {
 		payload := strings.TrimPrefix(strings.TrimSpace(frame), "data: ")
@@ -339,9 +443,9 @@ func TestArgonStreamLeftAtContinuationEndsAsLength(t *testing.T) {
 	assert.Equal(t, 65536, usage.CompletionTokens, "the request's usage is kept")
 }
 
-// The SSE metadata a stream repeats is not billed twice; queries a chunk lists
-// twice are two runs.
-func TestStreamWebSearchQueriesDeduplicateRepeatsNotRuns(t *testing.T) {
+// On argon the SSE metadata a stream repeats is not billed twice; queries a chunk
+// lists twice are two runs.
+func TestArgonStreamWebSearchQueriesDeduplicateRepeatsNotRuns(t *testing.T) {
 	stream := sseChunk(t, `{"candidates":[{"content":{"parts":[{"text":"a"}]},"groundingMetadata":{"webSearchQueries":["x","x"]}}]}`) +
 		sseChunk(t, `{"candidates":[{"content":{"parts":[{"text":"b"}]},"finishReason":"STOP","groundingMetadata":{"webSearchQueries":["x","x","y"]}}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":2}}`)
 	usage := lastUsage(transformStream(t, stream))
@@ -415,7 +519,7 @@ func TestMergeContinuationResponses(t *testing.T) {
 	support := candidate.GroundingMetadata.GroundingSupports[0]
 	assert.Equal(t, int32(2), support.Segment.PartIndex, "points at the second request's part")
 	assert.Equal(t, []int32{1}, support.GroundingChunkIndices, "and at its chunk")
-	assert.Equal(t, 2, CountWebSearchRequests(resp.Candidates))
+	assert.Equal(t, 2, CountWebSearchRequests(resp.Candidates, argon))
 
 	usage := resp.UsageMetadata
 	assert.Equal(t, int32(35200), usage.PromptTokenCount)

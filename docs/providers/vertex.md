@@ -560,27 +560,8 @@ client.embeddings.create(
   and on the tool results, which go in the order of the calls whatever order the client sends them in. On the
   Responses API the thought signature of a call travels in its `call_id` (`<id>__thought__<signature>`), since the
   Responses API has no field for it; clients send `call_id` back verbatim.
-
-#### Long decodes
-
-One upstream request returns at most 65,536 output tokens streamed, 32,768 otherwise. With an output cap above that
-(up to 1,048,576 minus the input), Google stops the generation at the request's limit with finish reason
-`CONTINUATION` and a continuation token. The router then sends the same request again with the token
-(`continuationToken`, Vertex AI `v1beta1`) through the same credential, and so on until the generation finishes,
-and returns one answer:
-
-- non-streamed: one response with the output of every request in order;
-- streamed: one SSE stream; a request's `CONTINUATION` finish is not passed on, and a request that spent its whole
-  limit thinking simply streams nothing visible.
-
-Usage is the sum of every request's final usage. Each follow-up request reads the prompt and the output so far again
-as input, mostly as implicit cache hits, so `prompt_tokens` and `cached_tokens` grow with each request;
-`prompt_tokens_details.initial_prompt_tokens` (`input_tokens_details` on the Responses API) keeps the size of the
-context the client sent. Google Search queries add up over the requests too.
-
-A generation that cannot be continued -- the client went away, a follow-up request failed twice, 40 follow-ups
-were sent -- ends where it stopped: finish reason `length` (Responses API: `incomplete`, `max_output_tokens`), and
-the usage of every finished request is billed.
+- **Every Google Search query run is billed.** A query text the model ran twice counts twice in
+  `web_search_requests`; grounding metadata a stream repeats is not counted again.
 
 ### Streaming
 
@@ -604,14 +585,14 @@ Usage metadata (token counts) is included in streaming chunks when available.
 
 Vertex AI finish reasons are mapped to OpenAI format:
 
-| Vertex Reason  | OpenAI Reason    | Notes                                                                         |
-| -------------- | ---------------- | ----------------------------------------------------------------------------- |
-| `STOP`         | `stop`           | Overridden to `tool_calls` if function calls present                          |
-| `MAX_TOKENS`   | `length`         |                                                                               |
-| `CONTINUATION` | `length`         | Only when the generation is not continued (see [Long decodes](#long-decodes)) |
-| `SAFETY`       | `content_filter` |                                                                               |
-| `RECITATION`   | `content_filter` |                                                                               |
-| `TOOL_CALL`    | `tool_calls`     |                                                                               |
+| Vertex Reason  | OpenAI Reason    | Notes                                                |
+| -------------- | ---------------- | ---------------------------------------------------- |
+| `STOP`         | `stop`           | Overridden to `tool_calls` if function calls present |
+| `MAX_TOKENS`   | `length`         |                                                      |
+| `CONTINUATION` | `length`         | Only when the generation is not continued            |
+| `SAFETY`       | `content_filter` |                                                      |
+| `RECITATION`   | `content_filter` |                                                      |
+| `TOOL_CALL`    | `tool_calls`     |                                                      |
 
 ### Token Counting
 
@@ -624,4 +605,4 @@ The router provides accurate token counting with modality breakdown:
 - **Image and video tokens**: Reported separately (`prompt_tokens_details.image_tokens` / `video_tokens`), each at its own price
 - **Thinking tokens**: Included in completion count, tracked in `completion_tokens_details.reasoning_tokens`
 - **Generated image tokens**: Tracked in `completion_tokens_details.image_tokens` and billed at the image output rate, apart from text and thinking
-- **Google Search**: Queries in `server_tool_use.web_search_requests`, one per query run (a second run with the same text counts too; grounding metadata a stream repeats does not); search-retrieved context counts as prompt tokens except on `gemini-nano-banana-2.1` (see [Google Search types](#google-search-types))
+- **Google Search**: Queries in `server_tool_use.web_search_requests`, a query text repeated in a response once (except on [`gemini-4-argon`](#gemini-4-argon)); search-retrieved context counts as prompt tokens except on `gemini-nano-banana-2.1` (see [Google Search types](#google-search-types))
