@@ -306,6 +306,9 @@ func convertToolCallsToGenaiParts(toolCalls []interface{}) []*genai.Part {
 
 		part := &genai.Part{
 			FunctionCall: &genai.FunctionCall{
+				// The ID Gemini gave the call (see convertGenaiToOpenAIFunctionCall):
+				// Gemini 4 checks that every function response carries its call's ID.
+				ID:   converterutil.GetString(toolCallMap, "id"),
 				Name: funcName,
 				Args: args,
 			},
@@ -335,4 +338,64 @@ func convertToolCallsToGenaiParts(toolCalls []interface{}) []*genai.Part {
 	}
 
 	return parts
+}
+
+// OrderFunctionResponses puts the function responses of a tool turn in the order
+// of the calls in calls (the model turn before it): Gemini pairs a turn's
+// responses with its calls by position, while OpenAI clients may send the tool
+// results in any order. A response is matched to its call by ID, or by name when
+// either side has no ID; unmatched responses keep their order after the matched
+// ones. Exported for use by sub-packages (e.g. vertex/responses).
+func OrderFunctionResponses(responses []*genai.Part, calls *genai.Content) []*genai.Part {
+	if len(responses) < 2 || calls == nil || calls.Role != "model" {
+		return responses
+	}
+	type slot struct {
+		id, name string
+		taken    bool
+	}
+	var slots []*slot
+	for _, part := range calls.Parts {
+		if part != nil && part.FunctionCall != nil {
+			slots = append(slots, &slot{id: part.FunctionCall.ID, name: part.FunctionCall.Name})
+		}
+	}
+	if len(slots) < 2 {
+		return responses
+	}
+	ordered := make([]*genai.Part, len(slots))
+	var unmatched []*genai.Part
+	match := func(response *genai.FunctionResponse) int {
+		for i, s := range slots {
+			if !s.taken && response.ID != "" && s.id == response.ID {
+				return i
+			}
+		}
+		for i, s := range slots {
+			if !s.taken && (response.ID == "" || s.id == "") && s.name == response.Name {
+				return i
+			}
+		}
+		return -1
+	}
+	for _, part := range responses {
+		if part == nil || part.FunctionResponse == nil {
+			unmatched = append(unmatched, part)
+			continue
+		}
+		i := match(part.FunctionResponse)
+		if i < 0 {
+			unmatched = append(unmatched, part)
+			continue
+		}
+		slots[i].taken = true
+		ordered[i] = part
+	}
+	result := make([]*genai.Part, 0, len(responses))
+	for _, part := range ordered {
+		if part != nil {
+			result = append(result, part)
+		}
+	}
+	return append(result, unmatched...)
 }

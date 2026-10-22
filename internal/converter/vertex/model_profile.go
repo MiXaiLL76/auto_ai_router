@@ -24,6 +24,24 @@ type geminiModelProfile struct {
 	maxInputImages int
 	// unbilledSearchContext: Google Search context is not charged as input tokens.
 	unbilledSearchContext bool
+	// thinkingLevelsOnly: the model takes nothing but its thinking levels. A native
+	// thinking_budget or thinking_level MINIMAL is refused with 400 (Google answers
+	// both with 400 rather than mapping them), and a compatibility request to turn
+	// thinking off gets the lowest level: thinking cannot be disabled.
+	thinkingLevelsOnly bool
+	// ignoresSamplingParams: temperature, topP and topK have no effect and are dropped.
+	ignoresSamplingParams bool
+	// singleCandidate: candidateCount is rejected upstream, so n=1 is not sent and
+	// n>1 is refused with 400.
+	singleCandidate bool
+	// noModelPrefill: the conversation may not end with a model turn.
+	noModelPrefill bool
+	// tokenLimit is one limit for input and output together (output counts thinking,
+	// function calls and the answer); 0 when the model has separate limits.
+	tokenLimit int
+	// longDecode: generation past the single-request output cap stops with finish
+	// reason CONTINUATION and goes on in requests carrying its continuation token.
+	longDecode bool
 }
 
 var geminiModelProfiles = []geminiModelProfile{
@@ -42,6 +60,23 @@ var geminiModelProfiles = []geminiModelProfile{
 		rejectsSamplingParams: true,
 		maxInputImages:        14,
 		unbilledSearchContext: true,
+	},
+	{
+		// Gemini 4 Argon. Its name passes the Gemini 2.5 budget checks and a Gemini 3
+		// rule would turn medium into HIGH, so its rules live here.
+		id: "gemini-4-argon",
+		thinkingLevels: []genai.ThinkingLevel{
+			genai.ThinkingLevelLow,
+			genai.ThinkingLevelMedium,
+			genai.ThinkingLevelHigh,
+		},
+		defaultThinkingLevel:  genai.ThinkingLevelMedium,
+		thinkingLevelsOnly:    true,
+		ignoresSamplingParams: true,
+		singleCandidate:       true,
+		noModelPrefill:        true,
+		tokenLimit:            1048576,
+		longDecode:            true,
 	},
 }
 

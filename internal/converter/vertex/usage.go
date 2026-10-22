@@ -12,39 +12,69 @@ import (
 // streaming routes and by the proxy: the OpenAI usage conversion, the billed
 // Google Search queries and the tool-use prompt tokens a model does not charge.
 
-// CountWebSearchRequests returns the number of distinct Google Search queries
-// confirmed by Vertex grounding metadata, web and image search together.
+// CountWebSearchRequests returns the number of Google Search queries confirmed by
+// the grounding metadata of one response, web and image search together.
 func CountWebSearchRequests(candidates []*genai.Candidate) int {
-	queries := make(map[string]struct{})
-	AddWebSearchQueries(queries, candidates)
-	return len(queries)
+	var queries WebSearchQueries
+	queries.Add(candidates)
+	return queries.Count()
 }
 
 // imageSearchQueryKey keeps image queries apart from web ones: the same text searched
 // both ways is two billed queries.
 const imageSearchQueryKey = "\x00image_search\x00"
 
-// AddWebSearchQueries adds distinct, non-empty Google Search queries from the
-// supplied candidates (web and image search alike) to queries. Callers can reuse the
-// same set across streaming chunks so each provider query is billed exactly once.
-func AddWebSearchQueries(queries map[string]struct{}, candidates []*genai.Candidate) {
+// WebSearchQueries counts the Google Search queries a generation ran, web and
+// image search together, as Google bills them: one per query run, even when two
+// runs share their text. A stream repeats grounding metadata it already sent, so
+// within one upstream response a query text counts as many times as a single
+// chunk lists it at most; the responses of a continued generation (see
+// continuation.go) ran their own queries, so theirs add up.
+type WebSearchQueries struct {
+	response map[string]int // per query, the most times one chunk of the current response listed it
+	closed   int            // queries of the earlier responses of a continued generation
+}
+
+// Add records the queries listed by one response or stream chunk.
+func (q *WebSearchQueries) Add(candidates []*genai.Candidate) {
+	listed := make(map[string]int)
 	for _, candidate := range candidates {
 		if candidate == nil || candidate.GroundingMetadata == nil {
 			continue
 		}
 		for _, query := range candidate.GroundingMetadata.WebSearchQueries {
-			query = strings.TrimSpace(query)
-			if query != "" {
-				queries[query] = struct{}{}
+			if query = strings.TrimSpace(query); query != "" {
+				listed[query]++
 			}
 		}
 		for _, query := range candidate.GroundingMetadata.ImageSearchQueries {
-			query = strings.TrimSpace(query)
-			if query != "" {
-				queries[imageSearchQueryKey+query] = struct{}{}
+			if query = strings.TrimSpace(query); query != "" {
+				listed[imageSearchQueryKey+query]++
 			}
 		}
 	}
+	for query, times := range listed {
+		if q.response == nil {
+			q.response = make(map[string]int)
+		}
+		q.response[query] = max(q.response[query], times)
+	}
+}
+
+// CloseResponse ends the current upstream response of a continued generation:
+// queries listed after it are new ones.
+func (q *WebSearchQueries) CloseResponse() {
+	q.closed = q.Count()
+	q.response = nil
+}
+
+// Count returns the number of queries recorded so far.
+func (q *WebSearchQueries) Count() int {
+	count := q.closed
+	for _, times := range q.response {
+		count += times
+	}
+	return count
 }
 
 // ToolUseSources records, over a response or a whole stream, what fed

@@ -25,7 +25,11 @@ func VertexToResponsesResponse(body []byte, displayModelID, responseID string, c
 	if createdAt == 0 {
 		createdAt = time.Now().Unix()
 	}
-	return buildResponsesResponse(&vertexResp, displayModelID, responseID, createdAt), nil
+	resp := buildResponsesResponse(&vertexResp, displayModelID, responseID, createdAt)
+	if initial := vertex.InitialPromptTokens(body); initial > 0 && resp.Usage != nil {
+		resp.Usage.InputTokensDetails.InitialPromptTokens = int(initial)
+	}
+	return resp, nil
 }
 
 func buildResponsesResponse(
@@ -118,15 +122,11 @@ func candidatesToOutputItems(vertexResp *genai.GenerateContentResponse) []respon
 						argsJSON = string(b)
 					}
 				}
-				callID := part.FunctionCall.ID
-				if callID == "" {
-					callID = responses.GenerateItemID("call_")
-				}
 				output = append(output, responses.OutputItem{
 					Type:      "function_call",
 					ID:        responses.GenerateItemID("fc_"),
 					Status:    "completed",
-					CallID:    callID,
+					CallID:    encodeCallID(part.FunctionCall, part.ThoughtSignature),
 					Name:      part.FunctionCall.Name,
 					Arguments: argsJSON,
 				})
@@ -328,7 +328,9 @@ func finishReasonToStatus(vertexResp *genai.GenerateContentResponse) (string, *r
 	switch vertexResp.Candidates[0].FinishReason {
 	case genai.FinishReasonStop:
 		return "completed", nil
-	case genai.FinishReasonMaxTokens:
+	case genai.FinishReasonMaxTokens, genai.FinishReasonContinuation:
+		// CONTINUATION here: the generation reached the per-request output cap
+		// and was not continued (see vertex/continuation.go).
 		return "incomplete", &responses.IncompleteDetails{Reason: "max_output_tokens"}
 	case genai.FinishReasonSafety, genai.FinishReasonRecitation:
 		return "incomplete", &responses.IncompleteDetails{Reason: "content_filter"}

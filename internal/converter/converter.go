@@ -637,11 +637,12 @@ type responsesUsageDetails struct {
 			Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
 			Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
 		} `json:"cache_creation_token_details,omitempty"`
-		ImageTokens int    `json:"image_tokens,omitempty"`
-		VideoTokens int    `json:"video_tokens,omitempty"`
-		TextTokens  int    `json:"text_tokens,omitempty"`
-		AudioTokens int    `json:"audio_tokens,omitempty"`
-		CacheType   string `json:"cache_type,omitempty"`
+		ImageTokens         int    `json:"image_tokens,omitempty"`
+		VideoTokens         int    `json:"video_tokens,omitempty"`
+		TextTokens          int    `json:"text_tokens,omitempty"`
+		AudioTokens         int    `json:"audio_tokens,omitempty"`
+		CacheType           string `json:"cache_type,omitempty"`
+		InitialPromptTokens int    `json:"initial_prompt_tokens,omitempty"`
 	} `json:"input_tokens_details,omitempty"`
 	OutputTokensDetails struct {
 		AudioTokens     int `json:"audio_tokens,omitempty"`
@@ -742,6 +743,7 @@ type tokenUsageShapeUsage struct {
 		// exclusive — see TokenUsage.CacheType.
 		CacheType string `json:"cache_type,omitempty"`
 		converterutil.CachingTokensExtension
+		InitialPromptTokens int `json:"initial_prompt_tokens,omitempty"`
 	} `json:"prompt_tokens_details,omitempty"`
 	CompletionTokensDetails struct {
 		AcceptedPredictionTokens int `json:"accepted_prediction_tokens,omitempty"`
@@ -969,6 +971,10 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 	if outputTextTokens == 0 {
 		outputTextTokens = resp.Usage.OutputTokensDetails.TextTokens
 	}
+	initialPromptTokens := resp.Usage.PromptTokensDetails.InitialPromptTokens
+	if initialPromptTokens == 0 {
+		initialPromptTokens = resp.Usage.InputTokensDetails.InitialPromptTokens
+	}
 
 	// If tokens came from the nested response.completed event, use its detail fields
 	if resp.Usage.PromptTokens == 0 && resp.Usage.InputTokens == 0 && resp.Response.Usage != nil {
@@ -1019,6 +1025,9 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 		}
 		if outputTextTokens == 0 {
 			outputTextTokens = u.OutputTokensDetails.TextTokens
+		}
+		if initialPromptTokens == 0 {
+			initialPromptTokens = u.InputTokensDetails.InitialPromptTokens
 		}
 	}
 	// Body never reports the TTL split for providers like Kimi/Moonshot
@@ -1093,6 +1102,7 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 		ImageToolEdits:           imageToolEdits,
 		ReasoningAccounting:      reasoningAccounting,
 		ProviderCostUSD:          providerCost,
+		InitialPromptTokens:      initialPromptTokens,
 	}).Normalize()
 }
 
