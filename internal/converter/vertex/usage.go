@@ -21,6 +21,17 @@ func CountWebSearchRequests(candidates []*genai.Candidate, model string) int {
 	return queries.Count(model)
 }
 
+// CountResponseWebSearchRequests is CountWebSearchRequests for the generateContent
+// response body that candidates were parsed from. A generation that
+// MergeContinuationResponses joined from several requests is counted request by
+// request: its merged grounding lists the queries of all of them as one response's.
+func CountResponseWebSearchRequests(body []byte, candidates []*genai.Candidate, model string) int {
+	if queries, ok := continuationWebSearchQueries(body); ok {
+		return queries.Count(model)
+	}
+	return CountWebSearchRequests(candidates, model)
+}
+
 // imageSearchQueryKey keeps image queries apart from web ones: the same text searched
 // both ways is two billed queries.
 const imageSearchQueryKey = "\x00image_search\x00"

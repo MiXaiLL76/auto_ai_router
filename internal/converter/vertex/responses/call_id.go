@@ -37,16 +37,17 @@ func encodeCallID(call *genai.FunctionCall, signature []byte, model string) stri
 }
 
 // decodeCallID splits a call_id into the function call's ID and its thought
-// signature (nil when the call_id carries none).
+// signature (nil when the call_id carries none). A signature that is missing or
+// does not decode leaves the bare ID: Gemini knows the call by that alone.
 func decodeCallID(callID string) (string, []byte) {
-	id, encoded, found := strings.Cut(callID, callIDSignatureSeparator)
-	if !found || encoded == "" {
-		return callID, nil
+	id, encoded, _ := strings.Cut(callID, callIDSignatureSeparator)
+	if encoded == "" {
+		return id, nil
 	}
 	signature, err := base64.RawURLEncoding.DecodeString(encoded)
 	if err != nil {
 		if signature, err = base64.StdEncoding.DecodeString(encoded); err != nil {
-			return callID, nil
+			return id, nil
 		}
 	}
 	return id, signature

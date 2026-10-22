@@ -25,14 +25,17 @@ func VertexToResponsesResponse(body []byte, displayModelID, responseID string, c
 	if createdAt == 0 {
 		createdAt = time.Now().Unix()
 	}
-	resp := buildResponsesResponse(&vertexResp, displayModelID, responseID, createdAt)
+	resp := buildResponsesResponse(body, &vertexResp, displayModelID, responseID, createdAt)
 	if initial := vertex.InitialPromptTokens(body); initial > 0 && resp.Usage != nil {
 		resp.Usage.InputTokensDetails.InitialPromptTokens = int(initial)
 	}
 	return resp, nil
 }
 
+// buildResponsesResponse converts vertexResp, parsed from body (nil for a
+// response built in place), to a responses.Response.
 func buildResponsesResponse(
+	body []byte,
 	vertexResp *genai.GenerateContentResponse,
 	model, responseID string,
 	createdAt int64,
@@ -42,7 +45,7 @@ func buildResponsesResponse(
 	toolUse.Add(vertexResp.Candidates, vertexResp.ModelVersion)
 	output := candidatesToOutputItems(vertexResp, toolUse.AnsweringModel(model))
 	usage := usageMetadataToUsage(vertex.BillableUsageMetadata(vertexResp.UsageMetadata, toolUse, model))
-	webSearchRequests := vertex.CountWebSearchRequests(vertexResp.Candidates, toolUse.AnsweringModel(model))
+	webSearchRequests := vertex.CountResponseWebSearchRequests(body, vertexResp.Candidates, toolUse.AnsweringModel(model))
 	if usage == nil && webSearchRequests > 0 {
 		usage = &responses.Usage{}
 	}

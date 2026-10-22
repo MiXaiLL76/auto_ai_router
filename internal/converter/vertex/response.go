@@ -135,7 +135,7 @@ func VertexToOpenAI(vertexBody []byte, model string) ([]byte, error) {
 			openAIResp.Usage.PromptTokensDetails.InitialPromptTokens = int(initial)
 		}
 	}
-	if webSearchRequests := CountWebSearchRequests(vertexResp.Candidates, toolUse.AnsweringModel(model)); webSearchRequests > 0 {
+	if webSearchRequests := CountResponseWebSearchRequests(vertexBody, vertexResp.Candidates, toolUse.AnsweringModel(model)); webSearchRequests > 0 {
 		if openAIResp.Usage == nil {
 			openAIResp.Usage = &openai.OpenAIUsage{}
 		}

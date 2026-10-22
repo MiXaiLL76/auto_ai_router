@@ -79,18 +79,22 @@ func ContinuationRequest(body []byte, token string) ([]byte, error) {
 // MergeContinuationResponses joins the generateContent responses of one continued
 // generation into the response the client gets: each candidate's parts in order,
 // the last request's finish reason, the grounding and citations of all requests,
-// and usage summed over the requests.
+// usage summed over the requests and their Google Search queries counted request
+// by request.
 func MergeContinuationResponses(bodies [][]byte) ([]byte, error) {
 	if len(bodies) == 1 {
 		return bodies[0], nil
 	}
 	var merged *genai.GenerateContentResponse
 	var initialPromptTokens int32
+	var searches WebSearchQueries
 	for i, body := range bodies {
 		var resp genai.GenerateContentResponse
 		if err := json.Unmarshal(body, &resp); err != nil {
 			return nil, fmt.Errorf("continuation response %d: %w", i, err)
 		}
+		searches.Add(resp.Candidates)
+		searches.CloseResponse()
 		if merged == nil {
 			merged = &resp
 			if resp.UsageMetadata != nil {
@@ -104,22 +108,58 @@ func MergeContinuationResponses(bodies [][]byte) ([]byte, error) {
 		return nil, fmt.Errorf("no continuation responses")
 	}
 	body, err := json.Marshal(merged)
-	if err != nil || initialPromptTokens <= 0 {
+	if err != nil || (initialPromptTokens <= 0 && searches.closedRuns == 0) {
 		return body, err
 	}
-	// The summed usage counts the prompt once per request; the size of the
-	// context the client sent rides along under a field of our own.
+	// What the merged response no longer tells rides along under fields of our
+	// own: the summed usage counts the prompt once per request, and the merged
+	// grounding lists the queries of all requests as one.
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(body, &fields); err != nil {
 		return nil, err
 	}
-	fields[initialPromptTokensField] = json.RawMessage(fmt.Sprint(initialPromptTokens))
+	if initialPromptTokens > 0 {
+		fields[initialPromptTokensField] = json.RawMessage(fmt.Sprint(initialPromptTokens))
+	}
+	if searches.closedRuns > 0 {
+		counts, err := json.Marshal(continuationSearches{Runs: searches.closedRuns, Texts: searches.closedTexts})
+		if err != nil {
+			return nil, err
+		}
+		fields[continuationSearchesField] = counts
+	}
 	return json.Marshal(fields)
 }
 
 // initialPromptTokensField is the router's own top-level field of a merged
 // response: the first request's promptTokenCount (see InitialPromptTokens).
 const initialPromptTokensField = "initialPromptTokenCount"
+
+// continuationSearchesField is the router's own top-level field of a merged
+// response: its Google Search queries counted request by request, as
+// WebSearchQueries counts a continued stream (see CountResponseWebSearchRequests).
+const continuationSearchesField = "continuationWebSearchQueries"
+
+type continuationSearches struct {
+	Runs  int `json:"runs"`  // every query run
+	Texts int `json:"texts"` // each query text once per request
+}
+
+// continuationWebSearchQueries returns the queries of a generation that
+// MergeContinuationResponses joined from several requests, as counted before the
+// merge; ok is false for any other body.
+func continuationWebSearchQueries(body []byte) (queries WebSearchQueries, ok bool) {
+	if !bytes.Contains(body, []byte(`"`+continuationSearchesField+`"`)) {
+		return queries, false
+	}
+	var probe struct {
+		Searches *continuationSearches `json:"continuationWebSearchQueries"`
+	}
+	if json.Unmarshal(body, &probe) != nil || probe.Searches == nil {
+		return queries, false
+	}
+	return WebSearchQueries{closedRuns: probe.Searches.Runs, closedTexts: probe.Searches.Texts}, true
+}
 
 // InitialPromptTokens returns the prompt of the first request of a generation
 // that MergeContinuationResponses joined from several, or 0 for any other body.

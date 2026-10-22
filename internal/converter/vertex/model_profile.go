@@ -51,8 +51,7 @@ type geminiModelProfile struct {
 	functionCallIDs bool
 	// billsRepeatedSearches: every Google Search query the model runs is billed, a
 	// second run with the same text too; without it a response's queries count once
-	// per text. A longDecode model needs it: the queries of its merged requests
-	// (see MergeContinuationResponses) are then counted as the stream counts them.
+	// per text.
 	billsRepeatedSearches bool
 }
 

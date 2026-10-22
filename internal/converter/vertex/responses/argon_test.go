@@ -129,6 +129,29 @@ func TestDecodeCallID(t *testing.T) {
 	id, signature = decodeCallID("fc-1__thought__" + base64.StdEncoding.EncodeToString([]byte("sig?>")))
 	assert.Equal(t, "fc-1", id)
 	assert.Equal(t, []byte("sig?>"), signature, "standard base64 is read too")
+
+	for _, callID := range []string{"fc-1__thought__!!!not-valid-base64!!!", "fc-1__thought__"} {
+		id, signature = decodeCallID(callID)
+		assert.Equal(t, "fc-1", id, callID)
+		assert.Nil(t, signature, callID)
+	}
+}
+
+// A call_id whose signature does not decode goes to Gemini as the bare ID, on the
+// call and on its result, and the call as one without a signature.
+func TestArgonResponsesUnreadableCallIDSignature(t *testing.T) {
+	const callID = "fc-1__thought__!!!not-valid-base64!!!"
+	req := argonVertexRequest(t, `{"model": "gemini-4-argon", "input": [
+		{"role": "user", "content": "Weather in Moscow?"},
+		{"type": "function_call", "call_id": "`+callID+`", "name": "get_weather", "arguments": "{}"},
+		{"type": "function_call_output", "call_id": "`+callID+`", "output": "20C"}]}`)
+	require.Len(t, req.Contents, 3)
+	call := req.Contents[1].Parts[0]
+	assert.Equal(t, "fc-1", call.FunctionCall.ID)
+	assert.Equal(t, skipThoughtSignature, call.ThoughtSignature)
+	result := req.Contents[2].Parts[0].FunctionResponse
+	assert.Equal(t, "fc-1", result.ID)
+	assert.Equal(t, "get_weather", result.Name)
 }
 
 func TestArgonResponsesMergedContinuation(t *testing.T) {
@@ -286,6 +309,25 @@ func TestResponsesRepeatedSearchQueriesBilledOnlyOnArgon(t *testing.T) {
 		assert.Equal(t, want, resp.Usage.ServerToolUse.WebSearchRequests, model)
 
 		completed, _ := streamToResponsesFor(t, "data: "+string(body)+"\n\n", model)
+		require.NotNil(t, completed.Usage.ServerToolUse, model)
+		assert.Equal(t, want, completed.Usage.ServerToolUse.WebSearchRequests, model+", streamed")
+	}
+}
+
+// The requests of a continued generation ran their own searches: merged into one
+// response, a text both requests searched counts once in each, as in the stream.
+func TestResponsesMergedContinuationCountsSearchesRequestByRequest(t *testing.T) {
+	first := `{"candidates":[{"content":{"role":"model","parts":[{"text":"a"}]},"finishReason":"CONTINUATION","continuationToken":"dG9r","groundingMetadata":{"webSearchQueries":["q","q"]}}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":2}}`
+	second := `{"candidates":[{"content":{"role":"model","parts":[{"text":"b"}]},"finishReason":"STOP","groundingMetadata":{"webSearchQueries":["q"]}}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":2}}`
+	merged, err := vertex.MergeContinuationResponses([][]byte{[]byte(first), []byte(second)})
+	require.NoError(t, err)
+	for model, want := range map[string]int{argon: 3, "gemini-3.1-pro-preview": 2} {
+		resp, err := VertexToResponsesResponse(merged, model, "", 0)
+		require.NoError(t, err)
+		require.NotNil(t, resp.Usage.ServerToolUse, model)
+		assert.Equal(t, want, resp.Usage.ServerToolUse.WebSearchRequests, model)
+
+		completed, _ := streamToResponsesFor(t, "data: "+first+"\n\ndata: "+second+"\n\n", model)
 		require.NotNil(t, completed.Usage.ServerToolUse, model)
 		assert.Equal(t, want, completed.Usage.ServerToolUse.WebSearchRequests, model+", streamed")
 	}

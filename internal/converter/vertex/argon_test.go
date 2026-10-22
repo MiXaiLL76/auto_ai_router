@@ -546,6 +546,35 @@ func TestMergeContinuationResponses(t *testing.T) {
 	assert.Equal(t, 2, openAIResp.Usage.ServerToolUse.WebSearchRequests)
 }
 
+// The requests of a continued generation ran their own searches: merged into one
+// response, their queries are counted request by request, as the stream counts
+// them, whether the model bills every run or each text once per request.
+func TestMergedContinuationCountsSearchesRequestByRequest(t *testing.T) {
+	const other = "gemini-3.1-pro-preview"
+	first := `{"candidates":[{"content":{"role":"model","parts":[{"text":"a"}]},"finishReason":"CONTINUATION","continuationToken":"dG9r","groundingMetadata":{"webSearchQueries":["q","q"]}}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":2}}`
+	second := `{"candidates":[{"content":{"role":"model","parts":[{"text":"b"}]},"finishReason":"STOP","groundingMetadata":{"webSearchQueries":["q"],"imageSearchQueries":["q"]}}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":2}}`
+	merged, err := MergeContinuationResponses([][]byte{[]byte(first), []byte(second)})
+	require.NoError(t, err)
+	for model, want := range map[string]int{argon: 4, other: 3} {
+		converted, err := VertexToOpenAI(merged, model)
+		require.NoError(t, err)
+		var resp openai.OpenAIResponse
+		require.NoError(t, json.Unmarshal(converted, &resp))
+		require.NotNil(t, resp.Usage.ServerToolUse, model)
+		assert.Equal(t, want, resp.Usage.ServerToolUse.WebSearchRequests, model)
+
+		usage := lastUsage(transformStreamFor(t, sseChunk(t, first)+sseChunk(t, second), model))
+		require.NotNil(t, usage, model)
+		require.NotNil(t, usage.ServerToolUse, model)
+		assert.Equal(t, want, usage.ServerToolUse.WebSearchRequests, model+", streamed")
+	}
+
+	unsearched := continuationResponse(t, []*genai.Part{{Text: "c"}}, genai.FinishReasonStop, "", nil, nil)
+	merged, err = MergeContinuationResponses([][]byte{unsearched, unsearched})
+	require.NoError(t, err)
+	assert.NotContains(t, string(merged), continuationSearchesField, "nothing to count")
+}
+
 func TestArgonUncontinuedResponseEndsAsLength(t *testing.T) {
 	body := continuationResponse(t, []*genai.Part{{Text: "cut"}}, genai.FinishReasonContinuation, "tok",
 		&genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 10, CandidatesTokenCount: 32768}, nil)

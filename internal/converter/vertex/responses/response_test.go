@@ -276,7 +276,7 @@ func TestCandidatesToOutputItems_GroundingMetadataAddsAnnotationsAndWebSearchCal
 		CandidatesTokenCount: 2,
 		TotalTokenCount:      7,
 	}
-	response := buildResponsesResponse(vertexResp, "gemini-test", "resp_test", 1)
+	response := buildResponsesResponse(nil, vertexResp, "gemini-test", "resp_test", 1)
 	require.NotNil(t, response.Usage)
 	require.NotNil(t, response.Usage.ServerToolUse)
 	assert.Equal(t, 1, response.Usage.ServerToolUse.WebSearchRequests)
@@ -303,7 +303,7 @@ func TestVertexToResponsesResponse_RequiredSchemaFields(t *testing.T) {
 		},
 	}
 
-	resp := buildResponsesResponse(vertexResp, "gemini-test", "resp_test", 123)
+	resp := buildResponsesResponse(nil, vertexResp, "gemini-test", "resp_test", 123)
 
 	assert.Equal(t, "auto", resp.ToolChoice)
 	assert.Equal(t, "disabled", resp.Truncation)
