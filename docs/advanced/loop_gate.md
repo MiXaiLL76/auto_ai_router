@@ -166,6 +166,16 @@ client called:
 - Not watched: `responses_only` models, requests forwarded to an `air`/`proxy` peer (gate
   them on the peer). Only choice 0 of a chat completion is watched.
 
+!!! note "Non-streamed passthrough is observed only, by design"
+A non-streamed `/v1/responses` or `/v1/messages` request relayed to vLLM as is
+(passthrough) is only scanned after the answer arrives, in `enforce` mode too: firings
+are logged and counted, the response is not changed and nothing is restarted. Gating it
+would mean streaming the native API upstream and rebuilding its response object (every
+output item and content block type) in AIR. Such requests are rare (Codex, Claude Code
+and most agents stream), so this stays observe-only for now. To have them gated, convert
+them instead (`passthrough_responses: false`; `/v1/messages` is converted by default):
+converted requests are gated like chat completions.
+
 ## What it reports
 
 Each firing logs a `WARN` once per channel and attempt:
