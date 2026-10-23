@@ -733,7 +733,7 @@ func (b *cancelOnCloseBody) Close() error {
 // connection outright, giving streamToClient's abort path a real chance to
 // drain the response, capture actual usage, and return the TCP connection to
 // the pool. The detached call is still bounded — it gets canceled
-// streamDrainTimeout after the client goes away, and always via the returned
+// StreamDrainTimeout after the client goes away, and always via the returned
 // cancel func once the request finishes normally.
 func (p *Proxy) upstreamRequestContext(r *http.Request) (context.Context, context.CancelFunc) {
 	if !p.drainUpstreamOnAbort {
@@ -744,7 +744,7 @@ func (p *Proxy) upstreamRequestContext(r *http.Request) (context.Context, contex
 	go func() {
 		select {
 		case <-r.Context().Done():
-			timer := time.NewTimer(streamDrainTimeout)
+			timer := time.NewTimer(StreamDrainTimeout)
 			defer timer.Stop()
 			select {
 			case <-timer.C:

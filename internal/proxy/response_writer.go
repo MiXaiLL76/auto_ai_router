@@ -631,7 +631,7 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 		)
 		if err != nil && p.drainUpstreamOnAbort {
 			// Drain upstream so the usage chunk arrives even though the client left.
-			drainCtx, cancel := context.WithTimeout(context.Background(), streamDrainTimeout)
+			drainCtx, cancel := context.WithTimeout(context.Background(), StreamDrainTimeout)
 			defer cancel()
 
 			p.drainUpstream(

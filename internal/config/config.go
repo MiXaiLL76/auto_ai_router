@@ -27,7 +27,7 @@ const FallbackPriorityGroup = 999
 // DefaultModelPricesSyncInterval is how often model prices are re-fetched from model_prices_link.
 const DefaultModelPricesSyncInterval = 5 * time.Minute
 
-// DefaultShutdownTimeout is how long a stopping server waits for in-flight requests before it exits.
+// DefaultShutdownTimeout is how long a stopping server waits for in-flight requests before it cancels them.
 const DefaultShutdownTimeout = 30 * time.Second
 
 var DefaultErrorCodes = []int{429}
@@ -629,7 +629,7 @@ type ServerConfig struct {
 	ModelPricesLink            string                `yaml:"model_prices_link,omitempty"`       // URL or file path to model prices JSON - supports os.environ/VAR_NAME
 	ModelPricesSyncInterval    time.Duration         `yaml:"model_prices_sync_interval"`        // How often model prices are re-fetched from model_prices_link (default: 5m)
 	ShutdownDelay              time.Duration         `yaml:"shutdown_delay"`                    // Delay between readiness=false and server.Shutdown (default: 5s)
-	ShutdownTimeout            time.Duration         `yaml:"shutdown_timeout"`                  // How long server.Shutdown waits for in-flight requests before the process exits and cuts the rest (default: 30s)
+	ShutdownTimeout            time.Duration         `yaml:"shutdown_timeout"`                  // How long server.Shutdown waits for in-flight requests before the rest are cancelled (default: 30s)
 	DrainUpstreamOnAbort       bool                  `yaml:"drain_upstream_on_abort"`           // When true, keep reading upstream after client disconnect to capture real usage chunk (default: false — estimate from delta text)
 	TiktokenEnabled            bool                  `yaml:"tiktoken_enabled"`                  // Enable local tiktoken-based prompt/completion token estimation as a fallback when a provider omits usage (default: true; disable if all configured providers always report usage)
 	StrictAllTeamModelsACL     bool                  `yaml:"strict_all_team_models_acl"`        // Enforce key/team/user model ACLs (default: false)
