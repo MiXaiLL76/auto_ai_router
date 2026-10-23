@@ -189,6 +189,7 @@ type loopGateObserver struct {
 	normalizeUsage bool            // the upstream body was wrapped in the usage normalizer; restarts get it too
 	respawn        loopGateRespawn // nil = no restarts
 	visionInject   bool            // descriptions were injected into attempt 1: never restart
+	watchOnly      bool            // log and count only, whatever the mode (see newLoopGateWatcher)
 	keepalive      io.Writer       // where waiting keepalives go; nil = into the stream read through the gate
 	stripUsage     bool            // vLLM sends the running usage on every chunk for the gate only: wrap drops it
 	restarts       int
@@ -267,6 +268,24 @@ func (p *Proxy) newLoopGateObserver(ctx context.Context, logCtx *RequestLogConte
 	return o
 }
 
+// newLoopGateWatcher returns an observer that only logs and counts, for an
+// upstream stream the client gets as one non-streamed answer the gate was not
+// asked to stream (force_stream_for_ttft): a non-streamed request is gated
+// only with force_stream, otherwise it is observed. nil when the gate is off
+// for the attempt.
+func (p *Proxy) newLoopGateWatcher(ctx context.Context, logCtx *RequestLogContext, modelID string, statusCode int) *loopGateObserver {
+	o := p.newLoopGateObserver(ctx, logCtx, modelID, statusCode, loopGateFormatOf(logCtx))
+	if o != nil {
+		o.watchOnly, o.respawn, o.responsesOut = true, nil, nil
+	}
+	return o
+}
+
+// enforcing reports whether the observer acts on loops.
+func (o *loopGateObserver) enforcing() bool {
+	return o.settings.Mode == config.LoopGateEnforce && !o.watchOnly
+}
+
 // newLoopGateObserverWith returns an observer for one attempt, without
 // restarts of its own.
 func (p *Proxy) newLoopGateObserverWith(ctx context.Context, logCtx *RequestLogContext, modelID string, settings config.LoopGateSettings, format loopgate.Format) *loopGateObserver {
@@ -343,7 +362,7 @@ func (o *loopGateObserver) Read(p []byte) (int, error) {
 // returns the offset just past the line that made a channel loop at the cut
 // ratio, and that channel; -1 otherwise.
 func (o *loopGateObserver) scan(b []byte) (int, string) {
-	enforce := o.settings.Mode == config.LoopGateEnforce
+	enforce := o.enforcing()
 	cut := o.settings.CutRatio()
 	pos := 0
 	for {
@@ -393,7 +412,7 @@ func (o *loopGateObserver) observeLine(line []byte) {
 		return
 	}
 	o.record(o.detector.Observe(o.format, payload, o.now()))
-	if o.settings.Mode != config.LoopGateEnforce {
+	if !o.enforcing() {
 		return
 	}
 	switch {

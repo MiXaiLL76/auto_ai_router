@@ -27,10 +27,11 @@ import (
 // If no data flows for this duration, the connection is terminated.
 const streamChunkWriteTimeout = 60 * time.Second
 
-// streamDrainTimeout caps how long we wait for the upstream to finish after a
+// StreamDrainTimeout caps how long we wait for the upstream to finish after a
 // client disconnects. The provider charges for the full generation regardless,
-// so we keep reading to capture the real usage chunk.
-const streamDrainTimeout = 60 * time.Second
+// so we keep reading to capture the real usage chunk. Exported because the
+// server's shutdown grace for cancelled requests has to outlast it.
+const StreamDrainTimeout = 60 * time.Second
 
 // streamTTFTDetectionLimit caps how many bytes streamToClient accumulates while
 // looking for the first real content delta (for CompletionStartTime/ttft_ms).
@@ -1044,7 +1045,7 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 		if p.drainUpstreamOnAbort {
 			// Keep reading upstream to capture the real usage chunk.
 			// The provider charges for the full generation regardless of client disconnect.
-			drainCtx, cancel := context.WithTimeout(context.Background(), streamDrainTimeout)
+			drainCtx, cancel := context.WithTimeout(context.Background(), StreamDrainTimeout)
 			defer cancel()
 			p.drainUpstream(drainCtx, clientReader, onChunk, credName)
 		}
@@ -2074,7 +2075,7 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 		p.logStreamHandlerError(respCtx(resp), "streamToClient error in handlePassthroughResponsesStreaming", err,
 			"credential", credName, "model", modelID, "chunks_received", chunkCount)
 		if p.drainUpstreamOnAbort {
-			drainCtx, cancel := context.WithTimeout(context.Background(), streamDrainTimeout)
+			drainCtx, cancel := context.WithTimeout(context.Background(), StreamDrainTimeout)
 			defer cancel()
 			p.drainUpstream(drainCtx, clientReader, onChunk, credName)
 		}

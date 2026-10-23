@@ -436,6 +436,7 @@ type Config struct {
 	SessionStoreKeyPrefix        string        // Redis key prefix for session bindings (the deployment's redis.key_prefix)
 	RouterID                     string        // Human-readable name for this router (shown in /trace); defaults to hostname
 	DrainUpstreamOnAbort         bool          // When true, keep reading upstream after client disconnect to get real usage (default: false)
+	ForceStreamForTTFT           bool          // When true, force stream:true upstream for non-streaming chat requests and reassemble the response back to non-stream JSON (default: false)
 	ResponseCompatibility        string
 	TiktokenEnabled              bool // Local tiktoken-based prompt/completion token fallback estimation (default: true)
 	StrictAllTeamModelsACL       bool
@@ -483,6 +484,7 @@ type Proxy struct {
 	sessionStore                     sessionBindingStore // Optional: session-sticky credential routing
 	stickyAutoCacheCtrl              bool                // Auto-inject Anthropic cache_control when session is active
 	drainUpstreamOnAbort             bool                // Keep reading upstream after client disconnect to get real usage chunk
+	forceStreamForTTFT               bool                // Force stream:true upstream for non-streaming chat requests and reassemble the response back to non-stream JSON (TTFT on every request)
 	tiktokenEnabled                  bool                // Local tiktoken-based prompt/completion token fallback estimation
 	strictAllTeamModelsACL           bool
 	responseHeaderMode               config.ResponseHeaderMode
@@ -589,6 +591,7 @@ func New(cfg *Config) *Proxy {
 		sessionStore:                     sessionStore,
 		stickyAutoCacheCtrl:              cfg.SessionStickyAutoCacheCtrl,
 		drainUpstreamOnAbort:             cfg.DrainUpstreamOnAbort,
+		forceStreamForTTFT:               cfg.ForceStreamForTTFT,
 		tiktokenEnabled:                  cfg.TiktokenEnabled,
 		strictAllTeamModelsACL:           cfg.StrictAllTeamModelsACL,
 		responseHeaderMode:               cfg.ResponseHeaderMode,
@@ -758,7 +761,7 @@ func (b *cancelOnCloseBody) Close() error {
 // connection outright, giving streamToClient's abort path a real chance to
 // drain the response, capture actual usage, and return the TCP connection to
 // the pool. The detached call is still bounded — it gets canceled
-// streamDrainTimeout after the client goes away, and always via the returned
+// StreamDrainTimeout after the client goes away, and always via the returned
 // cancel func once the request finishes normally.
 func (p *Proxy) upstreamRequestContext(r *http.Request) (context.Context, context.CancelFunc) {
 	if !p.drainUpstreamOnAbort {
@@ -769,7 +772,7 @@ func (p *Proxy) upstreamRequestContext(r *http.Request) (context.Context, contex
 	go func() {
 		select {
 		case <-r.Context().Done():
-			timer := time.NewTimer(streamDrainTimeout)
+			timer := time.NewTimer(StreamDrainTimeout)
 			defer timer.Stop()
 			select {
 			case <-timer.C:
@@ -2214,7 +2217,16 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+		// Gemini long decode: past the per-request output cap the generation goes on
+		// in follow-up requests to this credential (see gemini_continuation.go).
+		var continuation *geminiContinuation
+		if resp.StatusCode == http.StatusOK && !isEmbeddings && !logCtx.IsImageGeneration && !isImageEdit {
+			continuation = p.newGeminiContinuation(r, cred, modelID, realModelID, proxyReq, requestBody, logCtx)
+		}
 		if isStreamingResp {
+			if continuation != nil {
+				resp.Body = continuation.stream(resp.Body)
+			}
 			p.recordProviderResponse(r.Context(), cred, modelID, realModelID, resp.StatusCode, resp.Header, nil)
 			// Cannot retry streaming responses
 			logCtx.TargetURL = targetURL
@@ -2253,6 +2265,9 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			retryReason = RetryReasonNetErr
 			transportErr = readErr
 			continue
+		}
+		if continuation != nil {
+			responseBody = continuation.complete(responseBody)
 		}
 
 		if mappedStatus, ok := statusCodeFromProviderBodyError(resp.StatusCode, responseBody); ok {
@@ -2429,6 +2444,14 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 	outgoingAudioUsageContract := audioUsageContractUnknown
 
 	if isStreamingResp {
+		// force_stream_for_ttft: the client asked for a non-streaming response,
+		// but applyForceStream sent "stream": true upstream. Consume the SSE,
+		// measure TTFT from the first content delta and reassemble the response
+		// into the non-stream JSON the client expects.
+		if p.forceStreamForTTFT && !streaming && resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices && p.simulatedNonStreamSupported(prepared) {
+			p.handleSimulatedNonStream(w, r, resp, prepared, cred, modelID, realModelID, logCtx, saveResponseFn, targetURL, body)
+			return
+		}
 		p.logger.DebugContext(r.Context(), "Response is streaming", "credential", cred.Name)
 	} else {
 		// Decode the response body for logging (handles gzip, etc.)

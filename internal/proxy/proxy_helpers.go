@@ -893,6 +893,11 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 		if usage.ReasoningAccounting != "" {
 			metadata["reasoning_tokens_accounting"] = usage.ReasoningAccounting
 		}
+		// A generation continued over several upstream requests (Gemini long
+		// decode): prompt_tokens sums them all, this is the context sent.
+		if usage.InitialPromptTokens > 0 {
+			metadata["initial_prompt_tokens"] = usage.InitialPromptTokens
+		}
 	}
 
 	if tokenInfo != nil {

@@ -101,6 +101,12 @@ With `force_stream: false` (the default), or in `observe` mode, non-streamed res
 only scanned after they arrive: firings are logged and counted (at the word a stream would
 have fired on), the response is not changed.
 
+With the server's `force_stream_for_ttft` on, a non-streamed request goes upstream as a
+stream anyway, and the gate watches that stream the same way: logged and counted, not
+changed. With the gate's `force_stream` on too, the gate takes the request (restarts and
+trimming as above) and `force_stream_for_ttft` does not apply to it: no TTFT is measured
+for it.
+
 !!! warning "Before you turn on `force_stream`"
     Every non-streamed chat completion to the credential then goes upstream as a stream, loop or
     no loop, and the client gets an answer rebuilt by AIR, not the one vLLM returns for a

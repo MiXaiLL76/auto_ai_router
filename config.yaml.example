@@ -7,7 +7,7 @@ server:
   write_timeout: 60s  # HTTP server write timeout (default: 60s)
   idle_timeout: 2m  # HTTP server idle timeout (default: 2*write_timeout)
   shutdown_delay: 5s  # After SIGTERM, keep serving while not ready so the load balancer stops sending requests (default: 5s)
-  shutdown_timeout: 30s  # Then give in-flight requests this long to finish before exiting; set it to the longest a request may run (default: 30s)
+  shutdown_timeout: 30s  # Then give in-flight requests this long to finish before cancelling them; set it to the longest a request may run (default: 30s)
   idle_conn_timeout: 120s  # HTTP idle connection timeout (default: 120s)
   max_idle_conns: 200  # Maximum idle connections (default: 200)
   max_idle_conns_per_host: 20  # Maximum idle connections per host (default: 20)
@@ -21,6 +21,7 @@ server:
   strict_all_team_models_acl: false  # Enforce key/team/user model ACLs (default: false)
   credential_name_as_team_id: false  # Use provider credential name as team_id when auth has no team_id (default: false)
   tiktoken_enabled: true  # Local fallback token estimation when a provider omits usage (default: true)
+  # force_stream_for_ttft: false  # Force "stream": true upstream for chat-shaped non-streaming requests (/v1/chat/completions, /v1/messages, converted /v1/responses) and reassemble the response back into non-stream JSON, so every request gets a measurable TTFT. Native/passthrough Responses API and responses_only requests are exempt. (default: false)
   model_prices_link: ""  # Optional: URL or file path to model prices JSON (supports os.environ/VAR_NAME)
   model_prices_sync_interval: 5m  # How often model prices are re-fetched from model_prices_link (default: 5m)
   response_headers:

@@ -220,7 +220,7 @@ Gemini 2.5 and Gemini 3+ models support configurable reasoning. The router suppo
 3. `extra_body.thinking` — Anthropic-style format
 4. `extra_body.reasoning_effort` — OpenAI format (lowest priority)
 
-If none are specified, the router explicitly suppresses autonomous thinking for **predictable latency**. Exceptions: `gemini-2.5-pro` cannot disable thinking and uses dynamic budget (`-1`) by default; [`gemini-nano-banana-2.1`](#gemini-nano-banana-21) keeps its own default level (`MEDIUM`).
+If none are specified, the router explicitly suppresses autonomous thinking for **predictable latency**. Exceptions: `gemini-2.5-pro` cannot disable thinking and uses dynamic budget (`-1`) by default; [`gemini-nano-banana-2.1`](#gemini-nano-banana-21) and [`gemini-4-argon`](#gemini-4-argon) keep their own default level (`MEDIUM`).
 
 Each source is read at the top level (where the OpenAI SDKs put `extra_body` keys) first, then inside a literal
 `extra_body` object; `thinking_config` is also read from `extra_body.generation_config`, as in Gemini's REST
@@ -542,6 +542,27 @@ client.embeddings.create(
 
 `usage.prompt_tokens_details` splits the tokens by modality (`text_tokens`, `image_tokens`, `audio_tokens`, `video_tokens`; PDF pages count as images), and each modality is billed at its own rate (see [Model Pricing](../litellm-integration/pricing.md)). If Google returns no usage for some or all inputs, their text is estimated at ~4 characters per token (media is not counted) and a warning is logged.
 
+### Gemini 4 Argon
+
+`gemini-4-argon` has rules of its own, which the router applies on the chat and Responses routes alike:
+
+- **Thinking levels only.** `reasoning_effort` (or `reasoning.effort`) `low` / `medium` / `high` map to `LOW` /
+  `MEDIUM` / `HIGH`; without one the model's default `MEDIUM` is sent. Thinking cannot be turned off: `minimal`,
+  `none` / `disable` and Anthropic's `{"type": "disabled"}` get `LOW`, the lowest level. The Gemini-native
+  `thinking_budget` (any value) and `thinking_level` `MINIMAL` are rejected with 400, as Google rejects them.
+- **One candidate.** `n: 1` is not sent; `n` (or `generation_config.candidate_count`) above 1 is rejected with 400.
+- **Ignored or rejected sampling parameters** are not sent: `temperature`, `top_p` and `top_k` have no effect on the
+  model, `frequency_penalty` and `presence_penalty` are dropped as on every Gemini 2.5+ model.
+- **No assistant prefill.** A conversation ending with an assistant message is rejected with 400.
+- **One token limit.** Input and output (thinking, function calls and the answer) share 1,048,576 tokens; an output cap
+  (`max_tokens`, `max_completion_tokens`, `max_output_tokens`) above it is rejected with 400.
+- **Function calls** keep Gemini's call IDs: they are the tool call IDs the client sees and are sent back on the calls
+  and on the tool results, which go in the order of the calls whatever order the client sends them in. On the
+  Responses API the thought signature of a call travels in its `call_id` (`<id>__thought__<signature>`), since the
+  Responses API has no field for it; clients send `call_id` back verbatim.
+- **Every Google Search query run is billed.** A query text the model ran twice counts twice in
+  `web_search_requests`; grounding metadata a stream repeats is not counted again.
+
 ### Streaming
 
 SSE streaming works transparently:
@@ -564,13 +585,14 @@ Usage metadata (token counts) is included in streaming chunks when available.
 
 Vertex AI finish reasons are mapped to OpenAI format:
 
-| Vertex Reason | OpenAI Reason    | Notes                                                |
-| ------------- | ---------------- | ---------------------------------------------------- |
-| `STOP`        | `stop`           | Overridden to `tool_calls` if function calls present |
-| `MAX_TOKENS`  | `length`         |                                                      |
-| `SAFETY`      | `content_filter` |                                                      |
-| `RECITATION`  | `content_filter` |                                                      |
-| `TOOL_CALL`   | `tool_calls`     |                                                      |
+| Vertex Reason  | OpenAI Reason    | Notes                                                |
+| -------------- | ---------------- | ---------------------------------------------------- |
+| `STOP`         | `stop`           | Overridden to `tool_calls` if function calls present |
+| `MAX_TOKENS`   | `length`         |                                                      |
+| `CONTINUATION` | `length`         | Only when the generation is not continued            |
+| `SAFETY`       | `content_filter` |                                                      |
+| `RECITATION`   | `content_filter` |                                                      |
+| `TOOL_CALL`    | `tool_calls`     |                                                      |
 
 ### Token Counting
 
@@ -583,4 +605,4 @@ The router provides accurate token counting with modality breakdown:
 - **Image and video tokens**: Reported separately (`prompt_tokens_details.image_tokens` / `video_tokens`), each at its own price
 - **Thinking tokens**: Included in completion count, tracked in `completion_tokens_details.reasoning_tokens`
 - **Generated image tokens**: Tracked in `completion_tokens_details.image_tokens` and billed at the image output rate, apart from text and thinking
-- **Google Search**: Queries in `server_tool_use.web_search_requests`; search-retrieved context counts as prompt tokens except on `gemini-nano-banana-2.1` (see [Google Search types](#google-search-types))
+- **Google Search**: Queries in `server_tool_use.web_search_requests`, a query text repeated in a response once (except on [`gemini-4-argon`](#gemini-4-argon)); search-retrieved context counts as prompt tokens except on `gemini-nano-banana-2.1` (see [Google Search types](#google-search-types))

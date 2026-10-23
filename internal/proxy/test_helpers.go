@@ -107,6 +107,7 @@ type TestProxyConfig struct {
 	MaxFallbackAttempts    int
 	Retry                  config.RetryConfig
 	DrainUpstreamOnAbort   bool
+	ForceStreamForTTFT     bool
 	TiktokenEnabled        bool
 	ResponseHeaderMode     config.ResponseHeaderMode
 	CredentialNameAsTeamID bool
@@ -267,6 +268,14 @@ func (b *TestProxyBuilder) WithDrainUpstreamOnAbort(v bool) *TestProxyBuilder {
 	return b
 }
 
+// WithForceStreamForTTFT enables or disables the force_stream_for_ttft toggle:
+// non-streaming chat requests are sent upstream with "stream": true and the
+// response is reassembled back into non-stream JSON so every request gets a TTFT.
+func (b *TestProxyBuilder) WithForceStreamForTTFT(v bool) *TestProxyBuilder {
+	b.config.ForceStreamForTTFT = v
+	return b
+}
+
 // WithTiktokenEnabled overrides the default (true) local tiktoken-based prompt/completion
 // token fallback estimation toggle. Use WithTiktokenEnabled(false) to test the codepath
 // where a provider's own usage is unavailable and no local estimate backfills it.
@@ -316,6 +325,7 @@ func (b *TestProxyBuilder) Build() *Proxy {
 		MaxFallbackAttempts:    b.config.MaxFallbackAttempts,
 		Retry:                  b.config.Retry,
 		DrainUpstreamOnAbort:   b.config.DrainUpstreamOnAbort,
+		ForceStreamForTTFT:     b.config.ForceStreamForTTFT,
 		TiktokenEnabled:        b.config.TiktokenEnabled,
 		ResponseHeaderMode:     b.config.ResponseHeaderMode,
 		CredentialNameAsTeamID: b.config.CredentialNameAsTeamID,

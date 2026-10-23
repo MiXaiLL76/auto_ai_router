@@ -10,10 +10,12 @@ import (
 	"testing/iotest"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 )
 
 func TestStripRunningUsage(t *testing.T) {
@@ -282,4 +284,45 @@ func TestLoopGate_RestartKeepaliveReachesTheClient(t *testing.T) {
 			assert.Contains(t, body, tc.end)
 		})
 	}
+}
+
+func TestLoopGate_ForceStreamForTTFTIsObserved(t *testing.T) {
+	resetLoopGateEnforceMetrics()
+	sv, url := newScriptedVLLM(t, func(n int, w http.ResponseWriter, r *http.Request) bool {
+		return writeLoopGateStream(w, r, "c1", append(loopGateWords(500), loopGateLoop(100)...), loopGateWords(20), "length")
+	})
+	prx := newLoopGateProxyWithGate(t, url, enforceGate(0, 3)) // force_stream off
+	prx.forceStreamForTTFT = true
+
+	out := decodeCompletion(t, postChat(t, prx, loopGateNonStreamRequest))
+
+	msg, finish := completionChoice0(t, out)
+	assert.Equal(t, "length", finish, "the upstream answer, not cut")
+	assert.Contains(t, msg["content"], "w19")
+	assert.NotContains(t, out, "air_loop_gate")
+	bodies, _ := sv.snapshot()
+	require.Len(t, bodies, 1, "not restarted")
+	assert.Equal(t, true, bodies[0]["stream"], "force_stream_for_ttft streamed it upstream")
+	assert.Equal(t, 1.0, testutil.ToFloat64(monitoring.LoopGateFiringsTotal.WithLabelValues("lg-cred", "qwen", "reasoning", "enforce")),
+		"the simulated non-stream answer is observed")
+}
+
+func TestLoopGate_ForceStreamWinsOverForceStreamForTTFT(t *testing.T) {
+	resetLoopGateEnforceMetrics()
+	sv, url := newScriptedVLLM(t, func(n int, w http.ResponseWriter, r *http.Request) bool {
+		if n == 0 {
+			return writeLoopGateEndless(w, r, "c1")
+		}
+		return writeLoopGateStream(w, r, "c2", loopGateWords(20), []string{"final", "answer"}, "stop")
+	})
+	prx := newLoopGateProxyWithGate(t, url, forcedGate(0, 3))
+	prx.forceStreamForTTFT = true
+
+	out := decodeCompletion(t, postChat(t, prx, loopGateNonStreamRequest))
+
+	msg, finish := completionChoice0(t, out)
+	assert.Equal(t, "stop", finish)
+	assert.Equal(t, "final answer ", msg["content"])
+	bodies, _ := sv.snapshot()
+	assert.Len(t, bodies, 2, "the gate restarted the looping attempt")
 }
