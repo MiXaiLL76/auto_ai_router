@@ -5,6 +5,7 @@ import (
 	"hash/maphash"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/goccy/go-json"
 )
@@ -150,6 +151,39 @@ func (d *Detector) ObserveChatChunk(payload []byte, now time.Time) []Firing {
 	}
 	return d.check(now)
 }
+
+// ObserveText feeds the complete reasoning and answer text of a non-streamed
+// response as if they had streamed (reasoning first), checking every few
+// words, so a firing reports the word a stream would have fired on. Returns
+// the firings.
+func (d *Detector) ObserveText(content, reasoning, finishReason string, now time.Time) []Firing {
+	var out []Firing
+	feed := func(c *Channel, text string) {
+		for len(text) > 0 {
+			end := min(observeTextStep, len(text))
+			if i := strings.IndexFunc(text[end:], unicode.IsSpace); i >= 0 {
+				end += i + 1
+			} else {
+				end = len(text)
+			}
+			c.Feed(text[:end])
+			text = text[end:]
+			out = append(out, d.check(now)...)
+		}
+	}
+	feed(d.reasoning, reasoning)
+	feed(d.content, content)
+	if strings.TrimSpace(content) != "" {
+		d.answered = true
+	}
+	if finishReason != "" {
+		d.finishReason = finishReason
+	}
+	return append(out, d.Finish(now)...)
+}
+
+// observeTextStep is how many bytes ObserveText feeds between checks.
+const observeTextStep = 64
 
 // Finish counts the words still pending at the end of the stream and returns
 // the firings that caused.

@@ -1949,6 +1949,12 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		// Loop gate (enforce, force_stream): a non-streamed chat completion goes
+		// upstream as a stream so a loop can be stopped before the client gets
+		// anything; collectLoopGateStream rebuilds the chat.completion below.
+		var loopGateForced *loopGateForcedStream
+		requestBody, loopGateForced = p.loopGateForceStream(r.Context(), cred, modelID, r.URL.Path, streaming, requestBody)
+
 		upstreamCtx, cancelUpstream := p.upstreamRequestContext(r)
 		defer cancelUpstream()
 		proxyReq, reqErr := http.NewRequestWithContext(httputil.WithProxyURL(upstreamCtx, cred.ProxyURL), r.Method, targetURL, bytes.NewReader(requestBody)) //nolint:gosec // G704: targetURL's host comes from the matched credential's base URL, not the incoming request
@@ -2013,6 +2019,9 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		logCtx.loopGateRespawn = nil
 		if streaming && strings.HasSuffix(r.URL.Path, "/chat/completions") {
 			logCtx.loopGateRespawn = p.loopGateRespawner(upstreamCtx, r, proxyReq, requestBody)
+		}
+		if loopGateForced != nil {
+			loopGateForced.respawn = p.loopGateRespawner(upstreamCtx, r, proxyReq, requestBody)
 		}
 
 		if p.logger.Enabled(context.Background(), slog.LevelDebug) {
@@ -2117,6 +2126,9 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			retryReason = RetryReasonNetErr
 			transportErr = doErr
 			continue
+		}
+		if loopGateForced != nil {
+			resp = p.collectLoopGateStream(r.Context(), logCtx, resp, loopGateForced)
 		}
 
 		// Setup close body with sync.Once to prevent double-close
@@ -2228,6 +2240,9 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 
 		p.recordProviderResponse(r.Context(), cred, modelID, realModelID, resp.StatusCode, resp.Header, responseBody)
+		if loopGateForced == nil && !streaming && resp.StatusCode == http.StatusOK && strings.HasSuffix(r.URL.Path, "/chat/completions") {
+			p.observeLoopGateBody(r.Context(), logCtx, cred, modelID, responseBody)
+		}
 
 		// Check if we should retry with another same-type credential
 		shouldRetry, retryReason = p.shouldRetry(cred, resp.StatusCode, responseBody)

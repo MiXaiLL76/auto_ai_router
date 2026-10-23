@@ -118,15 +118,12 @@ type loopGateCut struct {
 	elapsed time.Duration
 }
 
-// newLoopGateObserver returns an observer for a successful stream served by
-// the request's credential, or nil when the loop gate is disabled for that
-// credential and model.
-func (p *Proxy) newLoopGateObserver(ctx context.Context, logCtx *RequestLogContext, modelID string, statusCode int) *loopGateObserver {
-	if logCtx == nil || logCtx.Credential == nil ||
-		statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
-		return nil
+// loopGateSettings returns the effective loop gate settings of a request for
+// modelID served by cred; ok is false when the gate is off for them.
+func (p *Proxy) loopGateSettings(ctx context.Context, cred *config.CredentialConfig, modelID string) (config.LoopGateSettings, bool) {
+	if cred == nil {
+		return config.LoopGateSettings{}, false
 	}
-	cred := logCtx.Credential
 	var modelOverride *config.LoopGateOverride
 	if p.modelManager != nil {
 		modelOverride = p.modelManager.GetLoopGateOverride(modelID, cred.Name)
@@ -135,27 +132,45 @@ func (p *Proxy) newLoopGateObserver(ctx context.Context, logCtx *RequestLogConte
 	if err != nil {
 		p.logger.WarnContext(ctx, "Loop gate disabled: invalid effective settings",
 			"credential", cred.Name, "model", modelID, "error", err)
+		return settings, false
+	}
+	return settings, settings.Enabled()
+}
+
+// newLoopGateObserver returns an observer for a successful stream served by
+// the request's credential, or nil when the loop gate is disabled for that
+// credential and model.
+func (p *Proxy) newLoopGateObserver(ctx context.Context, logCtx *RequestLogContext, modelID string, statusCode int) *loopGateObserver {
+	if logCtx == nil || statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
 		return nil
 	}
-	if !settings.Enabled() {
+	settings, ok := p.loopGateSettings(ctx, logCtx.Credential, modelID)
+	if !ok {
 		return nil
 	}
+	o := p.newLoopGateObserverWith(ctx, logCtx, modelID, settings)
+	o.respawn = logCtx.loopGateRespawn
+	o.visionInject = logCtx.visionInject != nil
+	p.metrics.RecordLoopGateStream(o.credential, o.model, string(settings.Mode))
+	return o
+}
+
+// newLoopGateObserverWith returns an observer for one attempt, without
+// restarts of its own.
+func (p *Proxy) newLoopGateObserverWith(ctx context.Context, logCtx *RequestLogContext, modelID string, settings config.LoopGateSettings) *loopGateObserver {
 	o := &loopGateObserver{
-		p:            p,
-		ctx:          ctx,
-		settings:     settings,
-		credential:   cred.Name,
-		modelID:      modelID,
-		model:        metricModelID(modelID, logCtx),
-		publicModel:  clientVisibleResponseModel(logCtx, modelID),
-		requestID:    logCtx.RequestID,
-		now:          time.Now,
-		respawn:      logCtx.loopGateRespawn,
-		visionInject: logCtx.visionInject != nil,
+		p:           p,
+		ctx:         ctx,
+		settings:    settings,
+		credential:  logCtx.Credential.Name,
+		modelID:     modelID,
+		model:       metricModelID(modelID, logCtx),
+		publicModel: clientVisibleResponseModel(logCtx, modelID),
+		requestID:   logCtx.RequestID,
+		now:         time.Now,
 	}
 	o.start = o.now()
 	o.detector = o.newDetector()
-	p.metrics.RecordLoopGateStream(o.credential, o.model, string(settings.Mode))
 	return o
 }
 
@@ -415,47 +430,79 @@ func (o *loopGateObserver) reportAttempt(outcome string) {
 	}
 }
 
-// finish closes the stream when the handler returns.
-func (o *loopGateObserver) finish() {
-	outcome := o.detector.FinishReason()
+// finishAttempt closes the current attempt: the last unfinished word is
+// counted and the fired channels are reported with outcome, or with the
+// upstream finish_reason when outcome is "".
+func (o *loopGateObserver) finishAttempt(outcome string) {
 	if o.cut == nil {
 		o.record(o.detector.Finish(o.now()))
-	} else {
-		outcome = "loop_gate_cut"
-		o.p.metrics.RecordLoopGateCut(o.credential, o.model, o.cut.channel)
-		o.p.logger.WarnContext(o.ctx, "Loop gate: stream cut",
-			"credential", o.credential,
-			"model", o.model,
-			"channel", o.cut.channel,
-			"words", o.cut.words,
-			"ratio", o.cut.ratio,
-			"elapsed_s", o.cut.elapsed.Seconds(),
-			"cut_ratio", o.settings.CutRatio(),
-			"attempts", o.restarts+1,
-			"request_id", o.requestID,
-		)
+	}
+	if outcome == "" {
+		outcome = o.detector.FinishReason()
 	}
 	o.reportAttempt(outcome)
+}
+
+// reportCut records the final cut of a request after attempts attempts.
+func (o *loopGateObserver) reportCut(attempts int) {
+	o.p.metrics.RecordLoopGateCut(o.credential, o.model, o.cut.channel)
+	o.p.logger.WarnContext(o.ctx, "Loop gate: stream cut",
+		"credential", o.credential,
+		"model", o.model,
+		"channel", o.cut.channel,
+		"words", o.cut.words,
+		"ratio", o.cut.ratio,
+		"elapsed_s", o.cut.elapsed.Seconds(),
+		"cut_ratio", o.settings.CutRatio(),
+		"attempts", attempts,
+		"request_id", o.requestID,
+	)
+}
+
+// reportRecovered records a request whose restart finished uncut.
+func (o *loopGateObserver) reportRecovered(attempts int, elapsed time.Duration) {
+	o.p.metrics.RecordLoopGateRecovered(o.credential, o.model)
+	o.p.logger.InfoContext(o.ctx, "Loop gate: restart recovered the generation",
+		"credential", o.credential, "model", o.model,
+		"attempts", attempts, "finish_reason", o.detector.FinishReason(),
+		"elapsed_s", elapsed.Seconds(),
+		"request_id", o.requestID)
+}
+
+// consumeAbortedTokens counts an estimate of restarted attempts' tokens
+// against the credential's TPM: the final usage covers the last attempt only,
+// but the restarted ones used the engine too. Not billed to the client.
+func (o *loopGateObserver) consumeAbortedTokens(words int) {
+	o.consumeTokens(loopGateWordsToTokens(words))
+}
+
+// consumeTokens counts tokens against the credential's (and model's) TPM.
+func (o *loopGateObserver) consumeTokens(tokens int) {
+	if tokens <= 0 || o.p.rateLimiter == nil {
+		return
+	}
+	o.p.rateLimiter.ConsumeTokens(o.credential, tokens)
+	if o.modelID != "" {
+		o.p.rateLimiter.ConsumeModelTokens(o.credential, o.modelID, tokens)
+	}
+}
+
+// finish closes the stream when the handler returns.
+func (o *loopGateObserver) finish() {
+	outcome := ""
+	if o.cut != nil {
+		outcome = "loop_gate_cut"
+		o.reportCut(o.restarts + 1)
+	}
+	o.finishAttempt(outcome)
 	if o.restarts == 0 {
 		return
 	}
 	if o.cut == nil {
-		o.p.metrics.RecordLoopGateRecovered(o.credential, o.model)
-		o.p.logger.InfoContext(o.ctx, "Loop gate: restart recovered the generation",
-			"credential", o.credential, "model", o.model,
-			"attempts", o.restarts+1, "finish_reason", outcome,
-			"elapsed_s", o.now().Sub(o.start).Seconds(),
-			"request_id", o.requestID)
-		// The final usage covers the last attempt only: the restarted ones still
-		// used the engine, so they count against the credential's TPM. Not
-		// billed to the client. A cut stream has no usage and its token count
-		// comes from all streamed text, restarted attempts included.
-		if tokens := loopGateWordsToTokens(o.abortedWords); tokens > 0 && o.p.rateLimiter != nil {
-			o.p.rateLimiter.ConsumeTokens(o.credential, tokens)
-			if o.modelID != "" {
-				o.p.rateLimiter.ConsumeModelTokens(o.credential, o.modelID, tokens)
-			}
-		}
+		o.reportRecovered(o.restarts+1, o.now().Sub(o.start))
+		// A cut stream has no usage: its token count comes from all streamed
+		// text, restarted attempts included, so only a recovered one adds them.
+		o.consumeAbortedTokens(o.abortedWords)
 	}
 }
 

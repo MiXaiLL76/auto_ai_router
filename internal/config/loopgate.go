@@ -71,6 +71,16 @@ type LoopGateSettings struct {
 	// RetryPresencePenalty is the presence_penalty sent with restart N
 	// (element N-1); the last element applies to every later restart.
 	RetryPresencePenalty []float64 `yaml:"retry_presence_penalty"`
+	// ForceStream makes enforce mode send a non-streamed chat completion
+	// upstream as a stream, so a loop can be stopped and restarted before the
+	// client gets anything; the client still receives one chat.completion.
+	// nil = true. false leaves non-streamed requests to post-hoc observation.
+	ForceStream *bool `yaml:"force_stream,omitempty"`
+}
+
+// ForceStreamEnabled reports whether enforce mode streams non-streamed requests.
+func (s LoopGateSettings) ForceStreamEnabled() bool {
+	return s.ForceStream == nil || *s.ForceStream
 }
 
 // PresencePenaltyForRestart returns the presence_penalty of restart n (1-based).
@@ -115,6 +125,7 @@ type LoopGateOverride struct {
 	MaxAttempts          *int           `yaml:"max_attempts,omitempty"`
 	RetryDeadline        *time.Duration `yaml:"retry_deadline,omitempty"`
 	RetryPresencePenalty []float64      `yaml:"retry_presence_penalty,omitempty"`
+	ForceStream          *bool          `yaml:"force_stream,omitempty"`
 }
 
 type rawLoopGateFields struct {
@@ -127,6 +138,7 @@ type rawLoopGateFields struct {
 	MaxAttempts          string   `yaml:"max_attempts"`
 	RetryDeadline        string   `yaml:"retry_deadline"`
 	RetryPresencePenalty []string `yaml:"retry_presence_penalty"`
+	ForceStream          string   `yaml:"force_stream"`
 }
 
 func parsePresencePenalties(raw []string, fieldPath string) ([]float64, error) {
@@ -195,6 +207,9 @@ func (o *LoopGateOverride) UnmarshalYAML(value *yaml.Node) error {
 	if o.RetryPresencePenalty, err = parsePresencePenalties(raw.RetryPresencePenalty, "loop_gate.retry_presence_penalty"); err != nil {
 		return err
 	}
+	if o.ForceStream, err = parseOptionalBool(raw.ForceStream, "loop_gate.force_stream"); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -232,6 +247,9 @@ func (c *LoopGateConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if c.RetryPresencePenalty, err = parsePresencePenalties(raw.RetryPresencePenalty, "loop_gate.retry_presence_penalty"); err != nil {
+		return err
+	}
+	if c.ForceStream, err = parseOptionalBool(raw.ForceStream, "loop_gate.force_stream"); err != nil {
 		return err
 	}
 	for _, p := range raw.Providers {
@@ -374,6 +392,9 @@ func (c *LoopGateConfig) Resolve(providerType ProviderType, overrides ...*LoopGa
 		}
 		if len(o.RetryPresencePenalty) > 0 {
 			s.RetryPresencePenalty = o.RetryPresencePenalty
+		}
+		if o.ForceStream != nil {
+			s.ForceStream = o.ForceStream
 		}
 	}
 	if !s.Enabled() {

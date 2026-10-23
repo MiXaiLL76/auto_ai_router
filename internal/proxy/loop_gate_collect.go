@@ -1,0 +1,273 @@
+package proxy
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+
+	json "github.com/goccy/go-json"
+
+	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/loopgate"
+)
+
+// loopGateForcedStream is a non-streamed chat completion the loop gate sends
+// upstream as a stream (enforce mode with force_stream): the stream is read
+// through the gate, restarted on a loop, and rebuilt into the one
+// chat.completion the client asked for.
+type loopGateForcedStream struct {
+	settings config.LoopGateSettings
+	modelID  string
+	respawn  loopGateRespawn
+}
+
+// loopGateForceStream returns the body to send upstream instead of body and
+// the plan for its response, or (body, nil) when the gate does not apply: a
+// streamed request, another endpoint, or enforce/force_stream off for this
+// credential and model.
+func (p *Proxy) loopGateForceStream(ctx context.Context, cred *config.CredentialConfig, modelID, path string, streaming bool, body []byte) ([]byte, *loopGateForcedStream) {
+	if streaming || !strings.HasSuffix(path, "/chat/completions") {
+		return body, nil
+	}
+	settings, ok := p.loopGateSettings(ctx, cred, modelID)
+	if !ok || settings.Mode != config.LoopGateEnforce || !settings.ForceStreamEnabled() {
+		return body, nil
+	}
+	streamBody, err := loopGateStreamBody(body, cred.Type == config.ProviderTypeVLLM)
+	if err != nil {
+		p.logger.DebugContext(ctx, "Loop gate: request not streamed upstream", "error", err)
+		return body, nil
+	}
+	return streamBody, &loopGateForcedStream{settings: settings, modelID: modelID}
+}
+
+// loopGateStreamBody turns a non-streamed chat completion request into a
+// streamed one with usage. stream and stream_options are replaced, never
+// added twice (a duplicate key is a 400 for some routers in front of vLLM).
+// continuousUsage asks vLLM for the running usage on every chunk, so an
+// attempt cut short still reports what the engine generated.
+func loopGateStreamBody(body []byte, continuousUsage bool) ([]byte, error) {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(body, &top); err != nil {
+		return nil, fmt.Errorf("decode request body: %w", err)
+	}
+	if top == nil {
+		return nil, errors.New("request body is not a JSON object")
+	}
+	top["stream"] = json.RawMessage("true")
+	top["stream_options"] = json.RawMessage(`{"include_usage":true}`)
+	if continuousUsage {
+		top["stream_options"] = json.RawMessage(`{"include_usage":true,"continuous_usage_stats":true}`)
+	}
+	return json.Marshal(top)
+}
+
+type loopGateAttempt struct {
+	agg   *chatStreamAggregator
+	cut   *loopGateCut
+	words int
+}
+
+// tokens returns the attempt's total tokens from its usage, else an estimate
+// of its generated tokens from the word count.
+func (a loopGateAttempt) tokens() int {
+	var usage struct {
+		TotalTokens int `json:"total_tokens"`
+	}
+	if len(a.agg.usage) > 0 && json.Unmarshal(a.agg.usage, &usage) == nil && usage.TotalTokens > 0 {
+		return usage.TotalTokens
+	}
+	return loopGateWordsToTokens(a.words)
+}
+
+// errorBodyReader fails every read with err, so the regular response body
+// read reports a transport error or an oversized body as it would for a
+// non-streamed reply.
+type errorBodyReader struct{ err error }
+
+func (r errorBodyReader) Read([]byte) (int, error) { return 0, r.err }
+
+// collectLoopGateStream reads the forced stream of resp through the loop gate
+// and returns resp rebuilt as the non-streamed chat.completion (or the error
+// the stream carried). A looping attempt is aborted and restarted while
+// max_attempts and retry_deadline allow; when they run out, the best attempt
+// is returned with its looped tail trimmed and finish_reason "length".
+func (p *Proxy) collectLoopGateStream(ctx context.Context, logCtx *RequestLogContext, resp *http.Response, plan *loopGateForcedStream) *http.Response {
+	if resp.StatusCode != http.StatusOK || !IsStreamingResponse(resp) {
+		return resp
+	}
+	start := time.Now()
+	var attempts []loopGateAttempt
+	var last *loopGateObserver
+	body := resp.Body
+	for n := 1; ; n++ {
+		o := p.newLoopGateObserverWith(ctx, logCtx, plan.modelID, plan.settings)
+		o.restarts = n - 1
+		if n == 1 {
+			p.metrics.RecordLoopGateStream(o.credential, o.model, string(plan.settings.Mode))
+		}
+		agg := newChatStreamAggregator()
+		err := agg.consume(o.wrap(body), p.maxResponseBodySize)
+		_ = body.Close()
+		last = o
+
+		if err != nil || agg.errStatus != 0 {
+			o.finishAttempt("")
+			if len(attempts) == 0 {
+				if err != nil {
+					failed := aggregatedResponse(resp, http.StatusOK, nil)
+					failed.Body = io.NopCloser(errorBodyReader{err: err})
+					failed.ContentLength = -1
+					return failed
+				}
+				return aggregatedResponse(resp, agg.errStatus, agg.errBody)
+			}
+			// A restart failed midway: answer with what the earlier attempts got.
+			p.logger.WarnContext(ctx, "Loop gate: restarted attempt failed, answering with an earlier one",
+				"credential", o.credential, "model", o.model, "attempt", n,
+				"error", err, "status", agg.errStatus, "request_id", o.requestID)
+			break
+		}
+
+		words := o.detector.Content().Words() + o.detector.Reasoning().Words()
+		attempts = append(attempts, loopGateAttempt{agg: agg, cut: o.cut, words: words})
+		if o.cut == nil {
+			o.finishAttempt("")
+			if n > 1 {
+				o.reportRecovered(n, time.Since(start))
+			}
+			break
+		}
+
+		restart := n < plan.settings.MaxAttempts && time.Since(start) < plan.settings.RetryDeadline && plan.respawn != nil
+		if !restart {
+			o.finishAttempt("loop_gate_cut")
+			o.reportCut(n)
+			break
+		}
+		penalty := plan.settings.PresencePenaltyForRestart(n)
+		next, rerr := plan.respawn(penalty)
+		if rerr != nil {
+			o.finishAttempt("loop_gate_cut")
+			o.reportCut(n)
+			p.logger.WarnContext(ctx, "Loop gate: restart failed, answering with the trimmed attempt",
+				"credential", o.credential, "model", o.model, "attempt", n+1,
+				"error", rerr, "request_id", o.requestID)
+			break
+		}
+		o.finishAttempt("loop_gate_restart")
+		p.metrics.RecordLoopGateRestart(o.credential, o.model, o.cut.channel)
+		p.logger.WarnContext(ctx, "Loop gate: generation restarted",
+			"credential", o.credential,
+			"model", o.model,
+			"channel", o.cut.channel,
+			"words", o.cut.words,
+			"ratio", o.cut.ratio,
+			"elapsed_s", time.Since(start).Seconds(),
+			"attempt", n+1,
+			"presence_penalty", penalty,
+			"stream", false,
+			"request_id", o.requestID,
+		)
+		body = next
+	}
+
+	chosen := len(attempts) - 1
+	if attempts[chosen].cut != nil {
+		chosen = loopGateBestAttempt(attempts, plan.settings)
+		a := attempts[chosen]
+		a.agg.loopGate = &loopGateMarker{
+			Action:   "cut",
+			Channel:  a.cut.channel,
+			Words:    a.cut.words,
+			Ratio:    a.cut.ratio,
+			Attempts: len(attempts),
+		}
+	}
+	// The response's usage covers the returned attempt only (for a cut vLLM
+	// attempt: the running usage at the cut): every other attempt counts
+	// against the credential's TPM, not the client's bill.
+	other := 0
+	for i, a := range attempts {
+		if i != chosen {
+			other += a.tokens()
+		}
+	}
+	last.consumeTokens(other)
+
+	out, err := attempts[chosen].agg.completion()
+	if err != nil {
+		failed := aggregatedResponse(resp, http.StatusOK, nil)
+		failed.Body = io.NopCloser(errorBodyReader{err: err})
+		failed.ContentLength = -1
+		return failed
+	}
+	return aggregatedResponse(resp, http.StatusOK, out)
+}
+
+// loopGateBestAttempt trims the looped tail off every cut attempt (one round
+// of the loop is kept) and returns the index of the one with the longest
+// remaining answer, then the longest remaining reasoning. Its finish_reason
+// becomes "length".
+func loopGateBestAttempt(attempts []loopGateAttempt, s config.LoopGateSettings) int {
+	best, bestContent, bestReasoning := len(attempts)-1, -1, -1
+	for i, a := range attempts {
+		c := a.agg.choice0()
+		if c == nil || a.cut == nil {
+			continue
+		}
+		content := loopgate.Trim(c.content.String(), s.NGram, s.MinRepeat)
+		reasoning := loopgate.Trim(c.reasoning.String(), s.NGram, s.MinRepeat)
+		c.content.Reset()
+		c.content.WriteString(content)
+		c.reasoning.Reset()
+		c.reasoning.WriteString(reasoning)
+		length := "length"
+		c.finishReason = &length
+		if len(content) > bestContent || (len(content) == bestContent && len(reasoning) > bestReasoning) {
+			best, bestContent, bestReasoning = i, len(content), len(reasoning)
+		}
+	}
+	return best
+}
+
+// observeLoopGateBody runs the detector over a non-streamed chat completion
+// the gate did not stream (observe mode, or force_stream off): it only logs
+// and counts, the response is not changed.
+func (p *Proxy) observeLoopGateBody(ctx context.Context, logCtx *RequestLogContext, cred *config.CredentialConfig, modelID string, body []byte) {
+	settings, ok := p.loopGateSettings(ctx, cred, modelID)
+	if !ok {
+		return
+	}
+	var completion struct {
+		Choices []struct {
+			Index   int `json:"index"`
+			Message struct {
+				Content          string `json:"content"`
+				ReasoningContent string `json:"reasoning_content"`
+				Reasoning        string `json:"reasoning"`
+			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(body, &completion); err != nil {
+		return
+	}
+	o := p.newLoopGateObserverWith(ctx, logCtx, modelID, settings)
+	p.metrics.RecordLoopGateStream(o.credential, o.model, string(settings.Mode))
+	for _, c := range completion.Choices {
+		if c.Index != 0 {
+			continue
+		}
+		reasoning := c.Message.ReasoningContent
+		if reasoning == "" {
+			reasoning = c.Message.Reasoning
+		}
+		o.record(o.detector.ObserveText(c.Message.Content, reasoning, c.FinishReason, o.now()))
+	}
+	o.reportAttempt(o.detector.FinishReason())
+}

@@ -59,6 +59,28 @@ The closing chunk of a cut stream tells the client that `length` came from AIR, 
 A restarted stream is not marked. Its reasoning keeps the looped part of the abandoned
 attempt: the client already received it.
 
+### Non-streamed requests
+
+With `force_stream: true` (the default), enforce mode sends a non-streamed chat completion
+upstream as a stream (`stream: true`, `stream_options.include_usage`, and for vLLM
+`continuous_usage_stats`). AIR reads it through the gate and returns the one
+`chat.completion` the client asked for, rebuilt from the chunks: text and reasoning
+concatenated, tool calls assembled by index, `content: null` next to a tool call, usage from
+the stream, and an error event inside the stream returned with its own status.
+
+The client sees nothing until the answer is complete, so a loop is restarted **wherever** it
+is (reasoning or answer). When `max_attempts` or `retry_deadline` run out, the best attempt
+(the longest answer) is returned with its looped tail trimmed: the text ends where the
+second round of the loop begins. It has `finish_reason: "length"`, the `air_loop_gate`
+marker at the top level, and the usage vLLM reported at the cut.
+
+`/v1/responses` (when converted, `passthrough_responses: false`) and `/v1/messages` requests
+to vLLM go upstream as chat completions and are gated the same way.
+
+With `force_stream: false`, or in `observe` mode, non-streamed responses are only scanned
+after they arrive: firings are logged and counted (at the word a stream would have fired
+on), the response is not changed.
+
 !!! warning "Side effects"
 \- A cut stream has no `usage` chunk even when the client asked for `stream_options.include_usage`.
 AIR bills it from the streamed text, like any stream that ends without usage.
@@ -70,9 +92,10 @@ the descriptions were injected into the first attempt only. Such streams are cut
 
 ### Billing and rate limits
 
-The client is billed for what the final attempt reports in `usage`. The abandoned attempts
-are not billed, but they used the engine, so an estimate of their tokens (4 tokens per 3
-words) counts against the credential's TPM.
+The client is billed for what the returned attempt reports in `usage`. The abandoned
+attempts are not billed, but they used the engine, so their tokens count against the
+credential's TPM: their own usage when vLLM reported it (non-streamed requests), otherwise
+an estimate of 4 tokens per 3 words.
 
 ## Configuration
 
@@ -88,6 +111,7 @@ loop_gate:
   max_attempts: 3 # first attempt included; 1 = never restart, only cut
   retry_deadline: 10m # no restart later than this after the stream started
   retry_presence_penalty: [1.0, 1.5] # restart 1, restart 2 and later
+  force_stream: true # enforce: send non-streamed chat completions upstream as a stream
 
 credentials:
   - name: vllm_qwen
@@ -120,10 +144,10 @@ combination is validated at startup.
 
 ### Coverage
 
-Only **streamed Chat Completions** (`/v1/chat/completions` with `stream: true`) served
-directly by a credential are watched. Non-streamed requests, `/v1/responses` and
-`/v1/messages` over vLLM, and requests forwarded to an `air`/`proxy` peer are not watched
-yet. Only choice 0 is watched.
+Chat completions sent upstream to `/v1/chat/completions` by a credential directly, streamed
+or not, whatever endpoint the client called. Not watched: streamed `/v1/responses` and
+`/v1/messages` converted for vLLM, Responses API passthrough, and requests forwarded to an
+`air`/`proxy` peer (gate them on the peer). Only choice 0 is watched.
 
 ## What it reports
 

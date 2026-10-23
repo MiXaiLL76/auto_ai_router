@@ -263,3 +263,19 @@ func TestLoopGate_RetrySettings(t *testing.T) {
 	var bad LoopGateConfig
 	assert.ErrorContains(t, yaml.Unmarshal([]byte("retry_deadline: soon\n"), &bad), "retry_deadline")
 }
+
+func TestLoopGate_ForceStream(t *testing.T) {
+	var cfg LoopGateConfig
+	require.NoError(t, yaml.Unmarshal([]byte("mode: enforce\n"), &cfg))
+	cfg.ApplyDefaults()
+	assert.True(t, cfg.ForceStreamEnabled(), "on by default")
+
+	require.NoError(t, yaml.Unmarshal([]byte("mode: enforce\nforce_stream: false\n"), &cfg))
+	assert.False(t, cfg.ForceStreamEnabled())
+
+	got, err := cfg.Resolve(ProviderTypeVLLM, nil, &LoopGateOverride{ForceStream: loopGatePtr(true)})
+	require.NoError(t, err)
+	assert.True(t, got.ForceStreamEnabled(), "a model override wins")
+
+	assert.ErrorContains(t, yaml.Unmarshal([]byte("force_stream: maybe\n"), &cfg), "force_stream")
+}

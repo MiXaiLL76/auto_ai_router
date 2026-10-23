@@ -15,6 +15,7 @@ loop_gate:
   max_attempts: 3
   retry_deadline: 10m
   retry_presence_penalty: [1.0, 1.5]
+  force_stream: true
 
 credentials:
   - name: vllm_qwen
