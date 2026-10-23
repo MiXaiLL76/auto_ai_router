@@ -107,6 +107,7 @@ func (p *Proxy) applyCredentialCompatibilityRouting(
 		prepared.passthroughMessages = nextReq.passthroughMessages
 		prepared.nativeResponses = nextReq.nativeResponses
 		prepared.forcedNativeNonStream = nextReq.forcedNativeNonStream
+		prepared.forcedPassthroughNonStream = nextReq.forcedPassthroughNonStream
 		prepared.messagesMetadata = nextReq.messagesMetadata
 		logCtx.Credential = nextCred
 		logCtx.RealModelID = prepared.realModelID
@@ -1756,6 +1757,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			prepared.passthroughMessages = nextReq.passthroughMessages
 			prepared.nativeResponses = nextReq.nativeResponses
 			prepared.forcedNativeNonStream = nextReq.forcedNativeNonStream
+			prepared.forcedPassthroughNonStream = nextReq.forcedPassthroughNonStream
 			prepared.messagesMetadata = nextReq.messagesMetadata
 			logCtx.RealModelID = realModelID
 
@@ -2411,6 +2413,13 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			// provider SSE, fold it back into the single Responses JSON the
 			// client asked for, and record TTFT on the way.
 			p.handleSimulatedNativeNonStream(w, r, resp, prepared, cred, provResponses, modelID, logCtx, saveResponseFn, targetURL)
+			return
+		}
+		if prepared.forcedPassthroughNonStream && resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+			// Codex/OpenAI passthrough Responses forced to stream: the upstream
+			// SSE is already Responses-shaped, so the terminal response.completed
+			// event is written back as non-stream JSON, with TTFT recorded.
+			p.handleSimulatedPassthroughNonStream(w, r, resp, prepared, cred, modelID, logCtx, saveResponseFn, targetURL)
 			return
 		}
 		p.logger.DebugContext(r.Context(), "Response is streaming", "credential", cred.Name)

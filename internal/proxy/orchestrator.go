@@ -51,6 +51,11 @@ type orchestratedRequest struct {
 	// provider SSE and reassembles it into the non-stream JSON the client
 	// expects (see handleSimulatedNativeNonStream).
 	forcedNativeNonStream bool
+	// forcedPassthroughNonStream is the same idea for codex/OpenAI passthrough
+	// Responses requests: the upstream SSE is already Responses-shaped, so the
+	// terminal response.completed event is written back as non-stream JSON (see
+	// handleSimulatedPassthroughNonStream).
+	forcedPassthroughNonStream bool
 	responsesPrevHandled  bool
 	responsesMetadata     *responses.ResponsesMetadata // non-nil for Responses API requests
 	messagesMetadata      anthropicconv.MessagesAdapterMetadata
@@ -70,6 +75,7 @@ type credentialPreparedRequest struct {
 	passthroughMessages  bool
 	nativeResponses      bool
 	forcedNativeNonStream bool // see orchestratedRequest.forcedNativeNonStream
+	forcedPassthroughNonStream bool // see orchestratedRequest.forcedPassthroughNonStream
 	messagesMetadata     anthropicconv.MessagesAdapterMetadata
 }
 
@@ -319,6 +325,7 @@ func (p *Proxy) orchestrateRequest(
 		passthroughMessages:  credentialReq.passthroughMessages,
 		nativeResponses:      credentialReq.nativeResponses,
 		forcedNativeNonStream: credentialReq.forcedNativeNonStream,
+		forcedPassthroughNonStream: credentialReq.forcedPassthroughNonStream,
 		responsesPrevHandled: prevEntryHandled,
 		responsesMetadata:    responsesMetadata,
 		messagesMetadata:     credentialReq.messagesMetadata,
@@ -434,7 +441,7 @@ func (p *Proxy) buildCredentialRequest(
 // conversions and proxy-like (AIR-to-AIR) chains are left untouched — they
 // keep their existing behavior and merely miss the TTFT.
 func (p *Proxy) applyForceStream(req credentialPreparedRequest, streaming bool, cred *config.CredentialConfig, r *http.Request) credentialPreparedRequest {
-	if !p.forceStreamForTTFT || streaming || req.passthroughResponses || req.convertedToResponses {
+	if !p.forceStreamForTTFT || streaming || req.convertedToResponses {
 		return req
 	}
 	if cred.IsProxyLike() {
@@ -457,6 +464,20 @@ func (p *Proxy) applyForceStream(req credentialPreparedRequest, streaming bool, 
 		req.proxyBody = setStreamTrue(req.proxyBody)
 		req.forcedNativeNonStream = true
 		p.logger.DebugContext(r.Context(), "Forced streaming upstream for non-streaming native Responses request",
+			"credential", cred.Name, "path", req.path, "model", req.realModelID)
+		return req
+	}
+	if req.passthroughResponses {
+		// Codex/OpenAI passthrough Responses API: the provider speaks the
+		// Responses wire format natively, so forcing stream:true is a plain
+		// body flag and the SSE it returns is already Responses-shaped — the
+		// terminal response.completed event carries the whole final Response,
+		// which handleSimulatedPassthroughNonStream writes back as non-stream
+		// JSON (no converter round-trip needed).
+		req.body = setStreamTrue(req.body)
+		req.proxyBody = setStreamTrue(req.proxyBody)
+		req.forcedPassthroughNonStream = true
+		p.logger.DebugContext(r.Context(), "Forced streaming upstream for non-streaming passthrough Responses request",
 			"credential", cred.Name, "path", req.path, "model", req.realModelID)
 		return req
 	}

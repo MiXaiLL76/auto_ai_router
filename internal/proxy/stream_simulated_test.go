@@ -664,3 +664,82 @@ func TestHandleSimulatedNativeNonStream_CapturesTTFT(t *testing.T) {
 	require.NotEmpty(t, out.Output[0].Content)
 	assert.Equal(t, "Hello world", out.Output[0].Content[0].Text)
 }
+
+// responsesSSE builds a Responses API SSE body whose terminal event carries the
+// full final Response object — the wire format a codex/OpenAI passthrough
+// upstream returns.
+func responsesSSE(finalJSON string) string {
+	var b strings.Builder
+	b.WriteString("event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"model\":\"gpt-4o-mini\",\"status\":\"in_progress\"}}\n\n")
+	b.WriteString("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n\n")
+	b.WriteString("event: response.completed\ndata: " + finalJSON + "\n\n")
+	return b.String()
+}
+
+// TestApplyForceStream_PassthroughResponses verifies a codex/OpenAI passthrough
+// Responses request is now force-streamed too, with its own marker.
+func TestApplyForceStream_PassthroughResponses(t *testing.T) {
+	prx := NewTestProxyBuilder().WithForceStreamForTTFT(true).Build()
+	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(`{}`))
+	body := []byte(`{"model":"gpt-4o-mini","input":"hi","stream":false}`)
+	cred := &config.CredentialConfig{Name: "openai", Type: config.ProviderTypeOpenAI, BaseURL: "http://upstream"}
+
+	out := prx.applyForceStream(credentialPreparedRequest{
+		body:                 body,
+		proxyBody:            body,
+		path:                 "/v1/responses",
+		passthroughResponses: true,
+	}, false, cred, req)
+
+	assert.True(t, out.forcedPassthroughNonStream, "passthrough Responses request must be marked as forced")
+	assert.Contains(t, string(out.body), `"stream":true`, "outbound body must force stream:true")
+	assert.False(t, out.forcedNativeNonStream, "passthrough must not take the native marker")
+}
+
+// TestHandleSimulatedPassthroughNonStream_CapturesTTFT drives the passthrough
+// simulated handler directly: the upstream SSE is Responses-shaped and its
+// terminal event carries the whole Response, which the handler must write back
+// as non-stream JSON while stamping TTFT.
+func TestHandleSimulatedPassthroughNonStream_CapturesTTFT(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(`{"model":"gpt-4o-mini","input":"hi"}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+
+	finalJSON := `{"type":"response.completed","response":{"id":"resp_1","object":"response","model":"gpt-4o-mini","status":"completed","output":[{"type":"message","id":"msg_1","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Hello world"}]}],"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}}`
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(responsesSSE(finalJSON))),
+	}
+
+	start := time.Now().Add(-time.Second)
+	logCtx := &RequestLogContext{StartTime: start, RequestID: "test-passthrough-req", Request: req}
+	cred := &config.CredentialConfig{Name: "openai", Type: config.ProviderTypeOpenAI, BaseURL: "http://upstream"}
+	prepared := &orchestratedRequest{streaming: false, passthroughResponses: true, forcedPassthroughNonStream: true, body: []byte(`{"model":"gpt-4o-mini","input":"hi"}`)}
+	w := httptest.NewRecorder()
+
+	prx.handleSimulatedPassthroughNonStream(w, req, resp, prepared, cred, "gpt-4o-mini", logCtx, nil, "http://upstream")
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+	require.False(t, logCtx.CompletionStartTime.IsZero(), "TTFT must be stamped on the first content delta")
+	assert.GreaterOrEqual(t, logCtx.CompletionStartTime, start)
+
+	var out struct {
+		Object string `json:"object"`
+		Status string `json:"status"`
+		Output []struct {
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"output"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &out))
+	assert.Equal(t, "response", out.Object)
+	assert.Equal(t, "completed", out.Status)
+	require.NotEmpty(t, out.Output)
+	require.NotEmpty(t, out.Output[0].Content)
+	assert.Equal(t, "Hello world", out.Output[0].Content[0].Text)
+}

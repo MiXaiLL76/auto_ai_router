@@ -532,6 +532,199 @@ func (p *Proxy) handleSimulatedNativeNonStream(
 	p.writeSimulatedBody(w, r, resp, cred, modelID, logCtx, finalBody)
 }
 
+// handleSimulatedPassthroughNonStream consumes a codex/OpenAI passthrough
+// Responses SSE stream that was produced because applyForceStream forced a
+// non-streaming request to stream upstream, and writes the single non-stream
+// Responses JSON the client asked for. Unlike the native path there is no
+// converter: the provider already speaks the Responses wire format, so the
+// terminal response.completed (or .incomplete) event carries the whole final
+// Response object verbatim. TTFT is stamped from the first real content delta
+// with the same detector the live streaming path uses.
+func (p *Proxy) handleSimulatedPassthroughNonStream(
+	w http.ResponseWriter,
+	r *http.Request,
+	resp *http.Response,
+	prepared *orchestratedRequest,
+	cred *config.CredentialConfig,
+	modelID string,
+	logCtx *RequestLogContext,
+	saveResponseFn func(*responses.Response),
+	targetURL string,
+) {
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			p.logger.WarnContext(respCtx(resp), "Failed to close simulated passthrough non-stream response body", "error", closeErr)
+		}
+	}()
+
+	publicModel := clientVisibleResponseModel(logCtx, modelID)
+	tokenUsageOptions := tokenUsageExtractionOptionsForResponse(cred, resp.Header)
+
+	var totalTokens int
+	completion := p.newCompletionTokenAccumulator(modelID, logCtx)
+	var lastChunk []byte
+	rawProviderStreamError := &proxyStreamErrorCapture{}
+
+	var (
+		finalBody      []byte
+		sawTerminal    bool
+		streamErr      error
+		streamBuf      strings.Builder
+		ttftScan       ttftScanState
+		ttftPending    = logCtx != nil && logCtx.CompletionStartTime.IsZero()
+		completedEvent []byte
+	)
+
+	providerReader := io.TeeReader(resp.Body, proxyStreamErrorObserver{capture: rawProviderStreamError})
+	readBuf := make([]byte, 8192)
+	var lineBuf strings.Builder
+	overflow := false
+	for {
+		n, readErr := providerReader.Read(readBuf)
+		if n > 0 {
+			chunk := readBuf[:n]
+			if int64(streamBuf.Len()+n) > p.maxResponseBodySize {
+				overflow = true
+				break
+			}
+			streamBuf.Write(chunk)
+			completion.AddChunk(chunk)
+			if tokens := extractTokensFromPayloads(splitSSEPayloads(chunk, nil)); tokens > 0 {
+				totalTokens = tokens
+			}
+			if usage := extractTokenUsageFromPayloads(splitSSEPayloads(chunk, nil), tokenUsageOptions); usage != nil {
+				if logCtx != nil {
+					if logCtx.TokenUsage == nil {
+						logCtx.TokenUsage = &converter.TokenUsage{}
+					}
+					logCtx.TokenUsage.MergeNonZero(usage)
+				}
+			}
+			rememberLastStreamDataChunk(&lastChunk, chunk)
+			if ttftPending {
+				if ttftScan.observe(chunk) {
+					logCtx.CompletionStartTime = time.Now()
+					ttftPending = false
+				}
+			}
+			// Walk complete SSE lines for the terminal Responses event.
+			lineBuf.Write(chunk)
+			buffered := lineBuf.String()
+			lastNL := strings.LastIndex(buffered, "\n")
+			if lastNL >= 0 {
+				for _, line := range strings.Split(buffered[:lastNL], "\n") {
+					line = strings.TrimRight(line, "\r")
+					if !strings.HasPrefix(line, "data: ") {
+						continue
+					}
+					jsonData := strings.TrimPrefix(line, "data: ")
+					if jsonData == "" || jsonData == "[DONE]" {
+						continue
+					}
+					var event struct {
+						Type     string             `json:"type"`
+						Response responses.Response `json:"response"`
+					}
+					if json.Unmarshal([]byte(jsonData), &event) == nil && (event.Type == "response.completed" || event.Type == "response.incomplete") {
+						sawTerminal = true
+						completedEvent = []byte(jsonData)
+						if enriched, mErr := json.Marshal(&event.Response); mErr == nil {
+							finalBody = enriched
+						}
+					}
+				}
+				lineBuf.Reset()
+				lineBuf.WriteString(buffered[lastNL+1:])
+			}
+		}
+		if readErr != nil {
+			if !errors.Is(readErr, io.EOF) {
+				streamErr = readErr
+			}
+			break
+		}
+	}
+
+	logTokens := totalTokens
+	if logTokens == 0 {
+		logTokens = completion.TokenCount()
+	}
+
+	if streamErr = resolveCapturedProviderStreamError(logCtx, resp.StatusCode, streamErr, rawProviderStreamError); streamErr != nil {
+		markStreamFailure(logCtx, streamErr)
+	} else if overflow {
+		streamErr = ErrResponseBodyTooLarge
+		markStreamFailure(logCtx, streamErr)
+	} else if !sawTerminal || finalBody == nil {
+		streamErr = fmt.Errorf("simulated passthrough non-stream response: no terminal Responses event in upstream stream")
+		markStreamFailure(logCtx, streamErr)
+	}
+
+	if streamErr != nil {
+		p.logger.ErrorContext(respCtx(resp), "Simulated passthrough non-stream response failed",
+			"credential", cred.Name, "model", modelID,
+			"error", streamErr, "request_id", logCtx.RequestID)
+		p.setPromptTokensEstimate(logCtx, bodyBytesForEstimate(prepared), modelID)
+		p.finalizeStreamingLog(logCtx, logTokens, lastChunk, "openai", resp.StatusCode, true)
+		p.writeSimulatedError(w, logCtx, http.StatusBadGateway, targetURL)
+		return
+	}
+
+	if logTokens > 0 {
+		p.rateLimiter.ConsumeTokens(cred.Name, logTokens)
+		if modelID != "" {
+			p.rateLimiter.ConsumeModelTokens(cred.Name, modelID, logTokens)
+		}
+	}
+
+	// Enrich with request-echoed metadata and persist, mirroring the plain
+	// passthrough non-stream branch.
+	var respObj responses.Response
+	if err := json.Unmarshal(finalBody, &respObj); err == nil {
+		applyResponsesMetadata(&respObj, prepared.responsesMetadata)
+		if enriched, mErr := json.Marshal(&respObj); mErr == nil {
+			finalBody = enriched
+		}
+		if saveResponseFn != nil {
+			saveResponseFn(&respObj)
+		}
+	}
+
+	if normalizedBody := normalizeSuccessfulResponseModel(finalBody, endpointFromLogContext(logCtx), publicModel); !bytes.Equal(normalizedBody, finalBody) {
+		finalBody = normalizedBody
+		dropRepresentationIntegrityHeaders(resp.Header)
+	}
+	if normalizedBody, changed := modelutils.NormalizeCompletionUsage(finalBody, publicModel); changed {
+		finalBody = normalizedBody
+		dropRepresentationIntegrityHeaders(resp.Header)
+	}
+	if logCtx.HideWebSearchResults {
+		if stripped, ok := stripWebSearchResults(finalBody); ok {
+			finalBody = stripped
+			dropRepresentationIntegrityHeaders(resp.Header)
+		}
+	}
+	logCtx.captureClientResponseID(finalBody)
+
+	finalChunk := lastChunk
+	if len(completedEvent) > 0 {
+		finalChunk = completedEvent
+	}
+	p.setPromptTokensEstimate(logCtx, bodyBytesForEstimate(prepared), modelID)
+	p.finalizeStreamingLog(logCtx, logTokens, finalChunk, "openai", resp.StatusCode, true)
+
+	logCtx.RequestCompleted = true
+	p.setSessionBinding(logCtx.SessionID, modelID, cred.Name)
+
+	p.copyResponseHeaders(w, resp.Header, cred, false)
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Del("X-Accel-Buffering")
+	p.markAudioUsageExcludesCachedForClient(w, logCtx)
+	p.setCredentialResponseHeader(w, logCtx, cred.Name)
+
+	p.writeSimulatedBody(w, r, resp, cred, modelID, logCtx, finalBody)
+}
+
 // bodyBytesForEstimate returns the request body used for the local prompt-token
 // estimate — the real-model-substituted body when present, matching the other
 // simulated paths.
