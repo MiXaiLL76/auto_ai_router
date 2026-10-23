@@ -10,10 +10,10 @@ logits processors, no `repetition_penalty`.
 
 Based on [loop-gate](https://github.com/vakovalskii/loop-gate-skill) by Valerii Kovalskii (MIT).
 
-| Mode            | What happens on a loop                                                                                       |
-| --------------- | ------------------------------------------------------------------------------------------------------------ |
-| `off` (default) | nothing, the detector does not run                                                                           |
-| `observe`       | logged and counted; the response is not changed. Use it to measure and calibrate first                      |
+| Mode            | What happens on a loop                                                                                     |
+| --------------- | ---------------------------------------------------------------------------------------------------------- |
+| `off` (default) | nothing, the detector does not run                                                                         |
+| `observe`       | logged and counted; the response is not changed. Use it to measure and calibrate first                     |
 | `enforce`       | the upstream generation is aborted, then **restarted** in the same stream or the stream is **cut** (below) |
 
 ## How detection works
@@ -37,11 +37,11 @@ reached a ratio of 0.35, while loops climbed to 0.8–0.99.
 `enforce` acts once a channel's repeat ratio reaches `cut_min_ratio` (default: `min_ratio`).
 AIR closes the upstream connection, so vLLM stops generating, and then:
 
-| Where the loop is                                                  | What the client gets                                                                                                                                         |
-| ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| reasoning, no answer text or tool call streamed yet                | **restart**: the request is sent again to the same credential with a new `seed` and a higher `presence_penalty`; the new attempt continues the same stream |
-| the answer text (the client is already reading the answer)         | **cut**: a final chunk with `finish_reason: "length"` and an `air_loop_gate` marker, then `data: [DONE]`                                                    |
-| restarts used up (`max_attempts`), past `retry_deadline`, or the restart request failed | **cut**                                                                                                                                                      |
+| Where the loop is                                                                       | What the client gets                                                                                                                                       |
+| --------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| reasoning, no answer text or tool call streamed yet                                     | **restart**: the request is sent again to the same credential with a new `seed` and a higher `presence_penalty`; the new attempt continues the same stream |
+| the answer text (the client is already reading the answer)                              | **cut**: a final chunk with `finish_reason: "length"` and an `air_loop_gate` marker, then `data: [DONE]`                                                   |
+| restarts used up (`max_attempts`), past `retry_deadline`, or the restart request failed | **cut**                                                                                                                                                    |
 
 The closing chunk of a cut stream tells the client that `length` came from AIR, not from its
 `max_tokens`:
@@ -147,11 +147,11 @@ combination is validated at startup.
 What is watched depends on what the credential sends upstream, not on the endpoint the
 client called:
 
-| Upstream answer                                                                                                              | Streamed                                   | Not streamed                                       |
-| ---------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------ | -------------------------------------------------- |
-| chat completion: `/v1/chat/completions`, and `/v1/responses` / `/v1/messages` **converted** to it                            | restart (reasoning) or cut                 | `force_stream`: restart anywhere, trimmed at the end |
-| native `/v1/responses` (**passthrough**, the vLLM default)                                                                   | cut with `response.incomplete`             | observed only                                      |
-| native `/v1/messages` (**passthrough**, `passthrough_messages: true`)                                                       | cut with `stop_reason: "max_tokens"`       | observed only                                      |
+| Upstream answer                                                                                   | Streamed                             | Not streamed                                         |
+| ------------------------------------------------------------------------------------------------- | ------------------------------------ | ---------------------------------------------------- |
+| chat completion: `/v1/chat/completions`, and `/v1/responses` / `/v1/messages` **converted** to it | restart (reasoning) or cut           | `force_stream`: restart anywhere, trimmed at the end |
+| native `/v1/responses` (**passthrough**, the vLLM default)                                        | cut with `response.incomplete`       | observed only                                        |
+| native `/v1/messages` (**passthrough**, `passthrough_messages: true`)                             | cut with `stop_reason: "max_tokens"` | observed only                                        |
 
 - A converted stream is restarted like a chat stream: the new attempt goes through the same
   conversion, so the client still sees one `response.created` / `message_start`.

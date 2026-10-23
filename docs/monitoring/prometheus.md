@@ -13,20 +13,20 @@ The same metrics can also be **pushed** to an OTLP collector instead of (or in a
 
 ## Available Metrics
 
-| Metric                                     | Type      | Description                                                |
-| ------------------------------------------ | --------- | ---------------------------------------------------------- |
-| `auto_ai_router_credential_rpm_current`    | Gauge     | Current RPM usage per credential                           |
-| `auto_ai_router_credential_tpm_current`    | Gauge     | Current TPM usage per credential                           |
-| `auto_ai_router_credential_banned`         | Gauge     | Ban status per credential (1 = banned)                     |
-| `auto_ai_router_requests_total`            | Counter   | Total requests processed                                   |
-| `auto_ai_router_requests_duration_seconds` | Histogram | Request latency distribution                               |
-| `auto_ai_router_aborted_requests_total`    | Counter   | Client-aborted requests by credential, model, and endpoint |
-| `auto_ai_router_loop_gate_streams_total`   | Counter   | Streams watched by the [loop gate](../advanced/loop_gate.md) |
-| `auto_ai_router_loop_gate_firings_total`   | Counter   | Looping generations seen by the loop gate, by channel      |
-| `auto_ai_router_loop_gate_words_after_firing_total` | Counter | Words generated after a loop gate firing           |
-| `auto_ai_router_loop_gate_restarts_total`  | Counter   | Looping generations the loop gate restarted (enforce)      |
-| `auto_ai_router_loop_gate_recovered_total` | Counter   | Restarted generations that finished without a cut          |
-| `auto_ai_router_loop_gate_cuts_total`      | Counter   | Streams the loop gate cut short (enforce)                  |
+| Metric                                              | Type      | Description                                                  |
+| --------------------------------------------------- | --------- | ------------------------------------------------------------ |
+| `auto_ai_router_credential_rpm_current`             | Gauge     | Current RPM usage per credential                             |
+| `auto_ai_router_credential_tpm_current`             | Gauge     | Current TPM usage per credential                             |
+| `auto_ai_router_credential_banned`                  | Gauge     | Ban status per credential (1 = banned)                       |
+| `auto_ai_router_requests_total`                     | Counter   | Total requests processed                                     |
+| `auto_ai_router_requests_duration_seconds`          | Histogram | Request latency distribution                                 |
+| `auto_ai_router_aborted_requests_total`             | Counter   | Client-aborted requests by credential, model, and endpoint   |
+| `auto_ai_router_loop_gate_streams_total`            | Counter   | Streams watched by the [loop gate](../advanced/loop_gate.md) |
+| `auto_ai_router_loop_gate_firings_total`            | Counter   | Looping generations seen by the loop gate, by channel        |
+| `auto_ai_router_loop_gate_words_after_firing_total` | Counter   | Words generated after a loop gate firing                     |
+| `auto_ai_router_loop_gate_restarts_total`           | Counter   | Looping generations the loop gate restarted (enforce)        |
+| `auto_ai_router_loop_gate_recovered_total`          | Counter   | Restarted generations that finished without a cut            |
+| `auto_ai_router_loop_gate_cuts_total`               | Counter   | Streams the loop gate cut short (enforce)                    |
 
 ## Per-Key Metrics
 
