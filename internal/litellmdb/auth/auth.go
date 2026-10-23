@@ -181,6 +181,8 @@ func (a *Authenticator) ValidateTokenForModel(ctx context.Context, rawToken, mod
 // fetchTokenFromDB loads token from database with full budget hierarchy
 // Single query loads: Token → User → Team → Organization → Memberships
 // All with their budget data (embedded or external via BudgetTable)
+//
+//nolint:gocyclo // flat mapping of nullable DB columns
 func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string) (*models.TokenInfo, error) {
 	if !a.pool.IsHealthy() {
 		return nil, models.ErrConnectionFailed

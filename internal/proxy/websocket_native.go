@@ -219,6 +219,7 @@ func (s *nativeWSSession) clientEvent(body []byte) bool {
 	}
 }
 
+//nolint:gocyclo // linear guard clauses with early returns, no nested logic
 func (s *nativeWSSession) create(event map[string]json.RawMessage) bool {
 	if s.active != nil || (s.pending != nil && !s.waitingForTools) {
 		s.sendError("response_in_progress", "Wait for the current response or send response.steer")

@@ -172,6 +172,8 @@ func stripVisionMarkersFromContent(item map[string]any) (changed, empty bool) {
 // visionInjectAllowed reports whether a description may be prepended to the answer:
 // not when the client asked for machine-readable output (structured output or a
 // forced tool call).
+//
+//nolint:gocyclo // flat lookup table, one branch per case
 func visionInjectAllowed(root map[string]any, format visionBodyFormat) bool {
 	switch format {
 	case visionFormatChat:

@@ -116,6 +116,7 @@ func (c *VideoConfig) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
+//nolint:gocyclo // flat sequence of independent validation checks
 func (c VideoConfig) Validate() error {
 	if !c.Enabled {
 		return nil

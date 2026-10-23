@@ -98,6 +98,7 @@ func (s *PostgresStore) GetJob(ctx context.Context, org, id string) (*Job, error
 	return job, err
 }
 
+//nolint:gocyclo // state-machine dispatch, one branch per state
 func (s *PostgresStore) RequestCancel(ctx context.Context, org, id string) (*Job, error) {
 	job, err := s.GetJob(ctx, org, id)
 	if err != nil {

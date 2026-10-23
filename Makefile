@@ -1,4 +1,4 @@
-.PHONY: build run clean test fmt vet lint vuln install-lint format help install-deps docker-build docs-install docs-serve docs-build docs-deploy test-clean kafka-up kafka-down kafka-logs kafka-ps kafka-clean kafka-clickhouse-client
+.PHONY: build run clean test fmt vet lint cyclo vuln install-lint format help install-deps docker-build docs-install docs-serve docs-build docs-deploy test-clean kafka-up kafka-down kafka-logs kafka-ps kafka-clean kafka-clickhouse-client
 
 # Build variables
 BINARY_NAME=auto_ai_router
@@ -41,6 +41,7 @@ help:
 	@echo "  fmt                  - Format code"
 	@echo "  vet                  - Run go vet"
 	@echo "  lint                 - Run golangci-lint (requires installation)"
+	@echo "  cyclo                - Run gocyclo and write gocyclo.html report"
 	@echo "  install-lint         - Install pinned golangci-lint"
 	@echo "  vuln                 - Run govulncheck (latest, same as CI)"
 	@echo "  format               - Format code and run pre-commit checks"
@@ -173,6 +174,17 @@ lint:
 	fi
 	export PATH=/usr/local/go/bin:$$(go env GOPATH)/bin:$$PATH && golangci-lint run ./...
 	@echo "Lint complete"
+
+## cyclo: Run gocyclo (settings in .golangci.yml) and write gocyclo.html.
+## Fails when any function is above the threshold, after writing the report.
+cyclo:
+	@export PATH=/usr/local/go/bin:$$(go env GOPATH)/bin:$$PATH; \
+	status=0; \
+	golangci-lint run --enable-only gocyclo --max-issues-per-linter=0 --max-same-issues=0 \
+		--output.json.path gocyclo.json --output.text.path stdout ./... || status=$$?; \
+	$(GO) run ./cmd/cycloreport -commit $(COMMIT) < gocyclo.json > gocyclo.html || exit 1; \
+	echo "Report: gocyclo.html"; \
+	exit $$status
 
 ## vuln: Run govulncheck. Unpinned (@latest) on purpose, like CI: the
 ## vulnerability DB and the tool move together, so a new advisory fails here

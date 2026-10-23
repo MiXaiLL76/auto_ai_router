@@ -74,6 +74,8 @@ func (w *Worker) RunOnce(ctx context.Context) error {
 	}
 	return w.process(ctx, j)
 }
+
+//nolint:gocyclo // state-machine dispatch, one branch per state
 func (w *Worker) process(ctx context.Context, j *Job) error {
 	if j.CancelRequested && j.State == StateReserving {
 		_, err := w.cfg.Store.Transition(ctx, j, StateCancelRequested, JobUpdate{})
