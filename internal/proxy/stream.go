@@ -501,6 +501,9 @@ var (
 	// cannot possibly carry usage/total_tokens — skip the unmarshal attempt
 	// entirely rather than paying for it on every content-only chunk.
 	sseUsageNeedle = []byte(`"usage"`)
+	// sseTypeNeedle prefilters Responses / Messages events, which all carry a
+	// "type".
+	sseTypeNeedle = []byte(`"type"`)
 	// sseWebSearchCallNeedle and sseAnnotationsNeedle catch the two other
 	// shapes converter.ExtractTokenUsageWithOptions can derive a non-nil,
 	// billable TokenUsage from *without* any "usage" key present at all:
@@ -815,8 +818,12 @@ func (p *Proxy) handleTransformedStreaming(
 	// converted to Responses / Messages events, or a Messages stream relayed as
 	// is. The closing events it adds go through the same conversion. Its
 	// reads run in the transform goroutine, which ends before this returns.
+	// A converter drops SSE comments, so keepalives during a restart go
+	// straight to the client stream: the converter is blocked in its read
+	// between two events, nothing else writes to pw meanwhile.
 	if loopGate := p.newLoopGateObserver(respCtx(resp), logCtx, modelID, resp.StatusCode, loopGateFormatOf(logCtx)); loopGate != nil {
 		defer loopGate.finish()
+		loopGate.keepalive = pw
 		providerReader = loopGate.wrap(resp.Body)
 	}
 	if detectProviderStreamError {
@@ -1963,7 +1970,7 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 		providerStreamError   = &proxyStreamErrorCapture{}
 	)
 	providerReader := io.Reader(resp.Body)
-	if loopGate := p.newLoopGateObserver(respCtx(resp), logCtx, metricModelID(modelID, logCtx), resp.StatusCode, loopgate.FormatResponses); loopGate != nil {
+	if loopGate := p.newLoopGateObserver(respCtx(resp), logCtx, modelID, resp.StatusCode, loopgate.FormatResponses); loopGate != nil {
 		defer loopGate.finish()
 		providerReader = loopGate.wrap(resp.Body)
 	}

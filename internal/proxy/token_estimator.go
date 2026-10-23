@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"strings"
-	"sync"
 	"unicode"
 	"unicode/utf8"
 
@@ -417,23 +416,13 @@ func (p *Proxy) setPromptTokensEstimate(logCtx *RequestLogContext, body []byte, 
 	if logCtx == nil || !p.tiktokenEnabled {
 		return
 	}
+	// Re-armed for another attempt's body: the memoized value is stale.
+	logCtx.promptTokensEstimateReady = false
 	logCtx.promptTokensEstimateFn = func() int {
 		tokens := estimatePromptTokensForModel(body, model)
 		tokens = addNativeWSHistoryTokens(logCtx.Context(), tokens)
 		return tokens
 	}
-}
-
-// lazyPromptTokensEstimate returns a memoized local estimate of body's prompt
-// tokens, for a caller that needs it before logCtx's estimate is armed; 0
-// with tiktoken_enabled=false.
-func (p *Proxy) lazyPromptTokensEstimate(body []byte, model string) func() int {
-	return sync.OnceValue(func() int {
-		if !p.tiktokenEnabled {
-			return 0
-		}
-		return estimatePromptTokensForModel(body, model)
-	})
 }
 
 func (a *completionTokenAccumulator) AddChunk(chunk []byte) {
@@ -505,7 +494,7 @@ func appendDeltaTextForPayload(b *strings.Builder, payload []byte) {
 	if bytes.Contains(payload, []byte(`"content_block_delta"`)) {
 		appendMessagesDeltaText(b, payload)
 	}
-	if bytes.Contains(payload, []byte(`"type"`)) {
+	if bytes.Contains(payload, sseTypeNeedle) {
 		appendResponsesDeltaText(b, payload)
 	}
 }

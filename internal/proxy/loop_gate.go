@@ -131,7 +131,7 @@ func loopGateRestartBody(body []byte, presencePenalty float64, restart int, rand
 	}
 	seed := randomSeed
 	var clientSeed int64
-	if raw, ok := top["seed"]; ok && !bytes.Equal(raw, []byte("null")) && json.Unmarshal(raw, &clientSeed) == nil {
+	if raw, ok := top["seed"]; ok && !isJSONNull(raw) && json.Unmarshal(raw, &clientSeed) == nil {
 		seed = clientSeed + int64(restart)
 	}
 	top["seed"] = json.RawMessage(strconv.FormatInt(seed, 10))
@@ -164,7 +164,9 @@ func loopGateJSONObject(body []byte) (map[string]json.RawMessage, error) {
 //   - while only reasoning has been streamed, the upstream generation is
 //     aborted and restarted with a new seed and a higher presence_penalty; the
 //     new attempt's events continue the same client stream (the looped
-//     reasoning the client already received stays);
+//     reasoning the client already received stays). While the new attempt is
+//     on its way (request, prefill), the client gets an SSE comment every
+//     loopGateKeepaliveInterval;
 //   - otherwise, or when restarts run out, the stream ends right after the
 //     line that tipped it: a final chunk with finish_reason "length" and an
 //     air_loop_gate marker, then [DONE]. The upstream body is closed so the
@@ -187,8 +189,12 @@ type loopGateObserver struct {
 	normalizeUsage bool            // the upstream body was wrapped in the usage normalizer; restarts get it too
 	respawn        loopGateRespawn // nil = no restarts
 	visionInject   bool            // descriptions were injected into attempt 1: never restart
+	keepalive      io.Writer       // where waiting keepalives go; nil = into the stream read through the gate
+	stripUsage     bool            // vLLM sends the running usage on every chunk for the gate only: wrap drops it
 	restarts       int
-	abortedWords   int // words of restarted attempts, missing from the final usage
+	abortedTokens  int                    // tokens of restarted attempts, missing from the final usage
+	restarting     chan loopGateRestarted // the next attempt being sent; nil = none
+	restartCut     *loopGateCut           // the loop being restarted, cut with it when the restart fails
 
 	promptTokens func() int               // local prompt token estimate, 0 = unknown
 	lastUsage    loopGateChatUsage        // chat: the last usage the current attempt reported
@@ -256,6 +262,7 @@ func (p *Proxy) newLoopGateObserver(ctx context.Context, logCtx *RequestLogConte
 	o := p.newLoopGateObserverWith(ctx, logCtx, modelID, settings, format)
 	o.respawn = logCtx.loopGateRespawn
 	o.visionInject = logCtx.visionInject != nil
+	o.stripUsage = logCtx.loopGateStripUsage
 	p.metrics.RecordLoopGateStream(o.credential, o.model, string(settings.Mode))
 	return o
 }
@@ -269,7 +276,7 @@ func (p *Proxy) newLoopGateObserverWith(ctx context.Context, logCtx *RequestLogC
 		settings:     settings,
 		format:       format,
 		credential:   logCtx.Credential.Name,
-		modelID:      modelID,
+		modelID:      metricModelID(modelID, logCtx),
 		model:        metricModelID(modelID, logCtx),
 		publicModel:  clientVisibleResponseModel(logCtx, modelID),
 		requestID:    logCtx.RequestID,
@@ -296,10 +303,18 @@ func (o *loopGateObserver) newDetector() *loopgate.Detector {
 // wrap returns the reader the stream handler reads instead of body.
 func (o *loopGateObserver) wrap(body io.ReadCloser) io.Reader {
 	o.upstream = body
+	if o.stripUsage {
+		return newLoopGateUsageStripReader(o)
+	}
 	return o
 }
 
 func (o *loopGateObserver) Read(p []byte) (int, error) {
+	for len(o.pending) == 0 && o.restarting != nil {
+		if err := o.awaitRestart(); err != nil {
+			return 0, err
+		}
+	}
 	if len(o.pending) > 0 {
 		n := copy(p, o.pending)
 		o.pending = o.pending[n:]
@@ -384,12 +399,10 @@ func (o *loopGateObserver) observeLine(line []byte) {
 	switch {
 	case o.responsesOut != nil:
 		o.responsesOut.add(payload)
-	case o.format == loopgate.FormatChat && bytes.Contains(payload, sseUsageNeedle):
-		var chunk struct {
-			Usage *loopGateChatUsage `json:"usage"`
-		}
-		if json.Unmarshal(payload, &chunk) == nil && chunk.Usage != nil {
-			o.lastUsage = *chunk.Usage
+	case o.format == loopgate.FormatChat:
+		var usage loopGateChatUsage
+		if start, end, ok := chatChunkUsageSpan(payload); ok && json.Unmarshal(payload[start:end], &usage) == nil {
+			o.lastUsage = usage
 		}
 	}
 }
@@ -401,9 +414,9 @@ type loopGateChatUsage struct {
 	TotalTokens      int `json:"total_tokens"`
 }
 
-// cutUsage returns the usage of a cut attempt: what the engine last reported
-// (vLLM's continuous_usage_stats is exact), else the prompt estimate and the
-// streamed words as tokens.
+// cutUsage returns the usage of a cut or restarted attempt: what the engine
+// last reported (vLLM's continuous_usage_stats, which the gate asks for, is
+// exact), else the prompt estimate and the streamed words as tokens.
 func (o *loopGateObserver) cutUsage() loopGateChatUsage {
 	u := o.lastUsage
 	if u.PromptTokens <= 0 && o.promptTokens != nil {
@@ -427,11 +440,16 @@ func (o *loopGateObserver) channel(name string) *loopgate.Channel {
 // is abandoned either way, then restarted or cut.
 func (o *loopGateObserver) onLoop(ch string) {
 	_ = o.upstream.Close()
-	if o.canRestart(ch) && o.restart(ch) {
+	c := o.channel(ch)
+	cut := &loopGateCut{channel: ch, words: c.Words(), ratio: c.Ratio(), elapsed: o.now().Sub(o.start)}
+	if o.canRestart(ch) {
+		o.startRestart(cut)
+		// The line that tipped the loop ended with its own "\n"; the blank
+		// line closes its event before keepalives and the new attempt's events.
+		o.pending = []byte("\n")
 		return
 	}
-	c := o.channel(ch)
-	o.cut = &loopGateCut{channel: ch, words: c.Words(), ratio: c.Ratio(), elapsed: o.now().Sub(o.start)}
+	o.cut = cut
 	o.pending = o.cutTail()
 }
 
@@ -442,54 +460,161 @@ func (o *loopGateObserver) canRestart(ch string) bool {
 	return o.format == loopgate.FormatChat &&
 		ch == loopgate.ChannelReasoning &&
 		!o.detector.AnswerStarted() &&
-		o.respawn != nil &&
 		!o.visionInject &&
+		o.restartAllowed(o.respawn)
+}
+
+// restartAllowed reports whether max_attempts and retry_deadline allow an
+// attempt after the current one, sent with respawn.
+func (o *loopGateObserver) restartAllowed(respawn loopGateRespawn) bool {
+	return respawn != nil &&
 		o.restarts+1 < o.settings.MaxAttempts &&
 		o.now().Sub(o.start) < o.settings.RetryDeadline
 }
 
-// restart replaces the upstream with a new attempt. false = the restart
-// request failed, and the stream is cut instead.
-func (o *loopGateObserver) restart(ch string) bool {
-	c := o.channel(ch)
-	penalty := o.settings.PresencePenaltyForRestart(o.restarts + 1)
-	body, err := o.respawn(o.restarts+1, penalty)
-	if err != nil {
-		o.p.logger.WarnContext(o.ctx, "Loop gate: restart failed, cutting the stream",
-			"credential", o.credential, "model", o.model, "attempt", o.restarts+2,
-			"error", err, "request_id", o.requestID)
-		return false
-	}
-	if o.normalizeUsage {
-		body, _ = modelutils.NewUsageNormalizingReadCloser(body, o.publicModel)
-	}
+// nextRestart returns the number of the restart after the current attempt
+// and its presence_penalty.
+func (o *loopGateObserver) nextRestart() (int, float64) {
+	restart := o.restarts + 1
+	return restart, o.settings.PresencePenaltyForRestart(restart)
+}
 
-	o.reportRestart(ch, c.Words(), c.Ratio(), o.now().Sub(o.start), o.restarts+2, penalty, true)
+func (o *loopGateObserver) warnRestartFailed(err error, fallback string) {
+	o.p.logger.WarnContext(o.ctx, "Loop gate: restart failed, "+fallback,
+		"credential", o.credential, "model", o.model, "attempt", o.restarts+2,
+		"error", err, "request_id", o.requestID)
+}
+
+// loopGateKeepaliveInterval is how often a client stream waiting for a
+// restarted attempt gets a keepalive: the new attempt's request and prefill
+// can outlast the read timeout of a proxy or SDK in front of the client.
+var loopGateKeepaliveInterval = 15 * time.Second
+
+// loopGateKeepalive is an SSE comment: clients and the converters skip it.
+var loopGateKeepalive = []byte(": air loop gate restart\n\n")
+
+// loopGateRestarted is the outcome of a restart request: the new attempt's
+// stream, once its first bytes arrived, or the error.
+type loopGateRestarted struct {
+	body    io.ReadCloser
+	penalty float64
+	err     error
+}
+
+// startRestart sends the next attempt in the background; Read waits for it
+// in awaitRestart, sending keepalives meanwhile.
+func (o *loopGateObserver) startRestart(cut *loopGateCut) {
+	restart, penalty := o.nextRestart()
+	respawn, normalize, model := o.respawn, o.normalizeUsage, o.publicModel
+	done := make(chan loopGateRestarted, 1)
+	o.restarting, o.restartCut = done, cut
+	go func() {
+		body, err := respawn(restart, penalty)
+		if err == nil {
+			if normalize {
+				body, _ = modelutils.NewUsageNormalizingReadCloser(body, model)
+			}
+			body, err = loopGatePrefetch(body)
+		}
+		done <- loopGateRestarted{body: body, penalty: penalty, err: err}
+	}()
+}
+
+// awaitRestart waits for the restarted attempt, or for one keepalive
+// interval: the keepalive is then queued for the client (or written to
+// o.keepalive). An error means the client is gone.
+func (o *loopGateObserver) awaitRestart() error {
+	timer := time.NewTimer(loopGateKeepaliveInterval)
+	defer timer.Stop()
+	select {
+	case r := <-o.restarting:
+		o.restarting = nil
+		o.restarted(r)
+	case <-timer.C:
+		if o.keepalive == nil {
+			o.pending = loopGateKeepalive
+			return nil
+		}
+		if _, err := o.keepalive.Write(loopGateKeepalive); err != nil {
+			return err
+		}
+	case <-o.ctx.Done():
+		return o.ctx.Err()
+	}
+	return nil
+}
+
+// restarted continues the stream with the new attempt, or cuts it at the
+// restarted loop when the restart failed.
+func (o *loopGateObserver) restarted(r loopGateRestarted) {
+	cut := o.restartCut
+	o.restartCut = nil
+	if r.err != nil {
+		o.warnRestartFailed(r.err, "cutting the stream")
+		o.cut = cut
+		o.pending = o.cutTail()
+		return
+	}
+	o.reportRestart(cut, o.restarts+2, r.penalty, true)
 	o.reportAttempt("loop_gate_restart")
-	o.abortedWords += o.detector.Content().Words() + o.detector.Reasoning().Words()
+	o.abortedTokens += o.cutUsage().TotalTokens
 	o.restarts++
-	o.upstream = body
+	o.upstream = r.body
 	o.detector = o.newDetector()
 	o.lastUsage = loopGateChatUsage{}
 	o.firings = nil
 	o.carry, o.carryDropped = o.carry[:0], false
-	// The line that tipped the loop ended with its own "\n"; the blank line
-	// closes its event before the new attempt's events.
-	o.pending = []byte("\n")
-	return true
 }
 
-// reportRestart records a restart: attempt is the number of the new attempt,
-// stream whether it continues a client stream (false: a forced stream).
-func (o *loopGateObserver) reportRestart(ch string, words int, ratio float64, elapsed time.Duration, attempt int, penalty float64, stream bool) {
-	o.p.metrics.RecordLoopGateRestart(o.credential, o.model, ch)
+// loopGatePrefetch waits for the first bytes of a restarted attempt's stream:
+// until then the engine is still on prefill, and a stream that fails or ends
+// before sending anything is a failed restart.
+func loopGatePrefetch(body io.ReadCloser) (io.ReadCloser, error) {
+	head := make([]byte, 4096)
+	n, err := body.Read(head)
+	if n == 0 && err != nil {
+		_ = body.Close()
+		if errors.Is(err, io.EOF) {
+			err = io.ErrUnexpectedEOF
+		}
+		return nil, err
+	}
+	return &loopGatePrefetched{head: head[:n], err: err, body: body}, nil
+}
+
+// loopGatePrefetched is a stream whose first read was made ahead.
+type loopGatePrefetched struct {
+	head []byte
+	err  error // the first read's error, returned once head is drained
+	body io.ReadCloser
+}
+
+func (b *loopGatePrefetched) Read(p []byte) (int, error) {
+	if len(b.head) > 0 {
+		n := copy(p, b.head)
+		b.head = b.head[n:]
+		return n, nil
+	}
+	if b.err != nil {
+		return 0, b.err
+	}
+	return b.body.Read(p)
+}
+
+func (b *loopGatePrefetched) Close() error { return b.body.Close() }
+
+// reportRestart records the restart of the loop c: attempt is the number of
+// the new attempt, stream whether it continues a client stream (false: a
+// forced stream).
+func (o *loopGateObserver) reportRestart(c *loopGateCut, attempt int, penalty float64, stream bool) {
+	o.p.metrics.RecordLoopGateRestart(o.credential, o.model, c.channel)
 	o.p.logger.WarnContext(o.ctx, "Loop gate: generation restarted",
 		"credential", o.credential,
 		"model", o.model,
-		"channel", ch,
-		"words", words,
-		"ratio", ratio,
-		"elapsed_s", elapsed.Seconds(),
+		"channel", c.channel,
+		"words", c.words,
+		"ratio", c.ratio,
+		"elapsed_s", c.elapsed.Seconds(),
 		"attempt", attempt,
 		"presence_penalty", penalty,
 		"stream", stream,
@@ -771,13 +896,6 @@ func (o *loopGateObserver) reportRecovered(attempts int, elapsed time.Duration) 
 		"request_id", o.requestID)
 }
 
-// consumeAbortedTokens counts an estimate of restarted attempts' tokens
-// against the credential's TPM: the final usage covers the last attempt only,
-// but the restarted ones used the engine too. Not billed to the client.
-func (o *loopGateObserver) consumeAbortedTokens(words int) {
-	o.consumeTokens(loopGateWordsToTokens(words))
-}
-
 // consumeTokens counts tokens against the credential's (and model's) TPM.
 func (o *loopGateObserver) consumeTokens(tokens int) {
 	if tokens <= 0 || o.p.rateLimiter == nil {
@@ -791,26 +909,37 @@ func (o *loopGateObserver) consumeTokens(tokens int) {
 
 // finish closes the stream when the handler returns. The handler closes only
 // the original body, so a restarted attempt's body is closed here: a client
-// gone mid-stream must not leave the engine generating.
+// gone mid-stream must not leave the engine generating. A restart still on
+// its way is closed when it arrives.
 func (o *loopGateObserver) finish() {
+	outcome := ""
+	if o.restarting != nil {
+		// The client went away while the restart was on its way: the
+		// abandoned attempt used the engine all the same.
+		go func(done <-chan loopGateRestarted) {
+			if r := <-done; r.body != nil {
+				_ = r.body.Close()
+			}
+		}(o.restarting)
+		o.restarting, o.restartCut = nil, nil
+		o.abortedTokens += o.cutUsage().TotalTokens
+		outcome = "loop_gate_restart"
+	}
 	if o.restarts > 0 {
 		_ = o.upstream.Close()
 	}
-	outcome := ""
 	if o.cut != nil {
 		outcome = "loop_gate_cut"
 		o.reportCut(o.restarts + 1)
 	}
 	o.finishAttempt(outcome)
-	if o.restarts == 0 {
-		return
-	}
-	if o.cut == nil {
+	// The final usage, the upstream's or the cut tail's, covers the last
+	// attempt only: the restarted ones (prompt and generated tokens) used the
+	// engine too. Counted against the credential's TPM, not billed.
+	o.consumeTokens(o.abortedTokens)
+	if o.restarts > 0 && outcome == "" {
 		o.reportRecovered(o.restarts+1, o.now().Sub(o.start))
 	}
-	// The final usage, the upstream's or the cut tail's, covers the last
-	// attempt only.
-	o.consumeAbortedTokens(o.abortedWords)
 }
 
 // loopGateWordsToTokens estimates tokens from whitespace-separated words

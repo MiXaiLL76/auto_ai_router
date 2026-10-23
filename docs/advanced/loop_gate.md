@@ -61,9 +61,22 @@ The closing chunk of a cut stream tells the client that `length` came from AIR, 
 A restarted stream is not marked. Its reasoning keeps the looped part of the abandoned
 attempt: the client already received it.
 
+While the new attempt is on its way (the request, then vLLM's prefill until its first chunk),
+the client gets an SSE comment (`: air loop gate restart`) every 15 seconds, so a proxy or SDK
+read timeout in front of it does not drop the stream. SSE clients skip comments. A
+non-streamed request (`force_stream`) has no stream to keep alive: the client waits for the
+whole answer anyway.
+
+For a streamed chat completion to vLLM, enforce mode adds
+`stream_options.continuous_usage_stats: true` to the request, so a cut or restarted attempt
+has the usage the engine reported up to that point (exact, prompt included), not an estimate.
+The running usage is replaced with `null` on every chunk with choices before the client and
+AIR's accounting see it; the closing usage chunk (`choices: []`) keeps it. A client that asked
+for `continuous_usage_stats` itself gets it unchanged.
+
 ### Non-streamed requests
 
-With `force_stream: true` (the default), enforce mode sends a non-streamed chat completion
+With `force_stream: true` (off by default), enforce mode sends a non-streamed chat completion
 upstream as a stream (`stream: true`, `stream_options.include_usage`, and for vLLM
 `continuous_usage_stats`). AIR reads it through the gate and returns the one
 `chat.completion` the client asked for, rebuilt from the chunks: text and reasoning
@@ -80,9 +93,35 @@ upstream reported none: the local prompt estimate plus 4 tokens per 3 streamed w
 Non-streamed `/v1/responses` (`passthrough_responses: false`) and `/v1/messages` requests
 converted to chat completions are gated the same way.
 
-With `force_stream: false`, or in `observe` mode, non-streamed responses are only scanned
-after they arrive: firings are logged and counted (at the word a stream would have fired
-on), the response is not changed.
+With `force_stream: false` (the default), or in `observe` mode, non-streamed responses are
+only scanned after they arrive: firings are logged and counted (at the word a stream would
+have fired on), the response is not changed.
+
+!!! warning "Before you turn on `force_stream`"
+    Every non-streamed chat completion to the credential then goes upstream as a stream, loop or
+    no loop, and the client gets an answer rebuilt by AIR, not the one vLLM returns for a
+    non-streamed request:
+
+    - **Tool calls** come from vLLM's streaming tool parser, which is less reliable than the
+      non-streamed one for some parsers (`hermes`, `qwen3_coder`, ...): malformed or missing
+      `tool_calls` where the non-streamed request had them right.
+    - **Rejected options:** vLLM refuses `best_of` and `use_beam_search` with `stream: true`
+      (400).
+    - **Dropped fields:** the rebuild keeps id, model, created, system_fingerprint, usage,
+      and per choice: role, content, reasoning, refusal, tool_calls, logprobs (`content`),
+      finish_reason and stop_reason. It drops `prompt_logprobs`, `prompt_token_ids` /
+      `token_ids` (`return_token_ids`), `kv_transfer_params`, `message.annotations`,
+      `service_tier` and any other vLLM extension.
+    - **Response size limit:** `max_response_body_size` applies to the bytes of the stream,
+      not of the rebuilt JSON. A stream is several times larger than the answer (an event
+      envelope per token, plus the usage on every chunk with `continuous_usage_stats`), so a
+      long answer that fits as JSON can fail with "response too large". Raise the limit for
+      such credentials, or keep `force_stream` off.
+    - Each restart adds the time the loop took to show up, and the client sees nothing
+      until the last attempt ends.
+
+    Turn it on per model (`models[].loop_gate.force_stream: true`) for clients that do not
+    stream and do not depend on the above, after checking their requests in `observe`.
 
 !!! warning "Side effects"
 \- A cut stream ends with a usage chunk (`choices: []`): the last usage the upstream reported in
@@ -99,10 +138,11 @@ the descriptions were injected into the first attempt only. Such streams are cut
 ### Billing and rate limits
 
 The client is billed for what the returned attempt reports in `usage`. The abandoned
-attempts are not billed, but they used the engine, so their tokens count against the
-credential's TPM: their own usage when vLLM reported it (non-streamed requests), otherwise
-an estimate of 4 tokens per 3 words. This holds for cut streams too: their usage covers the
-last attempt only.
+attempts are not billed, but they used the engine (each one ran the prefill again), so their
+prompt and generated tokens count against the credential's and the model's TPM: the running
+usage vLLM reported (`continuous_usage_stats`), otherwise the local prompt estimate plus 4
+tokens per 3 streamed words. This holds for cut streams too: their usage covers the last
+attempt only.
 
 A restart is a request to the same credential: it counts toward the credential's and the
 model's RPM (while under the limit: a running stream is never held or refused for RPM),
@@ -122,7 +162,7 @@ loop_gate:
   max_attempts: 3 # first attempt included; 1 = never restart, only cut
   retry_deadline: 10m # no restart later than this after the stream started
   retry_presence_penalty: [1.0, 1.5] # restart 1, restart 2 and later
-  force_stream: true # enforce: send non-streamed chat completions upstream as a stream
+  force_stream: false # enforce: send non-streamed chat completions upstream as a stream (see the warning above)
 
 credentials:
   - name: vllm_qwen

@@ -226,6 +226,14 @@ func enforceGate(cutMinRatio float64, maxAttempts int) config.LoopGateConfig {
 	}}
 }
 
+// forcedGate is enforceGate with force_stream on.
+func forcedGate(cutMinRatio float64, maxAttempts int) config.LoopGateConfig {
+	g := enforceGate(cutMinRatio, maxAttempts)
+	on := true
+	g.ForceStream = &on
+	return g
+}
+
 // loopGateSSEChunks parses the data payloads of a client-visible SSE body.
 func loopGateSSEChunks(t *testing.T, body string) (chunks []map[string]any, done bool) {
 	t.Helper()
@@ -746,7 +754,7 @@ func TestLoopGate_NonStreamIsStreamedUpstreamAndRestarted(t *testing.T) {
 		}
 		return writeLoopGateStream(w, r, "c2", loopGateWords(200), loopGateWords(300), "stop")
 	})
-	prx := newLoopGateProxyWithGate(t, url, enforceGate(0, 3))
+	prx := newLoopGateProxyWithGate(t, url, forcedGate(0, 3))
 
 	w := postChat(t, prx, loopGateNonStreamRequest)
 
@@ -783,7 +791,7 @@ func TestLoopGate_NonStreamRestartsAnswerLoopsToo(t *testing.T) {
 		}
 		return writeLoopGateStream(w, r, "c2", nil, loopGateWords(30), "stop")
 	})
-	prx := newLoopGateProxyWithGate(t, url, enforceGate(0, 3))
+	prx := newLoopGateProxyWithGate(t, url, forcedGate(0, 3))
 
 	out := decodeCompletion(t, postChat(t, prx, loopGateNonStreamRequest))
 
@@ -800,7 +808,7 @@ func TestLoopGate_NonStreamReturnsTrimmedAttemptWhenRestartsRunOut(t *testing.T)
 	sv, url := newScriptedVLLM(t, func(n int, w http.ResponseWriter, r *http.Request) bool {
 		return writeLoopGateEndlessField(w, r, fmt.Sprintf("c%d", n+1), "content")
 	})
-	prx := newLoopGateProxyWithGate(t, url, enforceGate(0, 3))
+	prx := newLoopGateProxyWithGate(t, url, forcedGate(0, 3))
 
 	out := decodeCompletion(t, postChat(t, prx, loopGateNonStreamRequest))
 
@@ -832,7 +840,7 @@ func TestLoopGate_NonStreamErrorInsideStreamKeepsItsStatus(t *testing.T) {
 		_, _ = io.WriteString(w, "data: {\"error\":{\"object\":\"error\",\"message\":\"This model's maximum context length is 8192 tokens\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}\n\ndata: [DONE]\n\n")
 		return false
 	})
-	prx := newLoopGateProxyWithGate(t, url, enforceGate(0, 3))
+	prx := newLoopGateProxyWithGate(t, url, forcedGate(0, 3))
 
 	w := postChat(t, prx, loopGateNonStreamRequest)
 
@@ -885,7 +893,7 @@ func TestLoopGate_NonStreamResponsesAPIOverVLLM(t *testing.T) {
 		return writeLoopGateStream(w, r, "c2", nil, []string{"final", "answer"}, "stop")
 	})
 	passthrough := false
-	prx := newLoopGateProxyWithModel(t, url, enforceGate(0, 3), config.ModelRPMConfig{PassthroughResponses: &passthrough})
+	prx := newLoopGateProxyWithModel(t, url, forcedGate(0, 3), config.ModelRPMConfig{PassthroughResponses: &passthrough})
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"qwen","input":"hi"}`))
 	req.Header.Set("Authorization", "Bearer master-key")
@@ -917,7 +925,7 @@ func TestLoopGate_NonStreamTrimmedAttemptCarriesRunningUsage(t *testing.T) {
 		}
 		return false
 	})
-	prx := newLoopGateProxyWithGate(t, url, enforceGate(0, 2))
+	prx := newLoopGateProxyWithGate(t, url, forcedGate(0, 2))
 	tpmBefore := prx.rateLimiter.GetCurrentTPM("lg-cred")
 
 	out := decodeCompletion(t, postChat(t, prx, loopGateNonStreamRequest))
@@ -936,6 +944,9 @@ func TestLoopGateStreamBody(t *testing.T) {
 	got, err := loopGateStreamBody([]byte(`{"model":"m","stream":false,"stream_options":{"x":1},"messages":[]}`), false)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"model":"m","stream":true,"stream_options":{"include_usage":true},"messages":[]}`, string(got))
+	got, err = loopGateStreamBody([]byte(`{"model":"m","messages":[]}`), true)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"model":"m","stream":true,"stream_options":{"include_usage":true,"continuous_usage_stats":true},"messages":[]}`, string(got))
 	assert.Equal(t, 1, strings.Count(string(got), `"stream"`), "replaced, not duplicated")
 	_, err = loopGateStreamBody([]byte(`"x"`), false)
 	assert.Error(t, err)
@@ -949,7 +960,7 @@ func TestLoopGate_NonStreamMessagesAPIOverVLLM(t *testing.T) {
 		}
 		return writeLoopGateStream(w, r, "c2", nil, []string{"final", "answer"}, "stop")
 	})
-	prx := newLoopGateProxyWithGate(t, url, enforceGate(0, 3))
+	prx := newLoopGateProxyWithGate(t, url, forcedGate(0, 3))
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"qwen","max_tokens":100,"messages":[{"role":"user","content":"hi"}]}`))
 	req.Header.Set("Authorization", "Bearer master-key")
@@ -1358,7 +1369,7 @@ func TestLoopGate_NonStreamHungUpstreamTimesOut(t *testing.T) {
 		<-r.Context().Done() // the engine hangs mid-generation
 		return true
 	})
-	prx := newLoopGateProxyWith(t, config.CredentialConfig{BaseURL: url}, enforceGate(0, 3), config.ModelRPMConfig{}, 300*time.Millisecond)
+	prx := newLoopGateProxyWith(t, config.CredentialConfig{BaseURL: url}, forcedGate(0, 3), config.ModelRPMConfig{}, 300*time.Millisecond)
 
 	start := time.Now()
 	w := postChat(t, prx, loopGateNonStreamRequest)
@@ -1378,7 +1389,7 @@ func TestLoopGate_NonStreamFailedRestartStillCountsTheCut(t *testing.T) {
 		writeLoopGateStream(w, r, "c2", nil, loopGateWords(30), "")
 		panic(http.ErrAbortHandler) // the restart's connection drops midway
 	})
-	prx := newLoopGateProxyWithGate(t, url, enforceGate(0, 3))
+	prx := newLoopGateProxyWithGate(t, url, forcedGate(0, 3))
 
 	out := decodeCompletion(t, postChat(t, prx, loopGateNonStreamRequest))
 
@@ -1516,6 +1527,7 @@ func TestLoopGate_OffLeavesRequestsAndStreamsUntouched(t *testing.T) {
 	assert.NotContains(t, bodies[0], "stream", "a non-streamed request is not streamed upstream")
 	assert.NotContains(t, bodies[0], "stream_options")
 	assert.NotContains(t, bodies[1], "seed")
+	assert.Equal(t, map[string]any{"include_usage": true}, bodies[1]["stream_options"], "no running usage asked for")
 	assert.NotContains(t, ws.Body.String(), "air_loop_gate", "a looping stream is not cut")
 	assert.Equal(t, strings.Count(stream, "data: "), strings.Count(ws.Body.String(), "data: "), "every upstream event reaches the client")
 	assert.Zero(t, testutil.CollectAndCount(monitoring.LoopGateStreamsTotal))

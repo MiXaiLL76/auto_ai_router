@@ -57,7 +57,7 @@ func newLoopGateResponsesOutput() *loopGateResponsesOutput {
 
 // add applies one Responses API event payload.
 func (r *loopGateResponsesOutput) add(payload []byte) {
-	if !bytes.Contains(payload, typeKeyNeedle) {
+	if !bytes.Contains(payload, sseTypeNeedle) {
 		return
 	}
 	var ev loopGateResponsesEvent
@@ -107,8 +107,6 @@ func (r *loopGateResponsesOutput) add(payload []byte) {
 		it.arguments.WriteString(ev.Delta)
 	}
 }
-
-var typeKeyNeedle = []byte(`"type"`)
 
 func (r *loopGateResponsesOutput) noteUsage(raw json.RawMessage) {
 	var usage struct {

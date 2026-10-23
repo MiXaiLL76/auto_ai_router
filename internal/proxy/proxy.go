@@ -327,6 +327,9 @@ type RequestLogContext struct {
 	// loopGateSettings are the gate's settings for the current attempt,
 	// meaningful when loopGateFormat is not FormatNone.
 	loopGateSettings config.LoopGateSettings
+	// loopGateStripUsage: the gate asked vLLM for the running usage of the
+	// current streamed attempt, which the client did not ask for.
+	loopGateStripUsage bool
 
 	// keptEmbeddings of embeddingInputs: a failed fanned-out embeddings request
 	// was billed for the inputs the provider had already embedded (see
@@ -1957,13 +1960,14 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// Loop gate (enforce, force_stream): a non-streamed chat completion goes
-		// upstream as a stream so a loop can be stopped before the client gets
-		// anything; collectLoopGateStream rebuilds the chat.completion below.
+		// Loop gate (enforce): a streamed vLLM chat completion asks for the
+		// running usage; with force_stream, a non-streamed one goes upstream as
+		// a stream so a loop can be stopped before the client gets anything
+		// (collectLoopGateStream rebuilds the chat.completion below).
 		logCtx.loopGateFormat, logCtx.loopGateSettings = p.loopGateAttemptFormat(r.Context(), cred, modelID,
 			loopGateUpstreamFormat(cred, r.URL.Path, prepared.passthroughResponses, prepared.passthroughMessages))
 		var loopGateForced *loopGateForcedStream
-		requestBody, loopGateForced = p.loopGateForceStream(r.Context(), cred, modelID, logCtx.loopGateFormat, logCtx.loopGateSettings, streaming, requestBody)
+		requestBody, loopGateForced = p.loopGateUpstreamBody(r.Context(), logCtx, cred, modelID, streaming, requestBody)
 
 		upstreamCtx, cancelUpstream := p.upstreamRequestContext(r)
 		defer cancelUpstream()
@@ -2032,7 +2036,8 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 		if loopGateForced != nil {
 			loopGateForced.respawn = p.loopGateRespawner(r, proxyReq, requestBody, cred.Name, modelID)
-			loopGateForced.promptTokens = p.lazyPromptTokensEstimate(requestBody, realModelID)
+			// The prompt estimate of a cut attempt without upstream usage.
+			p.setPromptTokensEstimate(logCtx, body, realModelID)
 		}
 
 		if p.logger.Enabled(context.Background(), slog.LevelDebug) {

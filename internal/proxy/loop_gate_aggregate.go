@@ -155,10 +155,10 @@ func (a *chatStreamAggregator) add(payload []byte) {
 	if chunk.Model != "" {
 		a.model = chunk.Model
 	}
-	if len(chunk.SystemFingerprint) > 0 && !bytes.Equal(chunk.SystemFingerprint, jsonNullBytes) {
+	if !isJSONNull(chunk.SystemFingerprint) {
 		a.systemFingerprint = append(json.RawMessage(nil), chunk.SystemFingerprint...)
 	}
-	if len(chunk.Usage) > 0 && !bytes.Equal(chunk.Usage, jsonNullBytes) {
+	if !isJSONNull(chunk.Usage) {
 		a.usage = append(json.RawMessage(nil), chunk.Usage...)
 	}
 	if chunk.LoopGate != nil {
@@ -218,7 +218,7 @@ func (a *chatStreamAggregator) add(payload []byte) {
 			fr := *in.FinishReason
 			c.finishReason = &fr
 		}
-		if len(in.StopReason) > 0 && !bytes.Equal(in.StopReason, jsonNullBytes) {
+		if !isJSONNull(in.StopReason) {
 			c.stopReason = append(json.RawMessage(nil), in.StopReason...)
 		}
 		if in.Logprobs != nil {
@@ -228,12 +228,10 @@ func (a *chatStreamAggregator) add(payload []byte) {
 	}
 }
 
-var jsonNullBytes = []byte("null")
-
 // chatStreamErrorStatus recognizes an error event: vLLM sends
 // {"error": {"message", "type", "code"}} (older: {"object": "error", ...}).
 func chatStreamErrorStatus(chunk aggStreamChunk, payload []byte) (int, bool) {
-	isErr := chunk.Object == "error" || (len(chunk.Error) > 0 && !bytes.Equal(chunk.Error, jsonNullBytes))
+	isErr := chunk.Object == "error" || !isJSONNull(chunk.Error)
 	if !isErr {
 		return 0, false
 	}

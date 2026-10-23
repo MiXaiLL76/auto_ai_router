@@ -73,14 +73,16 @@ type LoopGateSettings struct {
 	RetryPresencePenalty []float64 `yaml:"retry_presence_penalty"`
 	// ForceStream makes enforce mode send a non-streamed chat completion
 	// upstream as a stream, so a loop can be stopped and restarted before the
-	// client gets anything; the client still receives one chat.completion.
-	// nil = true. false leaves non-streamed requests to post-hoc observation.
+	// client gets anything; the client still receives one chat.completion,
+	// rebuilt from the chunks. nil = false: the rebuilt answer is not what the
+	// engine returns for a non-streamed request (streaming tool parser, fields
+	// the rebuild drops, no best_of / beam search), so it is opt-in.
 	ForceStream *bool `yaml:"force_stream,omitempty"`
 }
 
 // ForceStreamEnabled reports whether enforce mode streams non-streamed requests.
 func (s LoopGateSettings) ForceStreamEnabled() bool {
-	return s.ForceStream == nil || *s.ForceStream
+	return s.ForceStream != nil && *s.ForceStream
 }
 
 // PresencePenaltyForRestart returns the presence_penalty of restart n (1-based).

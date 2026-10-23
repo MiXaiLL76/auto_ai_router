@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -20,21 +21,45 @@ import (
 // through the gate, restarted on a loop, and rebuilt into the one
 // chat.completion the client asked for.
 type loopGateForcedStream struct {
-	settings     config.LoopGateSettings
-	modelID      string
-	respawn      loopGateRespawn
-	promptTokens func() int // prompt estimate for a cut attempt without upstream usage
+	settings config.LoopGateSettings
+	modelID  string
+	respawn  loopGateRespawn
 }
 
-// loopGateForceStream returns the body to send upstream instead of body and
-// the plan for its response, or (body, nil) when the gate does not apply: a
-// streamed request, an upstream answer the gate does not watch as a chat
-// completion, or enforce/force_stream off in the attempt's settings.
-func (p *Proxy) loopGateForceStream(ctx context.Context, cred *config.CredentialConfig, modelID string, format loopgate.Format, settings config.LoopGateSettings, streaming bool, body []byte) ([]byte, *loopGateForcedStream) {
-	if streaming || format != loopgate.FormatChat || settings.Mode != config.LoopGateEnforce || !settings.ForceStreamEnabled() {
+// loopGateUpstreamBody returns the body to send upstream instead of body for
+// an attempt the gate enforces on as a chat completion, and the plan of a
+// forced stream (nil when the request is not one):
+//
+//   - a streamed request to vLLM asks for continuous_usage_stats, so a cut or
+//     restarted attempt has the engine's exact usage; logCtx.loopGateStripUsage
+//     tells the stream handler to drop the running usage from the chunks the
+//     client gets (unless the client asked for it itself);
+//   - a non-streamed request with force_stream goes upstream as a stream.
+//
+// Any other request, or a body that is not a JSON object, is sent unchanged.
+func (p *Proxy) loopGateUpstreamBody(ctx context.Context, logCtx *RequestLogContext, cred *config.CredentialConfig, modelID string, streaming bool, body []byte) ([]byte, *loopGateForcedStream) {
+	logCtx.loopGateStripUsage = false
+	settings := logCtx.loopGateSettings
+	if logCtx.loopGateFormat != loopgate.FormatChat || settings.Mode != config.LoopGateEnforce {
 		return body, nil
 	}
-	streamBody, err := loopGateStreamBody(body, cred.Type == config.ProviderTypeVLLM)
+	vllm := cred.Type == config.ProviderTypeVLLM
+	if streaming {
+		if !vllm {
+			return body, nil
+		}
+		usageBody, clientAsked, err := loopGateRunningUsageBody(body)
+		if err != nil {
+			p.logger.DebugContext(ctx, "Loop gate: running usage not requested", "error", err)
+			return body, nil
+		}
+		logCtx.loopGateStripUsage = !clientAsked
+		return usageBody, nil
+	}
+	if !settings.ForceStreamEnabled() {
+		return body, nil
+	}
+	streamBody, err := loopGateStreamBody(body, vllm)
 	if err != nil {
 		p.logger.DebugContext(ctx, "Loop gate: request not streamed upstream", "error", err)
 		return body, nil
@@ -44,7 +69,8 @@ func (p *Proxy) loopGateForceStream(ctx context.Context, cred *config.Credential
 
 // loopGateStreamBody turns a non-streamed chat completion request into a
 // streamed one with usage. stream and stream_options are replaced, never
-// added twice (a duplicate key is a 400 for some routers in front of vLLM).
+// added twice (a duplicate key is a 400 for some routers in front of vLLM);
+// a non-streamed request's stream_options is not the client's to keep.
 // continuousUsage asks vLLM for the running usage on every chunk, so an
 // attempt cut short still reports what the engine generated.
 func loopGateStreamBody(body []byte, continuousUsage bool) ([]byte, error) {
@@ -52,31 +78,40 @@ func loopGateStreamBody(body []byte, continuousUsage bool) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	top["stream"] = json.RawMessage("true")
-	top["stream_options"] = json.RawMessage(`{"include_usage":true}`)
+	top["stream"] = rawJSONTrue
+	delete(top, "stream_options")
+	keys := []string{"include_usage"}
 	if continuousUsage {
-		top["stream_options"] = json.RawMessage(`{"include_usage":true,"continuous_usage_stats":true}`)
+		keys = append(keys, "continuous_usage_stats")
+	}
+	if err := setStreamOptionsRaw(top, keys...); err != nil {
+		return nil, err
 	}
 	return json.Marshal(top)
 }
 
-type loopGateAttempt struct {
-	agg   *chatStreamAggregator
-	obs   *loopGateObserver
-	cut   *loopGateCut
-	words int
+// loopGateRunningUsageBody adds continuous_usage_stats to a streamed vLLM chat
+// completion request; clientAsked reports that the client had already asked
+// for it (body is then returned unchanged).
+func loopGateRunningUsageBody(body []byte) (out []byte, clientAsked bool, err error) {
+	top, err := loopGateJSONObject(body)
+	if err != nil {
+		return nil, false, err
+	}
+	if raw, ok := streamOptionsRaw(top)["continuous_usage_stats"]; ok && bytes.Equal(bytes.TrimSpace(raw), rawJSONTrue) {
+		return body, true, nil
+	}
+	if err := setStreamOptionsRaw(top, "include_usage", "continuous_usage_stats"); err != nil {
+		return nil, false, err
+	}
+	out, err = json.Marshal(top)
+	return out, false, err
 }
 
-// tokens returns the attempt's total tokens from its usage, else an estimate
-// of its generated tokens from the word count.
-func (a loopGateAttempt) tokens() int {
-	var usage struct {
-		TotalTokens int `json:"total_tokens"`
-	}
-	if len(a.agg.usage) > 0 && json.Unmarshal(a.agg.usage, &usage) == nil && usage.TotalTokens > 0 {
-		return usage.TotalTokens
-	}
-	return loopGateWordsToTokens(a.words)
+type loopGateAttempt struct {
+	agg *chatStreamAggregator
+	obs *loopGateObserver
+	cut *loopGateCut
 }
 
 // errorBodyReader fails every read with err, so the regular response body
@@ -112,10 +147,8 @@ func (p *Proxy) collectLoopGateStream(ctx context.Context, logCtx *RequestLogCon
 	for n := 1; ; n++ {
 		total = n
 		o := p.newLoopGateObserverWith(ctx, logCtx, plan.modelID, plan.settings, loopgate.FormatChat)
+		o.start = start
 		o.restarts = n - 1
-		if plan.promptTokens != nil {
-			o.promptTokens = plan.promptTokens
-		}
 		if n == 1 {
 			p.metrics.RecordLoopGateStream(o.credential, o.model, string(plan.settings.Mode))
 		}
@@ -141,8 +174,7 @@ func (p *Proxy) collectLoopGateStream(ctx context.Context, logCtx *RequestLogCon
 			break
 		}
 
-		words := o.detector.Content().Words() + o.detector.Reasoning().Words()
-		attempts = append(attempts, loopGateAttempt{agg: agg, obs: o, cut: o.cut, words: words})
+		attempts = append(attempts, loopGateAttempt{agg: agg, obs: o, cut: o.cut})
 		if o.cut == nil {
 			o.finishAttempt("")
 			if n > 1 {
@@ -151,25 +183,21 @@ func (p *Proxy) collectLoopGateStream(ctx context.Context, logCtx *RequestLogCon
 			break
 		}
 
-		restart := n < plan.settings.MaxAttempts && time.Since(start) < plan.settings.RetryDeadline && plan.respawn != nil
-		if !restart {
-			o.finishAttempt("loop_gate_cut")
-			o.reportCut(n)
-			break
+		var next io.ReadCloser
+		if o.restartAllowed(plan.respawn) {
+			restart, penalty := o.nextRestart()
+			var rerr error
+			if next, rerr = plan.respawn(restart, penalty); rerr == nil {
+				o.reportRestart(o.cut, restart+1, penalty, false)
+				o.finishAttempt("loop_gate_restart")
+				body = next
+				continue
+			}
+			o.warnRestartFailed(rerr, "answering with the trimmed attempt")
 		}
-		penalty := plan.settings.PresencePenaltyForRestart(n)
-		next, rerr := plan.respawn(n, penalty)
-		if rerr != nil {
-			o.finishAttempt("loop_gate_cut")
-			o.reportCut(n)
-			p.logger.WarnContext(ctx, "Loop gate: restart failed, answering with the trimmed attempt",
-				"credential", o.credential, "model", o.model, "attempt", n+1,
-				"error", rerr, "request_id", o.requestID)
-			break
-		}
-		o.finishAttempt("loop_gate_restart")
-		o.reportRestart(o.cut.channel, o.cut.words, o.cut.ratio, time.Since(start), n+1, penalty, false)
-		body = next
+		o.finishAttempt("loop_gate_cut")
+		o.reportCut(n)
+		break
 	}
 
 	chosen := len(attempts) - 1
@@ -181,11 +209,11 @@ func (p *Proxy) collectLoopGateStream(ctx context.Context, logCtx *RequestLogCon
 	}
 	// The response's usage covers the returned attempt only (for a cut vLLM
 	// attempt: the running usage at the cut): every other attempt counts
-	// against the credential's TPM, not the client's bill.
+	// against the credential's TPM, prompt included, not the client's bill.
 	other := 0
 	for i, a := range attempts {
 		if i != chosen {
-			other += a.tokens()
+			other += a.obs.cutUsage().TotalTokens
 		}
 	}
 	last.consumeTokens(other)
@@ -255,12 +283,18 @@ func (p *Proxy) observeLoopGateBody(ctx context.Context, logCtx *RequestLogConte
 	if format == loopgate.FormatNone {
 		return
 	}
+	p.metrics.RecordLoopGateStream(logCtx.Credential.Name, metricModelID(modelID, logCtx), string(settings.Mode))
+	// A word is at least one byte plus a separator (a Han / kana character:
+	// three bytes), so a body shorter than that for arm_words words cannot
+	// fire: most answers skip the parse.
+	if len(body) < 2*settings.ArmWords-1 {
+		return
+	}
 	content, reasoning, finish, ok := loopGateAnswerText(format, body)
 	if !ok {
 		return
 	}
 	o := p.newLoopGateObserverWith(ctx, logCtx, modelID, settings, format)
-	p.metrics.RecordLoopGateStream(o.credential, o.model, string(settings.Mode))
 	o.record(o.detector.ObserveText(content, reasoning, finish, o.now()))
 	o.reportAttempt(o.detector.FinishReason())
 }

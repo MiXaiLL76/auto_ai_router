@@ -268,14 +268,14 @@ func TestLoopGate_ForceStream(t *testing.T) {
 	var cfg LoopGateConfig
 	require.NoError(t, yaml.Unmarshal([]byte("mode: enforce\n"), &cfg))
 	cfg.ApplyDefaults()
-	assert.True(t, cfg.ForceStreamEnabled(), "on by default")
-
-	require.NoError(t, yaml.Unmarshal([]byte("mode: enforce\nforce_stream: false\n"), &cfg))
-	assert.False(t, cfg.ForceStreamEnabled())
+	assert.False(t, cfg.ForceStreamEnabled(), "off by default")
 
 	got, err := cfg.Resolve(ProviderTypeVLLM, nil, &LoopGateOverride{ForceStream: loopGatePtr(true)})
 	require.NoError(t, err)
-	assert.True(t, got.ForceStreamEnabled(), "a model override wins")
+	assert.True(t, got.ForceStreamEnabled(), "a model override opts in")
+
+	require.NoError(t, yaml.Unmarshal([]byte("mode: enforce\nforce_stream: true\n"), &cfg))
+	assert.True(t, cfg.ForceStreamEnabled())
 
 	assert.ErrorContains(t, yaml.Unmarshal([]byte("force_stream: maybe\n"), &cfg), "force_stream")
 }
