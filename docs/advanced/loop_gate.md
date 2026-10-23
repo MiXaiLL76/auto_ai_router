@@ -108,30 +108,32 @@ trimming as above) and `force_stream_for_ttft` does not apply to it: no TTFT is 
 for it.
 
 !!! warning "Before you turn on `force_stream`"
-    Every non-streamed chat completion to the credential then goes upstream as a stream, loop or
-    no loop, and the client gets an answer rebuilt by AIR, not the one vLLM returns for a
-    non-streamed request:
+Every non-streamed chat completion to the credential then goes upstream as a stream, loop or
+no loop, and the client gets an answer rebuilt by AIR, not the one vLLM returns for a
+non-streamed request:
 
-    - **Tool calls** come from vLLM's streaming tool parser, which is less reliable than the
-      non-streamed one for some parsers (`hermes`, `qwen3_coder`, ...): malformed or missing
-      `tool_calls` where the non-streamed request had them right.
-    - **Rejected options:** vLLM refuses `best_of` and `use_beam_search` with `stream: true`
-      (400).
-    - **Dropped fields:** the rebuild keeps id, model, created, system_fingerprint, usage,
-      and per choice: role, content, reasoning, refusal, tool_calls, logprobs (`content`),
-      finish_reason and stop_reason. It drops `prompt_logprobs`, `prompt_token_ids` /
-      `token_ids` (`return_token_ids`), `kv_transfer_params`, `message.annotations`,
-      `service_tier` and any other vLLM extension.
-    - **Response size limit:** `max_response_body_size` applies to the bytes of the stream,
-      not of the rebuilt JSON. A stream is several times larger than the answer (an event
-      envelope per token, plus the usage on every chunk with `continuous_usage_stats`), so a
-      long answer that fits as JSON can fail with "response too large". Raise the limit for
-      such credentials, or keep `force_stream` off.
-    - Each restart adds the time the loop took to show up, and the client sees nothing
-      until the last attempt ends.
+```
+- **Tool calls** come from vLLM's streaming tool parser, which is less reliable than the
+  non-streamed one for some parsers (`hermes`, `qwen3_coder`, ...): malformed or missing
+  `tool_calls` where the non-streamed request had them right.
+- **Rejected options:** vLLM refuses `best_of` and `use_beam_search` with `stream: true`
+  (400).
+- **Dropped fields:** the rebuild keeps id, model, created, system_fingerprint, usage,
+  and per choice: role, content, reasoning, refusal, tool_calls, logprobs (`content`),
+  finish_reason and stop_reason. It drops `prompt_logprobs`, `prompt_token_ids` /
+  `token_ids` (`return_token_ids`), `kv_transfer_params`, `message.annotations`,
+  `service_tier` and any other vLLM extension.
+- **Response size limit:** `max_response_body_size` applies to the bytes of the stream,
+  not of the rebuilt JSON. A stream is several times larger than the answer (an event
+  envelope per token, plus the usage on every chunk with `continuous_usage_stats`), so a
+  long answer that fits as JSON can fail with "response too large". Raise the limit for
+  such credentials, or keep `force_stream` off.
+- Each restart adds the time the loop took to show up, and the client sees nothing
+  until the last attempt ends.
 
-    Turn it on per model (`models[].loop_gate.force_stream: true`) for clients that do not
-    stream and do not depend on the above, after checking their requests in `observe`.
+Turn it on per model (`models[].loop_gate.force_stream: true`) for clients that do not
+stream and do not depend on the above, after checking their requests in `observe`.
+```
 
 !!! warning "Side effects"
 \- A cut stream ends with a usage chunk (`choices: []`): the last usage the upstream reported in
