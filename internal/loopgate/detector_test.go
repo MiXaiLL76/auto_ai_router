@@ -273,3 +273,42 @@ func TestDetector_ObserveMessagesEvent(t *testing.T) {
 	d.Observe(FormatMessages, []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"`+loopText(5, 10)+`"}}`), now)
 	assert.Zero(t, d.Content().Words())
 }
+
+// cjkText returns n distinct Han characters, no spaces.
+func cjkText(n, from int) string {
+	var b strings.Builder
+	for i := range n {
+		b.WriteRune(rune(0x4E00 + from + i))
+	}
+	return b.String()
+}
+
+func TestChannel_UnspacedCJKLoopFires(t *testing.T) {
+	c := NewChannel(testCfg, maphash.MakeSeed())
+	feedInDeltas(c, cjkText(500, 0)+strings.Repeat(cjkText(40, 1000), 100), 6) // 2 characters a delta
+	assert.Equal(t, 4500, c.Words(), "every Han character is a word")
+	assert.NotNil(t, c.Check(time.Second))
+
+	healthy := NewChannel(testCfg, maphash.MakeSeed())
+	feedInDeltas(healthy, cjkText(10000, 0), 6)
+	assert.Nil(t, healthy.Check(time.Second))
+}
+
+func TestChannel_LongUnspacedRunIsBounded(t *testing.T) {
+	c := NewChannel(testCfg, maphash.MakeSeed())
+	text := strings.Repeat("a", 100_000)
+	for len(text) > 0 {
+		n := min(3, len(text))
+		c.Feed(text[:n])
+		text = text[n:]
+		require.LessOrEqual(t, len(c.tail), maxWordBytes, "the pending word never outgrows maxWordBytes")
+	}
+	c.Flush()
+	assert.Equal(t, (100_000+maxWordBytes-1)/maxWordBytes, c.Words(), "the run is counted in maxWordBytes words")
+}
+
+func TestTrim_UnspacedCJK(t *testing.T) {
+	head := cjkText(100, 0)
+	loop := cjkText(40, 1000)
+	assert.Equal(t, head+loop, Trim(head+strings.Repeat(loop, 20), 32, 5))
+}

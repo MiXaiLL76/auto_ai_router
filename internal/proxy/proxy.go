@@ -321,8 +321,12 @@ type RequestLogContext struct {
 	// for a loop gate restart; nil when the attempt cannot be replayed.
 	loopGateRespawn loopGateRespawn
 	// loopGateFormat is the wire format of the current attempt's upstream
-	// answer when the loop gate can watch it (FormatNone otherwise).
+	// answer when the loop gate watches it (FormatNone otherwise: not
+	// watchable, or the gate is off for the attempt's credential and model).
 	loopGateFormat loopgate.Format
+	// loopGateSettings are the gate's settings for the current attempt,
+	// meaningful when loopGateFormat is not FormatNone.
+	loopGateSettings config.LoopGateSettings
 
 	// keptEmbeddings of embeddingInputs: a failed fanned-out embeddings request
 	// was billed for the inputs the provider had already embedded (see
@@ -1956,9 +1960,10 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		// Loop gate (enforce, force_stream): a non-streamed chat completion goes
 		// upstream as a stream so a loop can be stopped before the client gets
 		// anything; collectLoopGateStream rebuilds the chat.completion below.
-		logCtx.loopGateFormat = loopGateUpstreamFormat(cred, r.URL.Path, prepared.passthroughResponses, prepared.passthroughMessages)
+		logCtx.loopGateFormat, logCtx.loopGateSettings = p.loopGateAttemptFormat(r.Context(), cred, modelID,
+			loopGateUpstreamFormat(cred, r.URL.Path, prepared.passthroughResponses, prepared.passthroughMessages))
 		var loopGateForced *loopGateForcedStream
-		requestBody, loopGateForced = p.loopGateForceStream(r.Context(), cred, modelID, logCtx.loopGateFormat, streaming, requestBody)
+		requestBody, loopGateForced = p.loopGateForceStream(r.Context(), cred, modelID, logCtx.loopGateFormat, logCtx.loopGateSettings, streaming, requestBody)
 
 		upstreamCtx, cancelUpstream := p.upstreamRequestContext(r)
 		defer cancelUpstream()
@@ -2022,11 +2027,12 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		httputil.ApplyCredentialRequestHeaders(proxyReq.Header, cred)
 
 		logCtx.loopGateRespawn = nil
-		if streaming && logCtx.loopGateFormat == loopgate.FormatChat {
-			logCtx.loopGateRespawn = p.loopGateRespawner(upstreamCtx, r, proxyReq, requestBody)
+		if streaming && logCtx.loopGateFormat == loopgate.FormatChat && logCtx.loopGateSettings.Mode == config.LoopGateEnforce {
+			logCtx.loopGateRespawn = p.loopGateRespawner(r, proxyReq, requestBody, cred.Name, modelID)
 		}
 		if loopGateForced != nil {
-			loopGateForced.respawn = p.loopGateRespawner(upstreamCtx, r, proxyReq, requestBody)
+			loopGateForced.respawn = p.loopGateRespawner(r, proxyReq, requestBody, cred.Name, modelID)
+			loopGateForced.promptTokens = p.lazyPromptTokensEstimate(requestBody, realModelID)
 		}
 
 		if p.logger.Enabled(context.Background(), slog.LevelDebug) {
@@ -2231,9 +2237,13 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				p.failResponseTooLarge(w, r, logCtx, cred, modelID, targetURL, readErr, start)
 				return
 			}
-			// Transport error reading body — retryable with another credential
+			// Transport error reading body — retryable with another credential.
+			// Drop the half-read response: when no credential is left, the
+			// client gets the transport error (502/408), not a 200 with an
+			// empty body.
 			p.logger.WarnContext(r.Context(), "Failed to read response body, will retry", "error", readErr,
 				"credential", cred.Name, "attempt", attempt+1)
+			resp = nil
 			shouldRetry = true
 			retryReason = RetryReasonNetErr
 			transportErr = readErr
@@ -2246,7 +2256,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		p.recordProviderResponse(r.Context(), cred, modelID, realModelID, resp.StatusCode, resp.Header, responseBody)
 		if loopGateForced == nil && !streaming && resp.StatusCode == http.StatusOK {
-			p.observeLoopGateBody(r.Context(), logCtx, cred, modelID, logCtx.loopGateFormat, responseBody)
+			p.observeLoopGateBody(r.Context(), logCtx, modelID, responseBody)
 		}
 
 		// Check if we should retry with another same-type credential

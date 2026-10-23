@@ -331,10 +331,7 @@ func (d *Detector) ObserveChatChunk(payload []byte, now time.Time) []Firing {
 			d.finishReason = *choice.FinishReason
 		}
 		if choice.Delta.Content != nil {
-			d.content.Feed(*choice.Delta.Content)
-			if !d.answered && strings.TrimSpace(*choice.Delta.Content) != "" {
-				d.answered = true
-			}
+			d.feedContent(*choice.Delta.Content)
 		}
 		if len(choice.Delta.ToolCalls) > 0 && !bytes.Equal(choice.Delta.ToolCalls, jsonNull) && !bytes.Equal(choice.Delta.ToolCalls, emptyJSONArray) {
 			d.answered = true

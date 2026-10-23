@@ -20,8 +20,10 @@ Based on [loop-gate](https://github.com/vakovalskii/loop-gate-skill) by Valerii 
 
 - The answer text (`content`) and the reasoning text (`reasoning_content` / `reasoning`)
   are counted separately. Tool call arguments are never counted.
-- The text is split into words on whitespace. AIR counts sequences of `ngram` words
-  (32 by default) with a rolling hash, which costs O(1) per word.
+- The text is split into words on whitespace. A Han, Hiragana or Katakana character is a
+  word of its own (Chinese and Japanese are written without spaces), and a run of more than
+  256 bytes without whitespace is split into 256-byte words. AIR counts sequences of
+  `ngram` words (32 by default) with a rolling hash, which costs O(1) per word.
 - A channel **fires** when some sequence occurred at least `min_repeat` times **and** the
   share of repeated sequences is at least `min_ratio`.
 - Nothing fires before `arm_words` words. Short honest answers with lists and tables
@@ -40,7 +42,7 @@ AIR closes the upstream connection, so vLLM stops generating, and then:
 | Where the loop is                                                                       | What the client gets                                                                                                                                       |
 | --------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | reasoning, no answer text or tool call streamed yet                                     | **restart**: the request is sent again to the same credential with a new `seed` and a higher `presence_penalty`; the new attempt continues the same stream |
-| the answer text (the client is already reading the answer)                              | **cut**: a final chunk with `finish_reason: "length"` and an `air_loop_gate` marker, then `data: [DONE]`                                                   |
+| the answer text (the client is already reading the answer)                              | **cut**: a final chunk with `finish_reason: "length"` and an `air_loop_gate` marker, a usage chunk, then `data: [DONE]`                                    |
 | restarts used up (`max_attempts`), past `retry_deadline`, or the restart request failed | **cut**                                                                                                                                                    |
 
 The closing chunk of a cut stream tells the client that `length` came from AIR, not from its
@@ -72,7 +74,8 @@ The client sees nothing until the answer is complete, so a loop is restarted **w
 is (reasoning or answer). When `max_attempts` or `retry_deadline` run out, the best attempt
 (the longest answer) is returned with its looped tail trimmed: the text ends where the
 second round of the loop begins. It has `finish_reason: "length"`, the `air_loop_gate`
-marker at the top level, and the usage vLLM reported at the cut.
+marker at the top level, and the usage vLLM reported at the cut (an estimate when the
+upstream reported none: the local prompt estimate plus 4 tokens per 3 streamed words).
 
 Non-streamed `/v1/responses` (`passthrough_responses: false`) and `/v1/messages` requests
 converted to chat completions are gated the same way.
@@ -82,10 +85,13 @@ after they arrive: firings are logged and counted (at the word a stream would ha
 on), the response is not changed.
 
 !!! warning "Side effects"
-\- A cut stream has no `usage` chunk even when the client asked for `stream_options.include_usage`.
-AIR bills it from the streamed text, like any stream that ends without usage.
-\- A restart replaces the client's `seed` and `presence_penalty`, so seed-based reproducibility is lost
-for that request.
+\- A cut stream ends with a usage chunk (`choices: []`): the last usage the upstream reported in
+the stream (exact with vLLM's `continuous_usage_stats`), otherwise the local prompt estimate
+plus 4 tokens per 3 streamed words. It is shown to the client only when it asked for
+`stream_options.include_usage`, like any usage chunk, and it is what AIR bills.
+\- A restart sets `presence_penalty` to the higher of the client's and `retry_presence_penalty`.
+A client `seed` becomes `seed + restart number` (attempts stay reproducible but differ); without
+one, a random seed is used.
 \- Each restart adds the time the loop took to show up (often more than a minute).
 \- No restart when the request's images were described by [vision fallback](vision_fallback.md):
 the descriptions were injected into the first attempt only. Such streams are cut.
@@ -95,7 +101,12 @@ the descriptions were injected into the first attempt only. Such streams are cut
 The client is billed for what the returned attempt reports in `usage`. The abandoned
 attempts are not billed, but they used the engine, so their tokens count against the
 credential's TPM: their own usage when vLLM reported it (non-streamed requests), otherwise
-an estimate of 4 tokens per 3 words.
+an estimate of 4 tokens per 3 words. This holds for cut streams too: their usage covers the
+last attempt only.
+
+A restart is a request to the same credential: it counts toward the credential's and the
+model's RPM (while under the limit: a running stream is never held or refused for RPM),
+and its outcome goes to fail2ban and the credential error metric like any attempt.
 
 ## Configuration
 
@@ -157,9 +168,14 @@ client called:
   conversion, so the client still sees one `response.created` / `message_start`.
 - A passthrough stream is never restarted: a second attempt would start a second response
   or message. It is cut in its own format:
-  - Responses API: a final `response.incomplete` event (`status: "incomplete"`,
-    `incomplete_details.reason: "max_output_tokens"`, empty `output`, `air_loop_gate` marker).
-    The response stored for `previous_response_id` has no output.
+  - Responses API: the output items left open are closed the way a provider closes them
+    at the output limit (`response.output_text.done` / `reasoning_text.done` /
+    `content_part.done` / ..., then `response.output_item.done` with `status: "incomplete"`
+    and the full streamed text), then `response.incomplete` (`status: "incomplete"`,
+    `incomplete_details.reason: "max_output_tokens"`, `air_loop_gate` marker). It carries the
+    whole output, the other fields of `response.created`, and an estimated `usage`
+    (`input_tokens` from the upstream if it reported them, else the local estimate; output
+    as 4 tokens per 3 words). The response stored for `previous_response_id` has that output.
   - Messages API: the open content block is closed, then `message_delta` with
     `stop_reason: "max_tokens"`, an estimated `usage.output_tokens` and the
     `air_loop_gate` marker, then `message_stop`.

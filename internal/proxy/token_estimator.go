@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"strings"
+	"sync"
 	"unicode"
 	"unicode/utf8"
 
@@ -421,6 +422,18 @@ func (p *Proxy) setPromptTokensEstimate(logCtx *RequestLogContext, body []byte, 
 		tokens = addNativeWSHistoryTokens(logCtx.Context(), tokens)
 		return tokens
 	}
+}
+
+// lazyPromptTokensEstimate returns a memoized local estimate of body's prompt
+// tokens, for a caller that needs it before logCtx's estimate is armed; 0
+// with tiktoken_enabled=false.
+func (p *Proxy) lazyPromptTokensEstimate(body []byte, model string) func() int {
+	return sync.OnceValue(func() int {
+		if !p.tiktokenEnabled {
+			return 0
+		}
+		return estimatePromptTokensForModel(body, model)
+	})
 }
 
 func (a *completionTokenAccumulator) AddChunk(chunk []byte) {
