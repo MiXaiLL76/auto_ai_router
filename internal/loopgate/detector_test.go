@@ -312,3 +312,56 @@ func TestTrim_UnspacedCJK(t *testing.T) {
 	loop := cjkText(40, 1000)
 	assert.Equal(t, head+loop, Trim(head+strings.Repeat(loop, 20), 32, 5))
 }
+
+// windowCounts recounts the window's n-grams from scratch: the share of
+// repeats and the top count Channel keeps incrementally.
+func windowCounts(c *Channel) (ratio float64, top int) {
+	counts := map[uint64]int{}
+	for _, g := range c.grams {
+		counts[g]++
+	}
+	rep := 0
+	for _, n := range counts {
+		if n > 1 {
+			rep += n
+		}
+		top = max(top, n)
+	}
+	if len(c.grams) == 0 {
+		return 0, 0
+	}
+	return float64(rep) / float64(len(c.grams)), top
+}
+
+func TestChannel_WindowMatchesRecount(t *testing.T) {
+	c := NewChannel(Config{NGram: 2, MinRepeat: 2, MinRatio: 0.1, Window: 50}, maphash.MakeSeed())
+	// Loops come and go: the window's counts rise and fall.
+	text := uniqueText(80) + " " + loopText(3, 40) + " " + uniqueText(120) + " " + loopText(7, 30) + " " + uniqueText(60)
+	for i, word := range strings.Fields(text) {
+		c.Feed(word + " ")
+		ratio, top := windowCounts(c)
+		require.InDelta(t, ratio, c.Ratio(), 1e-9, "word %d", i)
+		require.Equal(t, top, c.Top(), "word %d", i)
+	}
+	assert.Len(t, c.grams, 50)
+	assert.LessOrEqual(t, len(c.counts), 50)
+}
+
+func TestChannel_WindowBoundsMemory(t *testing.T) {
+	c := NewChannel(testCfg, maphash.MakeSeed())
+	feedInDeltas(c, uniqueText(100_000), 97)
+	window := 4 * testCfg.ArmWords
+	assert.Equal(t, 100_000, c.Words())
+	assert.Len(t, c.grams, window)
+	assert.Len(t, c.counts, window, "only the window's n-grams are kept")
+	assert.Zero(t, c.Ratio())
+}
+
+func TestChannel_LateLoopIsNotDiluted(t *testing.T) {
+	c := NewChannel(testCfg, maphash.MakeSeed())
+	// 30k healthy words, then a loop of 6k: over the whole text the repeats
+	// are under min_ratio, within the window they are not.
+	feedInDeltas(c, uniqueText(30_000)+" "+loopText(40, 150), 13)
+	assert.Less(t, float64(6000)/36000, testCfg.MinRatio)
+	assert.NotNil(t, c.Check(time.Second))
+}

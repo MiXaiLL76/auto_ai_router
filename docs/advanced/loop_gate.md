@@ -24,8 +24,12 @@ Based on [loop-gate](https://github.com/vakovalskii/loop-gate-skill) by Valerii 
   word of its own (Chinese and Japanese are written without spaces), and a run of more than
   256 bytes without whitespace is split into 256-byte words. AIR counts sequences of
   `ngram` words (32 by default) with a rolling hash, which costs O(1) per word.
+- Only the latest `4 × arm_words` sequences of a channel are counted (12000 with the
+  defaults, at least 4096); older ones are forgotten. A channel's memory stays bounded
+  however long the generation runs, and a loop that starts late in a long answer is not
+  diluted by its healthy start. Below that length nothing is forgotten.
 - A channel **fires** when some sequence occurred at least `min_repeat` times **and** the
-  share of repeated sequences is at least `min_ratio`.
+  share of repeated sequences is at least `min_ratio` (both within the counted window).
 - Nothing fires before `arm_words` words. Short honest answers with lists and tables
   repeat short runs, while real loops show up far later.
 
