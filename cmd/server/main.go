@@ -282,6 +282,7 @@ func main() {
 		SessionStoreRedis:            sessionStoreRedis,
 		SessionStoreKeyPrefix:        cfg.Redis.KeyPrefix,
 		DrainUpstreamOnAbort:         cfg.Server.DrainUpstreamOnAbort,
+		ForceStreamForTTFT:           cfg.Server.ForceStreamForTTFT,
 		ResponseCompatibility:        cfg.Server.ResponseCompatibility,
 		TiktokenEnabled:              cfg.Server.TiktokenEnabled,
 		StrictAllTeamModelsACL:       cfg.Server.StrictAllTeamModelsACL,

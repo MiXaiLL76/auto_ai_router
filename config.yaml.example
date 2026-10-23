@@ -21,6 +21,7 @@ server:
   strict_all_team_models_acl: false  # Enforce key/team/user model ACLs (default: false)
   credential_name_as_team_id: false  # Use provider credential name as team_id when auth has no team_id (default: false)
   tiktoken_enabled: true  # Local fallback token estimation when a provider omits usage (default: true)
+  # force_stream_for_ttft: false  # Force "stream": true upstream for chat-shaped non-streaming requests (/v1/chat/completions, /v1/messages, converted /v1/responses) and reassemble the response back into non-stream JSON, so every request gets a measurable TTFT. Native/passthrough Responses API and responses_only requests are exempt. (default: false)
   model_prices_link: ""  # Optional: URL or file path to model prices JSON (supports os.environ/VAR_NAME)
   model_prices_sync_interval: 5m  # How often model prices are re-fetched from model_prices_link (default: 5m)
   response_headers:

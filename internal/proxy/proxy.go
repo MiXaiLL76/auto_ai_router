@@ -422,6 +422,7 @@ type Config struct {
 	SessionStoreKeyPrefix        string        // Redis key prefix for session bindings (the deployment's redis.key_prefix)
 	RouterID                     string        // Human-readable name for this router (shown in /trace); defaults to hostname
 	DrainUpstreamOnAbort         bool          // When true, keep reading upstream after client disconnect to get real usage (default: false)
+	ForceStreamForTTFT           bool          // When true, force stream:true upstream for non-streaming chat requests and reassemble the response back to non-stream JSON (default: false)
 	ResponseCompatibility        string
 	TiktokenEnabled              bool // Local tiktoken-based prompt/completion token fallback estimation (default: true)
 	StrictAllTeamModelsACL       bool
@@ -468,6 +469,7 @@ type Proxy struct {
 	sessionStore                     sessionBindingStore // Optional: session-sticky credential routing
 	stickyAutoCacheCtrl              bool                // Auto-inject Anthropic cache_control when session is active
 	drainUpstreamOnAbort             bool                // Keep reading upstream after client disconnect to get real usage chunk
+	forceStreamForTTFT               bool                // Force stream:true upstream for non-streaming chat requests and reassemble the response back to non-stream JSON (TTFT on every request)
 	tiktokenEnabled                  bool                // Local tiktoken-based prompt/completion token fallback estimation
 	strictAllTeamModelsACL           bool
 	responseHeaderMode               config.ResponseHeaderMode
@@ -565,6 +567,7 @@ func New(cfg *Config) *Proxy {
 		sessionStore:                     sessionStore,
 		stickyAutoCacheCtrl:              cfg.SessionStickyAutoCacheCtrl,
 		drainUpstreamOnAbort:             cfg.DrainUpstreamOnAbort,
+		forceStreamForTTFT:               cfg.ForceStreamForTTFT,
 		tiktokenEnabled:                  cfg.TiktokenEnabled,
 		strictAllTeamModelsACL:           cfg.StrictAllTeamModelsACL,
 		responseHeaderMode:               cfg.ResponseHeaderMode,
@@ -2387,6 +2390,14 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 	outgoingAudioUsageContract := audioUsageContractUnknown
 
 	if isStreamingResp {
+		// force_stream_for_ttft: the client asked for a non-streaming response,
+		// but applyForceStream sent "stream": true upstream. Consume the SSE,
+		// measure TTFT from the first content delta and reassemble the response
+		// into the non-stream JSON the client expects.
+		if p.forceStreamForTTFT && !streaming && resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices && p.simulatedNonStreamSupported(prepared) {
+			p.handleSimulatedNonStream(w, r, resp, prepared, cred, modelID, realModelID, logCtx, saveResponseFn, targetURL, body)
+			return
+		}
 		p.logger.DebugContext(r.Context(), "Response is streaming", "credential", cred.Name)
 	} else {
 		// Decode the response body for logging (handles gzip, etc.)
