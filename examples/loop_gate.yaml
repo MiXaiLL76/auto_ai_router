@@ -1,0 +1,27 @@
+# Loop gate example: watch streamed vLLM generations for loops (observe mode).
+# Docs: docs/advanced/loop_gate.md
+
+server:
+  port: 8080
+  master_key: os.environ/ROUTER_MASTER_KEY
+
+loop_gate:
+  mode: os.environ/LOOP_GATE_MODE # off | observe
+  ngram: 32
+  arm_words: 3000
+  min_repeat: 5
+  min_ratio: 0.35
+
+credentials:
+  - name: vllm_qwen
+    type: vllm
+    base_url: http://vllm-qwen:8000
+    rpm: -1
+    models:
+      - name: qwen3.6
+      - name: qwen-judge
+        loop_gate:
+          mode: off
+
+monitoring:
+  prometheus_enabled: true

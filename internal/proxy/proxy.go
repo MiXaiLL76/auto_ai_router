@@ -436,6 +436,7 @@ type Config struct {
 	KeyMetrics                       *monitoring.KeyMetrics // Per-API-key request counters (nil = disabled)
 
 	VisionFallback     config.VisionFallbackConfig // What to do with images sent to models with supports_vision: false; defaults are applied by config.Load
+	LoopGate           config.LoopGateConfig       // Generation loop detector settings; zero value = off
 	ServerWriteTimeout time.Duration               // http.Server WriteTimeout; restored after vision describe calls
 }
 
@@ -479,6 +480,7 @@ type Proxy struct {
 	keyRateLimitsEnabled             bool
 	defaultEstimatedCompletionTokens int
 	visionFallback                   config.VisionFallbackConfig
+	loopGate                         config.LoopGateConfig
 	visionFlagIgnoredWarned          sync.Map // model name -> struct{}: supports_vision ignored warning already logged
 	visionDescribeBlindWarned        sync.Map // model name -> struct{}: text-only describe_model warning already logged
 	serverWriteTimeout               time.Duration
@@ -532,6 +534,14 @@ func New(cfg *Config) *Proxy {
 		}
 	}
 
+	// A Config built in code (tests) has no loop_gate section parsed: start from
+	// the same defaults config.Load gives an absent section.
+	loopGate := cfg.LoopGate
+	if loopGate.Mode == "" {
+		loopGate = config.DefaultLoopGateConfig()
+	}
+	loopGate.ApplyDefaults()
+
 	var responseCompat *compatlitellm.Transformer
 	if cfg.ResponseCompatibility == "litellm" {
 		responseCompat = compatlitellm.New()
@@ -576,6 +586,7 @@ func New(cfg *Config) *Proxy {
 		keyRateLimitsEnabled:             cfg.KeyRateLimitsEnabled,
 		defaultEstimatedCompletionTokens: cfg.DefaultEstimatedCompletionTokens,
 		visionFallback:                   cfg.VisionFallback,
+		loopGate:                         loopGate,
 		serverWriteTimeout:               cfg.ServerWriteTimeout,
 		keyMetrics:                       cfg.KeyMetrics,
 		responseCompat:                   responseCompat,

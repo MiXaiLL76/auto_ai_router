@@ -956,11 +956,21 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 		providerReader = io.TeeReader(providerReader, proxyStreamErrorObserver{capture: providerStreamError})
 	}
 
+	// Loop gate: watches the generated text for a model stuck repeating itself.
+	// Runs over the drained tail too, and reports when the handler returns.
+	loopGate := p.newLoopGateObserver(respCtx(resp), logCtx, modelID, resp.StatusCode)
+	if loopGate != nil {
+		defer loopGate.finish()
+	}
+
 	var payloadBuf [][]byte
 	onLine := func(chunk []byte) {
 		// Parse complete SSE lines, not individual HTTP reads: a large image
 		// event may carry its usage after several stream buffer boundaries.
 		payloadBuf = splitSSEPayloads(chunk, payloadBuf)
+		if loopGate != nil {
+			loopGate.observe(payloadBuf)
+		}
 		if hasUsage := chunkMayCarryTokenUsage(chunk); hasUsage {
 			if logCtx != nil {
 				// The image usage event isn't necessarily the stream's last data

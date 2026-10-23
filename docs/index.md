@@ -62,6 +62,7 @@ graph LR
 - [Security](advanced/security.md) — master key, token auth
 - [Model Aliases](advanced/model_alias.md) — routing by alias
 - [Vision Fallback](advanced/vision_fallback.md) — images sent to text-only models: reject, strip or describe with a vision model
+- [Loop Gate](advanced/loop_gate.md) — detect self-hosted models stuck repeating themselves until `max_tokens`
 - [Troubleshooting](advanced/troubleshooting.md)
 
 ## LiteLLM Integration

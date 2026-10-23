@@ -43,6 +43,12 @@ Mark such models with `supports_vision: false` and choose what AIR does with the
 reject early, strip them, or have a vision model describe them. See
 [Vision Fallback](../advanced/vision_fallback.md).
 
+## Looping generations
+
+Reasoning models sometimes repeat the same passage until `max_tokens`. The loop gate
+watches streamed vLLM generations and reports such loops. See
+[Loop Gate](../advanced/loop_gate.md).
+
 ## Default parameters
 
 A LiteLLM deployment can carry default request parameters in its `litellm_params`

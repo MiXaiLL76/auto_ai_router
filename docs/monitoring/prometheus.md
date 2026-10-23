@@ -21,6 +21,9 @@ The same metrics can also be **pushed** to an OTLP collector instead of (or in a
 | `auto_ai_router_requests_total`            | Counter   | Total requests processed                                   |
 | `auto_ai_router_requests_duration_seconds` | Histogram | Request latency distribution                               |
 | `auto_ai_router_aborted_requests_total`    | Counter   | Client-aborted requests by credential, model, and endpoint |
+| `auto_ai_router_loop_gate_streams_total`   | Counter   | Streams watched by the [loop gate](../advanced/loop_gate.md) |
+| `auto_ai_router_loop_gate_firings_total`   | Counter   | Looping generations seen by the loop gate, by channel      |
+| `auto_ai_router_loop_gate_words_after_firing_total` | Counter | Words generated after a loop gate firing           |
 
 ## Per-Key Metrics
 
