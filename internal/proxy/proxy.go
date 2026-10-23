@@ -108,6 +108,7 @@ func (p *Proxy) applyCredentialCompatibilityRouting(
 		prepared.nativeResponses = nextReq.nativeResponses
 		prepared.forcedNativeNonStream = nextReq.forcedNativeNonStream
 		prepared.forcedPassthroughNonStream = nextReq.forcedPassthroughNonStream
+		prepared.forcedChatNonStream = nextReq.forcedChatNonStream
 		prepared.completionsPath = nextReq.completionsPath
 		prepared.messagesMetadata = nextReq.messagesMetadata
 		logCtx.Credential = nextCred
@@ -1759,6 +1760,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			prepared.nativeResponses = nextReq.nativeResponses
 			prepared.forcedNativeNonStream = nextReq.forcedNativeNonStream
 			prepared.forcedPassthroughNonStream = nextReq.forcedPassthroughNonStream
+			prepared.forcedChatNonStream = nextReq.forcedChatNonStream
 			prepared.completionsPath = nextReq.completionsPath
 			prepared.messagesMetadata = nextReq.messagesMetadata
 			logCtx.RealModelID = realModelID
@@ -1845,7 +1847,12 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				IsImageGeneration: logCtx.IsImageGeneration,
 				IsImageEdit:       isImageEdit,
 				IsEmbeddings:      isEmbeddings,
-				IsStreaming:       streaming,
+				// forcedChatNonStream: force_stream_for_ttft forced a non-streaming
+				// chat request to stream upstream. For Vertex/Gemini the streaming
+				// switch lives in the URL, not the body, so IsStreaming must be true
+				// here or the upstream stays non-streaming and TTFT goes unmeasured
+				// (see applyForceStream).
+				IsStreaming: streaming || prepared.forcedChatNonStream,
 				// prepared.convertedToResponses means body is already
 				// Responses-shaped here too (orchestrator.go's
 				// ChatRequestToResponses, for a responses_only model) -- not

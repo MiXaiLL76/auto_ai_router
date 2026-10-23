@@ -56,6 +56,13 @@ type orchestratedRequest struct {
 	// terminal response.completed event is written back as non-stream JSON (see
 	// handleSimulatedPassthroughNonStream).
 	forcedPassthroughNonStream bool
+	// forcedChatNonStream is true when force_stream_for_ttft forced a
+	// chat-shaped request to stream upstream. The response path reassembles it
+	// via handleSimulatedNonStream; the flag additionally tells the converter
+	// call site to build a streaming upstream request (Vertex/Gemini carry the
+	// stream switch in the URL, not the body, so a body-level stream:true alone
+	// leaves the upstream non-streaming and TTFT unmeasured).
+	forcedChatNonStream bool
 	// completionsPath is true when the client called the legacy /v1/completions
 	// endpoint. Its SSE carries choices[].text (not choices[].delta.content), so
 	// the simulated non-stream path reassembles that legacy shape separately
@@ -81,6 +88,7 @@ type credentialPreparedRequest struct {
 	nativeResponses      bool
 	forcedNativeNonStream bool // see orchestratedRequest.forcedNativeNonStream
 	forcedPassthroughNonStream bool // see orchestratedRequest.forcedPassthroughNonStream
+	forcedChatNonStream  bool // see orchestratedRequest.forcedChatNonStream
 	completionsPath      bool // see orchestratedRequest.completionsPath
 	messagesMetadata     anthropicconv.MessagesAdapterMetadata
 }
@@ -332,6 +340,7 @@ func (p *Proxy) orchestrateRequest(
 		nativeResponses:      credentialReq.nativeResponses,
 		forcedNativeNonStream: credentialReq.forcedNativeNonStream,
 		forcedPassthroughNonStream: credentialReq.forcedPassthroughNonStream,
+		forcedChatNonStream: credentialReq.forcedChatNonStream,
 		completionsPath:     credentialReq.completionsPath,
 		responsesPrevHandled: prevEntryHandled,
 		responsesMetadata:    responsesMetadata,
@@ -498,6 +507,11 @@ func (p *Proxy) applyForceStream(req credentialPreparedRequest, streaming bool, 
 		req.body = injectStreamOptions(req.body)
 		req.proxyBody = injectStreamOptions(req.proxyBody)
 	}
+	// Chat-shaped request forced to stream. Recorded so the converter mode can
+	// set IsStreaming=true: for Vertex/Gemini the streaming switch is the URL
+	// (streamGenerateContent?alt=sse), not a body field, so the body-level
+	// stream:true alone would leave the upstream non-streaming and TTFT unmeasured.
+	req.forcedChatNonStream = true
 	p.logger.DebugContext(r.Context(), "Forced streaming upstream for non-streaming request",
 		"credential", cred.Name, "path", req.path, "model", req.realModelID)
 	return req

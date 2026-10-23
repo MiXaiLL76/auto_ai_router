@@ -892,3 +892,48 @@ func TestProxyRequest_ForceStream_Completions(t *testing.T) {
 	require.Len(t, out.Choices, 1)
 	assert.Equal(t, "PONG", out.Choices[0].Text)
 }
+
+// TestApplyForceStream_ChatSetsForcedMarker verifies a normal chat request
+// forced to stream carries the forcedChatNonStream marker, which the converter
+// call site uses to build a streaming upstream URL (Vertex/Gemini).
+func TestApplyForceStream_ChatSetsForcedMarker(t *testing.T) {
+	prx := NewTestProxyBuilder().WithForceStreamForTTFT(true).Build()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{}`))
+	body := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"stream":false}`)
+	cred := &config.CredentialConfig{Name: "openai", Type: config.ProviderTypeOpenAI, BaseURL: "http://upstream"}
+
+	out := prx.applyForceStream(credentialPreparedRequest{body: body, proxyBody: body, path: "/v1/chat/completions"}, false, cred, req)
+
+	assert.True(t, out.forcedChatNonStream, "chat request must carry the forced marker")
+	assert.Contains(t, string(out.body), `"stream":true`)
+}
+
+// TestForceStream_GeminiChat_UsesStreamingURL verifies that with
+// force_stream_for_ttft on, a non-streaming gemini chat request reaches the
+// upstream's streaming URL (streamGenerateContent), so the simulated path can
+// reassemble it and measure TTFT.
+func TestForceStream_GeminiChat_UsesStreamingURL(t *testing.T) {
+	var gotPath string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Hi\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":3,\"candidatesTokenCount\":1,\"totalTokenCount\":4}}\n\n"))
+	}))
+	defer upstream.Close()
+
+	proxy := NewTestProxyBuilder().
+		WithSingleCredential("gemini", config.ProviderTypeGemini, upstream.URL, "k").
+		WithForceStreamForTTFT(true).
+		Build()
+	req := httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"gemini-2.5-flash","messages":[{"role":"user","content":"hi"}],"stream":false}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	proxy.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, gotPath, "streamGenerateContent", "gemini upstream must be called on the streaming URL")
+	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+}
