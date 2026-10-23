@@ -135,7 +135,7 @@ func TestConvertVertexFunctionCallToStreamingOpenAI(t *testing.T) {
 		}
 		thoughtSig := []byte("test-signature")
 
-		result := convertVertexFunctionCallToStreamingOpenAI(fc, thoughtSig, 0)
+		result := convertVertexFunctionCallToStreamingOpenAI(fc, thoughtSig, 0, false)
 
 		assert.Equal(t, 0, result.Index)
 		assert.Equal(t, "function", result.Type)
@@ -155,7 +155,7 @@ func TestConvertVertexFunctionCallToStreamingOpenAI(t *testing.T) {
 			Args: nil,
 		}
 
-		result := convertVertexFunctionCallToStreamingOpenAI(fc, nil, 1)
+		result := convertVertexFunctionCallToStreamingOpenAI(fc, nil, 1, false)
 
 		assert.Equal(t, 1, result.Index)
 		require.NotNil(t, result.Function)
@@ -169,7 +169,7 @@ func TestConvertVertexFunctionCallToStreamingOpenAI(t *testing.T) {
 			Args: map[string]interface{}{},
 		}
 
-		result := convertVertexFunctionCallToStreamingOpenAI(fc, nil, 0)
+		result := convertVertexFunctionCallToStreamingOpenAI(fc, nil, 0, false)
 
 		require.NotNil(t, result.ProviderSpecificFields)
 		assert.Equal(t, true, result.ProviderSpecificFields["skip_thought_signature_validator"])
@@ -181,7 +181,7 @@ func TestConvertVertexFunctionCallToStreamingOpenAI(t *testing.T) {
 			Args: map[string]interface{}{},
 		}
 
-		result := convertVertexFunctionCallToStreamingOpenAI(fc, []byte{}, 0)
+		result := convertVertexFunctionCallToStreamingOpenAI(fc, []byte{}, 0, false)
 
 		require.NotNil(t, result.ProviderSpecificFields)
 		assert.Equal(t, true, result.ProviderSpecificFields["skip_thought_signature_validator"])
@@ -193,7 +193,46 @@ func TestConvertVertexFunctionCallToStreamingOpenAI(t *testing.T) {
 			Args: map[string]interface{}{},
 		}
 
-		result := convertVertexFunctionCallToStreamingOpenAI(fc, nil, 5)
+		result := convertVertexFunctionCallToStreamingOpenAI(fc, nil, 5, false)
 		assert.Equal(t, 5, result.Index)
 	})
+}
+
+// TestTransformVertexStreamToOpenAI_ToolCallsFinishInLaterChunk: Gemini 3 may
+// stream a function call in one chunk and its STOP in a later chunk that carries
+// no call (empty text, a thought signature). The choice must still finish with
+// "tool_calls", or an agent loop stops instead of running the tool.
+func TestTransformVertexStreamToOpenAI_ToolCallsFinishInLaterChunk(t *testing.T) {
+	finishReasons := func(stream string) []string {
+		var out bytes.Buffer
+		require.NoError(t, TransformVertexStreamToOpenAI(strings.NewReader(stream), "gemini-3-flash-preview", &out))
+		var reasons []string
+		for _, line := range strings.Split(out.String(), "\n") {
+			payload, ok := strings.CutPrefix(line, "data: ")
+			if !ok || payload == "[DONE]" {
+				continue
+			}
+			var chunk openai.OpenAIStreamingChunk
+			require.NoError(t, json.Unmarshal([]byte(payload), &chunk))
+			for _, choice := range chunk.Choices {
+				if choice.FinishReason != nil {
+					reasons = append(reasons, *choice.FinishReason)
+				}
+			}
+		}
+		return reasons
+	}
+	call := `data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"get_weather","args":{"city":"Paris"}}}]}}]}` + "\n\n"
+	stop := `data: {"candidates":[{"content":{"role":"model","parts":[{"text":"","thoughtSignature":"c2ln"}]},"finishReason":"STOP"}]}` + "\n\n"
+	text := `data: {"candidates":[{"content":{"role":"model","parts":[{"text":"Sunny"}]}}]}` + "\n\n"
+
+	assert.Equal(t, []string{"tool_calls"}, finishReasons(call+stop), "call and STOP in different chunks")
+	assert.Equal(t, []string{"stop"}, finishReasons(text+stop), "no call: STOP stays stop")
+
+	// Candidates are tracked apart: only the one that called a tool finishes with tool_calls.
+	twoCandidates := `data: {"candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"Sunny"}]}},` +
+		`{"index":1,"content":{"role":"model","parts":[{"functionCall":{"name":"get_weather","args":{}}}]}}]}` + "\n\n" +
+		`data: {"candidates":[{"index":0,"content":{"role":"model","parts":[{"text":""}]},"finishReason":"STOP"},` +
+		`{"index":1,"content":{"role":"model","parts":[{"text":""}]},"finishReason":"STOP"}]}` + "\n\n"
+	assert.Equal(t, []string{"stop", "tool_calls"}, finishReasons(twoCandidates))
 }

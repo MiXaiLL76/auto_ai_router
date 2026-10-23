@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"strings"
 
@@ -114,6 +115,7 @@ func (p *Proxy) orchestrateRequest(
 	effectiveDenylist := mergeCredentialDenylists(inboundDenylist, policyDenylist)
 	r = withEffectiveCredentialDenylist(r, effectiveDenylist)
 	routingExclusions := p.reasoningOnlyExclusions(logCtx.ReasoningRequested)
+	reasoningExcluded := maps.Clone(routingExclusions)
 	for _, credentialName := range effectiveDenylist {
 		if p.balancer.IsProxyCredential(credentialName) {
 			continue
@@ -224,7 +226,9 @@ func (p *Proxy) orchestrateRequest(
 		setBaseBody(visionBody)
 	}
 
-	cred, ok := p.selectCredentialForModel(w, modelID, logCtx.SessionID, preferredCredentialName, routingExclusions, logCtx)
+	logCtx.stickyExclude = routingExclusions
+	logCtx.stickyRequestExcluded = reasoningExcluded
+	cred, ok := p.selectCredentialForModel(w, modelID, p.stickySessionKey(logCtx), preferredCredentialName, routingExclusions, logCtx)
 	if !ok {
 		return nil, false
 	}
@@ -482,6 +486,15 @@ func (p *Proxy) buildCredentialRequestInner(
 			realModelID = credRealName
 		}
 	}
+	requestAPI := anthropicconv.ChatAPI
+	if basePath == "/v1/messages" {
+		requestAPI = anthropicconv.MessagesAPI
+	} else if isResponsesAPI {
+		requestAPI = anthropicconv.ResponsesAPI
+	}
+	if err := anthropicconv.ValidateToolChoice(body, realModelID, requestAPI); err != nil {
+		return credentialPreparedRequest{}, err
+	}
 
 	effectiveType := cred.EffectiveProviderType()
 	if p.stickyAutoCacheCtrl &&
@@ -511,10 +524,10 @@ func (p *Proxy) buildCredentialRequestInner(
 			// trip and forward body (already carrying realModelID) as-is, aside from
 			// the thinking/anthropic_beta normalization real Anthropic API requests
 			// still need (see NormalizeMessagesForPassthrough).
-			// The response is still converted back through ChatToMessages downstream
-			// (convertedMessages stays true) because ResponseTo/StreamTo for this
-			// provider always normalize the native Anthropic response to Chat shape
-			// first regardless of how the request was built.
+			// The response goes back to the client as the provider sent it (model
+			// renamed): proxy.go and handleMessagesAPIStreaming skip ChatToMessages
+			// when passthroughMessages is set; non-stream billing still reads the
+			// Chat form ResponseTo builds.
 			passthroughBody, err := anthropicconv.NormalizeMessagesForPassthrough(body, realModelID, cred.Type == config.ProviderTypeAnthropic)
 			if err != nil {
 				return req, err
@@ -1200,23 +1213,36 @@ func (p *Proxy) selectCredentialForModel(
 	}
 
 	if sessionID != "" && p.sessionStore != nil {
-		if credName, ok := p.sessionStore.Get(sessionID, modelID); ok && !exclude[credName] {
-			cred, err := p.balancer.NextSpecificScoped(credName, modelID, logCtx.Scope)
-			if err == nil {
-				p.logger.DebugContext(logCtx.Context(), "Session-sticky routing: using cached credential",
-					"session_id", sessionID,
-					"credential", cred.Name,
+		if credName, ok := p.sessionStore.Get(sessionID, modelID); ok {
+			if exclude[credName] {
+				if logCtx.stickyRequestExcluded[credName] {
+					// Excluded for this request only (e.g. reasoning-only credential on a
+					// non-reasoning turn): serve elsewhere, keep the session.
+					logCtx.StickyHeldCredential = credName
+				}
+			} else {
+				cred, err := p.balancer.NextSpecificScoped(credName, modelID, logCtx.Scope)
+				if err == nil {
+					p.logger.DebugContext(logCtx.Context(), "Session-sticky routing: using cached credential",
+						"session_id", logCtx.SessionID,
+						"credential", cred.Name,
+						"model", modelID,
+					)
+					return cred, true
+				}
+				// Busy (its own RPM/TPM limit) is temporary: keep the binding. Banned,
+				// removed or not visible: let the cascade pick and the binding follow.
+				if errors.Is(err, balancer.ErrRateLimitExceeded) {
+					logCtx.StickyHeldCredential = credName
+				}
+				p.logger.DebugContext(logCtx.Context(), "Session-sticky routing: cached credential unavailable, falling back to standard selection",
+					"session_id", logCtx.SessionID,
+					"binding_kept", logCtx.StickyHeldCredential != "",
+					"credential", credName,
 					"model", modelID,
+					"error", err,
 				)
-				return cred, true
 			}
-
-			p.logger.DebugContext(logCtx.Context(), "Session-sticky routing: cached credential unavailable, falling back to standard selection",
-				"session_id", sessionID,
-				"credential", credName,
-				"model", modelID,
-				"error", err,
-			)
 		}
 	}
 

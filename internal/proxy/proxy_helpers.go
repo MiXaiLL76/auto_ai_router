@@ -355,6 +355,7 @@ var loggableStringFields = map[string]struct{}{
 	"include":                {},
 	"modalities":             {},
 	"search_context_size":    {},
+	"search_types":           {},
 	"prompt_cache_retention": {},
 	"ttl":                    {},
 	"previous_response_id":   {},
@@ -369,11 +370,16 @@ var loggableStringFields = map[string]struct{}{
 	"input_fidelity":         {},
 	"voice":                  {},
 	"seconds":                {},
-	// Gemini's generationConfig.
+	"thinking_level":         {},
+	"aspect_ratio":           {},
+	"image_size":             {},
+	// Gemini's generationConfig, its imageConfig and their top-level aliases.
 	"responseMimeType":   {},
 	"responseModalities": {},
 	"thinkingLevel":      {},
 	"mediaResolution":    {},
+	"aspectRatio":        {},
+	"imageSize":          {},
 }
 
 // definitionStringFields are loggable like loggableStringFields, but only in
@@ -413,6 +419,8 @@ var paramObjectFields = map[string]struct{}{
 	"cache_control":      {},
 	"generationConfig":   {},
 	"thinkingConfig":     {},
+	"imageConfig":        {},
+	"image_config":       {},
 }
 
 // loggableNumberFields are the only keys whose numbers maskClientParams
@@ -884,6 +892,11 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 		}
 		if usage.ReasoningAccounting != "" {
 			metadata["reasoning_tokens_accounting"] = usage.ReasoningAccounting
+		}
+		// A generation continued over several upstream requests (Gemini long
+		// decode): prompt_tokens sums them all, this is the context sent.
+		if usage.InitialPromptTokens > 0 {
+			metadata["initial_prompt_tokens"] = usage.InitialPromptTokens
 		}
 	}
 

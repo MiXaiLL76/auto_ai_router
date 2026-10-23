@@ -55,8 +55,8 @@ func newAnthropicTest(t *testing.T, contentType, response string) (*Proxy, *stub
 	return newBillingTestProxy(t, config.ProviderTypeAnthropic, upstream.URL, dbStub), dbStub
 }
 
-// A /v1/messages stream is billed from the re-emitted Messages events, so the
-// search counter and the TTL split must survive Anthropic -> Chat -> Messages.
+// A /v1/messages stream is billed from the relayed Messages events, so the
+// search counter and the TTL split must survive into the final message_delta.
 func TestProxyRequest_MessagesStreamKeepsServerSearchAndCacheTTL(t *testing.T) {
 	prx, dbStub := newAnthropicTest(t, "text/event-stream", anthropicWebSearchStream)
 
@@ -68,9 +68,11 @@ func TestProxyRequest_MessagesStreamKeepsServerSearchAndCacheTTL(t *testing.T) {
 	body := w.Body.String()
 	assert.Contains(t, body, "Radisson Blu Plaza")
 	assert.NotContains(t, body, `"tool_use"`, "a server search must not reach the client as a client tool call")
-	assert.NotContains(t, body, "tallest building oslo")
+	// Relayed as the server block it is: the client replays it with the result.
+	assert.Contains(t, body, `"type":"server_tool_use"`)
 	assert.Contains(t, compactJSONFragments(t, body), `"server_tool_use":{"web_search_requests":1}`)
-	assert.Contains(t, compactJSONFragments(t, body), `"cache_creation":{"ephemeral_1h_input_tokens":50}`)
+	// The provider's TTL split as sent, zero bucket included.
+	assert.Contains(t, compactJSONFragments(t, body), `"cache_creation":{"ephemeral_1h_input_tokens":50,"ephemeral_5m_input_tokens":0}`)
 
 	require.Len(t, dbStub.loggedEntries, 1)
 	entry := dbStub.loggedEntries[0]

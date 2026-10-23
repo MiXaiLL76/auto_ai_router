@@ -4,9 +4,59 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// A choice is forced when the converter for the request's API sends {"type":"any"} or
+// {"type":"tool"}; models that reject those get a router 400 instead of a masked one.
+func TestValidateToolChoice(t *testing.T) {
+	tests := []struct {
+		name   string
+		api    RequestAPI
+		choice string
+		forced bool
+	}{
+		{"chat required", ChatAPI, `"tool_choice":"required"`, true},
+		{"chat named function", ChatAPI, `"tool_choice":{"type":"function","function":{"name":"f"}}`, true},
+		{"chat function without type", ChatAPI, `"tool_choice":{"function":{"name":"f"}}`, true},
+		{"chat native any", ChatAPI, `"tool_choice":{"type":"any"}`, true},
+		{"chat allowed_tools any", ChatAPI, `"tool_choice":{"type":"allowed_tools","mode":"any","tools":[{"name":"f"}]}`, true},
+		{"chat allowed_tools required is sent as auto", ChatAPI, `"tool_choice":{"type":"allowed_tools","mode":"required","tools":[]}`, false},
+		{"chat extra_body any", ChatAPI, `"extra_body":{"tool_choice":{"type":"any"}}`, true},
+		{"chat extra_body auto wins", ChatAPI, `"tool_choice":"required","extra_body":{"tool_choice":{"type":"auto"}}`, false},
+		{"chat auto", ChatAPI, `"tool_choice":"auto"`, false},
+		{"chat none", ChatAPI, `"tool_choice":"none"`, false},
+		{"messages any", MessagesAPI, `"tool_choice":{"type":"any"}`, true},
+		{"messages tool", MessagesAPI, `"tool_choice":{"type":"tool","name":"f"}`, true},
+		{"messages auto single call", MessagesAPI, `"tool_choice":{"type":"auto","disable_parallel_tool_use":true}`, false},
+		{"messages none", MessagesAPI, `"tool_choice":{"type":"none"}`, false},
+		{"responses required", ResponsesAPI, `"tool_choice":"required"`, true},
+		{"responses function", ResponsesAPI, `"tool_choice":{"type":"function","name":"f"}`, true},
+		{"responses web search", ResponsesAPI, `"tool_choice":{"type":"web_search_preview"}`, true},
+		{"responses mcp is dropped", ResponsesAPI, `"tool_choice":{"type":"mcp","server_label":"x"}`, false},
+		{"responses allowed_tools is dropped", ResponsesAPI, `"tool_choice":{"type":"allowed_tools","mode":"required","tools":[]}`, false},
+		{"responses auto", ResponsesAPI, `"tool_choice":"auto"`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := []byte(`{"tools":[{"name":"f"}],` + tt.choice + "}")
+			for _, model := range []string{"claude-sonnet-5-5", "policy/claude-sonnet-5.5", "claude-opus-5-5", "claude-fable-5-1", "claude-mythos-5-1"} {
+				err := ValidateToolChoice(body, model, tt.api)
+				if tt.forced {
+					testhelpers.RequireValidationError(t, err, "tool_choice", "")
+				} else {
+					assert.NoError(t, err, model)
+				}
+			}
+			for _, model := range []string{"claude-sonnet-5", "claude-opus-5", "claude-haiku-5-5", "claude-fable-5", "claude-sonnet-5-50"} {
+				assert.NoError(t, ValidateToolChoice(body, model, tt.api), "%s accepts a forced tool_choice", model)
+			}
+			assert.NoError(t, ValidateToolChoice([]byte("{"+tt.choice+"}"), "claude-sonnet-5-5", tt.api), "without tools the choice is dropped")
+		})
+	}
+}
 
 func TestMapToolChoice(t *testing.T) {
 	tests := []struct {

@@ -210,6 +210,30 @@ func TestLogSpendToLiteLLMDB_UsesClientResponseID(t *testing.T) {
 	assert.Equal(t, "/v1/messages", spendMetadata["request_endpoint"])
 }
 
+func TestLogSpendToLiteLLMDB_PreservesMessagesCallType(t *testing.T) {
+	for _, status := range []string{"success", "failure"} {
+		t.Run(status, func(t *testing.T) {
+			prx := NewTestProxyBuilder().Build()
+			dbStub := &stubLiteLLMManager{}
+			prx.LiteLLMDB = dbStub
+			setTestModelPrice(prx, "gpt-4o-mini", &routermodels.ModelPrice{
+				InputCostPerToken: 0.000001, OutputCostPerToken: 0.000002,
+			})
+			logCtx := testLogCtx(t)
+			logCtx.Request.URL.Path = "/v1/messages"
+			logCtx.Status = status
+
+			require.NoError(t, prx.logSpendToLiteLLMDB(logCtx))
+			require.Len(t, dbStub.loggedEntries, 1)
+			entry := dbStub.loggedEntries[0]
+			assert.Equal(t, "anthropic_messages", entry.CallType)
+			assert.Equal(t, status, entry.Status)
+			assert.Positive(t, entry.Spend)
+			assert.False(t, entry.SkipAccounting)
+		})
+	}
+}
+
 func TestLogSpendToLiteLLMDB_PersistsInternalAIRRequestWithoutKafkaAccounting(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
 	kafkaStub := &stubKafkaManager{enabled: true}

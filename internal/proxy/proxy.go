@@ -4,7 +4,9 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,6 +43,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/scope"
 	"github.com/mixaill76/auto_ai_router/internal/security"
 	"github.com/mixaill76/auto_ai_router/internal/utils"
+	"github.com/valkey-io/valkey-go"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -285,6 +288,9 @@ type RequestLogContext struct {
 	StreamOutcome         string                   // completed, client_aborted, or stream_error
 	Credential            *config.CredentialConfig // Credential used
 	SessionID             string                   // Session ID
+	StickyHeldCredential  string                   // Credential the session stays bound to although it could not take this request (busy or excluded for it)
+	stickyExclude         map[string]bool          // Credentials excluded for this request (denylist, reasoning, tried); used to find the model's best tier
+	stickyRequestExcluded map[string]bool          // Subset excluded only because of this request's shape (reasoning-only credentials)
 	TargetURL             string                   // Target URL (for APIBase extraction)
 	TokenInfo             *litellmdb.TokenInfo     // User/team/org info
 	IsImageGeneration     bool                     // True if this is an image generation request
@@ -388,6 +394,7 @@ type Config struct {
 	IdleConnTimeout              time.Duration
 	HTTP2IdlePingTimeout         time.Duration // See httputil.HTTPClientConfig.HTTP2IdlePingTimeout (default: 15s)
 	HTTP2PingTimeout             time.Duration // See httputil.HTTPClientConfig.HTTP2PingTimeout (default: 10s)
+	MaxConnectionLifetime        time.Duration // See httputil.HTTPClientConfig.MaxConnectionLifetime (default: 0, connections are kept while reused)
 	Metrics                      *monitoring.Metrics
 	MasterKey                    string
 	RateLimiter                  *ratelimit.RPMLimiter
@@ -411,9 +418,11 @@ type Config struct {
 	SessionStickyEnabled         bool
 	SessionStickyAutoCacheCtrl   bool // Auto-inject Anthropic cache_control markers when session is active (default: true)
 	SessionStoreTTL              time.Duration
-	RouterID                     string // Human-readable name for this router (shown in /trace); defaults to hostname
-	DrainUpstreamOnAbort         bool   // When true, keep reading upstream after client disconnect to get real usage (default: false)
-	ForceStreamForTTFT           bool   // When true, force stream:true upstream for non-streaming chat requests and reassemble the response back to non-stream JSON (default: false)
+	SessionStoreRedis            valkey.Client // Optional: share session bindings between replicas (nil = replica-local)
+	SessionStoreKeyPrefix        string        // Redis key prefix for session bindings (the deployment's redis.key_prefix)
+	RouterID                     string        // Human-readable name for this router (shown in /trace); defaults to hostname
+	DrainUpstreamOnAbort         bool          // When true, keep reading upstream after client disconnect to get real usage (default: false)
+	ForceStreamForTTFT           bool          // When true, force stream:true upstream for non-streaming chat requests and reassemble the response back to non-stream JSON (default: false)
 	ResponseCompatibility        string
 	TiktokenEnabled              bool // Local tiktoken-based prompt/completion token fallback estimation (default: true)
 	StrictAllTeamModelsACL       bool
@@ -457,7 +466,7 @@ type Proxy struct {
 	retryPolicy                      *retryPolicy        // compiled Config.Retry
 	maxFallbackAttempts              int                 // Max fallback proxy hops per request chain
 	responseStore                    responsestore.Store // Optional: Responses API store (bbolt or Redis)
-	sessionStore                     *SessionStore       // Optional: session-sticky credential routing
+	sessionStore                     sessionBindingStore // Optional: session-sticky credential routing
 	stickyAutoCacheCtrl              bool                // Auto-inject Anthropic cache_control when session is active
 	drainUpstreamOnAbort             bool                // Keep reading upstream after client disconnect to get real usage chunk
 	forceStreamForTTFT               bool                // Force stream:true upstream for non-streaming chat requests and reassemble the response back to non-stream JSON (TTFT on every request)
@@ -494,6 +503,7 @@ func New(cfg *Config) *Proxy {
 	httpClientCfg.IdleConnTimeout = cfg.IdleConnTimeout
 	httpClientCfg.HTTP2IdlePingTimeout = cfg.HTTP2IdlePingTimeout
 	httpClientCfg.HTTP2PingTimeout = cfg.HTTP2PingTimeout
+	httpClientCfg.MaxConnectionLifetime = cfg.MaxConnectionLifetime
 
 	// Compute max response body size from multiplier
 	multiplier := cfg.ResponseBodyMultiplier
@@ -511,13 +521,17 @@ func New(cfg *Config) *Proxy {
 		}
 	}
 
-	var sessionStore *SessionStore
+	var sessionStore sessionBindingStore
 	if cfg.SessionStickyEnabled {
 		ttl := cfg.SessionStoreTTL
 		if ttl == 0 {
 			ttl = 6 * time.Minute
 		}
-		sessionStore = NewSessionStore(ttl)
+		if cfg.SessionStoreRedis != nil {
+			sessionStore = newRedisSessionStore(cfg.SessionStoreRedis, cfg.SessionStoreKeyPrefix, ttl, cfg.Logger)
+		} else {
+			sessionStore = NewSessionStore(ttl)
+		}
 	}
 
 	var responseCompat *compatlitellm.Transformer
@@ -595,6 +609,71 @@ func (p *Proxy) clearSessionBinding(sessionID, modelID string) {
 	p.sessionStore.Delete(sessionID, modelID)
 }
 
+// stickySessionKey is the key session bindings are stored under. Client
+// session IDs are not unique across tenants (two customers may both send
+// user="1" or the same prompt_cache_key), so for client keys the binding is
+// scoped by the hashed API key. Master-key traffic (AIR-to-AIR hops, internal
+// callers) keeps the raw session ID so a chain of routers shares the binding.
+func (p *Proxy) stickySessionKey(logCtx *RequestLogContext) string {
+	if logCtx == nil || logCtx.SessionID == "" {
+		return ""
+	}
+	if logCtx.Token == "" || p.isMasterKey(logCtx.Token) {
+		return logCtx.SessionID
+	}
+	sum := sha256.Sum256([]byte(logCtx.Token))
+	return "k:" + hex.EncodeToString(sum[:8]) + ":" + logCtx.SessionID
+}
+
+// bindSessionAfterSuccess records which credential served a completed turn.
+//
+// The cascade decides, the binding follows:
+//   - a bound credential that was only busy (its own RPM/TPM limit) or excluded
+//     for this one request keeps the session: the next turn goes back to it and
+//     to its warm prompt cache;
+//   - a bound credential that failed or is banned loses the session to the
+//     credential that served the turn;
+//   - sessions are bound only to credentials in the best priority tier the model
+//     has, so a turn served by a lower tier (cascade fallback) leaves the next
+//     turn free to return to the primary tier.
+func (p *Proxy) bindSessionAfterSuccess(logCtx *RequestLogContext, modelID, credentialName string) {
+	if logCtx == nil || p.sessionStore == nil {
+		return
+	}
+	if held := logCtx.StickyHeldCredential; held != "" && held != credentialName {
+		return
+	}
+	if !p.balancer.IsTopPriorityForModel(credentialName, modelID, logCtx.stickyExclude, logCtx.Scope) {
+		// The credential that served this turn isn't eligible to become the
+		// session's home (reserve/lower tier). Any existing binding must still
+		// go: it was never "held" here (that case returned above), so if it
+		// pointed at a credential, that credential just failed or was banned
+		// on this very request. Leaving it in place would make the next
+		// turn's sticky lookup target that dead credential directly again,
+		// bypassing the cascade's own fair selection among its live peers -
+		// the exact bug this feature exists to fix, just one hop removed
+		// (primary fails, reserve rescues, primary stays bound anyway).
+		p.clearSessionBinding(p.stickySessionKey(logCtx), modelID)
+		return
+	}
+	p.setSessionBinding(p.stickySessionKey(logCtx), modelID, credentialName)
+}
+
+// shouldClearSessionBindingOnFailure decides whether an incomplete request may
+// drop the session binding. A client that hung up (499) says nothing about the
+// bound credential, and a binding held while its credential was busy must
+// survive the failure of the substitute.
+func shouldClearSessionBindingOnFailure(ctx context.Context, logCtx *RequestLogContext) bool {
+	if logCtx.StickyHeldCredential != "" {
+		return false
+	}
+	if logCtx.HTTPStatus == StatusClientClosedRequest || logCtx.ErrorOrigin == ErrorOriginClientCanceled ||
+		logCtx.StreamOutcome == "client_aborted" {
+		return false
+	}
+	return ctx == nil || !errors.Is(ctx.Err(), context.Canceled)
+}
+
 // GetMasterKey returns the proxy master key.
 func (p *Proxy) GetMasterKey() string {
 	return p.masterKey
@@ -657,7 +736,7 @@ func (b *cancelOnCloseBody) Close() error {
 // connection outright, giving streamToClient's abort path a real chance to
 // drain the response, capture actual usage, and return the TCP connection to
 // the pool. The detached call is still bounded — it gets canceled
-// streamDrainTimeout after the client goes away, and always via the returned
+// StreamDrainTimeout after the client goes away, and always via the returned
 // cancel func once the request finishes normally.
 func (p *Proxy) upstreamRequestContext(r *http.Request) (context.Context, context.CancelFunc) {
 	if !p.drainUpstreamOnAbort {
@@ -668,7 +747,7 @@ func (p *Proxy) upstreamRequestContext(r *http.Request) (context.Context, contex
 	go func() {
 		select {
 		case <-r.Context().Done():
-			timer := time.NewTimer(streamDrainTimeout)
+			timer := time.NewTimer(StreamDrainTimeout)
 			defer timer.Stop()
 			select {
 			case <-timer.C:
@@ -991,8 +1070,8 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		// logSpendToLiteLLMDB (e.g. an early failure before a credential was set).
 		// The guard makes this a no-op when reconciliation already happened.
 		p.reconcileBudgetAndRateLimits(logCtx, 0)
-		if !logCtx.RequestCompleted {
-			p.clearSessionBinding(logCtx.SessionID, logCtx.ModelID)
+		if !logCtx.RequestCompleted && shouldClearSessionBindingOnFailure(r.Context(), logCtx) {
+			p.clearSessionBinding(p.stickySessionKey(logCtx), logCtx.ModelID)
 		}
 	}()
 
@@ -1303,7 +1382,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 					Header:     proxyResp.Headers,
 					Body:       proxyResp.StreamBody,
 				}
-				if err := p.handleMessagesAPIStreaming(w, fakeResp, cred, realModelID, logCtx, prepared.messagesMetadata); err != nil {
+				if err := p.handleMessagesAPIStreaming(w, fakeResp, cred, realModelID, logCtx, prepared.messagesMetadata, prepared.passthroughMessages); err != nil {
 					p.logStreamHandlerError(r.Context(), "Failed to handle proxy Messages API streaming", err,
 						"credential", cred.Name, "model", modelID, "request_id", logCtx.RequestID)
 				} else {
@@ -1402,7 +1481,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 			if streamCompleted {
 				logCtx.RequestCompleted = true
-				p.setSessionBinding(logCtx.SessionID, modelID, cred.Name)
+				p.bindSessionAfterSuccess(logCtx, modelID, cred.Name)
 			}
 		} else {
 			// Save passthrough Responses API response or convert Chat Completions response if needed
@@ -1485,7 +1564,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 			if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
 				logCtx.RequestCompleted = true
-				p.setSessionBinding(logCtx.SessionID, modelID, cred.Name)
+				p.bindSessionAfterSuccess(logCtx, modelID, cred.Name)
 			}
 		}
 
@@ -2091,7 +2170,16 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+		// Gemini long decode: past the per-request output cap the generation goes on
+		// in follow-up requests to this credential (see gemini_continuation.go).
+		var continuation *geminiContinuation
+		if resp.StatusCode == http.StatusOK && !isEmbeddings && !logCtx.IsImageGeneration && !isImageEdit {
+			continuation = p.newGeminiContinuation(r, cred, modelID, realModelID, proxyReq, requestBody, logCtx)
+		}
 		if isStreamingResp {
+			if continuation != nil {
+				resp.Body = continuation.stream(resp.Body)
+			}
 			p.recordProviderResponse(r.Context(), cred, modelID, realModelID, resp.StatusCode, resp.Header, nil)
 			// Cannot retry streaming responses
 			logCtx.TargetURL = targetURL
@@ -2126,6 +2214,9 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			retryReason = RetryReasonNetErr
 			transportErr = readErr
 			continue
+		}
+		if continuation != nil {
+			responseBody = continuation.complete(responseBody)
 		}
 
 		if mappedStatus, ok := statusCodeFromProviderBodyError(resp.StatusCode, responseBody); ok {
@@ -2369,7 +2460,12 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Handle Responses API response body.
-		if prepared.convertedMessages && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		if prepared.passthroughMessages && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			// The provider answered in the Messages API format already: return its body
+			// as is, so thinking signatures, block order, server tool blocks and
+			// input_transformations survive. Billing keeps reading the Chat form above.
+			finalResponseBody = rewriteResponseModelAlias([]byte(decodedBody), realModelID, clientVisibleResponseModel(logCtx, modelID))
+		} else if prepared.convertedMessages && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			messagesBody, convErr := anthropicconv.ChatToMessages(finalResponseBody, prepared.messagesMetadata,
 				tokenUsageOptions.CacheWriteTTLHeader5mTokens, tokenUsageOptions.CacheWriteTTLHeader1hTokens)
 			if convErr != nil {
@@ -2689,7 +2785,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		streamCompleted := false
 		if prepared.convertedMessages {
 			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-				err := p.handleMessagesAPIStreaming(w, resp, cred, modelID, logCtx, prepared.messagesMetadata)
+				err := p.handleMessagesAPIStreaming(w, resp, cred, modelID, logCtx, prepared.messagesMetadata, prepared.passthroughMessages)
 				if err != nil {
 					p.logStreamHandlerError(r.Context(), "Failed to handle Messages API streaming", err,
 						"credential", cred.Name, "model", modelID, "request_id", logCtx.RequestID)
@@ -2799,7 +2895,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 		if streamCompleted {
 			logCtx.RequestCompleted = true
-			p.setSessionBinding(logCtx.SessionID, modelID, cred.Name)
+			p.bindSessionAfterSuccess(logCtx, modelID, cred.Name)
 		}
 
 	} else {
@@ -2837,7 +2933,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 		} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			logCtx.RequestCompleted = true
-			p.setSessionBinding(logCtx.SessionID, modelID, cred.Name)
+			p.bindSessionAfterSuccess(logCtx, modelID, cred.Name)
 		}
 	}
 }

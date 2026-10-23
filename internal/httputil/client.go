@@ -77,6 +77,10 @@ type HTTPClientConfig struct {
 	// went to 0.
 	HTTP2IdlePingTimeout time.Duration
 	HTTP2PingTimeout     time.Duration
+	// MaxConnectionLifetime, when positive, is how long a connection takes new
+	// requests before stopping and draining.
+	// Zero keeps connections open for as long as they are reused.
+	MaxConnectionLifetime time.Duration
 }
 
 // DefaultHTTPClientConfig returns HTTP client configuration with sensible defaults
@@ -177,10 +181,19 @@ func newTransport(cfg *HTTPClientConfig) *http.Transport {
 	}
 }
 
+// newRoundTripper is newTransport's transport, or, when cfg.MaxConnectionLifetime
+// is set, one replaced by a new one every MaxConnectionLifetime.
+func newRoundTripper(cfg *HTTPClientConfig) http.RoundTripper {
+	if cfg == nil || cfg.MaxConnectionLifetime <= 0 {
+		return newTransport(cfg)
+	}
+	return newLifetimeTransport(cfg.MaxConnectionLifetime, func() *http.Transport { return newTransport(cfg) })
+}
+
 // NewHTTPClient creates a new HTTP client with the given configuration
 // This centralized factory ensures consistent HTTP client behavior throughout the application
 func NewHTTPClient(cfg *HTTPClientConfig) *http.Client {
-	transport := newTransport(cfg)
+	transport := newRoundTripper(cfg)
 
 	return &http.Client{
 		// No global timeout — streaming responses can run for minutes.

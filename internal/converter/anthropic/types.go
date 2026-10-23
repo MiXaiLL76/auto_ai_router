@@ -1,5 +1,7 @@
 package anthropic
 
+import "encoding/json"
+
 // AnthropicRequest represents a request to the Anthropic Messages API.
 // Serialized directly to JSON for HTTP requests (no SDK dependency).
 type AnthropicRequest struct {
@@ -55,6 +57,20 @@ type ContentBlock struct {
 	CacheControl interface{} `json:"cache_control,omitempty"`
 }
 
+// MarshalJSON keeps "thinking" on a thinking block even when it is empty:
+// the API requires the field, and display "omitted" (the default on Claude 4.7+)
+// returns every block with empty text and only a signature.
+func (b ContentBlock) MarshalJSON() ([]byte, error) {
+	type plain ContentBlock
+	if b.Type != "thinking" {
+		return json.Marshal(plain(b))
+	}
+	return json.Marshal(struct {
+		plain
+		Thinking string `json:"thinking"`
+	}{plain(b), b.Thinking})
+}
+
 // AnthropicCitation is a citation attached to a text content block, e.g. a
 // web_search_result_location produced by the web_search server tool.
 type AnthropicCitation struct {
@@ -101,10 +117,14 @@ type AnthropicTool struct {
 // AnthropicThinking controls extended thinking / reasoning in Anthropic models.
 //   - Claude 3.x: Type="enabled", BudgetTokens=N
 //   - Claude 4+:  Type="adaptive", paired with AnthropicOutputConfig.Effort
+//   - Claude Sonnet 5.5 without thinking: Type="between_tools" (it rejects "disabled")
 type AnthropicThinking struct {
-	Type         string `json:"type"`                    // "enabled", "adaptive", or "disabled"
+	Type         string `json:"type"`                    // "enabled", "adaptive", "between_tools" or "disabled"
 	BudgetTokens int    `json:"budget_tokens,omitempty"` // token budget (Claude 3.x only)
 	Display      string `json:"display,omitempty"`       // "summarized" or "omitted"
+	// BlockBinding is the client's {"prefix_mismatch_behavior": "error"|"drop_block"},
+	// forwarded as-is; it needs the thinking-binding-controls-2026-08-01 beta.
+	BlockBinding interface{} `json:"block_binding,omitempty"`
 }
 
 // AnthropicOutputConfig controls output-level settings for Claude 4+ models.

@@ -1,24 +1,28 @@
 package vertexresponses
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
+	"github.com/mixaill76/auto_ai_router/internal/converter/vertex"
 	"google.golang.org/genai"
 )
 
 // responsesToolsToVertex converts Responses API tools to Vertex AI genai.Tool slice.
 // Function tools are grouped into one Tool with FunctionDeclarations.
-// Built-in tools (web_search, code_interpreter, url_context) become separate Tool entries.
-func responsesToolsToVertex(tools []responses.Tool) []*genai.Tool {
+// Built-in tools (web_search, code_interpreter, url_context) become separate Tool
+// entries; search tools merge into one GoogleSearch tool.
+func responsesToolsToVertex(tools []responses.Tool) ([]*genai.Tool, error) {
 	if len(tools) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	var funcDecls []*genai.FunctionDeclaration
 	var builtinTools []*genai.Tool
+	var search vertex.GoogleSearchTypes
 
-	for _, t := range tools {
+	for i, t := range tools {
 		switch t.Type {
 		case "function":
 			decl := &genai.FunctionDeclaration{
@@ -32,10 +36,14 @@ func responsesToolsToVertex(tools []responses.Tool) []*genai.Tool {
 			}
 			funcDecls = append(funcDecls, decl)
 
-		case "web_search_preview", "web_search_preview_2025_03_11", "web_search":
-			builtinTools = append(builtinTools, &genai.Tool{
-				GoogleSearch: &genai.GoogleSearch{},
-			})
+		case "web_search_preview", "web_search_preview_2025_03_11", "web_search", "google_search":
+			tool, err := search.Add(t.SearchTypes, fmt.Sprintf("tools[%d].search_types", i))
+			if err != nil {
+				return nil, err
+			}
+			if tool != nil {
+				builtinTools = append(builtinTools, tool)
+			}
 
 		case "code_interpreter":
 			builtinTools = append(builtinTools, &genai.Tool{
@@ -59,12 +67,12 @@ func responsesToolsToVertex(tools []responses.Tool) []*genai.Tool {
 	// Gemini API does NOT allow combining built-in tools with function declarations.
 	// When both are present, prefer built-in tools and silently drop functions.
 	if len(builtinTools) > 0 {
-		return builtinTools
+		return builtinTools, nil
 	}
 	if len(funcDecls) > 0 {
-		return []*genai.Tool{{FunctionDeclarations: funcDecls}}
+		return []*genai.Tool{{FunctionDeclarations: funcDecls}}, nil
 	}
-	return nil
+	return nil, nil
 }
 
 // hasFunctionDeclarations reports whether the converted Vertex tools still carry
