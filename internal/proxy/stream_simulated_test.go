@@ -597,7 +597,9 @@ func (s *stubProviderResponses) StreamTo(reader io.Reader, writer io.Writer, dis
 	return nil
 }
 
-func (s *stubProviderResponses) BuildURL(cred *config.CredentialConfig) string { return "http://upstream" }
+func (s *stubProviderResponses) BuildURL(cred *config.CredentialConfig) string {
+	return "http://upstream"
+}
 
 // TestHandleSimulatedNativeNonStream_CapturesTTFT drives the native simulated
 // handler directly: the provider answers SSE, the converter folds it into a

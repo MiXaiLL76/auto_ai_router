@@ -67,30 +67,30 @@ type orchestratedRequest struct {
 	// endpoint. Its SSE carries choices[].text (not choices[].delta.content), so
 	// the simulated non-stream path reassembles that legacy shape separately
 	// (reassembleCompletions) instead of the chat-shaped one.
-	completionsPath bool
-	responsesPrevHandled  bool
-	responsesMetadata     *responses.ResponsesMetadata // non-nil for Responses API requests
-	messagesMetadata      anthropicconv.MessagesAdapterMetadata
-	stickyCacheEligible   bool
+	completionsPath      bool
+	responsesPrevHandled bool
+	responsesMetadata    *responses.ResponsesMetadata // non-nil for Responses API requests
+	messagesMetadata     anthropicconv.MessagesAdapterMetadata
+	stickyCacheEligible  bool
 }
 
 type credentialPreparedRequest struct {
-	body                 []byte
-	proxyBody            []byte
-	proxyPath            string
-	realModelID          string
-	path                 string
-	convertedResp        bool
-	convertedMessages    bool
-	convertedToResponses bool
-	passthroughResponses bool
-	passthroughMessages  bool
-	nativeResponses      bool
-	forcedNativeNonStream bool // see orchestratedRequest.forcedNativeNonStream
+	body                       []byte
+	proxyBody                  []byte
+	proxyPath                  string
+	realModelID                string
+	path                       string
+	convertedResp              bool
+	convertedMessages          bool
+	convertedToResponses       bool
+	passthroughResponses       bool
+	passthroughMessages        bool
+	nativeResponses            bool
+	forcedNativeNonStream      bool // see orchestratedRequest.forcedNativeNonStream
 	forcedPassthroughNonStream bool // see orchestratedRequest.forcedPassthroughNonStream
-	forcedChatNonStream  bool // see orchestratedRequest.forcedChatNonStream
-	completionsPath      bool // see orchestratedRequest.completionsPath
-	messagesMetadata     anthropicconv.MessagesAdapterMetadata
+	forcedChatNonStream        bool // see orchestratedRequest.forcedChatNonStream
+	completionsPath            bool // see orchestratedRequest.completionsPath
+	messagesMetadata           anthropicconv.MessagesAdapterMetadata
 }
 
 // orchestrateRequest performs auth and credential selection for an incoming request.
@@ -318,34 +318,34 @@ func (p *Proxy) orchestrateRequest(
 	r = markCredentialAsTried(r, cred.Name)
 
 	return &orchestratedRequest{
-		request:              r,
-		body:                 body,
-		proxyBody:            credentialReq.proxyBody,
-		proxyPath:            credentialReq.proxyPath,
-		baseBody:             baseBody,
-		baseProxyBody:        baseProxyBody,
-		modelID:              modelID,
-		realModelID:          realModelID,
-		baseRealModelID:      baseRealModelID,
-		basePath:             basePath,
-		streaming:            streaming,
-		cred:                 cred,
-		isResponsesAPI:       isResponsesAPI,
-		isMessagesAPI:        isMessagesAPI,
-		convertedResp:        credentialReq.convertedResp,
-		convertedMessages:    credentialReq.convertedMessages,
-		convertedToResponses: credentialReq.convertedToResponses,
-		passthroughResponses: credentialReq.passthroughResponses,
-		passthroughMessages:  credentialReq.passthroughMessages,
-		nativeResponses:      credentialReq.nativeResponses,
-		forcedNativeNonStream: credentialReq.forcedNativeNonStream,
+		request:                    r,
+		body:                       body,
+		proxyBody:                  credentialReq.proxyBody,
+		proxyPath:                  credentialReq.proxyPath,
+		baseBody:                   baseBody,
+		baseProxyBody:              baseProxyBody,
+		modelID:                    modelID,
+		realModelID:                realModelID,
+		baseRealModelID:            baseRealModelID,
+		basePath:                   basePath,
+		streaming:                  streaming,
+		cred:                       cred,
+		isResponsesAPI:             isResponsesAPI,
+		isMessagesAPI:              isMessagesAPI,
+		convertedResp:              credentialReq.convertedResp,
+		convertedMessages:          credentialReq.convertedMessages,
+		convertedToResponses:       credentialReq.convertedToResponses,
+		passthroughResponses:       credentialReq.passthroughResponses,
+		passthroughMessages:        credentialReq.passthroughMessages,
+		nativeResponses:            credentialReq.nativeResponses,
+		forcedNativeNonStream:      credentialReq.forcedNativeNonStream,
 		forcedPassthroughNonStream: credentialReq.forcedPassthroughNonStream,
-		forcedChatNonStream: credentialReq.forcedChatNonStream,
-		completionsPath:     credentialReq.completionsPath,
-		responsesPrevHandled: prevEntryHandled,
-		responsesMetadata:    responsesMetadata,
-		messagesMetadata:     credentialReq.messagesMetadata,
-		stickyCacheEligible:  stickyCacheEligible,
+		forcedChatNonStream:        credentialReq.forcedChatNonStream,
+		completionsPath:            credentialReq.completionsPath,
+		responsesPrevHandled:       prevEntryHandled,
+		responsesMetadata:          responsesMetadata,
+		messagesMetadata:           credentialReq.messagesMetadata,
+		stickyCacheEligible:        stickyCacheEligible,
 	}, true
 }
 
