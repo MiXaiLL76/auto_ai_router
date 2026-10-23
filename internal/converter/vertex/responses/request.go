@@ -154,15 +154,22 @@ func inputToContents(input interface{}) ([]*genai.Content, error) {
 			arguments, _ := itemMap["arguments"].(string)
 			var argsMap map[string]interface{}
 			_ = json.Unmarshal([]byte(arguments), &argsMap)
+			part := &genai.Part{FunctionCall: &genai.FunctionCall{
+				ID:   callID,
+				Name: name,
+				Args: argsMap,
+			}}
+			// Parallel calls of one turn (possibly separated by reasoning items,
+			// which add no content) form one model content: Gemini rejects a
+			// function response turn whose parts outnumber the calls of the
+			// model turn right before it.
+			if last := lastContent(contents); last != nil && last.Role == "model" && onlyFunctionCalls(last.Parts) {
+				last.Parts = append(last.Parts, part)
+				continue
+			}
 			contents = append(contents, &genai.Content{
-				Role: "model",
-				Parts: []*genai.Part{{
-					FunctionCall: &genai.FunctionCall{
-						ID:   callID,
-						Name: name,
-						Args: argsMap,
-					},
-				}},
+				Role:  "model",
+				Parts: []*genai.Part{part},
 			})
 
 		case "function_call_output":
@@ -206,6 +213,23 @@ func inputToContents(input interface{}) ([]*genai.Content, error) {
 
 	flushToolParts()
 	return contents, nil
+}
+
+func lastContent(contents []*genai.Content) *genai.Content {
+	if len(contents) == 0 {
+		return nil
+	}
+	return contents[len(contents)-1]
+}
+
+// onlyFunctionCalls reports whether parts are all function calls.
+func onlyFunctionCalls(parts []*genai.Part) bool {
+	for _, p := range parts {
+		if p == nil || p.FunctionCall == nil {
+			return false
+		}
+	}
+	return len(parts) > 0
 }
 
 // messageItemToContent converts an input message item to a genai.Content.

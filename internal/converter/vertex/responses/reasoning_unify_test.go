@@ -123,5 +123,8 @@ func TestResponsesRequestToVertex_ReasoningAddsNoContentsAroundCalls(t *testing.
 			assert.NotContains(t, p, "text", "no text part may come from a reasoning item")
 		}
 	}
-	assert.Equal(t, []interface{}{"user", "model", "model", "user"}, roles)
+	// Both calls are answered by one user turn, so they form one model turn.
+	assert.Equal(t, []interface{}{"user", "model", "user"}, roles)
+	modelParts, _ := contents[1]["parts"].([]interface{})
+	assert.Len(t, modelParts, 2)
 }
