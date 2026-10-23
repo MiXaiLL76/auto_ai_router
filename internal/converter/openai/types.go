@@ -1,6 +1,10 @@
 package openai
 
-import "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
+import (
+	"encoding/json"
+
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
+)
 
 // Request types
 
@@ -239,9 +243,20 @@ type OpenAIStreamingChunk struct {
 }
 
 type OpenAIStreamingChoice struct {
-	Index        int                  `json:"index"`
-	Delta        OpenAIStreamingDelta `json:"delta"`
-	FinishReason *string              `json:"finish_reason"`
+	Index        int                      `json:"index"`
+	Delta        OpenAIStreamingDelta     `json:"delta"`
+	FinishReason *string                  `json:"finish_reason"`
+	Logprobs     *OpenAIStreamingLogprobs `json:"logprobs,omitempty"`
+}
+
+// OpenAIStreamingLogprobs carries the per-chunk logprobs of one streaming
+// choice: an OpenAI-compatible upstream with logprobs=true sends one content
+// entry per token, in the same shape the non-stream response uses
+// (bytes/logprob/token/top_logprobs). Kept as raw JSON so no provider field is
+// dropped when the stream is reassembled into a single non-stream body.
+type OpenAIStreamingLogprobs struct {
+	Content []json.RawMessage `json:"content,omitempty"`
+	Refusal json.RawMessage   `json:"refusal,omitempty"`
 }
 
 type OpenAIStreamingDelta struct {

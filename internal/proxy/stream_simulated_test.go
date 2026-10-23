@@ -937,3 +937,48 @@ func TestForceStream_GeminiChat_UsesStreamingURL(t *testing.T) {
 	assert.Contains(t, gotPath, "streamGenerateContent", "gemini upstream must be called on the streaming URL")
 	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
 }
+
+// TestReassembleChatCompletion_Logprobs verifies per-token logprobs streamed by
+// the upstream (one content entry per chunk) survive reassembly into the
+// non-stream choice, matching the plain non-stream response shape.
+func TestReassembleChatCompletion_Logprobs(t *testing.T) {
+	stream := openAIChatSSE(
+		`{"id":"c1","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"content":"","role":"assistant"},"logprobs":{"content":[],"refusal":null}}]}`,
+		`{"id":"c1","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"content":"Hi"},"logprobs":{"content":[{"token":"Hi","logprob":-0.1,"top_logprobs":[{"token":"Hi","logprob":-0.1}]}],"refusal":null}}]}`,
+		`{"id":"c1","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"content":"!"},"logprobs":{"content":[{"token":"!","logprob":-0.5,"top_logprobs":[{"token":"!","logprob":-0.5}]}],"refusal":null}}]}`,
+		`{"id":"c1","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+	)
+	body := reassembleChatCompletion([]byte(stream))
+	require.NotNil(t, body)
+	var out struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+			Logprobs *struct {
+				Content []struct {
+					Token string `json:"token"`
+				} `json:"content"`
+			} `json:"logprobs"`
+		} `json:"choices"`
+	}
+	require.NoError(t, json.Unmarshal(body, &out))
+	require.Len(t, out.Choices, 1)
+	assert.Equal(t, "Hi!", out.Choices[0].Message.Content)
+	require.NotNil(t, out.Choices[0].Logprobs, "logprobs must survive reassembly")
+	require.Len(t, out.Choices[0].Logprobs.Content, 2)
+	assert.Equal(t, "Hi", out.Choices[0].Logprobs.Content[0].Token)
+	assert.Equal(t, "!", out.Choices[0].Logprobs.Content[1].Token)
+}
+
+// TestReassembleChatCompletion_NoLogprobsWhenAbsent verifies the logprobs field
+// is omitted entirely (not emitted as null) for an ordinary stream that never
+// carried it, keeping the plain non-stream shape.
+func TestReassembleChatCompletion_NoLogprobsWhenAbsent(t *testing.T) {
+	stream := openAIChatSSE(
+		`{"id":"c1","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":"stop"}]}`,
+	)
+	body := reassembleChatCompletion([]byte(stream))
+	require.NotNil(t, body)
+	assert.NotContains(t, string(body), `"logprobs"`)
+}

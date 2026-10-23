@@ -881,6 +881,13 @@ type simToolCallState struct {
 	arguments strings.Builder
 }
 
+// simLogprobs is the choice-level logprobs shape the reassembled non-stream
+// body emits when the client asked for logprobs.
+type simLogprobs struct {
+	Content []json.RawMessage `json:"content"`
+	Refusal json.RawMessage   `json:"refusal"`
+}
+
 // simChoiceState accumulates one choice across streaming deltas.
 type simChoiceState struct {
 	index        int
@@ -892,6 +899,13 @@ type simChoiceState struct {
 	toolCalls    map[int]*simToolCallState
 	toolOrder    []int
 	finishReason *string
+	// logprobs accumulates the per-token entries the upstream streams when the
+	// client asked for logprobs=true (one content entry per chunk, same shape
+	// the non-stream response uses). Without this the reassembled body silently
+	// dropped them.
+	logprobsContent []json.RawMessage
+	logprobsRefusal json.RawMessage
+	hasLogprobs     bool
 }
 
 func newSimChoiceState(index int) *simChoiceState {
@@ -980,6 +994,18 @@ func reassembleChatCompletion(stream []byte) []byte {
 				// (vertex/streaming.go) — mirror the non-stream message shape.
 				st.images = append(st.images, c.Delta.Images...)
 			}
+			if c.Logprobs != nil {
+				// logprobs=true: the upstream sends one content entry per token,
+				// chunk by chunk — concatenate them into the final choice's
+				// logprobs.content, matching the non-stream shape.
+				st.hasLogprobs = true
+				if len(c.Logprobs.Content) > 0 {
+					st.logprobsContent = append(st.logprobsContent, c.Logprobs.Content...)
+				}
+				if len(c.Logprobs.Refusal) > 0 && string(c.Logprobs.Refusal) != "null" {
+					st.logprobsRefusal = c.Logprobs.Refusal
+				}
+			}
 			for _, tc := range c.Delta.ToolCalls {
 				idx := tc.Index
 				t := st.toolCalls[idx]
@@ -1038,6 +1064,10 @@ func reassembleChatCompletion(stream []byte) []byte {
 		// finish_reason is omitted (never null) when the stream ended without
 		// ever carrying one: the native non-stream contract is a string.
 		FinishReason *string `json:"finish_reason,omitempty"`
+		// Logprobs is emitted only when the client asked for logprobs (the
+		// upstream then streamed per-token entries), mirroring the non-stream
+		// shape: {content:[...], refusal:...}.
+		Logprobs *simLogprobs `json:"logprobs,omitempty"`
 	}
 	type simCompletion struct {
 		ID                string          `json:"id"`
@@ -1090,10 +1120,15 @@ func reassembleChatCompletion(stream []byte) []byte {
 				msg.ToolCalls = append(msg.ToolCalls, tc)
 			}
 		}
+		var lp *simLogprobs
+		if st.hasLogprobs {
+			lp = &simLogprobs{Content: st.logprobsContent, Refusal: st.logprobsRefusal}
+		}
 		out.Choices = append(out.Choices, simChoice{
 			Index:        st.index,
 			Message:      msg,
 			FinishReason: st.finishReason,
+			Logprobs:     lp,
 		})
 	}
 
