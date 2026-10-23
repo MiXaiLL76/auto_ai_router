@@ -16,6 +16,34 @@ const (
 	ChannelReasoning = "reasoning"
 )
 
+// Format is the wire format of a watched stream.
+type Format int
+
+const (
+	// FormatNone means the stream is not watched.
+	FormatNone Format = iota
+	// FormatChat is chat.completion.chunk events (OpenAI Chat Completions).
+	FormatChat
+	// FormatResponses is OpenAI Responses API events (response.*).
+	FormatResponses
+	// FormatMessages is Anthropic Messages API events.
+	FormatMessages
+)
+
+// String returns the format name used in logs.
+func (f Format) String() string {
+	switch f {
+	case FormatChat:
+		return "chat"
+	case FormatResponses:
+		return "responses"
+	case FormatMessages:
+		return "messages"
+	default:
+		return "none"
+	}
+}
+
 // Firing is a channel's first firing.
 type Firing struct {
 	Channel string
@@ -33,6 +61,8 @@ type Detector struct {
 	finishReason string
 	meta         ChunkMeta
 	answered     bool
+	openBlock    int // Messages: index of the content block being streamed, -1 = none
+	sequence     int // Responses: highest sequence_number seen
 }
 
 // ChunkMeta identifies the completion a stream belongs to, as the last chunk
@@ -50,7 +80,174 @@ func NewDetector(cfg Config, start time.Time) *Detector {
 		start:     start,
 		content:   NewChannel(cfg, seed),
 		reasoning: NewChannel(cfg, seed),
+		openBlock: -1,
 	}
+}
+
+// OpenBlock returns the index of the Messages content block being streamed.
+func (d *Detector) OpenBlock() (int, bool) { return d.openBlock, d.openBlock >= 0 }
+
+// Sequence returns the highest Responses sequence_number seen.
+func (d *Detector) Sequence() int { return d.sequence }
+
+// Observe feeds one SSE data payload in the given format.
+func (d *Detector) Observe(format Format, payload []byte, now time.Time) []Firing {
+	switch format {
+	case FormatChat:
+		return d.ObserveChatChunk(payload, now)
+	case FormatResponses:
+		return d.ObserveResponsesEvent(payload, now)
+	case FormatMessages:
+		return d.ObserveMessagesEvent(payload, now)
+	default:
+		return nil
+	}
+}
+
+func (d *Detector) feedContent(text string) {
+	d.content.Feed(text)
+	if !d.answered && strings.TrimSpace(text) != "" {
+		d.answered = true
+	}
+}
+
+type responsesEvent struct {
+	Type           string  `json:"type"`
+	SequenceNumber int     `json:"sequence_number"`
+	Delta          *string `json:"delta"`
+	Item           *struct {
+		Type string `json:"type"`
+	} `json:"item"`
+	Response *struct {
+		ID                string `json:"id"`
+		CreatedAt         int64  `json:"created_at"`
+		Model             string `json:"model"`
+		Status            string `json:"status"`
+		IncompleteDetails *struct {
+			Reason string `json:"reason"`
+		} `json:"incomplete_details"`
+	} `json:"response"`
+}
+
+var typeKey = []byte(`"type"`)
+
+// ObserveResponsesEvent feeds one Responses API event: output_text and
+// refusal deltas are the answer, reasoning deltas (reasoning_text,
+// reasoning_summary_text) the reasoning; a function call or any other
+// non-message output item starts the answer without being counted.
+func (d *Detector) ObserveResponsesEvent(payload []byte, now time.Time) []Firing {
+	if !bytes.Contains(payload, typeKey) {
+		return nil
+	}
+	var ev responsesEvent
+	if err := json.Unmarshal(payload, &ev); err != nil {
+		return nil
+	}
+	if ev.SequenceNumber > d.sequence {
+		d.sequence = ev.SequenceNumber
+	}
+	if r := ev.Response; r != nil {
+		if r.ID != "" {
+			d.meta.ID = r.ID
+		}
+		if r.CreatedAt != 0 {
+			d.meta.Created = r.CreatedAt
+		}
+		if r.Model != "" {
+			d.meta.Model = r.Model
+		}
+	}
+	switch {
+	case ev.Type == "response.output_text.delta" || ev.Type == "response.refusal.delta":
+		if ev.Delta != nil {
+			d.feedContent(*ev.Delta)
+		}
+	case strings.HasPrefix(ev.Type, "response.reasoning") && strings.HasSuffix(ev.Type, ".delta"):
+		if ev.Delta != nil {
+			d.reasoning.Feed(*ev.Delta)
+		}
+	case ev.Type == "response.function_call_arguments.delta":
+		d.answered = true
+	case ev.Type == "response.output_item.added":
+		if ev.Item != nil && ev.Item.Type != "reasoning" && ev.Item.Type != "message" {
+			d.answered = true
+		}
+	case ev.Type == "response.completed" || ev.Type == "response.incomplete" || ev.Type == "response.failed":
+		if r := ev.Response; r != nil {
+			d.finishReason = r.Status
+			if r.IncompleteDetails != nil && r.IncompleteDetails.Reason != "" {
+				d.finishReason = r.IncompleteDetails.Reason
+			}
+		}
+	}
+	return d.check(now)
+}
+
+type messagesEvent struct {
+	Type    string `json:"type"`
+	Index   *int   `json:"index"`
+	Message *struct {
+		ID    string `json:"id"`
+		Model string `json:"model"`
+	} `json:"message"`
+	ContentBlock *struct {
+		Type string `json:"type"`
+	} `json:"content_block"`
+	Delta *struct {
+		Type       string  `json:"type"`
+		Text       *string `json:"text"`
+		Thinking   *string `json:"thinking"`
+		StopReason *string `json:"stop_reason"`
+	} `json:"delta"`
+}
+
+// ObserveMessagesEvent feeds one Anthropic Messages API event: text deltas
+// are the answer, thinking deltas the reasoning; a tool_use block starts the
+// answer without its input being counted.
+func (d *Detector) ObserveMessagesEvent(payload []byte, now time.Time) []Firing {
+	if !bytes.Contains(payload, typeKey) {
+		return nil
+	}
+	var ev messagesEvent
+	if err := json.Unmarshal(payload, &ev); err != nil {
+		return nil
+	}
+	switch ev.Type {
+	case "message_start":
+		if ev.Message != nil {
+			d.meta.ID, d.meta.Model = ev.Message.ID, ev.Message.Model
+		}
+	case "content_block_start":
+		if ev.Index != nil {
+			d.openBlock = *ev.Index
+		}
+		if ev.ContentBlock != nil && ev.ContentBlock.Type != "text" && ev.ContentBlock.Type != "thinking" && ev.ContentBlock.Type != "redacted_thinking" {
+			d.answered = true
+		}
+	case "content_block_delta":
+		if ev.Delta == nil {
+			break
+		}
+		switch ev.Delta.Type {
+		case "text_delta":
+			if ev.Delta.Text != nil {
+				d.feedContent(*ev.Delta.Text)
+			}
+		case "thinking_delta":
+			if ev.Delta.Thinking != nil {
+				d.reasoning.Feed(*ev.Delta.Thinking)
+			}
+		case "input_json_delta":
+			d.answered = true
+		}
+	case "content_block_stop":
+		d.openBlock = -1
+	case "message_delta":
+		if ev.Delta != nil && ev.Delta.StopReason != nil {
+			d.finishReason = *ev.Delta.StopReason
+		}
+	}
+	return d.check(now)
 }
 
 // Content returns the answer text channel.

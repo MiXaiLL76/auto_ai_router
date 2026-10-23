@@ -347,6 +347,7 @@ func newTestLoopGateObserver(t *testing.T, mode config.LoopGateMode) *loopGateOb
 		p:        &Proxy{logger: testhelpers.NewTestLogger(), metrics: monitoring.New(false)},
 		ctx:      t.Context(),
 		settings: settings,
+		format:   loopgate.FormatChat,
 		now:      time.Now,
 		start:    time.Now(),
 	}
@@ -917,4 +918,288 @@ func TestLoopGate_NonStreamMessagesAPIOverVLLM(t *testing.T) {
 	bodies, _ := sv.snapshot()
 	require.Len(t, bodies, 2, "the Messages API request is converted to a chat completion and gated the same way")
 	assert.Equal(t, true, bodies[0]["stream"])
+}
+
+// writeLoopGateNativeEndless streams events produced by event(i) for word
+// chunk i (500 distinct words, then the same phrase) until the reader goes
+// away, after the given opening events. Returns true when the reader went away.
+func writeLoopGateNativeEndless(w http.ResponseWriter, r *http.Request, opening []string, event func(i int, text string) string) bool {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.WriteHeader(http.StatusOK)
+	flusher := w.(http.Flusher)
+	for _, e := range opening {
+		_, _ = io.WriteString(w, e)
+	}
+	words := loopGateWords(500)
+	for i := 0; i < 1_000_000; i += 10 {
+		if r.Context().Err() != nil {
+			return true
+		}
+		var chunk []string
+		if i < len(words) {
+			chunk = words[i : i+10]
+		} else {
+			chunk = loopGateLoop(1)[i%40 : i%40+10]
+		}
+		text, _ := json.Marshal(strings.Join(chunk, " ") + " ")
+		if _, err := io.WriteString(w, event(i/10, string(text))); err != nil {
+			return true
+		}
+		flusher.Flush()
+	}
+	return false
+}
+
+func responsesReasoningLoop(w http.ResponseWriter, r *http.Request) bool {
+	return writeLoopGateNativeEndless(w, r, []string{
+		"event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":5,\"model\":\"Qwen/Qwen3.6-35B\",\"status\":\"in_progress\",\"output\":[]}}\n\n",
+		"event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"summary\":[]}}\n\n",
+	}, func(i int, text string) string {
+		return fmt.Sprintf("event: response.reasoning_text.delta\ndata: {\"type\":\"response.reasoning_text.delta\",\"sequence_number\":%d,\"item_id\":\"rs_1\",\"output_index\":0,\"content_index\":0,\"delta\":%s}\n\n", i+2, text)
+	})
+}
+
+func messagesThinkingLoop(w http.ResponseWriter, r *http.Request) bool {
+	return writeLoopGateNativeEndless(w, r, []string{
+		"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"Qwen/Qwen3.6-35B\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":1}}}\n\n",
+		"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n",
+	}, func(_ int, text string) string {
+		return fmt.Sprintf("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":%s}}\n\n", text)
+	})
+}
+
+func postLoopGate(t *testing.T, prx *Proxy, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer master-key")
+	w := httptest.NewRecorder()
+	prx.ProxyRequest(w, req)
+	return w
+}
+
+// sseEventTypes returns the "type" of every data payload in an SSE body.
+func sseEventTypes(t *testing.T, body string) []string {
+	t.Helper()
+	var types []string
+	for _, line := range strings.Split(body, "\n") {
+		payload, ok := strings.CutPrefix(line, "data: ")
+		if !ok || payload == "[DONE]" {
+			continue
+		}
+		var ev struct {
+			Type string `json:"type"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(payload), &ev), payload)
+		types = append(types, ev.Type)
+	}
+	return types
+}
+
+func lastSSEPayload(t *testing.T, body, eventType string) map[string]any {
+	t.Helper()
+	var found map[string]any
+	for _, line := range strings.Split(body, "\n") {
+		payload, ok := strings.CutPrefix(line, "data: ")
+		if !ok || payload == "[DONE]" {
+			continue
+		}
+		var ev map[string]any
+		require.NoError(t, json.Unmarshal([]byte(payload), &ev))
+		if ev["type"] == eventType {
+			found = ev
+		}
+	}
+	require.NotNil(t, found, "no %s event in %s", eventType, body)
+	return found
+}
+
+func countOf(items []string, want string) int {
+	n := 0
+	for _, it := range items {
+		if it == want {
+			n++
+		}
+	}
+	return n
+}
+
+func TestLoopGate_ResponsesPassthroughStreamIsCut(t *testing.T) {
+	resetLoopGateEnforceMetrics()
+	sv, url := newScriptedVLLM(t, func(n int, w http.ResponseWriter, r *http.Request) bool {
+		return responsesReasoningLoop(w, r)
+	})
+	prx := newLoopGateProxyWithGate(t, url, enforceGate(0, 3))
+
+	w := postLoopGate(t, prx, "/v1/responses", `{"model":"qwen","input":"hi","stream":true}`)
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	types := sseEventTypes(t, w.Body.String())
+	require.NotEmpty(t, types)
+	assert.Equal(t, "response.incomplete", types[len(types)-1])
+	assert.Equal(t, 1, countOf(types, "response.created"))
+	assert.Equal(t, config.DefaultLoopGateArmWords/10, countOf(types, "response.reasoning_text.delta"))
+	last := lastSSEPayload(t, w.Body.String(), "response.incomplete")
+	resp := last["response"].(map[string]any)
+	assert.Equal(t, "resp_1", resp["id"])
+	assert.Equal(t, "incomplete", resp["status"])
+	assert.Equal(t, "max_output_tokens", resp["incomplete_details"].(map[string]any)["reason"])
+	assert.Equal(t, float64(config.DefaultLoopGateArmWords/10+2), last["sequence_number"])
+	marker := last["air_loop_gate"].(map[string]any)
+	assert.Equal(t, "reasoning", marker["channel"])
+	assert.Equal(t, float64(1), marker["attempts"], "a Responses stream is cut, never restarted")
+
+	assert.Eventually(t, func() bool { _, a := sv.snapshot(); return len(a) == 1 && a[0] }, 5*time.Second, 10*time.Millisecond,
+		"the upstream generation is aborted")
+	bodies, _ := sv.snapshot()
+	assert.Equal(t, "hi", bodies[0]["input"], "the request went to vLLM's own /v1/responses")
+	assert.Equal(t, 1.0, testutil.ToFloat64(monitoring.LoopGateCutsTotal.WithLabelValues("lg-cred", "qwen", "reasoning")))
+}
+
+func TestLoopGate_ResponsesPassthroughStreamObserve(t *testing.T) {
+	resetLoopGateEnforceMetrics()
+	reasoning := append(loopGateWords(500), loopGateLoop(100)...)
+	_, url := newScriptedVLLM(t, func(n int, w http.ResponseWriter, r *http.Request) bool {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"status\":\"in_progress\"}}\n\n")
+		for i := 0; i < len(reasoning); i += 10 {
+			text, _ := json.Marshal(strings.Join(reasoning[i:i+10], " ") + " ")
+			_, _ = fmt.Fprintf(w, "event: response.reasoning_text.delta\ndata: {\"type\":\"response.reasoning_text.delta\",\"delta\":%s}\n\n", text)
+		}
+		_, _ = io.WriteString(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n\n")
+		return false
+	})
+	prx := newLoopGateProxyWithGate(t, url, config.LoopGateConfig{LoopGateSettings: config.LoopGateSettings{Mode: config.LoopGateObserve, ArmWords: config.DefaultLoopGateArmWords}})
+
+	w := postLoopGate(t, prx, "/v1/responses", `{"model":"qwen","input":"hi","stream":true}`)
+
+	types := sseEventTypes(t, w.Body.String())
+	assert.Equal(t, "response.completed", types[len(types)-1], "observe mode leaves the stream intact")
+	assert.Equal(t, 1.0, testutil.ToFloat64(monitoring.LoopGateFiringsTotal.WithLabelValues("lg-cred", "qwen", "reasoning", "observe")))
+}
+
+func TestLoopGate_MessagesPassthroughStreamIsCut(t *testing.T) {
+	resetLoopGateEnforceMetrics()
+	sv, url := newScriptedVLLM(t, func(n int, w http.ResponseWriter, r *http.Request) bool {
+		return messagesThinkingLoop(w, r)
+	})
+	passthrough := true
+	prx := newLoopGateProxyWithModel(t, url, enforceGate(0, 3), config.ModelRPMConfig{PassthroughMessages: &passthrough})
+
+	w := postLoopGate(t, prx, "/v1/messages", `{"model":"qwen","max_tokens":100000,"stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	types := sseEventTypes(t, w.Body.String())
+	require.GreaterOrEqual(t, len(types), 4)
+	assert.Equal(t, []string{"content_block_stop", "message_delta", "message_stop"}, types[len(types)-3:])
+	assert.Equal(t, 1, countOf(types, "message_start"))
+	delta := lastSSEPayload(t, w.Body.String(), "message_delta")
+	assert.Equal(t, "max_tokens", delta["delta"].(map[string]any)["stop_reason"])
+	assert.Equal(t, "reasoning", delta["air_loop_gate"].(map[string]any)["channel"])
+	stop := lastSSEPayload(t, w.Body.String(), "content_block_stop")
+	assert.Equal(t, float64(0), stop["index"])
+
+	assert.Eventually(t, func() bool { _, a := sv.snapshot(); return len(a) == 1 && a[0] }, 5*time.Second, 10*time.Millisecond)
+	bodies, _ := sv.snapshot()
+	assert.Contains(t, bodies[0], "max_tokens", "the request went to vLLM's own /v1/messages")
+	assert.NotContains(t, bodies[0], "stream_options")
+}
+
+func TestLoopGate_ConvertedMessagesStreamIsRestarted(t *testing.T) {
+	resetLoopGateEnforceMetrics()
+	sv, url := newScriptedVLLM(t, func(n int, w http.ResponseWriter, r *http.Request) bool {
+		if n == 0 {
+			return writeLoopGateEndless(w, r, "c1")
+		}
+		return writeLoopGateStream(w, r, "c2", loopGateWords(20), []string{"final", "answer"}, "stop")
+	})
+	prx := newLoopGateProxyWithGate(t, url, enforceGate(0, 3))
+
+	w := postLoopGate(t, prx, "/v1/messages", `{"model":"qwen","max_tokens":100000,"stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	types := sseEventTypes(t, w.Body.String())
+	assert.Equal(t, 1, countOf(types, "message_start"), "the restart continues the same message")
+	assert.Equal(t, 1, countOf(types, "message_stop"))
+	assert.Equal(t, "message_stop", types[len(types)-1])
+	assert.Contains(t, w.Body.String(), "final answer")
+	assert.Equal(t, "end_turn", lastSSEPayload(t, w.Body.String(), "message_delta")["delta"].(map[string]any)["stop_reason"])
+	bodies, _ := sv.snapshot()
+	require.Len(t, bodies, 2)
+	assert.Contains(t, bodies[0], "messages", "converted to a chat completion")
+	assert.Equal(t, 1.0, testutil.ToFloat64(monitoring.LoopGateRestartsTotal.WithLabelValues("lg-cred", "qwen", "reasoning")))
+}
+
+func TestLoopGate_ConvertedResponsesStreamIsRestarted(t *testing.T) {
+	resetLoopGateEnforceMetrics()
+	sv, url := newScriptedVLLM(t, func(n int, w http.ResponseWriter, r *http.Request) bool {
+		if n == 0 {
+			return writeLoopGateEndless(w, r, "c1")
+		}
+		return writeLoopGateStream(w, r, "c2", loopGateWords(20), []string{"final", "answer"}, "stop")
+	})
+	passthrough := false
+	prx := newLoopGateProxyWithModel(t, url, enforceGate(0, 3), config.ModelRPMConfig{PassthroughResponses: &passthrough})
+
+	w := postLoopGate(t, prx, "/v1/responses", `{"model":"qwen","input":"hi","stream":true}`)
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	types := sseEventTypes(t, w.Body.String())
+	assert.Equal(t, 1, countOf(types, "response.created"), "the restart continues the same response")
+	assert.Equal(t, 1, countOf(types, "response.completed"))
+	assert.Equal(t, "response.completed", types[len(types)-1])
+	assert.Contains(t, w.Body.String(), "final answer")
+	bodies, _ := sv.snapshot()
+	require.Len(t, bodies, 2)
+	assert.Contains(t, bodies[0], "messages", "converted to a chat completion")
+}
+
+func TestLoopGate_ConvertedMessagesStreamCutOnAnswerLoop(t *testing.T) {
+	resetLoopGateEnforceMetrics()
+	_, url := newScriptedVLLM(t, func(n int, w http.ResponseWriter, r *http.Request) bool {
+		return writeLoopGateEndlessField(w, r, "c1", "content")
+	})
+	prx := newLoopGateProxyWithGate(t, url, enforceGate(0, 3))
+
+	w := postLoopGate(t, prx, "/v1/messages", `{"model":"qwen","max_tokens":100000,"stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+
+	types := sseEventTypes(t, w.Body.String())
+	assert.Equal(t, "message_stop", types[len(types)-1])
+	assert.Equal(t, "max_tokens", lastSSEPayload(t, w.Body.String(), "message_delta")["delta"].(map[string]any)["stop_reason"],
+		"the chat finish_reason length becomes the Messages max_tokens stop")
+}
+
+func TestLoopGate_NonStreamPassthroughIsObserved(t *testing.T) {
+	looping := strings.Join(append(loopGateWords(500), loopGateLoop(100)...), " ")
+	text, _ := json.Marshal(looping)
+	for name, tc := range map[string]struct {
+		path, request, response string
+		model                   config.ModelRPMConfig
+	}{
+		"responses": {
+			path: "/v1/responses", request: `{"model":"qwen","input":"hi"}`,
+			response: `{"id":"resp_1","object":"response","status":"completed","model":"Qwen/Qwen3.6-35B","output":[{"type":"reasoning","id":"rs","summary":[],"content":[{"type":"reasoning_text","text":` + string(text) + `}]},{"type":"message","id":"m","role":"assistant","content":[{"type":"output_text","text":"ok","annotations":[]}]}],"usage":{"input_tokens":1,"output_tokens":6000,"total_tokens":6001}}`,
+		},
+		"messages": {
+			path: "/v1/messages", request: `{"model":"qwen","max_tokens":100000,"messages":[{"role":"user","content":"hi"}]}`,
+			response: `{"id":"msg_1","type":"message","role":"assistant","model":"Qwen/Qwen3.6-35B","content":[{"type":"thinking","thinking":` + string(text) + `,"signature":""},{"type":"text","text":"ok"}],"stop_reason":"max_tokens","usage":{"input_tokens":1,"output_tokens":6000}}`,
+			model:    config.ModelRPMConfig{PassthroughMessages: func() *bool { v := true; return &v }()},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			resetLoopGateEnforceMetrics()
+			_, url := newScriptedVLLM(t, func(n int, w http.ResponseWriter, r *http.Request) bool {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, tc.response)
+				return false
+			})
+			prx := newLoopGateProxyWithModel(t, url, enforceGate(0, 3), tc.model)
+
+			w := postLoopGate(t, prx, tc.path, tc.request)
+
+			require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+			assert.Contains(t, w.Body.String(), "loop0", "the response is not changed")
+			assert.Equal(t, 1.0, testutil.ToFloat64(monitoring.LoopGateFiringsTotal.WithLabelValues("lg-cred", "qwen", "reasoning", "enforce")))
+		})
+	}
 }

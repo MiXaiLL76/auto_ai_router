@@ -74,8 +74,8 @@ is (reasoning or answer). When `max_attempts` or `retry_deadline` run out, the b
 second round of the loop begins. It has `finish_reason: "length"`, the `air_loop_gate`
 marker at the top level, and the usage vLLM reported at the cut.
 
-`/v1/responses` (when converted, `passthrough_responses: false`) and `/v1/messages` requests
-to vLLM go upstream as chat completions and are gated the same way.
+Non-streamed `/v1/responses` (`passthrough_responses: false`) and `/v1/messages` requests
+converted to chat completions are gated the same way.
 
 With `force_stream: false`, or in `observe` mode, non-streamed responses are only scanned
 after they arrive: firings are logged and counted (at the word a stream would have fired
@@ -144,10 +144,27 @@ combination is validated at startup.
 
 ### Coverage
 
-Chat completions sent upstream to `/v1/chat/completions` by a credential directly, streamed
-or not, whatever endpoint the client called. Not watched: streamed `/v1/responses` and
-`/v1/messages` converted for vLLM, Responses API passthrough, and requests forwarded to an
-`air`/`proxy` peer (gate them on the peer). Only choice 0 is watched.
+What is watched depends on what the credential sends upstream, not on the endpoint the
+client called:
+
+| Upstream answer                                                                                                              | Streamed                                   | Not streamed                                       |
+| ---------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------ | -------------------------------------------------- |
+| chat completion: `/v1/chat/completions`, and `/v1/responses` / `/v1/messages` **converted** to it                            | restart (reasoning) or cut                 | `force_stream`: restart anywhere, trimmed at the end |
+| native `/v1/responses` (**passthrough**, the vLLM default)                                                                   | cut with `response.incomplete`             | observed only                                      |
+| native `/v1/messages` (**passthrough**, `passthrough_messages: true`)                                                       | cut with `stop_reason: "max_tokens"`       | observed only                                      |
+
+- A converted stream is restarted like a chat stream: the new attempt goes through the same
+  conversion, so the client still sees one `response.created` / `message_start`.
+- A passthrough stream is never restarted: a second attempt would start a second response
+  or message. It is cut in its own format:
+  - Responses API: a final `response.incomplete` event (`status: "incomplete"`,
+    `incomplete_details.reason: "max_output_tokens"`, empty `output`, `air_loop_gate` marker).
+    The response stored for `previous_response_id` has no output.
+  - Messages API: the open content block is closed, then `message_delta` with
+    `stop_reason: "max_tokens"`, an estimated `usage.output_tokens` and the
+    `air_loop_gate` marker, then `message_stop`.
+- Not watched: `responses_only` models, requests forwarded to an `air`/`proxy` peer (gate
+  them on the peer). Only choice 0 of a chat completion is watched.
 
 ## What it reports
 

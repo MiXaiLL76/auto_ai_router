@@ -7,6 +7,7 @@ import (
 	"io"
 	"math/rand/v2"
 	"net/http"
+	"strings"
 	"time"
 
 	json "github.com/goccy/go-json"
@@ -15,6 +16,44 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/loopgate"
 	"github.com/mixaill76/auto_ai_router/internal/proxy/modelutils"
 )
+
+// loopGateUpstreamFormat returns the wire format of an attempt's upstream
+// answer when the loop gate can watch it: a chat completion from an
+// OpenAI-wire credential (whatever API the client called: Responses and
+// Messages requests converted to chat completions included), or a Responses /
+// Messages API answer relayed as is (passthrough).
+func loopGateUpstreamFormat(cred *config.CredentialConfig, path string, passthroughResponses, passthroughMessages bool) loopgate.Format {
+	switch {
+	case strings.HasSuffix(path, "/chat/completions") && loopGateOpenAIWire(cred):
+		return loopgate.FormatChat
+	case passthroughResponses && strings.HasSuffix(path, "/responses"):
+		return loopgate.FormatResponses
+	case passthroughMessages && strings.HasSuffix(path, "/messages"):
+		return loopgate.FormatMessages
+	default:
+		return loopgate.FormatNone
+	}
+}
+
+// loopGateOpenAIWire reports whether cred answers chat completions in the
+// OpenAI wire format (not converted from a provider-native one).
+func loopGateOpenAIWire(cred *config.CredentialConfig) bool {
+	switch cred.EffectiveProviderType() {
+	case config.ProviderTypeVertexAI, config.ProviderTypeGemini, config.ProviderTypeAnthropic,
+		config.ProviderTypeCometAPI, config.ProviderTypeProMan, config.ProviderTypeBedrock:
+		return false
+	default:
+		return true
+	}
+}
+
+// loopGateFormatOf returns the upstream format of logCtx's current attempt.
+func loopGateFormatOf(logCtx *RequestLogContext) loopgate.Format {
+	if logCtx == nil {
+		return loopgate.FormatNone
+	}
+	return logCtx.loopGateFormat
+}
 
 // loopGateMaxLine bounds the partial SSE line kept between upstream reads. A
 // longer line (a huge tool call or image event) is skipped by the detector.
@@ -99,10 +138,12 @@ type loopGateObserver struct {
 	now         func() time.Time
 	start       time.Time
 
-	respawn      loopGateRespawn // nil = no restarts
-	visionInject bool            // descriptions were injected into attempt 1: never restart
-	restarts     int
-	abortedWords int // words of restarted attempts, missing from the final usage
+	format         loopgate.Format // wire format of the upstream stream
+	normalizeUsage bool            // the upstream body was wrapped in the usage normalizer; restarts get it too
+	respawn        loopGateRespawn // nil = no restarts
+	visionInject   bool            // descriptions were injected into attempt 1: never restart
+	restarts       int
+	abortedWords   int // words of restarted attempts, missing from the final usage
 
 	upstream     io.ReadCloser
 	carry        []byte // unfinished SSE line from the previous read
@@ -139,16 +180,18 @@ func (p *Proxy) loopGateSettings(ctx context.Context, cred *config.CredentialCon
 
 // newLoopGateObserver returns an observer for a successful stream served by
 // the request's credential, or nil when the loop gate is disabled for that
-// credential and model.
-func (p *Proxy) newLoopGateObserver(ctx context.Context, logCtx *RequestLogContext, modelID string, statusCode int) *loopGateObserver {
-	if logCtx == nil || statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
+// credential and model or the upstream stream is not in format (the format
+// of each attempt is decided where its request is built: logCtx.loopGateFormat).
+func (p *Proxy) newLoopGateObserver(ctx context.Context, logCtx *RequestLogContext, modelID string, statusCode int, format loopgate.Format) *loopGateObserver {
+	if logCtx == nil || format == loopgate.FormatNone || logCtx.loopGateFormat != format ||
+		statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
 		return nil
 	}
 	settings, ok := p.loopGateSettings(ctx, logCtx.Credential, modelID)
 	if !ok {
 		return nil
 	}
-	o := p.newLoopGateObserverWith(ctx, logCtx, modelID, settings)
+	o := p.newLoopGateObserverWith(ctx, logCtx, modelID, settings, format)
 	o.respawn = logCtx.loopGateRespawn
 	o.visionInject = logCtx.visionInject != nil
 	p.metrics.RecordLoopGateStream(o.credential, o.model, string(settings.Mode))
@@ -157,11 +200,12 @@ func (p *Proxy) newLoopGateObserver(ctx context.Context, logCtx *RequestLogConte
 
 // newLoopGateObserverWith returns an observer for one attempt, without
 // restarts of its own.
-func (p *Proxy) newLoopGateObserverWith(ctx context.Context, logCtx *RequestLogContext, modelID string, settings config.LoopGateSettings) *loopGateObserver {
+func (p *Proxy) newLoopGateObserverWith(ctx context.Context, logCtx *RequestLogContext, modelID string, settings config.LoopGateSettings, format loopgate.Format) *loopGateObserver {
 	o := &loopGateObserver{
 		p:           p,
 		ctx:         ctx,
 		settings:    settings,
+		format:      format,
 		credential:  logCtx.Credential.Name,
 		modelID:     modelID,
 		model:       metricModelID(modelID, logCtx),
@@ -261,7 +305,7 @@ func (o *loopGateObserver) observeLine(line []byte) {
 	if len(payload) == 0 || bytes.Equal(payload, sseDoneSentinel) {
 		return
 	}
-	o.record(o.detector.ObserveChatChunk(payload, o.now()))
+	o.record(o.detector.Observe(o.format, payload, o.now()))
 }
 
 func (o *loopGateObserver) channel(name string) *loopgate.Channel {
@@ -283,8 +327,12 @@ func (o *loopGateObserver) onLoop(ch string) {
 	o.pending = o.cutTail()
 }
 
+// canRestart reports whether a loop on ch can be restarted in the same
+// stream. Only a chat stream can take a second attempt's events: a Responses
+// or Messages stream would get a second response.created / message_start.
 func (o *loopGateObserver) canRestart(ch string) bool {
-	return ch == loopgate.ChannelReasoning &&
+	return o.format == loopgate.FormatChat &&
+		ch == loopgate.ChannelReasoning &&
 		!o.detector.AnswerStarted() &&
 		o.respawn != nil &&
 		!o.visionInject &&
@@ -304,7 +352,9 @@ func (o *loopGateObserver) restart(ch string) bool {
 			"error", err, "request_id", o.requestID)
 		return false
 	}
-	body, _ = modelutils.NewUsageNormalizingReadCloser(body, o.publicModel)
+	if o.normalizeUsage {
+		body, _ = modelutils.NewUsageNormalizingReadCloser(body, o.publicModel)
+	}
 
 	o.p.metrics.RecordLoopGateRestart(o.credential, o.model, ch)
 	o.p.logger.WarnContext(o.ctx, "Loop gate: generation restarted",
@@ -331,28 +381,109 @@ func (o *loopGateObserver) restart(ch string) bool {
 	return true
 }
 
-// cutTail returns the closing events of a cut stream.
+func (o *loopGateObserver) marker() loopGateMarker {
+	return loopGateMarker{
+		Action:   "cut",
+		Channel:  o.cut.channel,
+		Words:    o.cut.words,
+		Ratio:    o.cut.ratio,
+		Attempts: o.restarts + 1,
+	}
+}
+
+// cutTail returns the closing events of a cut stream in its wire format. The
+// line that tipped the loop ended with its own "\n"; the blank line each tail
+// starts with closes its event.
 func (o *loopGateObserver) cutTail() []byte {
+	switch o.format {
+	case loopgate.FormatResponses:
+		return o.cutTailResponses()
+	case loopgate.FormatMessages:
+		return o.cutTailMessages()
+	default:
+		return o.cutTailChat()
+	}
+}
+
+// cutTailResponses ends a Responses API stream with response.incomplete
+// (reason max_output_tokens), the event a provider sends when it stops at
+// the output limit.
+func (o *loopGateObserver) cutTailResponses() []byte {
+	meta := o.detector.Meta()
+	event := map[string]any{
+		"type":            "response.incomplete",
+		"sequence_number": o.detector.Sequence() + 1,
+		"response": map[string]any{
+			"id":                 meta.ID,
+			"object":             "response",
+			"created_at":         meta.Created,
+			"model":              meta.Model,
+			"status":             "incomplete",
+			"incomplete_details": map[string]any{"reason": "max_output_tokens"},
+			"output":             []any{},
+		},
+		"air_loop_gate": o.marker(),
+	}
+	return loopGateSSEEvents([]loopGateSSEEvent{{name: "response.incomplete", data: event}})
+}
+
+// cutTailMessages ends an Anthropic Messages stream the way it ends at
+// max_tokens: the open content block is closed, message_delta carries
+// stop_reason "max_tokens", then message_stop.
+func (o *loopGateObserver) cutTailMessages() []byte {
+	var events []loopGateSSEEvent
+	if index, open := o.detector.OpenBlock(); open {
+		events = append(events, loopGateSSEEvent{name: "content_block_stop", data: map[string]any{"type": "content_block_stop", "index": index}})
+	}
+	words := o.detector.Content().Words() + o.detector.Reasoning().Words()
+	events = append(events,
+		loopGateSSEEvent{name: "message_delta", data: map[string]any{
+			"type":          "message_delta",
+			"delta":         map[string]any{"stop_reason": "max_tokens", "stop_sequence": nil},
+			"usage":         map[string]any{"output_tokens": loopGateWordsToTokens(words)},
+			"air_loop_gate": o.marker(),
+		}},
+		loopGateSSEEvent{name: "message_stop", data: map[string]any{"type": "message_stop"}},
+	)
+	return loopGateSSEEvents(events)
+}
+
+type loopGateSSEEvent struct {
+	name string
+	data any
+}
+
+func loopGateSSEEvents(events []loopGateSSEEvent) []byte {
+	out := []byte{'\n'}
+	for _, e := range events {
+		payload, err := json.Marshal(e.data)
+		if err != nil {
+			continue
+		}
+		out = append(out, "event: "...)
+		out = append(out, e.name...)
+		out = append(out, "\ndata: "...)
+		out = append(out, payload...)
+		out = append(out, "\n\n"...)
+	}
+	return out
+}
+
+// cutTailChat ends a chat completion stream with finish_reason "length".
+func (o *loopGateObserver) cutTailChat() []byte {
 	meta := o.detector.Meta()
 	chunk := loopGateCutChunk{
-		ID:      meta.ID,
-		Object:  "chat.completion.chunk",
-		Created: meta.Created,
-		Model:   meta.Model,
-		Choices: []loopGateCutChoice{{Index: 0, Delta: struct{}{}, FinishReason: "length"}},
-		LoopGate: loopGateMarker{
-			Action:   "cut",
-			Channel:  o.cut.channel,
-			Words:    o.cut.words,
-			Ratio:    o.cut.ratio,
-			Attempts: o.restarts + 1,
-		},
+		ID:       meta.ID,
+		Object:   "chat.completion.chunk",
+		Created:  meta.Created,
+		Model:    meta.Model,
+		Choices:  []loopGateCutChoice{{Index: 0, Delta: struct{}{}, FinishReason: "length"}},
+		LoopGate: o.marker(),
 	}
 	payload, err := json.Marshal(chunk)
 	if err != nil {
 		payload = []byte(`{"object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"length"}]}`)
 	}
-	// The cut line ended with its own "\n"; the blank line closes its event.
 	tail := make([]byte, 0, len(payload)+32)
 	tail = append(tail, '\n')
 	tail = append(tail, "data: "...)

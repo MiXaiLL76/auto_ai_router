@@ -203,3 +203,73 @@ func TestDetector_AnswerStarted(t *testing.T) {
 	d.ObserveChatChunk([]byte(`{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"t1","function":{"name":"f","arguments":""}}]}}]}`), time.Unix(0, 0))
 	assert.True(t, d.AnswerStarted(), "a tool call is an answer")
 }
+
+func TestDetector_ObserveResponsesEvent(t *testing.T) {
+	cfg := Config{NGram: 4, ArmWords: 20, MinRepeat: 3, MinRatio: 0.3}
+	d := NewDetector(cfg, time.Unix(0, 0))
+	now := time.Unix(1, 0)
+	ev := func(s string) []Firing { return d.Observe(FormatResponses, []byte(s), now) }
+
+	ev(`{"type":"response.created","sequence_number":0,"response":{"id":"resp_1","created_at":5,"model":"qwen","status":"in_progress"}}`)
+	ev(`{"type":"response.output_item.added","sequence_number":1,"item":{"type":"reasoning"}}`)
+	assert.False(t, d.AnswerStarted(), "a reasoning item is not an answer")
+	firings := ev(`{"type":"response.reasoning_text.delta","sequence_number":2,"delta":"` + loopText(5, 10) + ` "}`)
+	require.Len(t, firings, 1)
+	assert.Equal(t, ChannelReasoning, firings[0].Channel)
+	ev(`{"type":"response.reasoning_summary_text.delta","sequence_number":3,"delta":"sum "}`)
+	assert.Equal(t, 51, d.Reasoning().Words())
+
+	ev(`{"type":"response.output_item.added","sequence_number":4,"item":{"type":"message"}}`)
+	assert.False(t, d.AnswerStarted())
+	ev(`{"type":"response.output_text.delta","sequence_number":5,"delta":"Hello "}`)
+	assert.True(t, d.AnswerStarted())
+	assert.Equal(t, 1, d.Content().Words())
+
+	ev(`{"type":"response.incomplete","sequence_number":9,"response":{"id":"resp_1","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}`)
+	assert.Equal(t, "max_output_tokens", d.FinishReason())
+	assert.Equal(t, 9, d.Sequence())
+	assert.Equal(t, ChunkMeta{ID: "resp_1", Created: 5, Model: "qwen"}, d.Meta())
+
+	d = NewDetector(cfg, time.Unix(0, 0))
+	d.Observe(FormatResponses, []byte(`{"type":"response.output_item.added","item":{"type":"function_call"}}`), now)
+	assert.True(t, d.AnswerStarted(), "a function call is an answer")
+	d.Observe(FormatResponses, []byte(`{"type":"response.function_call_arguments.delta","delta":"`+loopText(5, 10)+`"}`), now)
+	assert.Zero(t, d.Content().Words(), "function arguments are not counted")
+}
+
+func TestDetector_ObserveMessagesEvent(t *testing.T) {
+	cfg := Config{NGram: 4, ArmWords: 20, MinRepeat: 3, MinRatio: 0.3}
+	d := NewDetector(cfg, time.Unix(0, 0))
+	now := time.Unix(1, 0)
+	ev := func(s string) []Firing { return d.Observe(FormatMessages, []byte(s), now) }
+
+	ev(`{"type":"message_start","message":{"id":"msg_1","model":"qwen","role":"assistant","content":[]}}`)
+	_, open := d.OpenBlock()
+	assert.False(t, open)
+	ev(`{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`)
+	firings := ev(`{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"` + loopText(5, 10) + ` "}}`)
+	require.Len(t, firings, 1)
+	assert.Equal(t, ChannelReasoning, firings[0].Channel)
+	idx, open := d.OpenBlock()
+	assert.True(t, open)
+	assert.Equal(t, 0, idx)
+	ev(`{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"abc"}}`)
+	ev(`{"type":"content_block_stop","index":0}`)
+	_, open = d.OpenBlock()
+	assert.False(t, open)
+	assert.False(t, d.AnswerStarted())
+
+	ev(`{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}`)
+	ev(`{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Hi there "}}`)
+	assert.True(t, d.AnswerStarted())
+	assert.Equal(t, 2, d.Content().Words())
+	ev(`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":5}}`)
+	assert.Equal(t, "end_turn", d.FinishReason())
+	assert.Equal(t, ChunkMeta{ID: "msg_1", Model: "qwen"}, d.Meta())
+
+	d = NewDetector(cfg, time.Unix(0, 0))
+	d.Observe(FormatMessages, []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t","name":"f","input":{}}}`), now)
+	assert.True(t, d.AnswerStarted(), "a tool call is an answer")
+	d.Observe(FormatMessages, []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"`+loopText(5, 10)+`"}}`), now)
+	assert.Zero(t, d.Content().Words())
+}

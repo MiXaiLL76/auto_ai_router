@@ -33,6 +33,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/budget"
 	"github.com/mixaill76/auto_ai_router/internal/logger"
+	"github.com/mixaill76/auto_ai_router/internal/loopgate"
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/proxy/modelutils"
@@ -319,6 +320,9 @@ type RequestLogContext struct {
 	// loopGateRespawn re-sends the current streaming chat completion upstream
 	// for a loop gate restart; nil when the attempt cannot be replayed.
 	loopGateRespawn loopGateRespawn
+	// loopGateFormat is the wire format of the current attempt's upstream
+	// answer when the loop gate can watch it (FormatNone otherwise).
+	loopGateFormat loopgate.Format
 
 	// keptEmbeddings of embeddingInputs: a failed fanned-out embeddings request
 	// was billed for the inputs the provider had already embedded (see
@@ -1952,8 +1956,9 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		// Loop gate (enforce, force_stream): a non-streamed chat completion goes
 		// upstream as a stream so a loop can be stopped before the client gets
 		// anything; collectLoopGateStream rebuilds the chat.completion below.
+		logCtx.loopGateFormat = loopGateUpstreamFormat(cred, r.URL.Path, prepared.passthroughResponses, prepared.passthroughMessages)
 		var loopGateForced *loopGateForcedStream
-		requestBody, loopGateForced = p.loopGateForceStream(r.Context(), cred, modelID, r.URL.Path, streaming, requestBody)
+		requestBody, loopGateForced = p.loopGateForceStream(r.Context(), cred, modelID, logCtx.loopGateFormat, streaming, requestBody)
 
 		upstreamCtx, cancelUpstream := p.upstreamRequestContext(r)
 		defer cancelUpstream()
@@ -2017,7 +2022,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		httputil.ApplyCredentialRequestHeaders(proxyReq.Header, cred)
 
 		logCtx.loopGateRespawn = nil
-		if streaming && strings.HasSuffix(r.URL.Path, "/chat/completions") {
+		if streaming && logCtx.loopGateFormat == loopgate.FormatChat {
 			logCtx.loopGateRespawn = p.loopGateRespawner(upstreamCtx, r, proxyReq, requestBody)
 		}
 		if loopGateForced != nil {
@@ -2240,8 +2245,8 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 
 		p.recordProviderResponse(r.Context(), cred, modelID, realModelID, resp.StatusCode, resp.Header, responseBody)
-		if loopGateForced == nil && !streaming && resp.StatusCode == http.StatusOK && strings.HasSuffix(r.URL.Path, "/chat/completions") {
-			p.observeLoopGateBody(r.Context(), logCtx, cred, modelID, responseBody)
+		if loopGateForced == nil && !streaming && resp.StatusCode == http.StatusOK {
+			p.observeLoopGateBody(r.Context(), logCtx, cred, modelID, logCtx.loopGateFormat, responseBody)
 		}
 
 		// Check if we should retry with another same-type credential

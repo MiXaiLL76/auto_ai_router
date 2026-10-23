@@ -19,6 +19,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	promanutils "github.com/mixaill76/auto_ai_router/internal/converter/proman/utils"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
+	"github.com/mixaill76/auto_ai_router/internal/loopgate"
 	"github.com/mixaill76/auto_ai_router/internal/proxy/modelutils"
 )
 
@@ -810,6 +811,14 @@ func (p *Proxy) handleTransformedStreaming(
 	rawProviderStreamError := &proxyStreamErrorCapture{}
 	outputStreamError := &proxyStreamErrorCapture{}
 	providerReader := io.Reader(resp.Body)
+	// Loop gate on the upstream stream, before conversion: a chat completion
+	// converted to Responses / Messages events, or a Messages stream relayed as
+	// is. The closing events it adds go through the same conversion. Its
+	// reads run in the transform goroutine, which ends before this returns.
+	if loopGate := p.newLoopGateObserver(respCtx(resp), logCtx, modelID, resp.StatusCode, loopGateFormatOf(logCtx)); loopGate != nil {
+		defer loopGate.finish()
+		providerReader = loopGate.wrap(resp.Body)
+	}
 	if detectProviderStreamError {
 		// Some converters normalize a provider error event into an apparently
 		// successful output chunk. Observe both sides so the original terminal
@@ -956,9 +965,10 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 	// and, in enforce mode, ends the stream there. It reads the raw upstream
 	// body, so the closing chunk it adds goes through the same sanitizing and
 	// usage accounting as the upstream chunks. Reports when the handler returns.
-	loopGate := p.newLoopGateObserver(respCtx(resp), logCtx, modelID, resp.StatusCode)
+	loopGate := p.newLoopGateObserver(respCtx(resp), logCtx, modelID, resp.StatusCode, loopgate.FormatChat)
 	if loopGate != nil {
 		defer loopGate.finish()
+		loopGate.normalizeUsage = true // handleProviderStreaming wrapped resp.Body
 		providerReader = loopGate.wrap(resp.Body)
 	}
 	if detectProviderStreamError {
@@ -1953,6 +1963,10 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 		providerStreamError   = &proxyStreamErrorCapture{}
 	)
 	providerReader := io.Reader(resp.Body)
+	if loopGate := p.newLoopGateObserver(respCtx(resp), logCtx, metricModelID(modelID, logCtx), resp.StatusCode, loopgate.FormatResponses); loopGate != nil {
+		defer loopGate.finish()
+		providerReader = loopGate.wrap(resp.Body)
+	}
 	if detectStreamError {
 		providerReader = io.TeeReader(providerReader, proxyStreamErrorObserver{capture: providerStreamError})
 	}

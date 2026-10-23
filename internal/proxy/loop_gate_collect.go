@@ -27,10 +27,10 @@ type loopGateForcedStream struct {
 
 // loopGateForceStream returns the body to send upstream instead of body and
 // the plan for its response, or (body, nil) when the gate does not apply: a
-// streamed request, another endpoint, or enforce/force_stream off for this
-// credential and model.
-func (p *Proxy) loopGateForceStream(ctx context.Context, cred *config.CredentialConfig, modelID, path string, streaming bool, body []byte) ([]byte, *loopGateForcedStream) {
-	if streaming || !strings.HasSuffix(path, "/chat/completions") {
+// streamed request, an upstream answer that is not a chat completion, or
+// enforce/force_stream off for this credential and model.
+func (p *Proxy) loopGateForceStream(ctx context.Context, cred *config.CredentialConfig, modelID string, format loopgate.Format, streaming bool, body []byte) ([]byte, *loopGateForcedStream) {
+	if streaming || format != loopgate.FormatChat {
 		return body, nil
 	}
 	settings, ok := p.loopGateSettings(ctx, cred, modelID)
@@ -105,7 +105,7 @@ func (p *Proxy) collectLoopGateStream(ctx context.Context, logCtx *RequestLogCon
 	var last *loopGateObserver
 	body := resp.Body
 	for n := 1; ; n++ {
-		o := p.newLoopGateObserverWith(ctx, logCtx, plan.modelID, plan.settings)
+		o := p.newLoopGateObserverWith(ctx, logCtx, plan.modelID, plan.settings, loopgate.FormatChat)
 		o.restarts = n - 1
 		if n == 1 {
 			p.metrics.RecordLoopGateStream(o.credential, o.model, string(plan.settings.Mode))
@@ -235,39 +235,122 @@ func loopGateBestAttempt(attempts []loopGateAttempt, s config.LoopGateSettings) 
 	return best
 }
 
-// observeLoopGateBody runs the detector over a non-streamed chat completion
-// the gate did not stream (observe mode, or force_stream off): it only logs
-// and counts, the response is not changed.
-func (p *Proxy) observeLoopGateBody(ctx context.Context, logCtx *RequestLogContext, cred *config.CredentialConfig, modelID string, body []byte) {
+// observeLoopGateBody runs the detector over a non-streamed answer the gate
+// did not stream (observe mode, force_stream off, or a Responses / Messages
+// passthrough): it only logs and counts, the response is not changed.
+func (p *Proxy) observeLoopGateBody(ctx context.Context, logCtx *RequestLogContext, cred *config.CredentialConfig, modelID string, format loopgate.Format, body []byte) {
+	if format == loopgate.FormatNone {
+		return
+	}
 	settings, ok := p.loopGateSettings(ctx, cred, modelID)
 	if !ok {
 		return
 	}
-	var completion struct {
-		Choices []struct {
-			Index   int `json:"index"`
-			Message struct {
-				Content          string `json:"content"`
-				ReasoningContent string `json:"reasoning_content"`
-				Reasoning        string `json:"reasoning"`
-			} `json:"message"`
-			FinishReason string `json:"finish_reason"`
-		} `json:"choices"`
-	}
-	if err := json.Unmarshal(body, &completion); err != nil {
+	content, reasoning, finish, ok := loopGateAnswerText(format, body)
+	if !ok {
 		return
 	}
-	o := p.newLoopGateObserverWith(ctx, logCtx, modelID, settings)
+	o := p.newLoopGateObserverWith(ctx, logCtx, modelID, settings, format)
 	p.metrics.RecordLoopGateStream(o.credential, o.model, string(settings.Mode))
-	for _, c := range completion.Choices {
-		if c.Index != 0 {
-			continue
-		}
-		reasoning := c.Message.ReasoningContent
-		if reasoning == "" {
-			reasoning = c.Message.Reasoning
-		}
-		o.record(o.detector.ObserveText(c.Message.Content, reasoning, c.FinishReason, o.now()))
-	}
+	o.record(o.detector.ObserveText(content, reasoning, finish, o.now()))
 	o.reportAttempt(o.detector.FinishReason())
+}
+
+// loopGateAnswerText extracts the answer and reasoning text of a
+// non-streamed response body: choice 0 of a chat completion, the message and
+// reasoning items of a Responses API response, the text and thinking blocks
+// of a Messages API message.
+func loopGateAnswerText(format loopgate.Format, body []byte) (content, reasoning, finish string, ok bool) {
+	var b strings.Builder
+	var rb strings.Builder
+	switch format {
+	case loopgate.FormatChat:
+		var completion struct {
+			Choices []struct {
+				Index   int `json:"index"`
+				Message struct {
+					Content          string `json:"content"`
+					ReasoningContent string `json:"reasoning_content"`
+					Reasoning        string `json:"reasoning"`
+				} `json:"message"`
+				FinishReason string `json:"finish_reason"`
+			} `json:"choices"`
+		}
+		if json.Unmarshal(body, &completion) != nil {
+			return "", "", "", false
+		}
+		for _, c := range completion.Choices {
+			if c.Index != 0 {
+				continue
+			}
+			r := c.Message.ReasoningContent
+			if r == "" {
+				r = c.Message.Reasoning
+			}
+			return c.Message.Content, r, c.FinishReason, true
+		}
+		return "", "", "", false
+	case loopgate.FormatResponses:
+		var response struct {
+			Status            string `json:"status"`
+			IncompleteDetails *struct {
+				Reason string `json:"reason"`
+			} `json:"incomplete_details"`
+			Output []struct {
+				Type    string `json:"type"`
+				Content []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"content"`
+				Summary []struct {
+					Text string `json:"text"`
+				} `json:"summary"`
+			} `json:"output"`
+		}
+		if json.Unmarshal(body, &response) != nil {
+			return "", "", "", false
+		}
+		for _, item := range response.Output {
+			switch item.Type {
+			case "message":
+				for _, part := range item.Content {
+					b.WriteString(part.Text)
+				}
+			case "reasoning":
+				for _, part := range item.Content {
+					rb.WriteString(part.Text)
+				}
+				for _, part := range item.Summary {
+					rb.WriteString(part.Text)
+				}
+			}
+		}
+		finish = response.Status
+		if response.IncompleteDetails != nil && response.IncompleteDetails.Reason != "" {
+			finish = response.IncompleteDetails.Reason
+		}
+		return b.String(), rb.String(), finish, true
+	case loopgate.FormatMessages:
+		var message struct {
+			Content []struct {
+				Type     string `json:"type"`
+				Text     string `json:"text"`
+				Thinking string `json:"thinking"`
+			} `json:"content"`
+			StopReason string `json:"stop_reason"`
+		}
+		if json.Unmarshal(body, &message) != nil {
+			return "", "", "", false
+		}
+		for _, block := range message.Content {
+			switch block.Type {
+			case "text":
+				b.WriteString(block.Text)
+			case "thinking":
+				rb.WriteString(block.Thinking)
+			}
+		}
+		return b.String(), rb.String(), message.StopReason, true
+	}
+	return "", "", "", false
 }
