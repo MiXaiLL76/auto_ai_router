@@ -45,6 +45,29 @@ type orchestratedRequest struct {
 	passthroughResponses bool // true for codex/OpenAI models: Responses API forwarded as-is (no conversion)
 	passthroughMessages  bool // true when /v1/messages is forwarded natively (no Messages->Chat->Messages round trip)
 	nativeResponses      bool // true when using Phase 4 ProviderResponses converter (Vertex/Anthropic)
+	// forcedNativeNonStream is true when force_stream_for_ttft forced the
+	// native-Responses upstream request to stream:true for a client that asked
+	// for a non-streaming response. The response path then consumes the
+	// provider SSE and reassembles it into the non-stream JSON the client
+	// expects (see handleSimulatedNativeNonStream).
+	forcedNativeNonStream bool
+	// forcedPassthroughNonStream is the same idea for codex/OpenAI passthrough
+	// Responses requests: the upstream SSE is already Responses-shaped, so the
+	// terminal response.completed event is written back as non-stream JSON (see
+	// handleSimulatedPassthroughNonStream).
+	forcedPassthroughNonStream bool
+	// forcedChatNonStream is true when force_stream_for_ttft forced a
+	// chat-shaped request to stream upstream. The response path reassembles it
+	// via handleSimulatedNonStream; the flag additionally tells the converter
+	// call site to build a streaming upstream request (Vertex/Gemini carry the
+	// stream switch in the URL, not the body, so a body-level stream:true alone
+	// leaves the upstream non-streaming and TTFT unmeasured).
+	forcedChatNonStream bool
+	// completionsPath is true when the client called the legacy /v1/completions
+	// endpoint. Its SSE carries choices[].text (not choices[].delta.content), so
+	// the simulated non-stream path reassembles that legacy shape separately
+	// (reassembleCompletions) instead of the chat-shaped one.
+	completionsPath      bool
 	responsesPrevHandled bool
 	responsesMetadata    *responses.ResponsesMetadata // non-nil for Responses API requests
 	messagesMetadata     anthropicconv.MessagesAdapterMetadata
@@ -52,18 +75,22 @@ type orchestratedRequest struct {
 }
 
 type credentialPreparedRequest struct {
-	body                 []byte
-	proxyBody            []byte
-	proxyPath            string
-	realModelID          string
-	path                 string
-	convertedResp        bool
-	convertedMessages    bool
-	convertedToResponses bool
-	passthroughResponses bool
-	passthroughMessages  bool
-	nativeResponses      bool
-	messagesMetadata     anthropicconv.MessagesAdapterMetadata
+	body                       []byte
+	proxyBody                  []byte
+	proxyPath                  string
+	realModelID                string
+	path                       string
+	convertedResp              bool
+	convertedMessages          bool
+	convertedToResponses       bool
+	passthroughResponses       bool
+	passthroughMessages        bool
+	nativeResponses            bool
+	forcedNativeNonStream      bool // see orchestratedRequest.forcedNativeNonStream
+	forcedPassthroughNonStream bool // see orchestratedRequest.forcedPassthroughNonStream
+	forcedChatNonStream        bool // see orchestratedRequest.forcedChatNonStream
+	completionsPath            bool // see orchestratedRequest.completionsPath
+	messagesMetadata           anthropicconv.MessagesAdapterMetadata
 }
 
 // orchestrateRequest performs auth and credential selection for an incoming request.
@@ -291,30 +318,34 @@ func (p *Proxy) orchestrateRequest(
 	r = markCredentialAsTried(r, cred.Name)
 
 	return &orchestratedRequest{
-		request:              r,
-		body:                 body,
-		proxyBody:            credentialReq.proxyBody,
-		proxyPath:            credentialReq.proxyPath,
-		baseBody:             baseBody,
-		baseProxyBody:        baseProxyBody,
-		modelID:              modelID,
-		realModelID:          realModelID,
-		baseRealModelID:      baseRealModelID,
-		basePath:             basePath,
-		streaming:            streaming,
-		cred:                 cred,
-		isResponsesAPI:       isResponsesAPI,
-		isMessagesAPI:        isMessagesAPI,
-		convertedResp:        credentialReq.convertedResp,
-		convertedMessages:    credentialReq.convertedMessages,
-		convertedToResponses: credentialReq.convertedToResponses,
-		passthroughResponses: credentialReq.passthroughResponses,
-		passthroughMessages:  credentialReq.passthroughMessages,
-		nativeResponses:      credentialReq.nativeResponses,
-		responsesPrevHandled: prevEntryHandled,
-		responsesMetadata:    responsesMetadata,
-		messagesMetadata:     credentialReq.messagesMetadata,
-		stickyCacheEligible:  stickyCacheEligible,
+		request:                    r,
+		body:                       body,
+		proxyBody:                  credentialReq.proxyBody,
+		proxyPath:                  credentialReq.proxyPath,
+		baseBody:                   baseBody,
+		baseProxyBody:              baseProxyBody,
+		modelID:                    modelID,
+		realModelID:                realModelID,
+		baseRealModelID:            baseRealModelID,
+		basePath:                   basePath,
+		streaming:                  streaming,
+		cred:                       cred,
+		isResponsesAPI:             isResponsesAPI,
+		isMessagesAPI:              isMessagesAPI,
+		convertedResp:              credentialReq.convertedResp,
+		convertedMessages:          credentialReq.convertedMessages,
+		convertedToResponses:       credentialReq.convertedToResponses,
+		passthroughResponses:       credentialReq.passthroughResponses,
+		passthroughMessages:        credentialReq.passthroughMessages,
+		nativeResponses:            credentialReq.nativeResponses,
+		forcedNativeNonStream:      credentialReq.forcedNativeNonStream,
+		forcedPassthroughNonStream: credentialReq.forcedPassthroughNonStream,
+		forcedChatNonStream:        credentialReq.forcedChatNonStream,
+		completionsPath:            credentialReq.completionsPath,
+		responsesPrevHandled:       prevEntryHandled,
+		responsesMetadata:          responsesMetadata,
+		messagesMetadata:           credentialReq.messagesMetadata,
+		stickyCacheEligible:        stickyCacheEligible,
 	}, true
 }
 
@@ -426,7 +457,7 @@ func (p *Proxy) buildCredentialRequest(
 // conversions and proxy-like (AIR-to-AIR) chains are left untouched — they
 // keep their existing behavior and merely miss the TTFT.
 func (p *Proxy) applyForceStream(req credentialPreparedRequest, streaming bool, cred *config.CredentialConfig, r *http.Request) credentialPreparedRequest {
-	if !p.forceStreamForTTFT || streaming || req.nativeResponses || req.passthroughResponses || req.convertedToResponses {
+	if !p.forceStreamForTTFT || streaming {
 		return req
 	}
 	if cred.IsProxyLike() {
@@ -434,6 +465,36 @@ func (p *Proxy) applyForceStream(req credentialPreparedRequest, streaming bool, 
 		// response path streams SSE straight to this router's client without
 		// ever reaching handleSimulatedNonStream's reassembly — forcing
 		// stream:true would hand a non-streaming client raw SSE.
+		return req
+	}
+	if req.nativeResponses {
+		// Native Responses (Anthropic, Vertex): forcing stream:true on the
+		// Responses-shaped body makes the provider converter emit the
+		// provider's own streaming request (Anthropic's `stream` field). For
+		// Vertex the streaming switch is the URL, driven by mode.IsStreaming
+		// at the converter call site, which reads forcedNativeNonStream. The
+		// provider SSE is then folded back into a single non-stream JSON via
+		// ProviderResponses.StreamTo's onComplete callback (see
+		// handleSimulatedNativeNonStream).
+		req.body = setStreamTrue(req.body)
+		req.proxyBody = setStreamTrue(req.proxyBody)
+		req.forcedNativeNonStream = true
+		p.logger.DebugContext(r.Context(), "Forced streaming upstream for non-streaming native Responses request",
+			"credential", cred.Name, "path", req.path, "model", req.realModelID)
+		return req
+	}
+	if req.passthroughResponses {
+		// Codex/OpenAI passthrough Responses API: the provider speaks the
+		// Responses wire format natively, so forcing stream:true is a plain
+		// body flag and the SSE it returns is already Responses-shaped — the
+		// terminal response.completed event carries the whole final Response,
+		// which handleSimulatedPassthroughNonStream writes back as non-stream
+		// JSON (no converter round-trip needed).
+		req.body = setStreamTrue(req.body)
+		req.proxyBody = setStreamTrue(req.proxyBody)
+		req.forcedPassthroughNonStream = true
+		p.logger.DebugContext(r.Context(), "Forced streaming upstream for non-streaming passthrough Responses request",
+			"credential", cred.Name, "path", req.path, "model", req.realModelID)
 		return req
 	}
 	req.body = setStreamTrue(req.body)
@@ -446,6 +507,11 @@ func (p *Proxy) applyForceStream(req credentialPreparedRequest, streaming bool, 
 		req.body = injectStreamOptions(req.body)
 		req.proxyBody = injectStreamOptions(req.proxyBody)
 	}
+	// Chat-shaped request forced to stream. Recorded so the converter mode can
+	// set IsStreaming=true: for Vertex/Gemini the streaming switch is the URL
+	// (streamGenerateContent?alt=sse), not a body field, so the body-level
+	// stream:true alone would leave the upstream non-streaming and TTFT unmeasured.
+	req.forcedChatNonStream = true
 	p.logger.DebugContext(r.Context(), "Forced streaming upstream for non-streaming request",
 		"credential", cred.Name, "path", req.path, "model", req.realModelID)
 	return req
@@ -509,6 +575,10 @@ func (p *Proxy) buildCredentialRequestInner(
 		proxyPath:   basePath,
 		realModelID: realModelID,
 		path:        basePath,
+		// The legacy /v1/completions endpoint answers with choices[].text, a
+		// different SSE/JSON shape than Chat Completions' choices[].delta.content;
+		// the simulated non-stream reassembly branches on this.
+		completionsPath: basePath == "/v1/completions",
 	}
 	if basePath == "/v1/messages" {
 		if cred.IsProxyLike() {
