@@ -25,20 +25,27 @@ func VertexToResponsesResponse(body []byte, displayModelID, responseID string, c
 	if createdAt == 0 {
 		createdAt = time.Now().Unix()
 	}
-	return buildResponsesResponse(&vertexResp, displayModelID, responseID, createdAt), nil
+	resp := buildResponsesResponse(body, &vertexResp, displayModelID, responseID, createdAt)
+	if initial := vertex.InitialPromptTokens(body); initial > 0 && resp.Usage != nil {
+		resp.Usage.InputTokensDetails.InitialPromptTokens = int(initial)
+	}
+	return resp, nil
 }
 
+// buildResponsesResponse converts vertexResp, parsed from body (nil for a
+// response built in place), to a responses.Response.
 func buildResponsesResponse(
+	body []byte,
 	vertexResp *genai.GenerateContentResponse,
 	model, responseID string,
 	createdAt int64,
 ) *responses.Response {
 	status, incompleteDetails := finishReasonToStatus(vertexResp)
-	output := candidatesToOutputItems(vertexResp)
 	var toolUse vertex.ToolUseSources
 	toolUse.Add(vertexResp.Candidates, vertexResp.ModelVersion)
+	output := candidatesToOutputItems(vertexResp, toolUse.AnsweringModel(model))
 	usage := usageMetadataToUsage(vertex.BillableUsageMetadata(vertexResp.UsageMetadata, toolUse, model))
-	webSearchRequests := vertex.CountWebSearchRequests(vertexResp.Candidates)
+	webSearchRequests := vertex.CountResponseWebSearchRequests(body, vertexResp.Candidates, toolUse.AnsweringModel(model))
 	if usage == nil && webSearchRequests > 0 {
 		usage = &responses.Usage{}
 	}
@@ -63,8 +70,9 @@ func setWebSearchUsage(usage *responses.Usage, requests int) {
 	usage.ServerToolUse = &responses.ServerToolUseDetails{WebSearchRequests: requests}
 }
 
-// candidatesToOutputItems converts Vertex candidates to Responses API OutputItems.
-func candidatesToOutputItems(vertexResp *genai.GenerateContentResponse) []responses.OutputItem {
+// candidatesToOutputItems converts Vertex candidates to Responses API OutputItems;
+// model is the model that answered (see encodeCallID).
+func candidatesToOutputItems(vertexResp *genai.GenerateContentResponse, model string) []responses.OutputItem {
 	var output []responses.OutputItem
 
 	for _, candidate := range vertexResp.Candidates {
@@ -118,15 +126,11 @@ func candidatesToOutputItems(vertexResp *genai.GenerateContentResponse) []respon
 						argsJSON = string(b)
 					}
 				}
-				callID := part.FunctionCall.ID
-				if callID == "" {
-					callID = responses.GenerateItemID("call_")
-				}
 				output = append(output, responses.OutputItem{
 					Type:      "function_call",
 					ID:        responses.GenerateItemID("fc_"),
 					Status:    "completed",
-					CallID:    callID,
+					CallID:    encodeCallID(part.FunctionCall, part.ThoughtSignature, model),
 					Name:      part.FunctionCall.Name,
 					Arguments: argsJSON,
 				})
@@ -328,7 +332,9 @@ func finishReasonToStatus(vertexResp *genai.GenerateContentResponse) (string, *r
 	switch vertexResp.Candidates[0].FinishReason {
 	case genai.FinishReasonStop:
 		return "completed", nil
-	case genai.FinishReasonMaxTokens:
+	case genai.FinishReasonMaxTokens, genai.FinishReasonContinuation:
+		// CONTINUATION here: the generation reached the per-request output cap
+		// and was not continued (see vertex/continuation.go).
 		return "incomplete", &responses.IncompleteDetails{Reason: "max_output_tokens"}
 	case genai.FinishReasonSafety, genai.FinishReasonRecitation:
 		return "incomplete", &responses.IncompleteDetails{Reason: "content_filter"}

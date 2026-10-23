@@ -265,7 +265,7 @@ func TestOpenAIToVertex_ToolRoleMessage_MultipleToolCalls_ResolvesCorrectName(t 
 			},
 			{
 				Role:       "tool",
-				ToolCallID: "call_1", // first tool call (order doesn't matter)
+				ToolCallID: "call_1", // first tool call, its result sent second
 				Content:    `{"temp": 20}`,
 			},
 		},
@@ -296,16 +296,16 @@ func TestOpenAIToVertex_ToolRoleMessage_MultipleToolCalls_ResolvesCorrectName(t 
 		t.Fatalf("expected 2 grouped tool response parts, got %d", len(toolResponses.Parts))
 	}
 
-	// First tool result should resolve to "get_time" (call_2)
+	// The results go in the order of the calls, whatever order the client sent:
+	// first "get_weather" (call_1), then "get_time" (call_2).
 	fr1 := toolResponses.Parts[0].FunctionResponse
-	if fr1 == nil || fr1.Name != "get_time" {
-		t.Fatalf("expected first tool result Name = %q, got %q", "get_time", fr1.Name)
+	if fr1 == nil || fr1.Name != "get_weather" {
+		t.Fatalf("expected first tool result Name = %q, got %+v", "get_weather", fr1)
 	}
 
-	// Second tool result should resolve to "get_weather" (call_1)
 	fr2 := toolResponses.Parts[1].FunctionResponse
-	if fr2 == nil || fr2.Name != "get_weather" {
-		t.Fatalf("expected second tool result Name = %q, got %q", "get_weather", fr2.Name)
+	if fr2 == nil || fr2.Name != "get_time" {
+		t.Fatalf("expected second tool result Name = %q, got %+v", "get_time", fr2)
 	}
 }
 

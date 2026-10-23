@@ -2167,7 +2167,16 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+		// Gemini long decode: past the per-request output cap the generation goes on
+		// in follow-up requests to this credential (see gemini_continuation.go).
+		var continuation *geminiContinuation
+		if resp.StatusCode == http.StatusOK && !isEmbeddings && !logCtx.IsImageGeneration && !isImageEdit {
+			continuation = p.newGeminiContinuation(r, cred, modelID, realModelID, proxyReq, requestBody, logCtx)
+		}
 		if isStreamingResp {
+			if continuation != nil {
+				resp.Body = continuation.stream(resp.Body)
+			}
 			p.recordProviderResponse(r.Context(), cred, modelID, realModelID, resp.StatusCode, resp.Header, nil)
 			// Cannot retry streaming responses
 			logCtx.TargetURL = targetURL
@@ -2202,6 +2211,9 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			retryReason = RetryReasonNetErr
 			transportErr = readErr
 			continue
+		}
+		if continuation != nil {
+			responseBody = continuation.complete(responseBody)
 		}
 
 		if mappedStatus, ok := statusCodeFromProviderBodyError(resp.StatusCode, responseBody); ok {

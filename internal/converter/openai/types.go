@@ -163,6 +163,9 @@ type TokenDetails struct {
 	// prompt_tokens_details.cache_type.
 	CacheType string `json:"cache_type,omitempty"`
 	converterutil.CachingTokensExtension
+	// InitialPromptTokens is the context the client sent when a generation ran
+	// over several upstream requests; see converter.TokenUsage.InitialPromptTokens.
+	InitialPromptTokens int `json:"initial_prompt_tokens,omitempty"`
 }
 
 // CacheWrite returns the cache-write total and its 5m / 1h split under any

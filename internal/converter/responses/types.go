@@ -267,6 +267,9 @@ type InputDetails struct {
 	// CacheType is Alibaba's explicit cache mode marker ("ephemeral") from
 	// prompt_tokens_details.cache_type; see converter.TokenUsage.CacheType.
 	CacheType string `json:"cache_type,omitempty"`
+	// InitialPromptTokens is the context the client sent when a generation ran
+	// over several upstream requests; see converter.TokenUsage.InitialPromptTokens.
+	InitialPromptTokens int `json:"initial_prompt_tokens,omitempty"`
 }
 
 // CacheCreationTokenDetails preserves Anthropic's cache-write TTL breakdown.
