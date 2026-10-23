@@ -1101,3 +1101,36 @@ func TestReassembleChatCompletion_NoAnnotationsWhenAbsent(t *testing.T) {
 	require.NotNil(t, body)
 	assert.NotContains(t, string(body), `"annotations"`)
 }
+
+// TestApplyForceStream_SkipsNonChatPaths is a regression guard: force_stream_for_ttft
+// must only touch chat-shaped endpoints. Images and embeddings previously got a
+// stray "stream": true and their providers reject it (gpt-image-1-mini 400
+// "unknown parameter: stream"), breaking a request that worked with the toggle off.
+func TestApplyForceStream_SkipsNonChatPaths(t *testing.T) {
+	prx := NewTestProxyBuilder().WithForceStreamForTTFT(true).Build()
+	cred := &config.CredentialConfig{Name: "openai", Type: config.ProviderTypeOpenAI, BaseURL: "http://upstream"}
+	req := httptest.NewRequest("POST", "/v1/images/generations", strings.NewReader(`{}`))
+
+	for _, c := range []struct{ path, body string }{
+		{"/v1/images/generations", `{"model":"gpt-image-1","prompt":"x"}`},
+		{"/v1/images/edits", `{"model":"gpt-image-1","prompt":"x"}`},
+		{"/v1/embeddings", `{"model":"text-embedding-3-small","input":"hi"}`},
+	} {
+		out := prx.applyForceStream(credentialPreparedRequest{body: []byte(c.body), proxyBody: []byte(c.body), path: c.path}, false, cred, req)
+		assert.NotContains(t, string(out.body), `"stream":true`, "path %s must not be force-streamed", c.path)
+	}
+}
+
+// TestApplyForceStream_TouchesChatPaths confirms the chat-shaped endpoints are
+// still forced (the fix must not disable the feature).
+func TestApplyForceStream_TouchesChatPaths(t *testing.T) {
+	prx := NewTestProxyBuilder().WithForceStreamForTTFT(true).Build()
+	cred := &config.CredentialConfig{Name: "openai", Type: config.ProviderTypeOpenAI, BaseURL: "http://upstream"}
+
+	for _, path := range []string{"/v1/chat/completions", "/v1/messages", "/v1/responses", "/v1/completions"} {
+		req := httptest.NewRequest("POST", path, strings.NewReader(`{}`))
+		body := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
+		out := prx.applyForceStream(credentialPreparedRequest{body: body, proxyBody: body, path: path}, false, cred, req)
+		assert.Contains(t, string(out.body), `"stream":true`, "path %s must be force-streamed", path)
+	}
+}
