@@ -56,6 +56,11 @@ type orchestratedRequest struct {
 	// terminal response.completed event is written back as non-stream JSON (see
 	// handleSimulatedPassthroughNonStream).
 	forcedPassthroughNonStream bool
+	// completionsPath is true when the client called the legacy /v1/completions
+	// endpoint. Its SSE carries choices[].text (not choices[].delta.content), so
+	// the simulated non-stream path reassembles that legacy shape separately
+	// (reassembleCompletions) instead of the chat-shaped one.
+	completionsPath bool
 	responsesPrevHandled  bool
 	responsesMetadata     *responses.ResponsesMetadata // non-nil for Responses API requests
 	messagesMetadata      anthropicconv.MessagesAdapterMetadata
@@ -76,6 +81,7 @@ type credentialPreparedRequest struct {
 	nativeResponses      bool
 	forcedNativeNonStream bool // see orchestratedRequest.forcedNativeNonStream
 	forcedPassthroughNonStream bool // see orchestratedRequest.forcedPassthroughNonStream
+	completionsPath      bool // see orchestratedRequest.completionsPath
 	messagesMetadata     anthropicconv.MessagesAdapterMetadata
 }
 
@@ -326,6 +332,7 @@ func (p *Proxy) orchestrateRequest(
 		nativeResponses:      credentialReq.nativeResponses,
 		forcedNativeNonStream: credentialReq.forcedNativeNonStream,
 		forcedPassthroughNonStream: credentialReq.forcedPassthroughNonStream,
+		completionsPath:     credentialReq.completionsPath,
 		responsesPrevHandled: prevEntryHandled,
 		responsesMetadata:    responsesMetadata,
 		messagesMetadata:     credentialReq.messagesMetadata,
@@ -554,6 +561,10 @@ func (p *Proxy) buildCredentialRequestInner(
 		proxyPath:   basePath,
 		realModelID: realModelID,
 		path:        basePath,
+		// The legacy /v1/completions endpoint answers with choices[].text, a
+		// different SSE/JSON shape than Chat Completions' choices[].delta.content;
+		// the simulated non-stream reassembly branches on this.
+		completionsPath: basePath == "/v1/completions",
 	}
 	if basePath == "/v1/messages" {
 		if cred.IsProxyLike() {

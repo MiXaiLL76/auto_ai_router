@@ -807,3 +807,88 @@ func TestProxyRequest_ForceStream_ResponsesOnly_ChatEndpoint(t *testing.T) {
 	assert.Equal(t, "stop", choice["finish_reason"])
 	assert.Equal(t, "4", choice["message"].(map[string]interface{})["content"])
 }
+
+// completionsSSE builds a legacy OpenAI Completions SSE body
+// (choices[].text, object "text_completion").
+func completionsSSE(payloads ...string) string {
+	var b strings.Builder
+	for _, p := range payloads {
+		b.WriteString("data: " + p + "\n\n")
+	}
+	b.WriteString("data: [DONE]\n\n")
+	return b.String()
+}
+
+func TestReassembleCompletions_Basic(t *testing.T) {
+	stream := completionsSSE(
+		`{"id":"cmpl-1","object":"text_completion","created":1,"model":"gpt-3.5-turbo-instruct","choices":[{"text":"Hel","index":0,"finish_reason":null}]}`,
+		`{"id":"cmpl-1","object":"text_completion","created":1,"model":"gpt-3.5-turbo-instruct","choices":[{"text":"lo","index":0,"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`,
+	)
+	body := reassembleCompletions([]byte(stream))
+	require.NotNil(t, body)
+	var out struct {
+		ID      string `json:"id"`
+		Object  string `json:"object"`
+		Model   string `json:"model"`
+		Choices []struct {
+			Index        int    `json:"index"`
+			Text         string `json:"text"`
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+		Usage struct {
+			TotalTokens int `json:"total_tokens"`
+		} `json:"usage"`
+	}
+	require.NoError(t, json.Unmarshal(body, &out))
+	assert.Equal(t, "cmpl-1", out.ID)
+	assert.Equal(t, "text_completion", out.Object)
+	assert.Equal(t, "gpt-3.5-turbo-instruct", out.Model)
+	require.Len(t, out.Choices, 1)
+	assert.Equal(t, "Hello", out.Choices[0].Text)
+	assert.Equal(t, "stop", out.Choices[0].FinishReason)
+	assert.Equal(t, 5, out.Usage.TotalTokens)
+}
+
+// TestProxyRequest_ForceStream_Completions verifies the legacy /v1/completions
+// path: with force_stream_for_ttft on, the outbound body is forced to stream and
+// the client still receives a text_completion JSON body (not a chat-completion
+// one, and not an empty message.content).
+func TestProxyRequest_ForceStream_Completions(t *testing.T) {
+	var gotBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(completionsSSE(
+			`{"id":"cmpl-9","object":"text_completion","created":1,"model":"gpt-3.5-turbo-instruct","choices":[{"text":"PONG","index":0,"finish_reason":"stop"}]}`,
+		)))
+	}))
+	defer upstream.Close()
+
+	p := NewTestProxyBuilder().
+		WithSingleCredential("openai", config.ProviderTypeOpenAI, upstream.URL, "k").
+		WithForceStreamForTTFT(true).Build()
+	req := httptest.NewRequest("POST", "/v1/completions", strings.NewReader(`{"model":"gpt-3.5-turbo-instruct","prompt":"say hi","stream":false}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	p.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+	var outbound map[string]any
+	require.NoError(t, json.Unmarshal([]byte(gotBody), &outbound))
+	assert.Equal(t, true, outbound["stream"], "outbound completions body must force stream:true")
+
+	var out struct {
+		Object  string `json:"object"`
+		Choices []struct {
+			Text         string `json:"text"`
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &out))
+	assert.Equal(t, "text_completion", out.Object, "client must receive text_completion, got: %s", w.Body.String())
+	require.Len(t, out.Choices, 1)
+	assert.Equal(t, "PONG", out.Choices[0].Text)
+}

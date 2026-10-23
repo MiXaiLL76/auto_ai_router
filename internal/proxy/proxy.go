@@ -108,6 +108,7 @@ func (p *Proxy) applyCredentialCompatibilityRouting(
 		prepared.nativeResponses = nextReq.nativeResponses
 		prepared.forcedNativeNonStream = nextReq.forcedNativeNonStream
 		prepared.forcedPassthroughNonStream = nextReq.forcedPassthroughNonStream
+		prepared.completionsPath = nextReq.completionsPath
 		prepared.messagesMetadata = nextReq.messagesMetadata
 		logCtx.Credential = nextCred
 		logCtx.RealModelID = prepared.realModelID
@@ -1758,6 +1759,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			prepared.nativeResponses = nextReq.nativeResponses
 			prepared.forcedNativeNonStream = nextReq.forcedNativeNonStream
 			prepared.forcedPassthroughNonStream = nextReq.forcedPassthroughNonStream
+			prepared.completionsPath = nextReq.completionsPath
 			prepared.messagesMetadata = nextReq.messagesMetadata
 			logCtx.RealModelID = realModelID
 

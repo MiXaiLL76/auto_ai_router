@@ -196,19 +196,26 @@ func (p *Proxy) handleSimulatedNonStream(
 	}
 
 	var streamErr error
-	var chatBody []byte
+	var reassembledBody []byte
 	if streamErr = resolveCapturedProviderStreamError(logCtx, resp.StatusCode, readErrForResolve, rawProviderStreamError, outputStreamError); streamErr != nil {
 		markStreamFailure(logCtx, streamErr)
 	} else if overflow {
 		streamErr = ErrResponseBodyTooLarge
 		markStreamFailure(logCtx, streamErr)
 	} else {
-		chatBody = reassembleChatCompletion(streamBuf.Bytes())
-		if len(chatBody) == 0 {
+		if prepared.completionsPath {
+			// Legacy /v1/completions: the upstream stream is choices[].text, not
+			// choices[].delta.content, so it assembles into text_completion JSON.
+			reassembledBody = reassembleCompletions(streamBuf.Bytes())
+		} else {
+			reassembledBody = reassembleChatCompletion(streamBuf.Bytes())
+		}
+		if len(reassembledBody) == 0 {
 			streamErr = fmt.Errorf("simulated non-stream response: no reassemblable content in upstream stream")
 			markStreamFailure(logCtx, streamErr)
 		}
 	}
+	chatBody := reassembledBody
 
 	if streamErr != nil {
 		p.logger.ErrorContext(respCtx(resp), "Simulated non-stream response failed",
@@ -1090,6 +1097,128 @@ func reassembleChatCompletion(stream []byte) []byte {
 		})
 	}
 
+	b, err := json.Marshal(out)
+	if err != nil {
+		return nil
+	}
+	return b
+}
+
+// reassembleCompletions folds a legacy OpenAI Completions SSE body
+// (choices[].text, object "text_completion") into a single non-stream
+// text_completion JSON body — the /v1/completions mirror of
+// reassembleChatCompletion. The two shapes differ: Completions has no
+// message/delta/tool_calls, just concatenated choice text plus finish_reason.
+func reassembleCompletions(stream []byte) []byte {
+	type completionChoiceAcc struct {
+		index        int
+		text         strings.Builder
+		finishReason *string
+	}
+	choices := map[int]*completionChoiceAcc{}
+	var choiceOrder []int
+	var (
+		id                string
+		model             string
+		createdAt         int64
+		systemFingerprint string
+		usage             json.RawMessage
+	)
+
+	for _, line := range strings.Split(string(stream), "\n") {
+		line = strings.TrimRight(line, "\r")
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		var chunk struct {
+			ID                string `json:"id"`
+			Model             string `json:"model"`
+			Created           int64  `json:"created"`
+			SystemFingerprint string `json:"system_fingerprint"`
+			Choices           []struct {
+				Index        int     `json:"index"`
+				Text         string  `json:"text"`
+				FinishReason *string `json:"finish_reason"`
+			} `json:"choices"`
+			Usage json.RawMessage `json:"usage"`
+		}
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			continue
+		}
+		if chunk.ID != "" {
+			id = chunk.ID
+		}
+		if chunk.Model != "" {
+			model = chunk.Model
+		}
+		if chunk.Created != 0 {
+			createdAt = chunk.Created
+		}
+		if chunk.SystemFingerprint != "" {
+			systemFingerprint = chunk.SystemFingerprint
+		}
+		for _, c := range chunk.Choices {
+			st := choices[c.Index]
+			if st == nil {
+				st = &completionChoiceAcc{index: c.Index}
+				choices[c.Index] = st
+				choiceOrder = append(choiceOrder, c.Index)
+			}
+			if c.Text != "" {
+				st.text.WriteString(c.Text)
+			}
+			if c.FinishReason != nil {
+				st.finishReason = c.FinishReason
+			}
+		}
+		if len(chunk.Usage) > 0 && string(chunk.Usage) != "null" {
+			usage = chunk.Usage
+		}
+	}
+
+	if len(choiceOrder) == 0 {
+		return nil
+	}
+	sort.Ints(choiceOrder)
+
+	type completionChoice struct {
+		Index        int     `json:"index"`
+		Text         string  `json:"text"`
+		FinishReason *string `json:"finish_reason,omitempty"`
+	}
+	type completionResponse struct {
+		ID                string             `json:"id"`
+		Object            string             `json:"object"`
+		Created           int64              `json:"created"`
+		Model             string             `json:"model"`
+		SystemFingerprint string             `json:"system_fingerprint,omitempty"`
+		Choices           []completionChoice `json:"choices"`
+		Usage             json.RawMessage    `json:"usage,omitempty"`
+	}
+
+	out := completionResponse{
+		ID:                id,
+		Object:            "text_completion",
+		Created:           createdAt,
+		Model:             model,
+		SystemFingerprint: systemFingerprint,
+		Usage:             usage,
+	}
+	if out.ID == "" {
+		out.ID = "cmpl-simulated"
+	}
+	for _, idx := range choiceOrder {
+		st := choices[idx]
+		out.Choices = append(out.Choices, completionChoice{
+			Index:        st.index,
+			Text:         st.text.String(),
+			FinishReason: st.finishReason,
+		})
+	}
 	b, err := json.Marshal(out)
 	if err != nil {
 		return nil
