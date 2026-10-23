@@ -46,7 +46,7 @@ reject early, strip them, or have a vision model describe them. See
 ## Looping generations
 
 Reasoning models sometimes repeat the same passage until `max_tokens`. The loop gate
-watches streamed vLLM generations and reports such loops. See
+watches streamed vLLM generations, reports such loops and can restart or cut them. See
 [Loop Gate](../advanced/loop_gate.md).
 
 ## Default parameters

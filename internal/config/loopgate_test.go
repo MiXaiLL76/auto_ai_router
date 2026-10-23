@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -16,6 +17,8 @@ func defaultLoopGateSettings(mode LoopGateMode) LoopGateSettings {
 	return LoopGateSettings{
 		Mode: mode, NGram: DefaultLoopGateNGram, ArmWords: DefaultLoopGateArmWords,
 		MinRepeat: DefaultLoopGateMinRepeat, MinRatio: DefaultLoopGateMinRatio,
+		MaxAttempts: DefaultLoopGateMaxAttempts, RetryDeadline: DefaultLoopGateRetryDeadline,
+		RetryPresencePenalty: DefaultLoopGateRetryPresencePenalty,
 	}
 }
 
@@ -179,4 +182,84 @@ func TestLoopGateConfig_Resolve(t *testing.T) {
 	s, err = off.Resolve(ProviderTypeVLLM)
 	require.NoError(t, err)
 	assert.False(t, s.Enabled())
+}
+
+func TestLoopGate_CutMinRatio(t *testing.T) {
+	s := defaultLoopGateSettings(LoopGateEnforce)
+	assert.Equal(t, DefaultLoopGateMinRatio, s.CutRatio(), "0 = min_ratio")
+	s.CutMinRatio = 0.8
+	assert.Equal(t, 0.8, s.CutRatio())
+
+	global := LoopGateConfig{LoopGateSettings: defaultLoopGateSettings(LoopGateEnforce)}
+	global.ApplyDefaults()
+	_, err := global.Resolve(ProviderTypeVLLM, &LoopGateOverride{CutMinRatio: loopGatePtr(0.2)})
+	assert.ErrorContains(t, err, "cut_min_ratio", "below the effective min_ratio")
+	got, err := global.Resolve(ProviderTypeVLLM, &LoopGateOverride{MinRatio: loopGatePtr(0.5)})
+	require.NoError(t, err)
+	assert.Equal(t, 0.5, got.CutRatio(), "an unset cut_min_ratio follows an overridden min_ratio")
+}
+
+func TestLoad_LoopGateCutMinRatioCombinationIsValidated(t *testing.T) {
+	for name, tc := range map[string]struct {
+		section string
+		wantErr string
+	}{
+		"global below min_ratio": {section: "loop_gate:\n  mode: enforce\n  cut_min_ratio: 0.2\n", wantErr: "cut_min_ratio"},
+		"model below inherited min_ratio": {
+			section: "loop_gate:\n  mode: enforce\n  min_ratio: 0.5\nmodels:\n  - name: glm\n    credential: vllm-node\n    loop_gate:\n      cut_min_ratio: 0.4\n",
+			wantErr: "model glm on credential vllm-node",
+		},
+		"enforce with cut above min_ratio": {section: "loop_gate:\n  mode: enforce\n  cut_min_ratio: 0.8\n"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			require.NoError(t, os.WriteFile(configPath, []byte(`
+server:
+  master_key: sk-test
+credentials:
+  - name: vllm-node
+    type: vllm
+    base_url: http://vllm:8000
+    rpm: -1
+`+tc.section), 0600))
+			cfg, err := Load(configPath)
+			if tc.wantErr != "" {
+				assert.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, LoopGateEnforce, cfg.LoopGate.Mode)
+			assert.Equal(t, 0.8, cfg.LoopGate.CutRatio())
+		})
+	}
+}
+
+func TestLoopGate_RetrySettings(t *testing.T) {
+	var cfg LoopGateConfig
+	require.NoError(t, yaml.Unmarshal([]byte("mode: enforce\nmax_attempts: 2\nretry_deadline: 90s\nretry_presence_penalty: [0.5, \"0.8\", 1.2]\n"), &cfg))
+	cfg.ApplyDefaults()
+	require.NoError(t, cfg.Validate())
+	assert.Equal(t, 2, cfg.MaxAttempts)
+	assert.Equal(t, 90*time.Second, cfg.RetryDeadline)
+	assert.Equal(t, 0.5, cfg.PresencePenaltyForRestart(1))
+	assert.Equal(t, 1.2, cfg.PresencePenaltyForRestart(3))
+	assert.Equal(t, 1.2, cfg.PresencePenaltyForRestart(9), "the last value repeats")
+
+	got, err := cfg.Resolve(ProviderTypeVLLM, &LoopGateOverride{MaxAttempts: loopGatePtr(1), RetryPresencePenalty: []float64{2}})
+	require.NoError(t, err)
+	assert.Equal(t, 1, got.MaxAttempts)
+	assert.Equal(t, 2.0, got.PresencePenaltyForRestart(1))
+
+	for name, doc := range map[string]string{
+		"zero attempts":   "mode: enforce\nmax_attempts: 0\n",
+		"penalty too big": "mode: enforce\nretry_presence_penalty: [3]\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			var o LoopGateOverride
+			require.NoError(t, yaml.Unmarshal([]byte(doc), &o))
+			assert.ErrorContains(t, o.Validate("loop_gate"), "loop_gate")
+		})
+	}
+	var bad LoopGateConfig
+	assert.ErrorContains(t, yaml.Unmarshal([]byte("retry_deadline: soon\n"), &bad), "retry_deadline")
 }

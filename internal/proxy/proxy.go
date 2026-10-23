@@ -316,6 +316,9 @@ type RequestLogContext struct {
 	// visionInject holds image descriptions of this request to prepend to the answer
 	// (vision fallback, describe mode); nil when there is nothing to write.
 	visionInject *visionResponseInjection
+	// loopGateRespawn re-sends the current streaming chat completion upstream
+	// for a loop gate restart; nil when the attempt cannot be replayed.
+	loopGateRespawn loopGateRespawn
 
 	// keptEmbeddings of embeddingInputs: a failed fanned-out embeddings request
 	// was billed for the inputs the provider had already embedded (see
@@ -2006,6 +2009,11 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		// Last, so per-credential request_headers override what the client sent
 		// (e.g. a User-Agent the provider's WAF rejects).
 		httputil.ApplyCredentialRequestHeaders(proxyReq.Header, cred)
+
+		logCtx.loopGateRespawn = nil
+		if streaming && strings.HasSuffix(r.URL.Path, "/chat/completions") {
+			logCtx.loopGateRespawn = p.loopGateRespawner(upstreamCtx, r, proxyReq, requestBody)
+		}
 
 		if p.logger.Enabled(context.Background(), slog.LevelDebug) {
 			p.logger.DebugContext(r.Context(), "Proxy request details",

@@ -24,6 +24,9 @@ The same metrics can also be **pushed** to an OTLP collector instead of (or in a
 | `auto_ai_router_loop_gate_streams_total`   | Counter   | Streams watched by the [loop gate](../advanced/loop_gate.md) |
 | `auto_ai_router_loop_gate_firings_total`   | Counter   | Looping generations seen by the loop gate, by channel      |
 | `auto_ai_router_loop_gate_words_after_firing_total` | Counter | Words generated after a loop gate firing           |
+| `auto_ai_router_loop_gate_restarts_total`  | Counter   | Looping generations the loop gate restarted (enforce)      |
+| `auto_ai_router_loop_gate_recovered_total` | Counter   | Restarted generations that finished without a cut          |
+| `auto_ai_router_loop_gate_cuts_total`      | Counter   | Streams the loop gate cut short (enforce)                  |
 
 ## Per-Key Metrics
 

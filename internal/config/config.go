@@ -2129,6 +2129,28 @@ func mappingValueIsNull(node *yaml.Node, key string) bool {
 	return false
 }
 
+// validateLoopGateCombinations resolves the loop gate settings of every
+// credential and model pair, so a credential or model override that is valid
+// alone but not together with the inherited values (cut_min_ratio below the
+// effective min_ratio) fails at startup instead of disabling the gate at
+// request time.
+func (c *Config) validateLoopGateCombinations() error {
+	for _, cred := range c.Credentials {
+		if _, err := c.LoopGate.Resolve(cred.Type, cred.LoopGate); err != nil {
+			return fmt.Errorf("credential %s: %w", cred.Name, err)
+		}
+		for _, model := range c.Models {
+			if model.LoopGate == nil || (model.Credential != "" && model.Credential != cred.Name) {
+				continue
+			}
+			if _, err := c.LoopGate.Resolve(cred.Type, cred.LoopGate, model.LoopGate); err != nil {
+				return fmt.Errorf("model %s on credential %s: %w", model.Name, cred.Name, err)
+			}
+		}
+	}
+	return nil
+}
+
 // Normalize cleans up configuration values
 func (c *Config) Normalize() {
 	// Remove /v1 suffix from base_url to avoid duplication
@@ -2156,6 +2178,9 @@ func (c *Config) Validate() error {
 		if err := model.LoopGate.Validate("model " + model.Name + " loop_gate"); err != nil {
 			return err
 		}
+	}
+	if err := c.validateLoopGateCombinations(); err != nil {
+		return err
 	}
 	if c.VisionFallback.Mode == VisionFallbackDescribe {
 		for _, model := range c.Models {

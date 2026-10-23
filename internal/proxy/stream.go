@@ -952,15 +952,17 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 	detectProviderStreamError := resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
 	providerStreamError := &proxyStreamErrorCapture{}
 	providerReader := io.Reader(resp.Body)
-	if detectProviderStreamError {
-		providerReader = io.TeeReader(providerReader, proxyStreamErrorObserver{capture: providerStreamError})
-	}
-
-	// Loop gate: watches the generated text for a model stuck repeating itself.
-	// Runs over the drained tail too, and reports when the handler returns.
+	// Loop gate: watches the generated text for a model stuck repeating itself
+	// and, in enforce mode, ends the stream there. It reads the raw upstream
+	// body, so the closing chunk it adds goes through the same sanitizing and
+	// usage accounting as the upstream chunks. Reports when the handler returns.
 	loopGate := p.newLoopGateObserver(respCtx(resp), logCtx, modelID, resp.StatusCode)
 	if loopGate != nil {
 		defer loopGate.finish()
+		providerReader = loopGate.wrap(resp.Body)
+	}
+	if detectProviderStreamError {
+		providerReader = io.TeeReader(providerReader, proxyStreamErrorObserver{capture: providerStreamError})
 	}
 
 	var payloadBuf [][]byte
@@ -968,9 +970,6 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 		// Parse complete SSE lines, not individual HTTP reads: a large image
 		// event may carry its usage after several stream buffer boundaries.
 		payloadBuf = splitSSEPayloads(chunk, payloadBuf)
-		if loopGate != nil {
-			loopGate.observe(payloadBuf)
-		}
 		if hasUsage := chunkMayCarryTokenUsage(chunk); hasUsage {
 			if logCtx != nil {
 				// The image usage event isn't necessarily the stream's last data

@@ -3,6 +3,7 @@ package loopgate
 import (
 	"bytes"
 	"hash/maphash"
+	"strings"
 	"time"
 
 	"github.com/goccy/go-json"
@@ -29,6 +30,16 @@ type Detector struct {
 	content      *Channel
 	reasoning    *Channel
 	finishReason string
+	meta         ChunkMeta
+	answered     bool
+}
+
+// ChunkMeta identifies the completion a stream belongs to, as the last chunk
+// carrying each field reported it.
+type ChunkMeta struct {
+	ID      string
+	Created int64
+	Model   string
 }
 
 // NewDetector returns a detector whose elapsed time counts from start.
@@ -50,19 +61,48 @@ func (d *Detector) Reasoning() *Channel { return d.reasoning }
 // FinishReason returns the finish_reason of choice 0, "" until it arrives.
 func (d *Detector) FinishReason() string { return d.finishReason }
 
+// AnswerStarted reports whether the stream carried answer text (anything but
+// whitespace) or a tool call for choice 0. Until then the client has seen at
+// most reasoning.
+func (d *Detector) AnswerStarted() bool { return d.answered }
+
+// Meta returns the id, created and model of the stream's chunks.
+func (d *Detector) Meta() ChunkMeta { return d.meta }
+
+// LoopingChannel returns the channel looping at ratio cut (reasoning first),
+// or "" when neither is.
+func (d *Detector) LoopingChannel(cut float64) string {
+	switch {
+	case d.reasoning.Looping(cut):
+		return ChannelReasoning
+	case d.content.Looping(cut):
+		return ChannelContent
+	default:
+		return ""
+	}
+}
+
 type chatChunk struct {
+	ID      string `json:"id"`
+	Created int64  `json:"created"`
+	Model   string `json:"model"`
 	Choices []struct {
 		Index int `json:"index"`
 		Delta struct {
-			Content          *string `json:"content"`
-			ReasoningContent *string `json:"reasoning_content"`
-			Reasoning        *string `json:"reasoning"`
+			Content          *string         `json:"content"`
+			ReasoningContent *string         `json:"reasoning_content"`
+			Reasoning        *string         `json:"reasoning"`
+			ToolCalls        json.RawMessage `json:"tool_calls"`
 		} `json:"delta"`
 		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
 }
 
-var deltaKey = []byte(`"delta"`)
+var (
+	deltaKey       = []byte(`"delta"`)
+	jsonNull       = []byte(`null`)
+	emptyJSONArray = []byte(`[]`)
+)
 
 // ObserveChatChunk feeds the data payload of one chat.completion.chunk SSE
 // event (without the "data: " prefix) and returns the firings it caused.
@@ -75,6 +115,15 @@ func (d *Detector) ObserveChatChunk(payload []byte, now time.Time) []Firing {
 	if err := json.Unmarshal(payload, &chunk); err != nil {
 		return nil
 	}
+	if chunk.ID != "" {
+		d.meta.ID = chunk.ID
+	}
+	if chunk.Created != 0 {
+		d.meta.Created = chunk.Created
+	}
+	if chunk.Model != "" {
+		d.meta.Model = chunk.Model
+	}
 	for i := range chunk.Choices {
 		choice := &chunk.Choices[i]
 		if choice.Index != 0 {
@@ -85,6 +134,12 @@ func (d *Detector) ObserveChatChunk(payload []byte, now time.Time) []Firing {
 		}
 		if choice.Delta.Content != nil {
 			d.content.Feed(*choice.Delta.Content)
+			if !d.answered && strings.TrimSpace(*choice.Delta.Content) != "" {
+				d.answered = true
+			}
+		}
+		if len(choice.Delta.ToolCalls) > 0 && !bytes.Equal(choice.Delta.ToolCalls, jsonNull) && !bytes.Equal(choice.Delta.ToolCalls, emptyJSONArray) {
+			d.answered = true
 		}
 		// vLLM names the field reasoning_content (older) or reasoning (newer).
 		if choice.Delta.ReasoningContent != nil {

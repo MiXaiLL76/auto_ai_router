@@ -152,6 +152,30 @@ var (
 		[]string{"credential", "model", "channel", "mode"},
 	)
 
+	LoopGateCutsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_loop_gate_cuts_total",
+			Help: "Total number of streamed generations the loop gate cut short (enforce mode), by the looping text channel",
+		},
+		[]string{"credential", "model", "channel"},
+	)
+
+	LoopGateRestartsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_loop_gate_restarts_total",
+			Help: "Total number of looping streamed generations the loop gate restarted (enforce mode), by the looping text channel",
+		},
+		[]string{"credential", "model", "channel"},
+	)
+
+	LoopGateRecoveredTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_loop_gate_recovered_total",
+			Help: "Total number of restarted streamed generations that then finished without being cut",
+		},
+		[]string{"credential", "model"},
+	)
+
 	CredentialRPMCurrent = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "auto_ai_router_credential_rpm_current",
@@ -655,6 +679,30 @@ func (m *Metrics) RecordLoopGateWordsAfterFiring(credential, model, channel, mod
 		return
 	}
 	LoopGateWordsAfterFiringTotal.WithLabelValues(credential, model, channel, mode).Add(float64(words))
+}
+
+// RecordLoopGateCut counts a stream the loop gate cut short.
+func (m *Metrics) RecordLoopGateCut(credential, model, channel string) {
+	if !m.isEnabled() {
+		return
+	}
+	LoopGateCutsTotal.WithLabelValues(credential, model, channel).Inc()
+}
+
+// RecordLoopGateRestart counts a looping generation the loop gate restarted.
+func (m *Metrics) RecordLoopGateRestart(credential, model, channel string) {
+	if !m.isEnabled() {
+		return
+	}
+	LoopGateRestartsTotal.WithLabelValues(credential, model, channel).Inc()
+}
+
+// RecordLoopGateRecovered counts a restarted generation that finished uncut.
+func (m *Metrics) RecordLoopGateRecovered(credential, model string) {
+	if !m.isEnabled() {
+		return
+	}
+	LoopGateRecoveredTotal.WithLabelValues(credential, model).Inc()
 }
 
 func (m *Metrics) UpdateCredentialRPM(credential string, rpm int) {

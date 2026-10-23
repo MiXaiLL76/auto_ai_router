@@ -166,3 +166,40 @@ func jsonMarshalString(s string) (string, error) {
 	b, err := stdjson.Marshal(s)
 	return string(b), err
 }
+
+func TestDetector_LoopingChannelAndMeta(t *testing.T) {
+	cfg := Config{NGram: 4, ArmWords: 20, MinRepeat: 3, MinRatio: 0.3}
+	d := NewDetector(cfg, time.Unix(0, 0))
+	assert.Empty(t, d.LoopingChannel(0.3))
+
+	d.ObserveChatChunk([]byte(`{"id":"c1","created":7,"model":"qwen","choices":[{"index":0,"delta":{"content":"`+loopText(5, 10)+` "}}]}`), time.Unix(1, 0))
+	assert.Equal(t, ChannelContent, d.LoopingChannel(0.3))
+	assert.Empty(t, d.LoopingChannel(1.01), "cut ratio above the reached ratio")
+	assert.Equal(t, ChunkMeta{ID: "c1", Created: 7, Model: "qwen"}, d.Meta())
+
+	d.ObserveChatChunk([]byte(`{"id":"","choices":[{"index":0,"delta":{"reasoning":"`+loopText(5, 10)+` "}}]}`), time.Unix(2, 0))
+	assert.Equal(t, ChannelReasoning, d.LoopingChannel(0.3), "reasoning is reported first")
+	assert.Equal(t, "c1", d.Meta().ID, "an empty id does not overwrite")
+}
+
+func TestDetector_AnswerStarted(t *testing.T) {
+	d := NewDetector(testCfg, time.Unix(0, 0))
+	for _, payload := range []string{
+		`{"choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}`,
+		`{"choices":[{"index":0,"delta":{"reasoning_content":"thinking hard"}}]}`,
+		`{"choices":[{"index":0,"delta":{"content":"\n\n "}}]}`,
+		`{"choices":[{"index":0,"delta":{"tool_calls":null}}]}`,
+		`{"choices":[{"index":0,"delta":{"tool_calls":[]}}]}`,
+		`{"choices":[{"index":1,"delta":{"content":"other choice"}}]}`,
+	} {
+		d.ObserveChatChunk([]byte(payload), time.Unix(0, 0))
+	}
+	assert.False(t, d.AnswerStarted(), "role, reasoning, whitespace and empty tool_calls are not an answer")
+
+	d.ObserveChatChunk([]byte(`{"choices":[{"index":0,"delta":{"content":"Hi"}}]}`), time.Unix(0, 0))
+	assert.True(t, d.AnswerStarted())
+
+	d = NewDetector(testCfg, time.Unix(0, 0))
+	d.ObserveChatChunk([]byte(`{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"t1","function":{"name":"f","arguments":""}}]}}]}`), time.Unix(0, 0))
+	assert.True(t, d.AnswerStarted(), "a tool call is an answer")
+}
