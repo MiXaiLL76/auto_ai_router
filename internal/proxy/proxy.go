@@ -32,7 +32,6 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/budget"
-	"github.com/mixaill76/auto_ai_router/internal/logger"
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/proxy/modelutils"
@@ -1999,7 +1998,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		if p.logger.Enabled(context.Background(), slog.LevelDebug) {
 			p.logger.DebugContext(r.Context(), "Proxy request details",
 				"target_url", targetURL, "credential", cred.Name,
-				"request_body", logger.SanitizeRequestBodyForLog(requestBody, 500))
+				"request_body", security.RedactBodyForLog(string(requestBody)))
 		}
 
 		var configuredHeaders map[string]bool
@@ -2646,7 +2645,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			} else {
 				p.logger.DebugContext(r.Context(), "Proxy response body",
 					"credential", cred.Name, "content_encoding", contentEncoding,
-					"body", logger.TruncateLongFields(string(finalResponseBody), 500))
+					"body", security.RedactBodyForLog(string(finalResponseBody)))
 			}
 		}
 

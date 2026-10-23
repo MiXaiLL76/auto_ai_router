@@ -56,3 +56,19 @@ Health and metrics endpoints (`/health`, `/vhealth`, `/metrics`) do not require 
 ## LiteLLM API Key Auth
 
 When [LiteLLM DB integration](../litellm-integration/litellm_db.md) is enabled, the router also validates API keys against the LiteLLM verification token table. This allows using LiteLLM-issued API keys alongside the master key.
+
+## Request and response content in logs
+
+The HTTP proxy's request/response body debug records, unified upstream error
+records and optional file error logs omit body text and retain a byte count.
+Provider errors may echo prompts, tool output or credentials in plain text;
+truncation does not protect that content. The delivered client response is
+unchanged. File error logs mask known authentication headers and cookies on
+both request and response sides, regardless of header-name casing.
+
+Kafka body diagnostics follow `kafka.raw_bodies.redact_sensitive_fields`, which
+defaults to `true`. Captured request content is redacted and response content
+is omitted before publishing. An explicit `false` allows captured body text
+in this separate debug topic. See [Kafka logging](../litellm-integration/kafka_spend_log.md).
+These controls do not remove historical logs or guarantee that arbitrary custom
+headers, exception messages or application-defined metadata contain no secrets.
