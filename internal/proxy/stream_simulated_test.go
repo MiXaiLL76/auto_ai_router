@@ -982,3 +982,68 @@ func TestReassembleChatCompletion_NoLogprobsWhenAbsent(t *testing.T) {
 	require.NotNil(t, body)
 	assert.NotContains(t, string(body), `"logprobs"`)
 }
+
+// TestReassembleChatCompletion_Annotations verifies url_citation annotations
+// streamed on delta.annotations survive reassembly into message.annotations,
+// matching the non-stream shape.
+func TestReassembleChatCompletion_Annotations(t *testing.T) {
+	stream := openAIChatSSE(
+		`{"id":"c1","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"role":"assistant","content":"see "}}]}`,
+		`{"id":"c1","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"content":"here","annotations":[{"type":"url_citation","url_citation":{"url":"https://example.com","title":"t"}}]}}]}`,
+		`{"id":"c1","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+	)
+	body := reassembleChatCompletion([]byte(stream))
+	require.NotNil(t, body)
+	var out struct {
+		Choices []struct {
+			Message struct {
+				Content     string `json:"content"`
+				Annotations []struct {
+					Type string `json:"type"`
+				} `json:"annotations"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	require.NoError(t, json.Unmarshal(body, &out))
+	require.Len(t, out.Choices, 1)
+	assert.Equal(t, "see here", out.Choices[0].Message.Content)
+	require.Len(t, out.Choices[0].Message.Annotations, 1, "annotations must survive reassembly")
+	assert.Equal(t, "url_citation", out.Choices[0].Message.Annotations[0].Type)
+}
+
+// TestReassembleChatCompletion_MessageAnnotationsCarrier verifies the
+// non-standard choices[].message.annotations carrier some aggregators
+// (Requesty) use instead of delta.annotations also survives reassembly.
+func TestReassembleChatCompletion_MessageAnnotationsCarrier(t *testing.T) {
+	stream := openAIChatSSE(
+		`{"id":"c1","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"},"message":{"annotations":[{"type":"url_citation"}]}}]}`,
+		`{"id":"c1","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+	)
+	body := reassembleChatCompletion([]byte(stream))
+	require.NotNil(t, body)
+	var out struct {
+		Choices []struct {
+			Message struct {
+				Annotations []struct {
+					Type string `json:"type"`
+				} `json:"annotations"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	require.NoError(t, json.Unmarshal(body, &out))
+	require.Len(t, out.Choices, 1)
+	require.Len(t, out.Choices[0].Message.Annotations, 1, "message.annotations carrier must survive reassembly")
+	assert.Equal(t, "url_citation", out.Choices[0].Message.Annotations[0].Type)
+}
+
+// TestReassembleChatCompletion_NoAnnotationsWhenAbsent verifies the
+// annotations field is omitted entirely for an ordinary stream that never
+// carried any, keeping the plain non-stream shape.
+func TestReassembleChatCompletion_NoAnnotationsWhenAbsent(t *testing.T) {
+	stream := openAIChatSSE(
+		`{"id":"c1","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":"stop"}]}`,
+	)
+	body := reassembleChatCompletion([]byte(stream))
+	require.NotNil(t, body)
+	assert.NotContains(t, string(body), `"annotations"`)
+}

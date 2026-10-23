@@ -247,6 +247,16 @@ type OpenAIStreamingChoice struct {
 	Delta        OpenAIStreamingDelta     `json:"delta"`
 	FinishReason *string                  `json:"finish_reason"`
 	Logprobs     *OpenAIStreamingLogprobs `json:"logprobs,omitempty"`
+	// Message carries choices[].message.annotations: some aggregators (e.g.
+	// Requesty) inject url_citation annotations into an SSE chunk under
+	// "message" instead of "delta".
+	Message *OpenAIStreamingMessageAnnotations `json:"message,omitempty"`
+}
+
+// OpenAIStreamingMessageAnnotations is the non-standard choices[].message
+// carrier described on OpenAIStreamingChoice.Message above.
+type OpenAIStreamingMessageAnnotations struct {
+	Annotations []json.RawMessage `json:"annotations,omitempty"`
 }
 
 // OpenAIStreamingLogprobs carries the per-chunk logprobs of one streaming
@@ -267,6 +277,10 @@ type OpenAIStreamingDelta struct {
 	ReasoningContent string                    `json:"reasoning_content,omitempty"`
 	Images           []ImageData               `json:"images,omitempty"`
 	ThinkingBlocks   interface{}               `json:"thinking_blocks,omitempty"` // see OpenAIResponseMessage.ThinkingBlocks
+	// Annotations carries url_citation (and similar) entries an
+	// OpenAI-compatible upstream streams on the delta, one or more per chunk,
+	// in the same shape the non-stream message.annotations uses.
+	Annotations []json.RawMessage `json:"annotations,omitempty"`
 }
 
 type OpenAIStreamingToolCall struct {

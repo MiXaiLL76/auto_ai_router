@@ -906,6 +906,11 @@ type simChoiceState struct {
 	logprobsContent []json.RawMessage
 	logprobsRefusal json.RawMessage
 	hasLogprobs     bool
+	// annotations accumulates url_citation (and similar) entries streamed on
+	// either delta.annotations or the non-standard message.annotations
+	// carrier (Requesty). Without this the reassembled body silently dropped
+	// citations.
+	annotations []json.RawMessage
 }
 
 func newSimChoiceState(index int) *simChoiceState {
@@ -994,6 +999,12 @@ func reassembleChatCompletion(stream []byte) []byte {
 				// (vertex/streaming.go) — mirror the non-stream message shape.
 				st.images = append(st.images, c.Delta.Images...)
 			}
+			if len(c.Delta.Annotations) > 0 {
+				st.annotations = append(st.annotations, c.Delta.Annotations...)
+			}
+			if c.Message != nil && len(c.Message.Annotations) > 0 {
+				st.annotations = append(st.annotations, c.Message.Annotations...)
+			}
 			if c.Logprobs != nil {
 				// logprobs=true: the upstream sends one content entry per token,
 				// chunk by chunk — concatenate them into the final choice's
@@ -1057,6 +1068,7 @@ func reassembleChatCompletion(stream []byte) []byte {
 		ReasoningContent *string            `json:"reasoning_content,omitempty"`
 		Images           []openai.ImageData `json:"images,omitempty"`
 		ToolCalls        []simToolCall      `json:"tool_calls,omitempty"`
+		Annotations      []json.RawMessage  `json:"annotations,omitempty"`
 	}
 	type simChoice struct {
 		Index   int        `json:"index"`
@@ -1097,9 +1109,10 @@ func reassembleChatCompletion(stream []byte) []byte {
 	for _, idx := range choiceOrder {
 		st := choices[idx]
 		msg := simMessage{
-			Role:    st.role,
-			Content: st.content.String(),
-			Images:  st.images,
+			Role:        st.role,
+			Content:     st.content.String(),
+			Images:      st.images,
+			Annotations: st.annotations,
 		}
 		if msg.Role == "" {
 			msg.Role = "assistant"
