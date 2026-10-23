@@ -321,7 +321,7 @@ func (p *Proxy) handleSimulatedNonStream(
 	}
 	p.setCredentialResponseHeader(w, logCtx, cred.Name)
 
-	p.writeSimulatedBody(w, r, resp, cred, modelID, logCtx, finalBody)
+	p.writeSimulatedBody(w, r, resp, cred, modelID, finalBody)
 }
 
 // writeSimulatedBody writes a buffered non-stream body to the client, mirroring
@@ -333,7 +333,6 @@ func (p *Proxy) writeSimulatedBody(
 	resp *http.Response,
 	cred *config.CredentialConfig,
 	modelID string,
-	logCtx *RequestLogContext,
 	body []byte,
 ) {
 	acceptEncoding := r.Header.Get("Accept-Encoding")
