@@ -483,6 +483,9 @@ func (p *Proxy) handleSimulatedNativeNonStream(
 		// streaming artifacts the converter stamps on the live path. Force the
 		// terminal status like the plain non-stream path does.
 		captured.Status = "completed"
+		if saveResponseFn != nil {
+			saveResponseFn(captured)
+		}
 		if body, marshalErr := json.Marshal(captured); marshalErr == nil {
 			finalBody = body
 		} else {

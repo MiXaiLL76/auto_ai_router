@@ -666,6 +666,58 @@ func TestHandleSimulatedNativeNonStream_CapturesTTFT(t *testing.T) {
 	assert.Equal(t, "Hello world", out.Output[0].Content[0].Text)
 }
 
+// TestHandleSimulatedNativeNonStream_SavesResponse verifies store: true on a
+// forced native Responses request still persists the terminal object for
+// later GET /v1/responses/{id} retrieval — saveResponseFn was previously
+// never called on this path, unlike the chat-shaped and passthrough
+// reassembly paths.
+func TestHandleSimulatedNativeNonStream_SavesResponse(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	req := httptest.NewRequest("POST", "/v1/responses",
+		strings.NewReader(`{"model":"claude-haiku-4.5","input":"hi","store":true}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+
+	provResponses := &stubProviderResponses{final: &responses.Response{
+		ID:     "resp_1",
+		Object: "response",
+		Model:  "claude-haiku-4.5",
+		Status: "in_progress",
+		Output: []responses.OutputItem{{
+			Type:   "message",
+			ID:     "msg_1",
+			Status: "completed",
+			Role:   "assistant",
+			Content: []responses.OutputContent{
+				{Type: "output_text", Text: "Hello world"},
+			},
+		}},
+		Usage: &responses.Usage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15},
+	}}
+
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader("event: message_start\ndata: {\"type\":\"message_start\"}\n\n")),
+	}
+
+	logCtx := &RequestLogContext{StartTime: time.Now(), RequestID: "test-native-store-req", Request: req}
+	cred := &config.CredentialConfig{Name: "anthropic", Type: config.ProviderTypeAnthropic, BaseURL: "http://upstream"}
+	prepared := &orchestratedRequest{streaming: false, nativeResponses: true, forcedNativeNonStream: true, body: []byte(`{"model":"claude-haiku-4.5","input":"hi","store":true}`)}
+	w := httptest.NewRecorder()
+
+	var saved *responses.Response
+	saveResponseFn := func(r *responses.Response) { saved = r }
+
+	prx.handleSimulatedNativeNonStream(w, req, resp, prepared, cred, provResponses, "claude-haiku-4.5",
+		logCtx, saveResponseFn, "http://upstream")
+
+	require.Equal(t, http.StatusOK, w.Code)
+	require.NotNil(t, saved, "saveResponseFn must be called so store: true responses are retrievable later")
+	assert.Equal(t, "resp_1", saved.ID)
+	assert.Equal(t, "completed", saved.Status)
+}
+
 // responsesSSE builds a Responses API SSE body whose terminal event carries the
 // full final Response object — the wire format a codex/OpenAI passthrough
 // upstream returns.
