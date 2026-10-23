@@ -538,7 +538,7 @@ func (p *Proxy) handleSimulatedNativeNonStream(
 	p.markAudioUsageExcludesCachedForClient(w, logCtx)
 	p.setCredentialResponseHeader(w, logCtx, cred.Name)
 
-	p.writeSimulatedBody(w, r, resp, cred, modelID, logCtx, finalBody)
+	p.writeSimulatedBody(w, r, resp, cred, modelID, finalBody)
 }
 
 // handleSimulatedPassthroughNonStream consumes a codex/OpenAI passthrough
@@ -731,7 +731,7 @@ func (p *Proxy) handleSimulatedPassthroughNonStream(
 	p.markAudioUsageExcludesCachedForClient(w, logCtx)
 	p.setCredentialResponseHeader(w, logCtx, cred.Name)
 
-	p.writeSimulatedBody(w, r, resp, cred, modelID, logCtx, finalBody)
+	p.writeSimulatedBody(w, r, resp, cred, modelID, finalBody)
 }
 
 // bodyBytesForEstimate returns the request body used for the local prompt-token
