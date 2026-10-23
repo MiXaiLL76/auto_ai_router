@@ -123,8 +123,10 @@ func (c *Channel) Feed(s string) {
 	if len(c.tail) > 0 {
 		start = 0
 	}
-	buf := append(c.tail, s...)
+	// The pending word is extended in place; tail is re-copied below.
+	buf := c.tail
 	c.tail = nil
+	buf = append(buf, s...)
 	for i := 0; i < len(buf); {
 		r, size := utf8.DecodeRune(buf[i:])
 		if unicode.IsSpace(r) {
