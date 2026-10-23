@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -526,4 +527,140 @@ func TestApplyForceStream_SkipsProxyLike(t *testing.T) {
 	out := prx.applyForceStream(credentialPreparedRequest{body: body, proxyBody: body, path: "/v1/chat/completions"}, false, cred, req)
 	assert.Equal(t, string(body), string(out.body), "proxy-like bodies must be left untouched")
 	assert.NotContains(t, string(out.body), `"stream":true`)
+}
+
+// TestApplyForceStream_NativeResponses verifies that a native-Responses
+// credential (Anthropic/Vertex) is now force-streamed too: the outbound body
+// must carry stream:true and the forcedNativeNonStream marker must be set.
+func TestApplyForceStream_NativeResponses(t *testing.T) {
+	prx := NewTestProxyBuilder().WithForceStreamForTTFT(true).Build()
+	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(`{}`))
+	body := []byte(`{"model":"claude-haiku-4.5","input":"hi","stream":false}`)
+	cred := &config.CredentialConfig{Name: "anthropic", Type: config.ProviderTypeAnthropic, BaseURL: "http://upstream"}
+
+	out := prx.applyForceStream(credentialPreparedRequest{
+		body:            body,
+		proxyBody:       body,
+		path:            "/v1/responses",
+		nativeResponses: true,
+	}, false, cred, req)
+
+	assert.True(t, out.forcedNativeNonStream, "native Responses request must be marked as forced")
+	assert.Contains(t, string(out.body), `"stream":true`, "outbound native body must force stream:true")
+}
+
+// TestApplyForceStream_NativeResponses_ToggleOff verifies the toggle still gates
+// the native path: with the feature off, the native body is left untouched.
+func TestApplyForceStream_NativeResponses_ToggleOff(t *testing.T) {
+	prx := NewTestProxyBuilder().WithForceStreamForTTFT(false).Build()
+	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(`{}`))
+	body := []byte(`{"model":"claude-haiku-4.5","input":"hi","stream":false}`)
+	cred := &config.CredentialConfig{Name: "anthropic", Type: config.ProviderTypeAnthropic, BaseURL: "http://upstream"}
+
+	out := prx.applyForceStream(credentialPreparedRequest{
+		body:            body,
+		proxyBody:       body,
+		path:            "/v1/responses",
+		nativeResponses: true,
+	}, false, cred, req)
+
+	assert.False(t, out.forcedNativeNonStream)
+	assert.NotContains(t, string(out.body), `"stream":true`)
+}
+
+// stubProviderResponses is a minimal ProviderResponses used to drive the
+// simulated native non-stream handler without registering a real provider
+// converter (which would change the behavior of unrelated orchestrator tests).
+// Its StreamTo reads the provider SSE (ignored), writes one Responses SSE text
+// delta, and reports the terminal Response via onComplete.
+type stubProviderResponses struct {
+	final *responses.Response
+}
+
+func (s *stubProviderResponses) RequestFrom(body []byte) ([]byte, string, error) {
+	return body, "application/json", nil
+}
+
+func (s *stubProviderResponses) ResponseTo(body []byte, displayModelID string) (*responses.Response, error) {
+	return s.final, nil
+}
+
+func (s *stubProviderResponses) StreamTo(reader io.Reader, writer io.Writer, displayModelID string,
+	meta *responses.ResponsesMetadata, onComplete func(*responses.Response)) error {
+	// Emit a Responses-shaped content delta so the TTFT scanner sees real content.
+	_, _ = writer.Write([]byte("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n\n"))
+	_, _ = reader.Read(make([]byte, 1)) // consume a byte so the upstream body is read
+	if onComplete != nil {
+		onComplete(s.final)
+	}
+	return nil
+}
+
+func (s *stubProviderResponses) BuildURL(cred *config.CredentialConfig) string { return "http://upstream" }
+
+// TestHandleSimulatedNativeNonStream_CapturesTTFT drives the native simulated
+// handler directly: the provider answers SSE, the converter folds it into a
+// terminal Responses object via onComplete, and the handler must serve
+// application/json with the full text, stamping CompletionStartTime (TTFT) on
+// the first content delta.
+func TestHandleSimulatedNativeNonStream_CapturesTTFT(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	req := httptest.NewRequest("POST", "/v1/responses",
+		strings.NewReader(`{"model":"claude-haiku-4.5","input":"hi"}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+
+	provResponses := &stubProviderResponses{final: &responses.Response{
+		ID:     "resp_1",
+		Object: "response",
+		Model:  "claude-haiku-4.5",
+		Status: "in_progress",
+		Output: []responses.OutputItem{{
+			Type:   "message",
+			ID:     "msg_1",
+			Status: "completed",
+			Role:   "assistant",
+			Content: []responses.OutputContent{
+				{Type: "output_text", Text: "Hello world"},
+			},
+		}},
+		Usage: &responses.Usage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15},
+	}}
+
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader("event: message_start\ndata: {\"type\":\"message_start\"}\n\n")),
+	}
+
+	start := time.Now().Add(-time.Second)
+	logCtx := &RequestLogContext{StartTime: start, RequestID: "test-native-req", Request: req}
+	cred := &config.CredentialConfig{Name: "anthropic", Type: config.ProviderTypeAnthropic, BaseURL: "http://upstream"}
+	prepared := &orchestratedRequest{streaming: false, nativeResponses: true, forcedNativeNonStream: true, body: []byte(`{"model":"claude-haiku-4.5","input":"hi"}`)}
+	w := httptest.NewRecorder()
+
+	prx.handleSimulatedNativeNonStream(w, req, resp, prepared, cred, provResponses, "claude-haiku-4.5",
+		logCtx, nil, "http://upstream")
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+	require.False(t, logCtx.CompletionStartTime.IsZero(), "TTFT must be stamped on the first content delta")
+	assert.GreaterOrEqual(t, logCtx.CompletionStartTime, start)
+
+	var out struct {
+		Object string `json:"object"`
+		Status string `json:"status"`
+		Output []struct {
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"output"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &out))
+	assert.Equal(t, "response", out.Object)
+	assert.Equal(t, "completed", out.Status)
+	require.NotEmpty(t, out.Output)
+	require.NotEmpty(t, out.Output[0].Content)
+	assert.Equal(t, "Hello world", out.Output[0].Content[0].Text)
 }

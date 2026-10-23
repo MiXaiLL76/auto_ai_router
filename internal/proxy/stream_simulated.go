@@ -40,8 +40,11 @@ import (
 
 // simulatedNonStreamSupported reports whether force_stream_for_ttft can serve
 // this request: the response must be reassemblable into the non-stream JSON the
-// client expects. Native and passthrough Responses API formats are excluded —
-// their provider-native wire formats have no reconstruction path here yet.
+// client expects. Chat-shaped requests are reassembled via reassembleChatCompletion
+// (handleSimulatedNonStream); native Responses requests are reassembled from the
+// ProviderResponses converter's terminal Response (handleSimulatedNativeNonStream).
+// Passthrough Responses API and responses_only conversions remain excluded — their
+// provider-native wire formats have no reconstruction path here yet.
 func (p *Proxy) simulatedNonStreamSupported(prepared *orchestratedRequest) bool {
 	return !prepared.nativeResponses && !prepared.passthroughResponses && !prepared.convertedToResponses
 }
@@ -322,6 +325,221 @@ func (p *Proxy) handleSimulatedNonStream(
 	p.setCredentialResponseHeader(w, logCtx, cred.Name)
 
 	p.writeSimulatedBody(w, r, resp, cred, modelID, finalBody)
+}
+
+// handleSimulatedNativeNonStream consumes a provider SSE response that was
+// produced because applyForceStream forced a native-Responses request (Anthropic,
+// Vertex) to stream upstream for a client that asked for a non-streaming
+// response. Unlike the chat-shaped path, there is no Chat-Completions SSE to
+// reassemble: the ProviderResponses converter's StreamTo already folds the
+// provider stream into the terminal *responses.Response via its onComplete
+// callback. This handler just captures that Response, measures TTFT from the
+// first real content delta (the same detector the live streaming path uses),
+// and writes the non-stream Responses JSON to the client. It owns the whole
+// client-facing outcome: headers, compression, spend logging and the TTFT
+// metric. The caller must return immediately afterwards.
+func (p *Proxy) handleSimulatedNativeNonStream(
+	w http.ResponseWriter,
+	r *http.Request,
+	resp *http.Response,
+	prepared *orchestratedRequest,
+	cred *config.CredentialConfig,
+	provResponses responses.ProviderResponses,
+	modelID string,
+	logCtx *RequestLogContext,
+	saveResponseFn func(*responses.Response),
+	targetURL string,
+) {
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			p.logger.WarnContext(respCtx(resp), "Failed to close simulated native non-stream response body", "error", closeErr)
+		}
+	}()
+
+	publicModel := clientVisibleResponseModel(logCtx, modelID)
+	tokenUsageOptions := tokenUsageExtractionOptionsForResponse(cred, resp.Header)
+	providerLabel := "native_responses"
+
+	pr, pw := io.Pipe()
+	defer func() { _ = pr.Close() }()
+	var totalTokens int
+	completion := p.newCompletionTokenAccumulator(modelID, logCtx)
+	var lastChunk []byte
+	rawProviderStreamError := &proxyStreamErrorCapture{}
+	outputStreamError := &proxyStreamErrorCapture{}
+	providerReader := io.TeeReader(resp.Body, proxyStreamErrorObserver{capture: rawProviderStreamError})
+
+	// Captured from StreamTo's terminal callback: the fully assembled non-stream
+	// Responses object the client asked for. Guarded by the WaitGroup below.
+	var captured *responses.Response
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		transformer := func(rr io.Reader, _ string, ww io.Writer) error {
+			return provResponses.StreamTo(rr, ww, publicModel, prepared.responsesMetadata, func(final *responses.Response) {
+				captured = final
+			})
+		}
+		err := transformer(providerReader, modelID, &tokenCapturingWriter{
+			writer:     pw,
+			tokens:     &totalTokens,
+			completion: completion,
+			logger:     p.logger,
+			onChunk: func(chunk []byte, payloads [][]byte, hasUsage bool) {
+				outputStreamError.Observe(chunk)
+				if logCtx != nil && hasUsage {
+					if usage := extractTokenUsageFromPayloads(payloads, tokenUsageOptions); usage != nil {
+						if logCtx.TokenUsage == nil {
+							logCtx.TokenUsage = &converter.TokenUsage{}
+						}
+						logCtx.TokenUsage.MergeNonZero(usage)
+					}
+				}
+				rememberLastStreamDataChunk(&lastChunk, chunk)
+			},
+		})
+		if err != nil {
+			p.logger.ErrorContext(respCtx(resp), "Simulated native non-stream transform goroutine error",
+				"provider", providerLabel, "error", err)
+			_ = pw.CloseWithError(fmt.Errorf("%s transform: %w", providerLabel, err))
+		} else {
+			_ = pw.Close()
+		}
+	}()
+
+	// Drain the converted Responses SSE, stamping TTFT on the first real content
+	// delta with the same incremental scanner the live streaming path uses.
+	clientReader := normalizeSuccessfulResponseModelStream(
+		promanutils.NewSanitizingSSEReader(pr, publicModel),
+		resp.StatusCode,
+		logCtx,
+		modelID,
+	)
+	var streamBuf bytes.Buffer
+	streamBuf.Grow(64 * 1024)
+	var ttftScan ttftScanState
+	ttftPending := logCtx != nil && logCtx.CompletionStartTime.IsZero()
+	readBuf := make([]byte, 8192)
+	overflow := false
+	var lastReadErr error
+	for {
+		n, readErr := clientReader.Read(readBuf)
+		if n > 0 {
+			chunk := readBuf[:n]
+			if int64(streamBuf.Len()+n) > p.maxResponseBodySize {
+				overflow = true
+				break
+			}
+			streamBuf.Write(chunk)
+			if ttftPending {
+				if ttftScan.observe(chunk) {
+					logCtx.CompletionStartTime = time.Now()
+					ttftPending = false
+				}
+			}
+		}
+		if readErr != nil {
+			lastReadErr = readErr
+			break
+		}
+	}
+	_ = pr.Close()
+	wg.Wait()
+
+	logTokens := totalTokens
+	if logTokens == 0 {
+		logTokens = completion.TokenCount()
+	}
+
+	readErrForResolve := lastReadErr
+	if errors.Is(readErrForResolve, io.EOF) {
+		readErrForResolve = nil
+	}
+
+	var streamErr error
+	var finalBody []byte
+	if streamErr = resolveCapturedProviderStreamError(logCtx, resp.StatusCode, readErrForResolve, rawProviderStreamError, outputStreamError); streamErr != nil {
+		markStreamFailure(logCtx, streamErr)
+	} else if overflow {
+		streamErr = ErrResponseBodyTooLarge
+		markStreamFailure(logCtx, streamErr)
+	} else if captured == nil {
+		streamErr = fmt.Errorf("simulated native non-stream response: converter produced no terminal Responses object")
+		markStreamFailure(logCtx, streamErr)
+	} else {
+		applyResponsesMetadata(captured, prepared.responsesMetadata)
+		// The client asked for a non-streaming response: it must not carry the
+		// streaming artifacts the converter stamps on the live path. Force the
+		// terminal status like the plain non-stream path does.
+		captured.Status = "completed"
+		if body, marshalErr := json.Marshal(captured); marshalErr == nil {
+			finalBody = body
+		} else {
+			streamErr = fmt.Errorf("simulated native non-stream response: marshal terminal object: %w", marshalErr)
+			markStreamFailure(logCtx, streamErr)
+		}
+	}
+
+	if streamErr != nil {
+		p.logger.ErrorContext(respCtx(resp), "Simulated native non-stream response failed",
+			"credential", cred.Name, "provider", providerLabel, "model", modelID,
+			"error", streamErr, "request_id", logCtx.RequestID)
+		p.setPromptTokensEstimate(logCtx, bodyBytesForEstimate(prepared), modelID)
+		p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerLabel, resp.StatusCode, true)
+		p.writeSimulatedError(w, logCtx, http.StatusBadGateway, targetURL)
+		return
+	}
+
+	if logTokens > 0 {
+		p.rateLimiter.ConsumeTokens(cred.Name, logTokens)
+		if modelID != "" {
+			p.rateLimiter.ConsumeModelTokens(cred.Name, modelID, logTokens)
+		}
+	}
+
+	// Mirror the plain non-stream path's post-conversion normalization so the
+	// simulated body is indistinguishable from a native non-stream response.
+	if normalizedBody := normalizeSuccessfulResponseModel(finalBody, endpointFromLogContext(logCtx), publicModel); !bytes.Equal(normalizedBody, finalBody) {
+		finalBody = normalizedBody
+		dropRepresentationIntegrityHeaders(resp.Header)
+	}
+	if normalizedBody, changed := modelutils.NormalizeCompletionUsage(finalBody, publicModel); changed {
+		finalBody = normalizedBody
+		dropRepresentationIntegrityHeaders(resp.Header)
+	}
+	if logCtx.HideWebSearchResults {
+		if stripped, ok := stripWebSearchResults(finalBody); ok {
+			finalBody = stripped
+			dropRepresentationIntegrityHeaders(resp.Header)
+		}
+	}
+	logCtx.captureClientResponseID(finalBody)
+
+	p.setPromptTokensEstimate(logCtx, bodyBytesForEstimate(prepared), modelID)
+	p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerLabel, resp.StatusCode, true)
+
+	logCtx.RequestCompleted = true
+	p.setSessionBinding(logCtx.SessionID, modelID, cred.Name)
+
+	p.copyResponseHeaders(w, resp.Header, cred, false)
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Del("X-Accel-Buffering")
+	p.markAudioUsageExcludesCachedForClient(w, logCtx)
+	p.setCredentialResponseHeader(w, logCtx, cred.Name)
+
+	p.writeSimulatedBody(w, r, resp, cred, modelID, logCtx, finalBody)
+}
+
+// bodyBytesForEstimate returns the request body used for the local prompt-token
+// estimate — the real-model-substituted body when present, matching the other
+// simulated paths.
+func bodyBytesForEstimate(prepared *orchestratedRequest) []byte {
+	if prepared == nil {
+		return nil
+	}
+	return prepared.body
 }
 
 // writeSimulatedBody writes a buffered non-stream body to the client, mirroring

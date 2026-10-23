@@ -45,10 +45,16 @@ type orchestratedRequest struct {
 	passthroughResponses bool // true for codex/OpenAI models: Responses API forwarded as-is (no conversion)
 	passthroughMessages  bool // true when /v1/messages is forwarded natively (no Messages->Chat->Messages round trip)
 	nativeResponses      bool // true when using Phase 4 ProviderResponses converter (Vertex/Anthropic)
-	responsesPrevHandled bool
-	responsesMetadata    *responses.ResponsesMetadata // non-nil for Responses API requests
-	messagesMetadata     anthropicconv.MessagesAdapterMetadata
-	stickyCacheEligible  bool
+	// forcedNativeNonStream is true when force_stream_for_ttft forced the
+	// native-Responses upstream request to stream:true for a client that asked
+	// for a non-streaming response. The response path then consumes the
+	// provider SSE and reassembles it into the non-stream JSON the client
+	// expects (see handleSimulatedNativeNonStream).
+	forcedNativeNonStream bool
+	responsesPrevHandled  bool
+	responsesMetadata     *responses.ResponsesMetadata // non-nil for Responses API requests
+	messagesMetadata      anthropicconv.MessagesAdapterMetadata
+	stickyCacheEligible   bool
 }
 
 type credentialPreparedRequest struct {
@@ -63,6 +69,7 @@ type credentialPreparedRequest struct {
 	passthroughResponses bool
 	passthroughMessages  bool
 	nativeResponses      bool
+	forcedNativeNonStream bool // see orchestratedRequest.forcedNativeNonStream
 	messagesMetadata     anthropicconv.MessagesAdapterMetadata
 }
 
@@ -311,6 +318,7 @@ func (p *Proxy) orchestrateRequest(
 		passthroughResponses: credentialReq.passthroughResponses,
 		passthroughMessages:  credentialReq.passthroughMessages,
 		nativeResponses:      credentialReq.nativeResponses,
+		forcedNativeNonStream: credentialReq.forcedNativeNonStream,
 		responsesPrevHandled: prevEntryHandled,
 		responsesMetadata:    responsesMetadata,
 		messagesMetadata:     credentialReq.messagesMetadata,
@@ -426,7 +434,7 @@ func (p *Proxy) buildCredentialRequest(
 // conversions and proxy-like (AIR-to-AIR) chains are left untouched — they
 // keep their existing behavior and merely miss the TTFT.
 func (p *Proxy) applyForceStream(req credentialPreparedRequest, streaming bool, cred *config.CredentialConfig, r *http.Request) credentialPreparedRequest {
-	if !p.forceStreamForTTFT || streaming || req.nativeResponses || req.passthroughResponses || req.convertedToResponses {
+	if !p.forceStreamForTTFT || streaming || req.passthroughResponses || req.convertedToResponses {
 		return req
 	}
 	if cred.IsProxyLike() {
@@ -434,6 +442,22 @@ func (p *Proxy) applyForceStream(req credentialPreparedRequest, streaming bool, 
 		// response path streams SSE straight to this router's client without
 		// ever reaching handleSimulatedNonStream's reassembly — forcing
 		// stream:true would hand a non-streaming client raw SSE.
+		return req
+	}
+	if req.nativeResponses {
+		// Native Responses (Anthropic, Vertex): forcing stream:true on the
+		// Responses-shaped body makes the provider converter emit the
+		// provider's own streaming request (Anthropic's `stream` field). For
+		// Vertex the streaming switch is the URL, driven by mode.IsStreaming
+		// at the converter call site, which reads forcedNativeNonStream. The
+		// provider SSE is then folded back into a single non-stream JSON via
+		// ProviderResponses.StreamTo's onComplete callback (see
+		// handleSimulatedNativeNonStream).
+		req.body = setStreamTrue(req.body)
+		req.proxyBody = setStreamTrue(req.proxyBody)
+		req.forcedNativeNonStream = true
+		p.logger.DebugContext(r.Context(), "Forced streaming upstream for non-streaming native Responses request",
+			"credential", cred.Name, "path", req.path, "model", req.realModelID)
 		return req
 	}
 	req.body = setStreamTrue(req.body)

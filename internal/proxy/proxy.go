@@ -106,6 +106,7 @@ func (p *Proxy) applyCredentialCompatibilityRouting(
 		prepared.passthroughResponses = nextReq.passthroughResponses
 		prepared.passthroughMessages = nextReq.passthroughMessages
 		prepared.nativeResponses = nextReq.nativeResponses
+		prepared.forcedNativeNonStream = nextReq.forcedNativeNonStream
 		prepared.messagesMetadata = nextReq.messagesMetadata
 		logCtx.Credential = nextCred
 		logCtx.RealModelID = prepared.realModelID
@@ -1754,6 +1755,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			prepared.passthroughResponses = nextReq.passthroughResponses
 			prepared.passthroughMessages = nextReq.passthroughMessages
 			prepared.nativeResponses = nextReq.nativeResponses
+			prepared.forcedNativeNonStream = nextReq.forcedNativeNonStream
 			prepared.messagesMetadata = nextReq.messagesMetadata
 			logCtx.RealModelID = realModelID
 
@@ -1776,10 +1778,16 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		// All other paths use the Chat Completions ProviderConverter.
 		var requestBody []byte
 		if prepared.nativeResponses {
+			// force_stream_for_ttft: when the toggle forced a non-streaming
+			// client request to stream upstream, the provider converter must
+			// build the streaming request (Vertex's stream switch lives in the
+			// URL, driven by IsStreaming). The response path then reassembles
+			// the SSE back into non-stream JSON.
+			nativeStreaming := streaming || prepared.forcedNativeNonStream
 			mode := responses.ResponsesRequestMode{
 				ModelID:        realModelID,
 				DisplayModelID: modelID,
-				IsStreaming:    streaming,
+				IsStreaming:    nativeStreaming,
 			}
 			provResponses = responses.NewProviderResponses(cred.EffectiveProviderType(), mode)
 			if provResponses == nil {
@@ -2396,6 +2404,13 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		// into the non-stream JSON the client expects.
 		if p.forceStreamForTTFT && !streaming && resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices && p.simulatedNonStreamSupported(prepared) {
 			p.handleSimulatedNonStream(w, r, resp, prepared, cred, modelID, realModelID, logCtx, saveResponseFn, targetURL, body)
+			return
+		}
+		if prepared.forcedNativeNonStream && resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices && provResponses != nil {
+			// Native Responses (Anthropic, Vertex) forced to stream: consume the
+			// provider SSE, fold it back into the single Responses JSON the
+			// client asked for, and record TTFT on the way.
+			p.handleSimulatedNativeNonStream(w, r, resp, prepared, cred, provResponses, modelID, logCtx, saveResponseFn, targetURL)
 			return
 		}
 		p.logger.DebugContext(r.Context(), "Response is streaming", "credential", cred.Name)
