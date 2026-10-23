@@ -441,7 +441,7 @@ func (p *Proxy) buildCredentialRequest(
 // conversions and proxy-like (AIR-to-AIR) chains are left untouched — they
 // keep their existing behavior and merely miss the TTFT.
 func (p *Proxy) applyForceStream(req credentialPreparedRequest, streaming bool, cred *config.CredentialConfig, r *http.Request) credentialPreparedRequest {
-	if !p.forceStreamForTTFT || streaming || req.convertedToResponses {
+	if !p.forceStreamForTTFT || streaming {
 		return req
 	}
 	if cred.IsProxyLike() {

@@ -42,11 +42,13 @@ import (
 // this request: the response must be reassemblable into the non-stream JSON the
 // client expects. Chat-shaped requests are reassembled via reassembleChatCompletion
 // (handleSimulatedNonStream); native Responses requests are reassembled from the
-// ProviderResponses converter's terminal Response (handleSimulatedNativeNonStream).
-// Passthrough Responses API and responses_only conversions remain excluded — their
-// provider-native wire formats have no reconstruction path here yet.
+// ProviderResponses converter's terminal Response (handleSimulatedNativeNonStream);
+// convertedResponses (responses_only) streams Responses-SSE that is first
+// transformed to Chat-SSE (TransformResponsesStreamToChat) and then reassembled
+// by the same chat-shaped handler. Passthrough Responses API requests remain
+// excluded from the chat-shaped path (they take handleSimulatedPassthroughNonStream).
 func (p *Proxy) simulatedNonStreamSupported(prepared *orchestratedRequest) bool {
-	return !prepared.nativeResponses && !prepared.passthroughResponses && !prepared.convertedToResponses
+	return !prepared.nativeResponses && !prepared.passthroughResponses
 }
 
 // handleSimulatedNonStream consumes an upstream SSE response that was produced
@@ -840,6 +842,16 @@ func (p *Proxy) simulatedTransformer(
 
 	if prepared.convertedMessages && conv.IsPassthrough() {
 		return identity
+	}
+	// convertedToResponses (responses_only): the client called /v1/chat/completions,
+	// the outbound body was converted to Responses shape and the upstream answers
+	// with Responses-SSE — the streaming mirror of what the non-stream path does
+	// with responses.ResponseToChat. Transform it to Chat-SSE first, so
+	// reassembleChatCompletion (which folds Chat-SSE) applies unchanged.
+	if prepared.convertedToResponses {
+		return func(r io.Reader, _ string, w io.Writer) error {
+			return responses.TransformResponsesStreamToChat(r, publicModel, w)
+		}
 	}
 	switch cred.EffectiveProviderType() {
 	case config.ProviderTypeVertexAI, config.ProviderTypeGemini, config.ProviderTypeBedrock:

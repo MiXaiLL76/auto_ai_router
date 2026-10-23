@@ -11,6 +11,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
+	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -742,4 +743,67 @@ func TestHandleSimulatedPassthroughNonStream_CapturesTTFT(t *testing.T) {
 	require.NotEmpty(t, out.Output)
 	require.NotEmpty(t, out.Output[0].Content)
 	assert.Equal(t, "Hello world", out.Output[0].Content[0].Text)
+}
+
+// responsesOnlySSETransport simulates a responses_only upstream (only /v1/responses)
+// answering with a Responses API SSE stream — the shape force_stream_for_ttft now
+// handles for convertedToResponses requests.
+type responsesOnlySSETransport struct {
+	t *testing.T
+}
+
+func (tr responsesOnlySSETransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	assert.Equal(tr.t, "/v1/responses", r.URL.Path,
+		"AIR must call the provider's native /v1/responses for a responses_only model")
+	body, err := io.ReadAll(r.Body)
+	require.NoError(tr.t, err)
+	var reqBody map[string]interface{}
+	require.NoError(tr.t, json.Unmarshal(body, &reqBody))
+	assert.Contains(tr.t, reqBody, "input", "outbound body must be Responses-API-shaped")
+	assert.NotContains(tr.t, reqBody, "messages")
+	assert.Equal(tr.t, true, reqBody["stream"], "force_stream_for_ttft must set stream:true")
+
+	sse := "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"model\":\"gpt-5-pro\",\"status\":\"in_progress\"}}\n\n" +
+		"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"4\"}\n\n" +
+		"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"id\":\"msg_1\",\"status\":\"completed\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"4\",\"annotations\":[]}]}],\"usage\":{\"input_tokens\":9,\"output_tokens\":1,\"total_tokens\":10}}}\n\n"
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": {"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(sse)),
+		Request:    r,
+	}, nil
+}
+
+// TestProxyRequest_ForceStream_ResponsesOnly_ChatEndpoint verifies the
+// convertedToResponses path now measures TTFT: the client asks for a
+// non-streaming /v1/chat/completions against a responses_only model, the
+// outbound body is converted to Responses shape and forced to stream, and the
+// client still receives reassembled Chat-Completions JSON.
+func TestProxyRequest_ForceStream_ResponsesOnly_ChatEndpoint(t *testing.T) {
+	credential := config.CredentialConfig{Name: "openai_main", Type: config.ProviderTypeOpenAI, BaseURL: "https://api.openai.com", APIKey: "provider-key", RPM: -1, TPM: -1}
+	prx := NewTestProxyBuilder().WithCredentials(credential).WithForceStreamForTTFT(true).Build()
+	prx.modelManager = models.New(prx.logger, 50, []config.ModelRPMConfig{
+		{Name: "gpt-5-pro", ResponsesOnly: true, Credential: "openai_main", RPM: -1, TPM: -1},
+	})
+	prx.modelManager.LoadModelsFromConfig([]config.CredentialConfig{credential})
+	prx.client.Transport = responsesOnlySSETransport{t: t}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-5-pro","max_tokens":64,"messages":[{"role":"user","content":"2+2?"}]}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+	var resp map[string]interface{}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp), "client must receive Chat-Completions JSON, got: %s", w.Body.String())
+	assert.Equal(t, "chat.completion", resp["object"])
+	choices := resp["choices"].([]interface{})
+	require.Len(t, choices, 1)
+	choice := choices[0].(map[string]interface{})
+	assert.Equal(t, "stop", choice["finish_reason"])
+	assert.Equal(t, "4", choice["message"].(map[string]interface{})["content"])
 }
