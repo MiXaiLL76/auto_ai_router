@@ -200,6 +200,11 @@ type ModelRPMConfig struct {
 	// From the database it is read from LiteLLM's model_info.supports_vision.
 	SupportsVision *bool `yaml:"supports_vision,omitempty"`
 
+	// LoopGate overrides the loop_gate settings for this model (on its
+	// credential, or on every credential when the entry has none). Wins over
+	// the credential's loop_gate block.
+	LoopGate *LoopGateOverride `yaml:"loop_gate,omitempty"`
+
 	// DefaultParams are request-body defaults applied to a vLLM deployment when the
 	// client did not send the same key (LiteLLM deployment litellm_params such as
 	// chat_template_kwargs, temperature, top_k). Populated only by the database
@@ -222,6 +227,7 @@ func (m *ModelRPMConfig) UnmarshalYAML(value *yaml.Node) error {
 		ResponsesOnly        string              `yaml:"responses_only,omitempty"`
 		ReasoningEffortMap   *ReasoningEffortMap `yaml:"reasoning_effort_map,omitempty"`
 		SupportsVision       string              `yaml:"supports_vision,omitempty"`
+		LoopGate             *LoopGateOverride   `yaml:"loop_gate,omitempty"`
 	}
 
 	var temp tempConfig
@@ -232,6 +238,7 @@ func (m *ModelRPMConfig) UnmarshalYAML(value *yaml.Node) error {
 	m.Name = resolveEnvString(temp.Name)
 	m.Model = resolveEnvString(temp.Model)
 	m.Credential = resolveEnvString(temp.Credential)
+	m.LoopGate = temp.LoopGate
 	m.ReasoningEffortMap = nil
 	if !temp.ReasoningEffortMap.IsEmpty() {
 		m.ReasoningEffortMap = temp.ReasoningEffortMap
@@ -285,6 +292,7 @@ type Config struct {
 	Kafka                KafkaConfig                `yaml:"kafka,omitempty"`
 	Video                VideoConfig                `yaml:"video,omitempty"`
 	VisionFallback       VisionFallbackConfig       `yaml:"vision_fallback,omitempty"`
+	LoopGate             LoopGateConfig             `yaml:"loop_gate,omitempty"`
 	// ModelTemplates stores x-model-templates entries as raw interface{} so that
 	// both single-model mappings and lists of models can be defined as YAML anchors
 	// without type errors. The actual model data is extracted via anchor expansion.
@@ -319,6 +327,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		Kafka                KafkaConfig                `yaml:"kafka,omitempty"`
 		Video                VideoConfig                `yaml:"video,omitempty"`
 		VisionFallback       VisionFallbackConfig       `yaml:"vision_fallback,omitempty"`
+		LoopGate             LoopGateConfig             `yaml:"loop_gate,omitempty"`
 		ModelTemplates       map[string]interface{}     `yaml:"x-model-templates,omitempty"`
 	}
 
@@ -345,6 +354,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.Kafka = raw.Kafka
 	c.Video = raw.Video
 	c.VisionFallback = raw.VisionFallback
+	c.LoopGate = raw.LoopGate
 	c.ModelTemplates = raw.ModelTemplates
 
 	return nil
@@ -913,6 +923,10 @@ type CredentialConfig struct {
 	// Typical use: a fixed User-Agent for a provider whose WAF rejects some
 	// client User-Agents (Novita's Cloudflare answers Python-urllib with 403/1010).
 	RequestHeaders map[string]string `yaml:"request_headers,omitempty"`
+
+	// LoopGate overrides the loop_gate settings for every model of this
+	// credential. A model's own loop_gate block wins over it.
+	LoopGate *LoopGateOverride `yaml:"loop_gate,omitempty"`
 }
 
 func (c CredentialConfig) VisibleTo(visibility scope.Context) bool {
@@ -1040,6 +1054,7 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 		Models           []ModelRPMConfig `yaml:"models,omitempty"`
 
 		RequestHeaders map[string]string `yaml:"request_headers,omitempty"`
+		LoopGate       *LoopGateOverride `yaml:"loop_gate,omitempty"`
 	}
 
 	var temp tempConfig
@@ -1106,6 +1121,7 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 	}
 	// Copy models decoded via YAML anchors / inline definitions
 	c.Models = temp.Models
+	c.LoopGate = temp.LoopGate
 
 	if c.RequestHeaders, err = parseCredentialRequestHeaders(c.Name, c.Type, temp.RequestHeaders); err != nil {
 		return err
@@ -1873,6 +1889,11 @@ func Load(path string) (*Config, error) {
 	}
 	cfg.VisionFallback.ApplyDefaults()
 
+	if !hasMappingKey(&root, "loop_gate") || mappingValueIsNull(&root, "loop_gate") {
+		cfg.LoopGate = DefaultLoopGateConfig()
+	}
+	cfg.LoopGate.ApplyDefaults()
+
 	// Ensure HealthCheckPath is always set regardless of whether monitoring section exists.
 	// MonitoringConfig.UnmarshalYAML is only called when a "monitoring:" key is present in YAML.
 	cfg.Monitoring.HealthCheckPath = "/health"
@@ -2113,6 +2134,28 @@ func mappingValueIsNull(node *yaml.Node, key string) bool {
 	return false
 }
 
+// validateLoopGateCombinations resolves the loop gate settings of every
+// credential and model pair, so a credential or model override that is valid
+// alone but not together with the inherited values (cut_min_ratio below the
+// effective min_ratio) fails at startup instead of disabling the gate at
+// request time.
+func (c *Config) validateLoopGateCombinations() error {
+	for _, cred := range c.Credentials {
+		if _, err := c.LoopGate.Resolve(cred.Type, cred.LoopGate); err != nil {
+			return fmt.Errorf("credential %s: %w", cred.Name, err)
+		}
+		for _, model := range c.Models {
+			if model.LoopGate == nil || (model.Credential != "" && model.Credential != cred.Name) {
+				continue
+			}
+			if _, err := c.LoopGate.Resolve(cred.Type, cred.LoopGate, model.LoopGate); err != nil {
+				return fmt.Errorf("model %s on credential %s: %w", model.Name, cred.Name, err)
+			}
+		}
+	}
+	return nil
+}
+
 // Normalize cleans up configuration values
 func (c *Config) Normalize() {
 	// Remove /v1 suffix from base_url to avoid duplication
@@ -2126,6 +2169,22 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := c.VisionFallback.Validate(); err != nil {
+		return err
+	}
+	if err := c.LoopGate.Validate(); err != nil {
+		return err
+	}
+	for _, cred := range c.Credentials {
+		if err := cred.LoopGate.Validate("credential " + cred.Name + " loop_gate"); err != nil {
+			return err
+		}
+	}
+	for _, model := range c.Models {
+		if err := model.LoopGate.Validate("model " + model.Name + " loop_gate"); err != nil {
+			return err
+		}
+	}
+	if err := c.validateLoopGateCombinations(); err != nil {
 		return err
 	}
 	if c.VisionFallback.Mode == VisionFallbackDescribe {

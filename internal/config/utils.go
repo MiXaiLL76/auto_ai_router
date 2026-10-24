@@ -237,6 +237,20 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 			"inject_into_response", cfg.VisionFallback.InjectEnabled(),
 		)
 	}
+	if cfg.LoopGate.Enabled() {
+		logger.Info("loop_gate",
+			"mode", cfg.LoopGate.Mode,
+			"providers", cfg.LoopGate.Providers,
+			"ngram", cfg.LoopGate.NGram,
+			"arm_words", cfg.LoopGate.ArmWords,
+			"min_repeat", cfg.LoopGate.MinRepeat,
+			"min_ratio", cfg.LoopGate.MinRatio,
+			"cut_min_ratio", cfg.LoopGate.CutRatio(),
+			"max_attempts", cfg.LoopGate.MaxAttempts,
+			"retry_deadline", cfg.LoopGate.RetryDeadline,
+			"retry_presence_penalty", cfg.LoopGate.RetryPresencePenalty,
+		)
+	}
 	if cfg.Video.Enabled {
 		logger.Info("video",
 			"enabled", true,

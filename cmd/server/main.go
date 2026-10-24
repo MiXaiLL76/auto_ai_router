@@ -295,6 +295,7 @@ func main() {
 		KeyRateLimitsEnabled:             cfg.LiteLLMDB.EnforceKeyRateLimits,
 		DefaultEstimatedCompletionTokens: cfg.LiteLLMDB.DefaultEstimatedCompletionTokens,
 		VisionFallback:                   cfg.VisionFallback,
+		LoopGate:                         cfg.LoopGate,
 		ServerWriteTimeout:               cfg.Server.WriteTimeout,
 		KeyMetrics:                       keyMetrics,
 	})

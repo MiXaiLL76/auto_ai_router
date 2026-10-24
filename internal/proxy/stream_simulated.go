@@ -96,11 +96,19 @@ func (p *Proxy) handleSimulatedNonStream(
 	var lastChunk []byte
 	rawProviderStreamError := &proxyStreamErrorCapture{}
 	outputStreamError := &proxyStreamErrorCapture{}
-	providerReader := io.Reader(resp.Body)
+	upstream := io.ReadCloser(resp.Body)
 	// Same as handleProviderStreaming's default branch: OpenAI-compatible
 	// providers get their usage deltas normalized before conversion.
 	if conv.IsPassthrough() {
-		providerReader, _ = modelutils.NewUsageNormalizingReadCloser(resp.Body, publicModel)
+		upstream, _ = modelutils.NewUsageNormalizingReadCloser(resp.Body, publicModel)
+	}
+	providerReader := io.Reader(upstream)
+	// Loop gate: the client asked for a non-streamed answer, which the gate
+	// only observes unless it streams the request itself (force_stream). Its
+	// reads run in the transform goroutine, which ends before this returns.
+	if loopGate := p.newLoopGateWatcher(respCtx(resp), logCtx, modelID, resp.StatusCode); loopGate != nil {
+		defer loopGate.finish()
+		providerReader = loopGate.wrap(upstream)
 	}
 	providerReader = io.TeeReader(providerReader, proxyStreamErrorObserver{capture: rawProviderStreamError})
 

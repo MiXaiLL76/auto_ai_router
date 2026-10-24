@@ -33,6 +33,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/budget"
 	"github.com/mixaill76/auto_ai_router/internal/logger"
+	"github.com/mixaill76/auto_ai_router/internal/loopgate"
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/proxy/modelutils"
@@ -320,6 +321,19 @@ type RequestLogContext struct {
 	// visionInject holds image descriptions of this request to prepend to the answer
 	// (vision fallback, describe mode); nil when there is nothing to write.
 	visionInject *visionResponseInjection
+	// loopGateRespawn re-sends the current streaming chat completion upstream
+	// for a loop gate restart; nil when the attempt cannot be replayed.
+	loopGateRespawn loopGateRespawn
+	// loopGateFormat is the wire format of the current attempt's upstream
+	// answer when the loop gate watches it (FormatNone otherwise: not
+	// watchable, or the gate is off for the attempt's credential and model).
+	loopGateFormat loopgate.Format
+	// loopGateSettings are the gate's settings for the current attempt,
+	// meaningful when loopGateFormat is not FormatNone.
+	loopGateSettings config.LoopGateSettings
+	// loopGateStripUsage: the gate asked vLLM for the running usage of the
+	// current streamed attempt, which the client did not ask for.
+	loopGateStripUsage bool
 
 	// keptEmbeddings of embeddingInputs: a failed fanned-out embeddings request
 	// was billed for the inputs the provider had already embedded (see
@@ -441,6 +455,7 @@ type Config struct {
 	KeyMetrics                       *monitoring.KeyMetrics // Per-API-key request counters (nil = disabled)
 
 	VisionFallback     config.VisionFallbackConfig // What to do with images sent to models with supports_vision: false; defaults are applied by config.Load
+	LoopGate           config.LoopGateConfig       // Generation loop detector settings; zero value = off
 	ServerWriteTimeout time.Duration               // http.Server WriteTimeout; restored after vision describe calls
 }
 
@@ -485,6 +500,7 @@ type Proxy struct {
 	keyRateLimitsEnabled             bool
 	defaultEstimatedCompletionTokens int
 	visionFallback                   config.VisionFallbackConfig
+	loopGate                         config.LoopGateConfig
 	visionFlagIgnoredWarned          sync.Map // model name -> struct{}: supports_vision ignored warning already logged
 	visionDescribeBlindWarned        sync.Map // model name -> struct{}: text-only describe_model warning already logged
 	serverWriteTimeout               time.Duration
@@ -538,6 +554,14 @@ func New(cfg *Config) *Proxy {
 		}
 	}
 
+	// A Config built in code (tests) has no loop_gate section parsed: start from
+	// the same defaults config.Load gives an absent section.
+	loopGate := cfg.LoopGate
+	if loopGate.Mode == "" {
+		loopGate = config.DefaultLoopGateConfig()
+	}
+	loopGate.ApplyDefaults()
+
 	var responseCompat *compatlitellm.Transformer
 	if cfg.ResponseCompatibility == "litellm" {
 		responseCompat = compatlitellm.New()
@@ -583,6 +607,7 @@ func New(cfg *Config) *Proxy {
 		keyRateLimitsEnabled:             cfg.KeyRateLimitsEnabled,
 		defaultEstimatedCompletionTokens: cfg.DefaultEstimatedCompletionTokens,
 		visionFallback:                   cfg.VisionFallback,
+		loopGate:                         loopGate,
 		serverWriteTimeout:               cfg.ServerWriteTimeout,
 		keyMetrics:                       cfg.KeyMetrics,
 		responseCompat:                   responseCompat,
@@ -1957,6 +1982,15 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		// Loop gate (enforce): a streamed vLLM chat completion asks for the
+		// running usage; with force_stream, a non-streamed one goes upstream as
+		// a stream so a loop can be stopped before the client gets anything
+		// (collectLoopGateStream rebuilds the chat.completion below).
+		logCtx.loopGateFormat, logCtx.loopGateSettings = p.loopGateAttemptFormat(r.Context(), cred, modelID,
+			loopGateUpstreamFormat(cred, r.URL.Path, prepared.passthroughResponses, prepared.passthroughMessages))
+		var loopGateForced *loopGateForcedStream
+		requestBody, loopGateForced = p.loopGateUpstreamBody(r.Context(), logCtx, cred, modelID, streaming, requestBody)
+
 		upstreamCtx, cancelUpstream := p.upstreamRequestContext(r)
 		defer cancelUpstream()
 		proxyReq, reqErr := http.NewRequestWithContext(httputil.WithProxyURL(upstreamCtx, cred.ProxyURL), r.Method, targetURL, bytes.NewReader(requestBody)) //nolint:gosec // G704: targetURL's host comes from the matched credential's base URL, not the incoming request
@@ -2017,6 +2051,16 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		// Last, so per-credential request_headers override what the client sent
 		// (e.g. a User-Agent the provider's WAF rejects).
 		httputil.ApplyCredentialRequestHeaders(proxyReq.Header, cred)
+
+		logCtx.loopGateRespawn = nil
+		if streaming && logCtx.loopGateFormat == loopgate.FormatChat && logCtx.loopGateSettings.Mode == config.LoopGateEnforce {
+			logCtx.loopGateRespawn = p.loopGateRespawner(r, proxyReq, requestBody, cred.Name, modelID)
+		}
+		if loopGateForced != nil {
+			loopGateForced.respawn = p.loopGateRespawner(r, proxyReq, requestBody, cred.Name, modelID)
+			// The prompt estimate of a cut attempt without upstream usage.
+			p.setPromptTokensEstimate(logCtx, body, realModelID)
+		}
 
 		if p.logger.Enabled(context.Background(), slog.LevelDebug) {
 			p.logger.DebugContext(r.Context(), "Proxy request details",
@@ -2120,6 +2164,9 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			retryReason = RetryReasonNetErr
 			transportErr = doErr
 			continue
+		}
+		if loopGateForced != nil {
+			resp = p.collectLoopGateStream(r.Context(), logCtx, resp, loopGateForced)
 		}
 
 		// Setup close body with sync.Once to prevent double-close
@@ -2226,9 +2273,13 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				p.failResponseTooLarge(w, r, logCtx, cred, modelID, targetURL, readErr, start)
 				return
 			}
-			// Transport error reading body — retryable with another credential
+			// Transport error reading body — retryable with another credential.
+			// Drop the half-read response: when no credential is left, the
+			// client gets the transport error (502/408), not a 200 with an
+			// empty body.
 			p.logger.WarnContext(r.Context(), "Failed to read response body, will retry", "error", readErr,
 				"credential", cred.Name, "attempt", attempt+1)
+			resp = nil
 			shouldRetry = true
 			retryReason = RetryReasonNetErr
 			transportErr = readErr
@@ -2243,6 +2294,9 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 
 		p.recordProviderResponse(r.Context(), cred, modelID, realModelID, resp.StatusCode, resp.Header, responseBody)
+		if loopGateForced == nil && !streaming && resp.StatusCode == http.StatusOK {
+			p.observeLoopGateBody(r.Context(), logCtx, modelID, responseBody)
+		}
 
 		// Check if we should retry with another same-type credential
 		shouldRetry, retryReason = p.shouldRetry(cred, resp.StatusCode, responseBody)
