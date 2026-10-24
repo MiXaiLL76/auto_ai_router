@@ -503,6 +503,8 @@ type RedisConfig struct {
 }
 
 // UnmarshalYAML implements custom unmarshaling for RedisConfig with env variable support.
+//
+//nolint:gocyclo // flat field-by-field YAML parsing, one check per field
 func (r *RedisConfig) UnmarshalYAML(value *yaml.Node) error {
 	type tempConfig struct {
 		Enabled           string   `yaml:"enabled"`
@@ -708,6 +710,8 @@ type ErrorCodeOverrideConfig struct {
 }
 
 // UnmarshalYAML implements custom unmarshaling for ServerConfig with env variable support
+//
+//nolint:gocyclo // flat field-by-field YAML parsing, one check per field
 func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 	// Create a temporary struct with all string fields
 	type tempConfig struct {
@@ -1012,6 +1016,8 @@ func (c CredentialConfig) SameProviderIdentity(other CredentialConfig) bool {
 }
 
 // UnmarshalYAML implements custom unmarshaling for CredentialConfig with env variable support
+//
+//nolint:gocyclo // flat field-by-field YAML parsing, one check per field
 func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 	// Create a temporary struct with all string fields
 	type tempConfig struct {
@@ -1571,6 +1577,8 @@ func (m *MonitoringConfig) UnmarshalYAML(value *yaml.Node) error {
 }
 
 // UnmarshalYAML implements custom unmarshaling for LiteLLMDBConfig with env variable support
+//
+//nolint:gocyclo // flat field-by-field YAML parsing, one check per field
 func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 	type tempConfig struct {
 		Enabled                     string `yaml:"enabled"`
@@ -1694,6 +1702,8 @@ type tempKafkaRawBodiesConfig struct {
 }
 
 // UnmarshalYAML implements custom unmarshaling for KafkaConfig with env variable support.
+//
+//nolint:gocyclo // flat field-by-field YAML parsing, one check per field
 func (k *KafkaConfig) UnmarshalYAML(value *yaml.Node) error {
 	type tempConfig struct {
 		Enabled          string                   `yaml:"enabled"`

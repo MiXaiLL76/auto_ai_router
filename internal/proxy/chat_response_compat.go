@@ -195,6 +195,7 @@ func normalizeSSEDataLineModel(line []byte, publicModel string) []byte {
 	return normalizeSSEDataLineModelWithOptions(line, publicModel, false)
 }
 
+//nolint:gocyclo // linear guard clauses with early returns, no nested logic
 func normalizeSSEDataLineModelWithOptions(line []byte, publicModel string, preserveNestedResponseModel bool) []byte {
 	newline := []byte(nil)
 	body := line

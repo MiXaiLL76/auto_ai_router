@@ -521,6 +521,7 @@ func inferMaxTokensParam(joined string) string {
 	}
 }
 
+//nolint:gocyclo // flat lookup table, one branch per case
 func classifyValidationError(joined string, param *string, signals []string) (BadRequest, bool) {
 	result := BadRequest{Param: param}
 	switch {

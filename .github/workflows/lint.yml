@@ -235,6 +235,40 @@ jobs:
         fi
         echo "### ✅ govulncheck" >> "$GITHUB_STEP_SUMMARY"
 
+    # After every other check on purpose: the complexity backlog must not hide
+    # real lint/test failures. Writes an HTML report (artifact `gocyclo-report`)
+    # and a top-20 table in the job summary, then fails if any function is
+    # above the threshold set in .golangci.yml.
+    - name: gocyclo
+      if: ${{ !cancelled() }}
+      run: |
+        status=0
+        golangci-lint run --enable-only gocyclo --timeout=5m --max-issues-per-linter=0 --max-same-issues=0 \
+          --output.json.path gocyclo.json --output.text.path gocyclo.log ./... || status=$?
+        if [ ! -s gocyclo.json ]; then
+          cat gocyclo.log
+          echo "::error title=gocyclo::golangci-lint did not produce gocyclo.json (exit ${status}) — see log"
+          exit 1
+        fi
+        repo_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/blob/${GITHUB_SHA}"
+        go run ./cmd/cycloreport -repo-url "$repo_url" -commit "$(echo "$GITHUB_SHA" | cut -c1-7)" < gocyclo.json > gocyclo.html
+        go run ./cmd/cycloreport -format markdown -top 20 -repo-url "$repo_url" < gocyclo.json >> "$GITHUB_STEP_SUMMARY"
+        if [ "$status" -ne 0 ]; then
+          cat gocyclo.log
+          issues=$(grep -cE '^\S+\.go:[0-9]+:[0-9]+:' gocyclo.log || true)
+          echo "::error title=gocyclo::${issues} function(s) above the complexity threshold — open the gocyclo-report artifact; run 'make cyclo'"
+          exit 1
+        fi
+
+    - name: Upload gocyclo report
+      if: ${{ !cancelled() }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: gocyclo-report
+        path: gocyclo.html
+        if-no-files-found: ignore
+        retention-days: 14
+
   # Runs on a GitHub-hosted runner, off the baremetal host, so it still works
   # when the runner there was OOM-killed and could not report anything itself.
   explain:
