@@ -435,6 +435,77 @@ func TestPrepareRequestForCredential_ResponsesOnlyScopedToItsOwnCredential(t *te
 	assert.Contains(t, raw, "messages", "the fallback credential must still receive a normal Chat Completions request")
 }
 
+// TestPrepareRequestForCredential_SamplingParamsFollowFinalEffort pins that the
+// reasoning model sampling rule (temperature/top_p/... only while reasoning is off)
+// is decided on the body the upstream actually receives: after reasoning_effort_map
+// rewrites the effort, and after a responses_only conversion, whose Responses body
+// may carry the effort as reasoning.effort.
+func TestPrepareRequestForCredential_SamplingParamsFollowFinalEffort(t *testing.T) {
+	cred := config.CredentialConfig{Name: "openai_main", Type: config.ProviderTypeOpenAI, APIKey: "key", BaseURL: "https://api.openai.com", RPM: 100}
+	prx := NewTestProxyBuilder().WithCredentials(cred).Build()
+	prx.modelManager = models.New(prx.logger, 50, []config.ModelRPMConfig{
+		{Name: "gpt-5.6-luna", Credential: cred.Name, RPM: -1, TPM: -1,
+			ReasoningEffortMap: &config.ReasoningEffortMap{Mapping: map[string]string{"none": "medium"}}},
+		{Name: "gpt-5.6-terra", Credential: cred.Name, RPM: -1, TPM: -1,
+			ReasoningEffortMap: &config.ReasoningEffortMap{Mapping: map[string]string{"low": "none"}}},
+		{Name: "gpt-5.6-sol", Credential: cred.Name, ResponsesOnly: true, RPM: -1, TPM: -1},
+		{Name: "gpt-5.5", Credential: cred.Name, RPM: -1, TPM: -1},
+	})
+	prx.modelManager.LoadModelsFromConfig([]config.CredentialConfig{cred})
+
+	prepare := func(t *testing.T, model, path, body string) map[string]any {
+		t.Helper()
+		req := httptest.NewRequest("POST", path, nil)
+		prepared, err := prx.prepareRequestForCredential(
+			req, []byte(body), []byte(body), model, model, path,
+			false, &cred, strings.HasSuffix(path, "/responses"), false, false,
+		)
+		require.NoError(t, err)
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal(prepared.body, &raw))
+		return raw
+	}
+	const msgs = `"messages":[{"role":"user","content":"hi"}]`
+
+	t.Run("effort map turns none into medium", func(t *testing.T) {
+		raw := prepare(t, "gpt-5.6-luna", "/v1/chat/completions",
+			`{"model":"gpt-5.6-luna",`+msgs+`,"reasoning_effort":"none","temperature":0.2,"top_p":0.5}`)
+		assert.Equal(t, "medium", raw["reasoning_effort"])
+		assert.NotContains(t, raw, "temperature")
+		assert.NotContains(t, raw, "top_p")
+	})
+	t.Run("effort map turns low into none", func(t *testing.T) {
+		raw := prepare(t, "gpt-5.6-terra", "/v1/chat/completions",
+			`{"model":"gpt-5.6-terra",`+msgs+`,"reasoning_effort":"low","temperature":0.2}`)
+		assert.Equal(t, "none", raw["reasoning_effort"])
+		assert.EqualValues(t, 0.2, raw["temperature"])
+	})
+	t.Run("responses_only keeps sampling for nested effort none", func(t *testing.T) {
+		raw := prepare(t, "gpt-5.6-sol", "/v1/chat/completions",
+			`{"model":"gpt-5.6-sol",`+msgs+`,"reasoning":{"effort":"none"},"temperature":0.2,"top_p":0.5}`)
+		assert.Contains(t, raw, "input", "body must be converted to Responses shape")
+		assert.Equal(t, "none", raw["reasoning"].(map[string]any)["effort"])
+		assert.EqualValues(t, 0.2, raw["temperature"])
+		assert.EqualValues(t, 0.5, raw["top_p"])
+	})
+	t.Run("responses_only drops sampling without effort", func(t *testing.T) {
+		raw := prepare(t, "gpt-5.6-sol", "/v1/chat/completions",
+			`{"model":"gpt-5.6-sol",`+msgs+`,"temperature":0.2,"top_p":0.5,"top_logprobs":2}`)
+		assert.Contains(t, raw, "input", "body must be converted to Responses shape")
+		for _, key := range []string{"temperature", "top_p", "top_logprobs"} {
+			assert.NotContains(t, raw, key)
+		}
+	})
+	t.Run("responses passthrough follows reasoning.effort", func(t *testing.T) {
+		raw := prepare(t, "gpt-5.5", "/v1/responses",
+			`{"model":"gpt-5.5","input":"hi","reasoning":{"effort":"none"},"temperature":0.2}`)
+		assert.EqualValues(t, 0.2, raw["temperature"])
+		raw = prepare(t, "gpt-5.5", "/v1/responses",
+			`{"model":"gpt-5.5","input":"hi","temperature":0.2}`)
+		assert.NotContains(t, raw, "temperature")
+	})
+}
+
 func TestPrepareRequestForCredential_UsesCredentialSpecificRealModel(t *testing.T) {
 	logger := testhelpers.NewTestLogger()
 	cheap := config.CredentialConfig{Name: "cheapgpt", Type: config.ProviderTypeAnthropic, APIKey: "key", BaseURL: "http://cheapgpt.local", RPM: 100}
