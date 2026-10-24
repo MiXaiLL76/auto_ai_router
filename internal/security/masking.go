@@ -104,14 +104,16 @@ func MaskSensitiveHeaders(headers http.Header) http.Header {
 
 	// List of sensitive headers to mask
 	sensitiveHeaders := map[string]bool{
-		"Authorization":        true,
-		"X-API-Key":            true,
-		"X-Auth-Token":         true,
-		"Proxy-Authorization":  true,
-		"Cookie":               true,
-		"X-Goog-Api-Key":       true,
-		"Api-Key":              true,
-		"Anthropic-Auth-Token": true,
+		"authorization":        true,
+		"x-api-key":            true,
+		"x-litellm-api-key":    true,
+		"x-auth-token":         true,
+		"proxy-authorization":  true,
+		"cookie":               true,
+		"set-cookie":           true,
+		"x-goog-api-key":       true,
+		"api-key":              true,
+		"anthropic-auth-token": true,
 	}
 
 	for key, values := range headers {
@@ -119,11 +121,12 @@ func MaskSensitiveHeaders(headers http.Header) http.Header {
 			continue
 		}
 
-		if sensitiveHeaders[key] {
+		lowerKey := strings.ToLower(key)
+		if sensitiveHeaders[lowerKey] {
 			// Mask sensitive header values
 			value := values[0]
-			switch key {
-			case "Authorization":
+			switch lowerKey {
+			case "authorization":
 				// Handle Bearer tokens specially
 				if strings.HasPrefix(value, "Bearer ") {
 					token := strings.TrimPrefix(value, "Bearer ")
@@ -131,7 +134,7 @@ func MaskSensitiveHeaders(headers http.Header) http.Header {
 				} else {
 					masked.Set(key, MaskSecret(value, 4))
 				}
-			case "Cookie":
+			case "cookie", "set-cookie":
 				// Mask cookie value but indicate it was present
 				masked.Set(key, "***cookie***")
 			default:

@@ -317,6 +317,40 @@ func TestBuildRawBodyEvent_MapsRawBodies(t *testing.T) {
 	assert.Empty(t, event.RequestBody, "RequestBody must stay empty when rawBodyStoreRawBody is off, even if logCtx captured one")
 }
 
+func TestBuildRawBodyEventRedactsResponseTextBeforePublishing(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	prx.rawBodyRedactSensitiveFields = true
+	logCtx := testLogCtx(t)
+	logCtx.HTTPStatus = 400
+	logCtx.ErrorBodyRaw = `{"error":{"message":"synthetic-oauth-secret"}}`
+	logCtx.ClientResponseBody = "synthetic-oauth-secret in provider text"
+	prx.rawBodyStoreRawBody = true
+	logCtx.RequestBodyRaw = `{"messages":"[REDACTED]"}`
+
+	event := prx.buildRawBodyEvent(logCtx, "failure", logCtx.StartTime)
+	assert.NotContains(t, event.ResponseBody, "synthetic-oauth-secret")
+	assert.NotContains(t, event.ClientResponseBody, "synthetic-oauth-secret")
+	assert.Contains(t, event.ResponseBody, "REDACTED")
+	assert.Equal(t, logCtx.RequestBodyRaw, event.RequestBody)
+	assert.Contains(t, logCtx.ErrorBodyRaw, "synthetic-oauth-secret", "logging must not alter the provider/client payload")
+	assert.Equal(t, "BadRequestError", event.ErrorClass)
+}
+
+func TestProviderBodyCannotEscapeViaSpendErrorMessage(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	logCtx := testLogCtx(t)
+	logCtx.HTTPStatus = 400
+	logCtx.ErrorMsg = "synthetic-provider-secret"
+	logCtx.ErrorBodyRaw = `{"error":"synthetic-provider-secret"}`
+	event := prx.buildKafkaSpendEvent(logCtx, "cred", "model", "hash", "user", "team", "org", "", "", "failure", 0, nil, 0, logCtx.StartTime)
+	assert.NotContains(t, event.ErrorMessage, "synthetic-provider-secret")
+	assert.Equal(t, classifiedErrorMessage(400, nil), errorMessageForLog(logCtx))
+	assert.Equal(t, "synthetic-provider-secret", logCtx.ErrorMsg, "do not mutate response-path state")
+	logCtx.ErrorBodyRaw = ""
+	logCtx.ErrorMsg = "LiteLLM DB unavailable"
+	assert.Equal(t, "LiteLLM DB unavailable", errorMessageForLog(logCtx))
+}
+
 // TestBuildRawBodyEvent_ErrorOriginSetWhenResponseBodyEmpty reproduces the
 // exact motivating case for ErrorOrigin: a 502 with no upstream response at
 // all (ResponseBody empty because nothing ever answered), where ErrorOrigin

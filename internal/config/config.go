@@ -1378,15 +1378,16 @@ type KafkaRawBodiesConfig struct {
 	// generally, not just alongside errors.
 	StoreOnlyErrors bool `yaml:"store_only_errors"` // default: true
 
-	// RedactSensitiveFields controls whether StoreRawBody's captured
+	// RedactSensitiveFields omits arbitrary provider/client response bodies
+	// before publishing and controls whether StoreRawBody's captured
 	// request body has prompt/message content stripped before publishing
 	// (see redactRequestBodyForLogging: messages/system/prompt/input/
 	// contents/instructions replaced with a role/count-preserving
 	// placeholder, every other client-written string -- tool descriptions,
 	// user, metadata, ... -- masked, while model, tool names, parameter
-	// shape and allowlisted numbers/booleans are kept). Defaults to true; only
-	// meaningful when StoreRawBody is
-	// also on. Set to false to capture the request body verbatim instead --
+	// shape and allowlisted numbers/booleans are kept). Defaults to true.
+	// Response bodies are omitted even when StoreRawBody is off.
+	// Set to false to capture bodies verbatim instead --
 	// e.g. for a short-lived, access-controlled debugging session where the
 	// actual prompt is genuinely needed. This is a deliberate, explicit
 	// escape hatch, not a recommended default: turning it off reintroduces
