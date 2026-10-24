@@ -626,10 +626,14 @@ func (p *Proxy) handleSimulatedPassthroughNonStream(
 			if lastNL >= 0 {
 				for _, line := range strings.Split(buffered[:lastNL], "\n") {
 					line = strings.TrimRight(line, "\r")
-					if !strings.HasPrefix(line, "data: ") {
+					// Accept "data:" with or without the (spec-optional) space:
+					// some Responses-compatible upstreams (e.g. Alibaba DashScope
+					// via a proxy) emit "data:{...}" — requiring "data: " made
+					// every event invisible and the terminal event never seen.
+					if !strings.HasPrefix(line, "data:") {
 						continue
 					}
-					jsonData := strings.TrimPrefix(line, "data: ")
+					jsonData := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 					if jsonData == "" || jsonData == "[DONE]" {
 						continue
 					}

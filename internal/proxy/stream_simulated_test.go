@@ -1134,3 +1134,42 @@ func TestApplyForceStream_TouchesChatPaths(t *testing.T) {
 		assert.Contains(t, string(out.body), `"stream":true`, "path %s must be force-streamed", path)
 	}
 }
+
+// TestSimulatedPassthrough_DataWithoutSpace covers upstreams that emit SSE
+// frames as "data:{...}" (no space after the colon, which the SSE spec allows
+// and e.g. Alibaba DashScope through a proxy does). The reassembly must still
+// find the terminal response.completed event and return the non-stream JSON.
+func TestSimulatedPassthrough_DataWithoutSpace(t *testing.T) {
+	sse := "id:1\n" +
+		"event:response.created\n" +
+		"data:{\"type\":\"response.created\",\"response\":{\"id\":\"r1\",\"object\":\"response\",\"status\":\"in_progress\"}}\n\n" +
+		"event:response.output_text.delta\n" +
+		"data:{\"type\":\"response.output_text.delta\",\"delta\":\"PONG\"}\n\n" +
+		"event:response.completed\n" +
+		"data:{\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"object\":\"response\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"id\":\"m1\",\"status\":\"completed\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"PONG\"}]}],\"usage\":{\"input_tokens\":3,\"output_tokens\":1,\"total_tokens\":4}}}\n\n" +
+		"data:[DONE]\n\n"
+
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(sse)),
+	}
+	prx := NewTestProxyBuilder().Build()
+	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	logCtx := &RequestLogContext{Request: req}
+	cred := &config.CredentialConfig{Name: "intl", Type: config.ProviderTypeOpenAI, BaseURL: "http://x"}
+	prepared := &orchestratedRequest{passthroughResponses: true, forcedPassthroughNonStream: true, body: []byte(`{}`)}
+	w := httptest.NewRecorder()
+
+	prx.handleSimulatedPassthroughNonStream(w, req, resp, prepared, cred, "m", logCtx, nil, "http://x")
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	var out struct {
+		Object string `json:"object"`
+		Status string `json:"status"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &out))
+	assert.Equal(t, "response", out.Object)
+	assert.Equal(t, "completed", out.Status)
+}
