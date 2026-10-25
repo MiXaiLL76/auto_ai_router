@@ -450,6 +450,46 @@ func TestConvertVertexUsageMetadata_ImageVideoTokens(t *testing.T) {
 	}
 }
 
+// TestConvertVertexUsageMetadata_DocumentTokensAsImages verifies that PDF
+// (DOCUMENT) tokens are billed as input image tokens, as on the embeddings
+// route, and that a cached PDF page is not billed at the image rate as well.
+func TestConvertVertexUsageMetadata_DocumentTokensAsImages(t *testing.T) {
+	meta := &genai.GenerateContentResponseUsageMetadata{
+		PromptTokenCount:        536,
+		ToolUsePromptTokenCount: 258, // a PDF fetched by url_context
+		CandidatesTokenCount:    40,
+		PromptTokensDetails: []*genai.ModalityTokenCount{
+			{Modality: genai.MediaModalityText, TokenCount: 20},
+			{Modality: genai.MediaModalityDocument, TokenCount: 516},
+		},
+		ToolUsePromptTokensDetails: []*genai.ModalityTokenCount{
+			{Modality: genai.MediaModalityDocument, TokenCount: 258},
+		},
+		CachedContentTokenCount: 258,
+		CacheTokensDetails: []*genai.ModalityTokenCount{
+			{Modality: genai.MediaModalityDocument, TokenCount: 258},
+		},
+	}
+
+	usage := convertVertexUsageMetadata(meta)
+
+	if usage.PromptTokens != 794 {
+		t.Fatalf("expected 794 prompt tokens, got %d", usage.PromptTokens)
+	}
+	// 516 prompt + 258 tool-use document tokens, less the 258 cached ones.
+	if usage.PromptTokensDetails == nil || usage.PromptTokensDetails.ImageTokens != 516 {
+		t.Fatalf("expected 516 uncached document tokens as image tokens, got %v", usage.PromptTokensDetails)
+	}
+	if usage.PromptTokensDetails.CachedTokens != 258 || usage.PromptTokensDetails.VideoTokens != 0 {
+		t.Fatalf("expected 258 cached and no video tokens, got %v", usage.PromptTokensDetails)
+	}
+	// Only the text part remains at the regular input rate.
+	text := usage.PromptTokens - usage.PromptTokensDetails.ImageTokens - usage.PromptTokensDetails.CachedTokens
+	if text != 20 {
+		t.Fatalf("expected 20 text tokens, got %d", text)
+	}
+}
+
 // TestMapFinishReason verifies Vertex finish reason mapping to OpenAI format.
 func TestMapFinishReason(t *testing.T) {
 	tests := []struct {

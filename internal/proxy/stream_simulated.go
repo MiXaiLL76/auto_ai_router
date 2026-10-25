@@ -585,11 +585,13 @@ func (p *Proxy) handleSimulatedPassthroughNonStream(
 		ttftScan       ttftScanState
 		ttftPending    = logCtx != nil && logCtx.CompletionStartTime.IsZero()
 		completedEvent []byte
+		// What finalizeStreamingLog reads from completedEvent.
+		completedEventParse *finalChunkParse
 	)
 
 	providerReader := io.TeeReader(resp.Body, proxyStreamErrorObserver{capture: rawProviderStreamError})
 	readBuf := make([]byte, 8192)
-	var lineBuf strings.Builder
+	lines := newResponsesStreamLines()
 	overflow := false
 	for {
 		n, readErr := providerReader.Read(readBuf)
@@ -620,38 +622,31 @@ func (p *Proxy) handleSimulatedPassthroughNonStream(
 				}
 			}
 			// Walk complete SSE lines for the terminal Responses event.
-			lineBuf.Write(chunk)
-			buffered := lineBuf.String()
-			lastNL := strings.LastIndex(buffered, "\n")
-			if lastNL >= 0 {
-				for _, line := range strings.Split(buffered[:lastNL], "\n") {
-					line = strings.TrimRight(line, "\r")
-					// Accept "data:" with or without the (spec-optional) space:
-					// some Responses-compatible upstreams (e.g. Alibaba DashScope
-					// via a proxy) emit "data:{...}" — requiring "data: " made
-					// every event invisible and the terminal event never seen.
-					if !strings.HasPrefix(line, "data:") {
-						continue
+			lines.Observe(chunk, func(line []byte) {
+				// Some Responses-compatible upstreams (e.g. Alibaba DashScope
+				// via a proxy) emit "data:{...}" without the space — requiring
+				// "data: " made every event invisible and the terminal event
+				// never seen.
+				jsonData := responsesStreamDataPayload(line)
+				if jsonData == nil || !mayBeTerminalResponsesEvent(jsonData) {
+					return
+				}
+				var event struct {
+					Type     string             `json:"type"`
+					Response responses.Response `json:"response"`
+				}
+				if json.Unmarshal(jsonData, &event) == nil && isTerminalResponsesEventType(event.Type) {
+					sawTerminal = true
+					completedEvent = bytes.Clone(jsonData) // line is only valid during this call
+					completedEventParse = nil
+					if parsed, ok := parseResponsesTerminalEvent(completedEvent); ok {
+						completedEventParse = parsed.finalChunkParse(completedEvent, true)
 					}
-					jsonData := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-					if jsonData == "" || jsonData == "[DONE]" {
-						continue
-					}
-					var event struct {
-						Type     string             `json:"type"`
-						Response responses.Response `json:"response"`
-					}
-					if json.Unmarshal([]byte(jsonData), &event) == nil && (event.Type == "response.completed" || event.Type == "response.incomplete") {
-						sawTerminal = true
-						completedEvent = []byte(jsonData)
-						if enriched, mErr := json.Marshal(&event.Response); mErr == nil {
-							finalBody = enriched
-						}
+					if enriched, mErr := json.Marshal(&event.Response); mErr == nil {
+						finalBody = enriched
 					}
 				}
-				lineBuf.Reset()
-				lineBuf.WriteString(buffered[lastNL+1:])
-			}
+			})
 		}
 		if readErr != nil {
 			if !errors.Is(readErr, io.EOF) {
@@ -722,12 +717,12 @@ func (p *Proxy) handleSimulatedPassthroughNonStream(
 	}
 	logCtx.captureClientResponseID(finalBody)
 
-	finalChunk := lastChunk
+	finalChunk, finalParse := lastChunk, (*finalChunkParse)(nil)
 	if len(completedEvent) > 0 {
-		finalChunk = completedEvent
+		finalChunk, finalParse = completedEvent, completedEventParse
 	}
 	p.setPromptTokensEstimate(logCtx, bodyBytesForEstimate(prepared), modelID)
-	p.finalizeStreamingLog(logCtx, logTokens, finalChunk, "openai", resp.StatusCode, true)
+	p.finalizeStreamingLogParsed(logCtx, logTokens, finalChunk, finalParse, "openai", resp.StatusCode, true)
 
 	logCtx.RequestCompleted = true
 	p.setSessionBinding(logCtx.SessionID, modelID, cred.Name)
