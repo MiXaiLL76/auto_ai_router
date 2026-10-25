@@ -698,8 +698,7 @@ func TestLogger_SQLInjectionPrevention_ParameterEscaping(t *testing.T) {
 
 // pgx writes a time's wall clock into the zone-less "startTime", "endTime" and
 // "completionStartTime" columns, so a value in the pod's local zone would be
-// stored shifted. On a LiteLLM_SpendLogs partitioned by "startTime", a replay of
-// the same event from a pod with another TZ would also add a second row.
+// stored shifted.
 func TestGetSpendLogParams_TimestampsInUTC(t *testing.T) {
 	utc := time.Date(2026, 9, 16, 12, 0, 0, 0, time.UTC)
 	msk := time.FixedZone("MSK", 3*3600)
