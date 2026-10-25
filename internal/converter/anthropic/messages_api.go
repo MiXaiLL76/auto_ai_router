@@ -116,6 +116,20 @@ func MessagesToChat(body []byte) ([]byte, MessagesAdapterMetadata, error) {
 		return nil, MessagesAdapterMetadata{}, err
 	}
 	thinking, hasThinking := request["thinking"].(map[string]interface{})
+	if isNativeAdaptiveModel(model) {
+		// Thinking is always adaptive here (ValidateThinkingControls rejects the rest), so
+		// the Chat form carries just the effort: OpenAIToAnthropic turns it back into
+		// adaptive thinking, an OpenAI-compatible endpoint reads it as is. Without one the
+		// model keeps its own default effort.
+		effort := configuredEffort
+		if effort == "" {
+			effort, _ = thinking["effort"].(string)
+		}
+		if effort != "" {
+			chat["reasoning_effort"] = effort
+		}
+		hasThinking = false
+	}
 	if !hasThinking && configuredEffort != "" && isClaudeModel(model) && thinksByDefault(model) {
 		// Omitting thinking runs adaptive on this model: say so, so the effort can go along.
 		thinking, hasThinking = map[string]interface{}{"type": "adaptive"}, true
@@ -845,6 +859,9 @@ func chatUsageToMessages(usage *openai.OpenAIUsage, cacheWriteTTLFallback5mToken
 		result.ServerToolUse = &ServerToolUsageDetails{
 			WebSearchRequests: usage.ServerToolUse.WebSearchRequests,
 		}
+	}
+	if usage.CompletionTokensDetails != nil && usage.CompletionTokensDetails.ReasoningTokens > 0 {
+		result.OutputTokensDetails = &OutputTokensDetails{ThinkingTokens: usage.CompletionTokensDetails.ReasoningTokens}
 	}
 	return result
 }

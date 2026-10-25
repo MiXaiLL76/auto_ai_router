@@ -586,6 +586,9 @@ func (p *Proxy) buildCredentialRequestInner(
 	if err := anthropicconv.ValidateToolChoice(body, realModelID, requestAPI); err != nil {
 		return credentialPreparedRequest{}, err
 	}
+	if err := anthropicconv.ValidateThinkingControls(body, realModelID, requestAPI); err != nil {
+		return credentialPreparedRequest{}, err
+	}
 
 	effectiveType := cred.EffectiveProviderType()
 	if p.stickyAutoCacheCtrl &&
@@ -1083,9 +1086,14 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 			"error_code", http.StatusBadRequest, "error", err)
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = http.StatusBadRequest
+		var validationErr *converterutil.RequestValidationError
 		if errors.Is(err, errInvalidMultipartRequestBody) {
 			logCtx.ErrorMsg = "Invalid multipart request body: " + err.Error()
 			WriteErrorBadRequest(w, "Invalid multipart request body")
+		} else if errors.As(err, &validationErr) {
+			logCtx.HTTPStatus = statusForValidationError(validationErr)
+			logCtx.ErrorMsg = "Invalid request: " + err.Error()
+			writeValidationError(w, validationErr, err.Error())
 		} else {
 			logCtx.ErrorMsg = "Invalid request body: " + err.Error()
 			WriteErrorBadRequest(w, "Invalid request body")

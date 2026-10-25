@@ -23,6 +23,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
+	anthropicconv "github.com/mixaill76/auto_ai_router/internal/converter/anthropic"
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 )
 
@@ -307,6 +308,28 @@ func deleteClientControlledBillingParams(object map[string]goccyjson.RawMessage)
 	return changed
 }
 
+// validateClientServiceTier rejects a service_tier, top level or in extra_body,
+// that model has no such tier for (see anthropicconv.ValidateServiceTier),
+// before stripClientControlledBillingParams drops it and the request runs at
+// another tier than asked.
+func validateClientServiceTier(reqBody map[string]goccyjson.RawMessage, model string) error {
+	tier, _ := rawJSONString(reqBody["service_tier"])
+	if err := anthropicconv.ValidateServiceTier(tier, model); err != nil {
+		return err
+	}
+	// Decoded only when it can hold one: this runs on every request.
+	if !bytes.Contains(reqBody["extra_body"], []byte(`"service_tier"`)) {
+		return nil
+	}
+	var extraBody struct {
+		ServiceTier string `json:"service_tier"`
+	}
+	if goccyjson.Unmarshal(reqBody["extra_body"], &extraBody) != nil {
+		return nil
+	}
+	return anthropicconv.ValidateServiceTier(extraBody.ServiceTier, model)
+}
+
 // stripClientControlledBillingParams removes clientControlledBillingParams
 // from the two request locations through which clients may set them: the
 // top level and extra_body. It is intentionally not recursive: the same names
@@ -407,6 +430,11 @@ func sanitizeJSONRequestBody(body []byte, isMessagesAPI bool) (sanitizedRequestB
 		return result, nil // Existing invalid-body handling reports missing model.
 	}
 
+	if model, ok := rawJSONString(reqBody["model"]); ok {
+		if err := validateClientServiceTier(reqBody, model); err != nil {
+			return sanitizedRequestBody{}, err
+		}
+	}
 	changed, err := stripClientControlledBillingParams(reqBody)
 	if err != nil {
 		return sanitizedRequestBody{}, err

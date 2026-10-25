@@ -280,7 +280,7 @@ func anthropicUsageToUsage(au *anthropic.AnthropicUsage) *responses.Usage {
 		OutputTokens:        au.OutputTokens,
 		TotalTokens:         totalInputTokens + au.OutputTokens,
 		InputTokensDetails:  inputDetails,
-		OutputTokensDetails: responses.OutputDetails{},
+		OutputTokensDetails: responses.OutputDetails{ReasoningTokens: au.ReasoningTokens()},
 	}
 	if au.ServerToolUse != nil && au.ServerToolUse.WebSearchRequests > 0 {
 		usage.ServerToolUse = &responses.ServerToolUseDetails{
