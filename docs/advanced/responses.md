@@ -458,6 +458,6 @@ Limitations of the `/v1/chat/completions` conversion:
 
 ## Retry and Fallback
 
-When a provider credential returns a rate-limit error (429), the router automatically tries the next available credential of the same type. The original HTTP error code is preserved in the final response — the client receives 429 (not 502) when all credentials of the appropriate type are exhausted.
+When a provider credential returns a rate-limit error (429), the router automatically tries the next available credential that serves the model, of any type. The original HTTP error code is preserved in the final response — the client receives 429 (not 502) when all credentials are exhausted.
 
 When no credentials are available at all, the router returns 503 Service Unavailable.
