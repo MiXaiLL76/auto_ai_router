@@ -90,14 +90,12 @@ litellm_db:
   min_conns: 5
   health_check_interval: 10s
   connect_timeout: 5s
-  auth_cache_ttl: 20s
+  auth_cache_ttl: 5s
   auth_cache_size: 10000
   log_queue_size: 5000
   log_batch_size: 100
   log_flush_interval: 5s
   include_team_spend_in_user_spend: true
-  log_retry_attempts: 3
-  log_retry_delay: 1s
 ```
 
 ## Server Parameters
