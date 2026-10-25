@@ -96,22 +96,7 @@ func (p *Proxy) applyCredentialCompatibilityRouting(
 	nextCred, nextReq, routed := p.nextPrimaryAfterUnsupportedCredential(r, prepared, modelID, cred, logCtx.Scope, reason, provider)
 	if routed {
 		r.URL.Path = nextReq.path
-		prepared.cred = nextCred
-		prepared.body = nextReq.body
-		prepared.proxyBody = nextReq.proxyBody
-		prepared.proxyPath = nextReq.proxyPath
-		prepared.realModelID = nextReq.realModelID
-		prepared.convertedResp = nextReq.convertedResp
-		prepared.convertedMessages = nextReq.convertedMessages
-		prepared.convertedToResponses = nextReq.convertedToResponses
-		prepared.passthroughResponses = nextReq.passthroughResponses
-		prepared.passthroughMessages = nextReq.passthroughMessages
-		prepared.nativeResponses = nextReq.nativeResponses
-		prepared.forcedNativeNonStream = nextReq.forcedNativeNonStream
-		prepared.forcedPassthroughNonStream = nextReq.forcedPassthroughNonStream
-		prepared.forcedChatNonStream = nextReq.forcedChatNonStream
-		prepared.completionsPath = nextReq.completionsPath
-		prepared.messagesMetadata = nextReq.messagesMetadata
+		prepared.useCredential(nextCred, nextReq)
 		logCtx.Credential = nextCred
 		logCtx.RealModelID = prepared.realModelID
 		if span := trace.SpanFromContext(r.Context()); span.IsRecording() {
@@ -234,6 +219,26 @@ func (p *Proxy) nextPrimaryAfterUnsupportedCredential(
 		"model", modelID,
 		"reason", reason)
 	return nil, credentialPreparedRequest{}, false
+}
+
+// useCredential switches the prepared request to cred and its prepared body.
+func (prepared *orchestratedRequest) useCredential(cred *config.CredentialConfig, nextReq credentialPreparedRequest) {
+	prepared.cred = cred
+	prepared.body = nextReq.body
+	prepared.proxyBody = nextReq.proxyBody
+	prepared.proxyPath = nextReq.proxyPath
+	prepared.realModelID = nextReq.realModelID
+	prepared.convertedResp = nextReq.convertedResp
+	prepared.convertedMessages = nextReq.convertedMessages
+	prepared.convertedToResponses = nextReq.convertedToResponses
+	prepared.passthroughResponses = nextReq.passthroughResponses
+	prepared.passthroughMessages = nextReq.passthroughMessages
+	prepared.nativeResponses = nextReq.nativeResponses
+	prepared.forcedNativeNonStream = nextReq.forcedNativeNonStream
+	prepared.forcedPassthroughNonStream = nextReq.forcedPassthroughNonStream
+	prepared.forcedChatNonStream = nextReq.forcedChatNonStream
+	prepared.completionsPath = nextReq.completionsPath
+	prepared.messagesMetadata = nextReq.messagesMetadata
 }
 
 // nextRetryCredential picks and prepares the next retry credential of any type
@@ -1265,22 +1270,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		proxyBody = nextReq.proxyBody
 		realModelID = nextReq.realModelID
 		r.URL.Path = nextReq.path
-		prepared.cred = next
-		prepared.body = nextReq.body
-		prepared.proxyBody = nextReq.proxyBody
-		prepared.proxyPath = nextReq.proxyPath
-		prepared.realModelID = nextReq.realModelID
-		prepared.convertedResp = nextReq.convertedResp
-		prepared.convertedMessages = nextReq.convertedMessages
-		prepared.convertedToResponses = nextReq.convertedToResponses
-		prepared.passthroughResponses = nextReq.passthroughResponses
-		prepared.passthroughMessages = nextReq.passthroughMessages
-		prepared.nativeResponses = nextReq.nativeResponses
-		prepared.forcedNativeNonStream = nextReq.forcedNativeNonStream
-		prepared.forcedPassthroughNonStream = nextReq.forcedPassthroughNonStream
-		prepared.forcedChatNonStream = nextReq.forcedChatNonStream
-		prepared.completionsPath = nextReq.completionsPath
-		prepared.messagesMetadata = nextReq.messagesMetadata
+		prepared.useCredential(next, nextReq)
 		logCtx.RealModelID = realModelID
 	}
 
@@ -1379,7 +1369,7 @@ dispatch:
 				}
 			}
 
-			p.logger.InfoContext(r.Context(), "All same-type proxy credentials exhausted, attempting fallback",
+			p.logger.InfoContext(r.Context(), "All retry credentials exhausted, attempting fallback proxy",
 				"credential", cred.Name, "model", modelID,
 				"last_status", fallbackStatus, "reason", retryReason)
 			success, fallbackReason := p.TryFallbackProxy(w, r, modelID, cred.Name, fallbackStatus, retryReason, proxyBody, start, logCtx)
@@ -1461,6 +1451,8 @@ dispatch:
 			cred = respCred
 			logCtx.Credential = cred
 		}
+		// Retries reset it; the peer that produced this response named its own credential.
+		logCtx.ActualCredentialName = proxyResp.ActualCredentialName
 
 		if !proxyResp.IsStreaming {
 			if mappedStatus, ok := statusCodeFromProviderBodyError(proxyResp.StatusCode, proxyResp.Body); ok {

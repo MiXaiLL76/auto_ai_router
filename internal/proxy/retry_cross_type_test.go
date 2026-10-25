@@ -122,3 +122,36 @@ func TestProxyRequestRetryDropsFailedPeerCredentialName(t *testing.T) {
 		t.Fatal("no spend log entry")
 	}
 }
+
+// When the response written comes from an earlier peer attempt (a later one had
+// no response at all), its peer credential name is kept for the spend log.
+func TestProxyRequestRetryKeepsPeerCredentialNameOfWrittenResponse(t *testing.T) {
+	limited := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Credential-Name", "peer-limited-cred")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"error":{"message":"rate limit exceeded","type":"rate_limit_error"}}`)
+	}))
+	defer limited.Close()
+	down := newIPv4Server(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	down.Close()
+
+	prx := NewTestProxyBuilder().WithCredentials(
+		config.CredentialConfig{Name: "peer-a", Type: config.ProviderTypeAIR, BaseURL: limited.URL, APIKey: "k1", RPM: 100, TPM: 10000},
+		config.CredentialConfig{Name: "peer-b", Type: config.ProviderTypeAIR, BaseURL: down.URL, APIKey: "k2", Priority: 1, RPM: 100, TPM: 10000},
+	).WithMaxProviderRetries(2).Build()
+	db := &nativeWSTestDB{clientAuthTestDB: &clientAuthTestDB{}, entries: make(chan *dbmodels.SpendLogEntry, 1)}
+	prx.LiteLLMDB = db
+	setTestModelPrice(prx, "gpt-4", &models.ModelPrice{InputCostPerToken: 1, OutputCostPerToken: 2})
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, newRequestHeadersClientRequest("/v1/chat/completions", requestHeadersCases[0].body))
+
+	require.Equal(t, http.StatusTooManyRequests, w.Code, w.Body.String())
+	select {
+	case entry := <-db.entries:
+		assert.Equal(t, "peer-limited-cred:gpt-4", entry.ModelID)
+	case <-time.After(5 * time.Second):
+		t.Fatal("no spend log entry")
+	}
+}
