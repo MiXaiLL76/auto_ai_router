@@ -745,7 +745,7 @@ func (r *RoundRobin) NextRetryForModelExcludingScoped(modelID string, current *c
 	if current == nil {
 		return nil, ErrNoCredentialsAvailable
 	}
-	if current.IsProxyLike() || current.IsFallback {
+	if current.IsFallback {
 		return r.NextSameTypeForModelExcludingScoped(modelID, current.Type, exclude, visibility)
 	}
 	// No same-type-only step for an unprioritized current credential: nextPriorityRetry
@@ -799,10 +799,6 @@ func (r *RoundRobin) splitPriorityRetryCandidatesLocked(modelID string, minPrior
 	for i := range r.credentials {
 		cred := &r.credentials[i]
 		if len(exclude) > 0 && exclude[cred.Name] {
-			continue
-		}
-		if cred.IsProxyLike() {
-			monitoring.CredentialSelectionRejected.WithLabelValues("type_not_allowed").Inc()
 			continue
 		}
 		if cred.IsFallback {

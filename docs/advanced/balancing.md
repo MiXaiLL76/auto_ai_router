@@ -218,10 +218,10 @@ tries `backup-anthropic` next. If `backup-anthropic` is also unavailable, it tri
 router re-resolves the model before sending the retry request, so an Anthropic model alias can
 safely move to a Bedrock credential.
 
-If `fallback_priority` is omitted or set to `0`, the old same-type retry behavior is preserved
-when that credential starts the retry chain. When a retry chain starts from a credential with
-`fallback_priority > 0`, the router tries all configured priority tiers first, then continues
-with regular credentials that do not set `fallback_priority`. Fallback credentials
+A retry goes to any non-fallback credential that serves the model, whatever its `type`:
+a direct provider credential can retry on an `air`/`proxy` credential and the other way round.
+The router tries the configured priority tiers first, starting from the tier of the credential
+that failed, then continues with regular credentials that do not set `fallback_priority`. Fallback credentials
 (`is_fallback: true`) are still used only by the fallback mechanism. See
 [Proxy — Fallback Behavior](../providers/proxy.md#fallback-behavior) for details.
 
@@ -236,8 +236,12 @@ router01 receives request
           └─► router03 (fallback AIR) → success
 ```
 
-router01 marks router02 as "tried" immediately on the first attempt, so same-type retries
-never re-select router02. After all primary AIR credentials are exhausted, `TryFallbackProxy`
+router01 marks router02 as "tried" immediately on the first attempt, so retries
+never re-select router02. Retries also reach router01's own direct credentials for the same model.
+A request that came from another router (router02 serving router01) does not retry from a direct
+credential onto an `air`/`proxy` credential, so two routers that list each other do not bounce a
+failing request back and forth; router02 returns the error and router01 continues its own retries.
+After all primary credentials are exhausted, `TryFallbackProxy`
 selects the next `is_fallback: true` credential (router03).
 
 ```yaml

@@ -11,7 +11,7 @@ This page covers two features that keep such requests from multiplying:
 
 ```yaml
 server:
-  max_provider_retries: 2      # extra same-type credentials per request (default 2 = 3 attempts)
+  max_provider_retries: 2      # extra credentials of any type per request (default 2 = 3 attempts)
   max_fallback_attempts: 5     # fallback hops per request chain (default 5)
 
 retry:
