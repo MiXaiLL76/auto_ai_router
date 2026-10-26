@@ -16,18 +16,25 @@ import (
 )
 
 type Router struct {
-	proxy            *proxy.Proxy
-	modelManager     *models.Manager
-	monitoringConfig *config.MonitoringConfig
-	appConfig        *config.Config
-	logger           *slog.Logger
-	isReady          atomic.Bool
-	videoHandler     http.Handler
+	proxy               *proxy.Proxy
+	modelManager        *models.Manager
+	monitoringConfig    *config.MonitoringConfig
+	appConfig           *config.Config
+	logger              *slog.Logger
+	isReady             atomic.Bool
+	videoHandler        http.Handler
+	yandexSearchHandler http.Handler
 }
 
 func (r *Router) SetVideoHandler(handler http.Handler) {
 	r.videoHandler = handler
 }
+
+func (r *Router) SetYandexSearchHandler(handler http.Handler) {
+	r.yandexSearchHandler = handler
+}
+
+const yandexSearchPath = "/v1/search/yandex"
 
 func isVideoPath(path string) bool {
 	return path == "/v1/videos" || strings.HasPrefix(path, "/v1/videos/") ||
@@ -152,6 +159,19 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 		r.videoHandler.ServeHTTP(w, req)
+		return
+	}
+
+	if req.URL.Path == yandexSearchPath {
+		if req.Method != http.MethodPost {
+			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		if r.yandexSearchHandler == nil {
+			proxy.WriteErrorNotFound(w, "Not Found")
+			return
+		}
+		r.yandexSearchHandler.ServeHTTP(w, req)
 		return
 	}
 

@@ -340,6 +340,8 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	}
 	info.Models = tokenModels
 	info.Metadata = decodeMetadata(tokenMetadata)
+	info.TeamMetadata = decodeMetadata(teamMetadata)
+	info.OrganizationMetadata = decodeMetadata(orgMetadata)
 
 	info.MaxBudget = tokenMaxBudget
 	info.Expires = expires
