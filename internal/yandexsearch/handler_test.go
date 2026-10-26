@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	dbmodels "github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	"github.com/mixaill76/auto_ai_router/internal/scope"
@@ -324,4 +325,117 @@ func TestHandlerNonTimeoutErrorDoesNotRecordIndeterminateRow(t *testing.T) {
 
 	assert.Equal(t, http.StatusBadGateway, resp.Code)
 	assert.Empty(t, spend.calls, "a plain network error (not a timeout) has no indeterminate-billing concern")
+}
+
+// fakeKafka records the analytics events the handler publishes, mirroring
+// kafkalog.Manager.LogSpend's error contract.
+type fakeKafka struct {
+	events []*kafkalog.SpendEvent
+	err    error
+}
+
+func (f *fakeKafka) LogSpend(event *kafkalog.SpendEvent) error {
+	f.events = append(f.events, event)
+	return f.err
+}
+
+// fakeIdentity is the RouterIdentity double.
+type fakeIdentity struct {
+	routerID string
+	version  string
+	commit   string
+}
+
+func (f fakeIdentity) GetRouterID() string { return f.routerID }
+func (f fakeIdentity) GetVersion() string  { return f.version }
+func (f fakeIdentity) GetCommit() string   { return f.commit }
+
+func TestHandlerPublishesKafkaSpendEventOnSuccess(t *testing.T) {
+	auth := allowedAuth("k1")
+	spend := &fakeSpend{}
+	kafka := &fakeKafka{}
+	cfg := baseHandlerConfig(auth, fakeSearcher{status: http.StatusOK, body: []byte(`{}`)}, spend)
+	cfg.Pricing = fakePricing{usd: 0.0074, period: "day"}
+	cfg.Kafka = kafka
+	cfg.Identity = fakeIdentity{routerID: "av-api-1", version: "1.2.3", commit: "abc123"}
+	handler := NewHandler(cfg)
+
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, newRequest(validSearchBody))
+
+	require.Equal(t, http.StatusOK, resp.Code)
+	require.Len(t, kafka.events, 1, "the analytics projection must be published alongside the Postgres row")
+	event := kafka.events[0]
+	assert.Equal(t, "search/yandex", event.CallType)
+	assert.Equal(t, "/v1/search/yandex", event.APIBase)
+	assert.Equal(t, "success", event.Status)
+	assert.Equal(t, http.StatusOK, event.HTTPStatus)
+	assert.Equal(t, 0.0074, event.TotalCost)
+	assert.Equal(t, "k1", event.APIKeyHash)
+	assert.Equal(t, "user-1", event.UserID)
+	assert.Equal(t, "team-1", event.TeamID)
+	assert.Equal(t, "org-1", event.OrganizationID)
+	assert.Equal(t, spendModel, event.Model, "a non-empty model keeps the row attributable in ClickHouse analytics")
+	assert.NotEmpty(t, event.RequestID, "the event must carry a request id to key the ClickHouse row")
+	assert.Equal(t, "av-api-1", event.ServerRouterID)
+	assert.Equal(t, "1.2.3", event.ServerVersion)
+	assert.Equal(t, "abc123", event.ServerCommit)
+}
+
+func TestHandlerPublishesKafkaEventForIndeterminateTimeout(t *testing.T) {
+	auth := allowedAuth("k1")
+	spend := &fakeSpend{}
+	kafka := &fakeKafka{}
+	cfg := baseHandlerConfig(auth, fakeSearcher{err: context.DeadlineExceeded}, spend)
+	cfg.Kafka = kafka
+	handler := NewHandler(cfg)
+
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, newRequest(validSearchBody))
+
+	assert.Equal(t, http.StatusGatewayTimeout, resp.Code)
+	require.Len(t, kafka.events, 1, "a timeout's $0 audit row must reach ClickHouse too")
+	assert.Equal(t, "failure", kafka.events[0].Status)
+	assert.Equal(t, 0.0, kafka.events[0].TotalCost)
+	assert.Equal(t, http.StatusGatewayTimeout, kafka.events[0].HTTPStatus)
+}
+
+func TestHandlerNilKafkaPublisherIsNoop(t *testing.T) {
+	spend := &fakeSpend{}
+	handler := newTestHandler(allowedAuth("k1"), fakeSearcher{status: http.StatusOK, body: []byte(`{}`)}, spend)
+
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, newRequest(validSearchBody))
+
+	assert.Equal(t, http.StatusOK, resp.Code, "an unwired Kafka (NoopManager) must not affect the request")
+	require.Len(t, spend.calls, 1)
+}
+
+func TestHandlerKafkaPublishFailureDoesNotAffectBillingOrResponse(t *testing.T) {
+	spend := &fakeSpend{}
+	kafka := &fakeKafka{err: kafkalog.ErrQueueFull}
+	cfg := baseHandlerConfig(allowedAuth("k1"), fakeSearcher{status: http.StatusOK, body: []byte(`{}`)}, spend)
+	cfg.Kafka = kafka
+	handler := NewHandler(cfg)
+
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, newRequest(validSearchBody))
+
+	assert.Equal(t, http.StatusOK, resp.Code, "a Kafka queue-full must never fail an already-billed request")
+	require.Len(t, spend.calls, 1, "Postgres billing is independent of the analytics write-path")
+}
+
+func TestHandlerDoesNotPublishKafkaEventForNonBilledStatus(t *testing.T) {
+	spend := &fakeSpend{}
+	kafka := &fakeKafka{}
+	cfg := baseHandlerConfig(allowedAuth("k1"), fakeSearcher{status: http.StatusBadGateway, body: []byte(`{}`)}, spend)
+	cfg.Kafka = kafka
+	handler := NewHandler(cfg)
+
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, newRequest(validSearchBody))
+
+	assert.Equal(t, http.StatusBadGateway, resp.Code)
+	assert.Empty(t, spend.calls, "a non-2xx is not billed")
+	assert.Empty(t, kafka.events, "and has no analytics spend event either")
 }

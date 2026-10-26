@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/budget"
 	dbmodels "github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
@@ -31,6 +32,15 @@ const accessScope = "yandex_search"
 const callType = "search/yandex"
 const customLLMProvider = "yandex_search"
 const apiBase = "/v1/search/yandex"
+
+// spendModel is the `model` dimension this adapter puts on its spend rows.
+// The operation has no LLM model, but leaving the column empty makes the rows
+// hard to use in analytics: air.logs (unlike LiteLLM_SpendLogs) has no
+// separate provider column, so an empty `model` leaves a search row
+// identifiable only by its call_type. A stable synthetic name keeps the rows
+// attributable and filterable (it is not a vendor id, so the admin panel's
+// provider breakdown does not fold it into a real LLM provider).
+const spendModel = "yandex-search"
 
 // operation identifies this adapter's own Yandex Search API operation type
 // for billing/audit (config.OperationWebSync's value) — a fixed constant,
@@ -59,6 +69,28 @@ type SpendRecorder interface {
 	CommitSpend(ctx context.Context, entry *dbmodels.SpendLogEntry) (litellmdb.SpendCommitResult, error)
 }
 
+// SpendEventPublisher publishes the expanded analytics copy of a spend entry
+// to Kafka (internal/kafkalog), the write-path ClickHouse's air.logs reads.
+// Independent of SpendRecorder: Postgres is the billing source of truth, Kafka
+// is the analytics projection, and a Kafka outage must never affect billing or
+// the request itself (kafkalog.Manager.LogSpend only reports queue-full, the
+// same best-effort contract the LLM path uses in proxy_log.go). nil is
+// accepted and makes publishing a no-op, so a deployment with Kafka disabled
+// runs exactly as before.
+type SpendEventPublisher interface {
+	LogSpend(event *kafkalog.SpendEvent) error
+}
+
+// RouterIdentity supplies the server identity fields kafkalog.SpendEvent
+// carries for the same reason the LLM path does: ClickHouse's air.logs keys a
+// row by (request_id, server_router_id), and the admin panel's per-router
+// breakdowns group by it. *proxy.Proxy satisfies this structurally.
+type RouterIdentity interface {
+	GetRouterID() string
+	GetVersion() string
+	GetCommit() string
+}
+
 // Searcher performs the upstream Yandex call. *Client satisfies this.
 type Searcher interface {
 	Search(ctx context.Context, body []byte) (status int, respBody []byte, err error)
@@ -85,6 +117,15 @@ type HandlerConfig struct {
 	Spend   SpendRecorder
 	Quota   QuotaChecker
 	Pricing PricingTable
+	// Kafka publishes the expanded analytics copy of each spend entry to the
+	// air.spend_logs topic ClickHouse ingests; nil disables it (no-op). Unlike
+	// Postgres billing it is best-effort by construction — a publish failure is
+	// logged and swallowed, never failing the request or the human-facing spend
+	// row.
+	Kafka SpendEventPublisher
+	// Identity fills ServerRouterID/ServerVersion/ServerCommit on the Kafka
+	// event; nil leaves them empty.
+	Identity RouterIdentity
 	// Budget is nil-safe (internal/litellmdb/budget.Reserver's own
 	// nil-receiver no-op) — pass nil when budget reservation is disabled
 	// system-wide or Redis is unavailable; the handler degrades to
@@ -101,6 +142,8 @@ type Handler struct {
 	client         Searcher
 	auth           Authenticator
 	spend          SpendRecorder
+	kafka          SpendEventPublisher
+	identity       RouterIdentity
 	quota          QuotaChecker
 	pricing        PricingTable
 	budget         *budget.Reserver
@@ -131,6 +174,8 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		client:         cfg.Client,
 		auth:           cfg.Auth,
 		spend:          cfg.Spend,
+		kafka:          cfg.Kafka,
+		identity:       cfg.Identity,
 		quota:          cfg.Quota,
 		pricing:        cfg.Pricing,
 		budget:         cfg.Budget,
@@ -269,14 +314,16 @@ func (h *Handler) commitSpend(ctx context.Context, tokenInfo *dbmodels.TokenInfo
 		h.logger.ErrorContext(ctx, "Yandex search: failed to encode spend metadata", "error", err)
 		metadata = []byte("{}")
 	}
-	_, err = h.spend.CommitSpend(ctx, &dbmodels.SpendLogEntry{
+	endTime := start.Add(duration)
+	entry := &dbmodels.SpendLogEntry{
 		RequestID:         requestID,
 		AirEventID:        requestID,
 		StartTime:         start,
-		EndTime:           start.Add(duration),
+		EndTime:           endTime,
 		RequestDurationMS: int(duration.Milliseconds()),
 		CallType:          callType,
 		APIBase:           apiBase,
+		Model:             spendModel,
 		CustomLLMProvider: customLLMProvider,
 		Metadata:          string(metadata),
 		Spend:             spendUSD,
@@ -286,9 +333,48 @@ func (h *Handler) commitSpend(ctx context.Context, tokenInfo *dbmodels.TokenInfo
 		BillingTeamID:     tokenInfo.TeamID,
 		OrganizationID:    tokenInfo.OrganizationID,
 		Status:            status,
-	})
-	if err != nil {
+	}
+	if _, err := h.spend.CommitSpend(ctx, entry); err != nil {
 		h.logger.ErrorContext(ctx, "Yandex search: failed to commit spend", "error", err)
+	}
+	h.publishSpendEvent(entry, upstreamStatus)
+}
+
+// publishSpendEvent mirrors the LLM path's dual write (proxy_log.go): the
+// Postgres row above is the billing source of truth, while this Kafka event is
+// the analytics projection ClickHouse's air.logs ingests. Best-effort by
+// construction — a publish failure is logged and swallowed, exactly like
+// proxy.logSpendToKafka, so neither billing nor the already-sent client
+// response is affected. No-op when Kafka is unwired (h.kafka == nil).
+func (h *Handler) publishSpendEvent(entry *dbmodels.SpendLogEntry, upstreamStatus int) {
+	if h.kafka == nil {
+		return
+	}
+	event := &kafkalog.SpendEvent{
+		RequestID:      entry.RequestID,
+		StartTime:      entry.StartTime,
+		EndTime:        entry.EndTime,
+		DurationMs:     int64(entry.RequestDurationMS),
+		CallType:       entry.CallType,
+		APIBase:        entry.APIBase,
+		Status:         entry.Status,
+		HTTPStatus:     upstreamStatus,
+		Model:          entry.Model,
+		ModelGroup:     entry.ModelGroup,
+		APIKeyHash:     entry.APIKey,
+		UserID:         entry.UserID,
+		TeamID:         entry.TeamID,
+		OrganizationID: entry.OrganizationID,
+		TotalCost:      entry.Spend,
+	}
+	if h.identity != nil {
+		event.ServerRouterID = h.identity.GetRouterID()
+		event.ServerVersion = h.identity.GetVersion()
+		event.ServerCommit = h.identity.GetCommit()
+	}
+	if err := h.kafka.LogSpend(event); err != nil {
+		h.logger.Warn("Yandex search: failed to queue Kafka spend event",
+			"error", err, "request_id", entry.RequestID)
 	}
 }
 
@@ -309,7 +395,7 @@ func (h *Handler) commitIndeterminateSpend(ctx context.Context, tokenInfo *dbmod
 	if err != nil {
 		metadata = []byte(`{"outcome":"indeterminate_timeout"}`)
 	}
-	_, err = h.spend.CommitSpend(ctx, &dbmodels.SpendLogEntry{
+	entry := &dbmodels.SpendLogEntry{
 		RequestID:         requestID,
 		AirEventID:        requestID,
 		StartTime:         start,
@@ -317,6 +403,7 @@ func (h *Handler) commitIndeterminateSpend(ctx context.Context, tokenInfo *dbmod
 		RequestDurationMS: int(duration.Milliseconds()),
 		CallType:          callType,
 		APIBase:           apiBase,
+		Model:             spendModel,
 		CustomLLMProvider: customLLMProvider,
 		Metadata:          string(metadata),
 		Spend:             0,
@@ -326,10 +413,11 @@ func (h *Handler) commitIndeterminateSpend(ctx context.Context, tokenInfo *dbmod
 		BillingTeamID:     tokenInfo.TeamID,
 		OrganizationID:    tokenInfo.OrganizationID,
 		Status:            "failure",
-	})
-	if err != nil {
+	}
+	if _, err := h.spend.CommitSpend(ctx, entry); err != nil {
 		h.logger.ErrorContext(ctx, "Yandex search: failed to record indeterminate-timeout spend row", "error", err)
 	}
+	h.publishSpendEvent(entry, http.StatusGatewayTimeout)
 }
 
 func requestIDFor(ctx context.Context) string {

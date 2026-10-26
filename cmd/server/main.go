@@ -300,7 +300,7 @@ func main() {
 	})
 
 	videoRuntime := initializeVideoOrExit(cfg, prx, litellmDBManager, log)
-	yandexSearchHandler := initializeYandexSearchOrExit(cfg, prx, litellmDBManager, redisBackend, budgetReserver, log)
+	yandexSearchHandler := initializeYandexSearchOrExit(cfg, prx, litellmDBManager, kafkaLogManager, redisBackend, budgetReserver, log)
 
 	// ==================== Background Goroutines ====================
 	bgCtx, bgCancel := context.WithCancel(context.Background())

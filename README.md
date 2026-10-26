@@ -52,6 +52,10 @@ same Spend Logs pipeline under `search/yandex` / `yandex_search` at a
 day/night marked-up rate, budget is reserved before the upstream call and
 settled after, and Yandex's own quota (1 RPS + an hourly cap, shared across
 every router replica via Redis) is enforced on top of a per-key RPM limit.
+Like every other billed operation, each row is written to LiteLLM's Postgres
+*and* published to the Kafka spend-log topic, so the request also shows up in
+the downstream ClickHouse analytics (`call_type = search/yandex`, synthetic
+`model = yandex-search`).
 
 Disabled by default (`yandex_search.enabled: false`). Even when enabled, a
 client key, team, or organization must separately opt in via its LiteLLM
