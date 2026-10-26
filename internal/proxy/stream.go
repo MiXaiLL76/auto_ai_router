@@ -2017,10 +2017,12 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 		// Walk every complete line in this chunk.
 		for _, line := range strings.Split(combined[:lastNL+1], "\n") {
 			line = strings.TrimRight(line, "\r")
-			if !strings.HasPrefix(line, "data: ") {
+			// Accept "data:" with or without the (spec-optional) space: some
+			// Responses-compatible upstreams emit "data:{...}".
+			if !strings.HasPrefix(line, "data:") {
 				continue
 			}
-			jsonData := strings.TrimPrefix(line, "data: ")
+			jsonData := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 			if jsonData == "" || jsonData == "[DONE]" {
 				continue
 			}

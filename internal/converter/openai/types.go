@@ -1,6 +1,10 @@
 package openai
 
-import "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
+import (
+	"encoding/json"
+
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
+)
 
 // Request types
 
@@ -239,9 +243,30 @@ type OpenAIStreamingChunk struct {
 }
 
 type OpenAIStreamingChoice struct {
-	Index        int                  `json:"index"`
-	Delta        OpenAIStreamingDelta `json:"delta"`
-	FinishReason *string              `json:"finish_reason"`
+	Index        int                      `json:"index"`
+	Delta        OpenAIStreamingDelta     `json:"delta"`
+	FinishReason *string                  `json:"finish_reason"`
+	Logprobs     *OpenAIStreamingLogprobs `json:"logprobs,omitempty"`
+	// Message carries choices[].message.annotations: some aggregators (e.g.
+	// Requesty) inject url_citation annotations into an SSE chunk under
+	// "message" instead of "delta".
+	Message *OpenAIStreamingMessageAnnotations `json:"message,omitempty"`
+}
+
+// OpenAIStreamingMessageAnnotations is the non-standard choices[].message
+// carrier described on OpenAIStreamingChoice.Message above.
+type OpenAIStreamingMessageAnnotations struct {
+	Annotations []json.RawMessage `json:"annotations,omitempty"`
+}
+
+// OpenAIStreamingLogprobs carries the per-chunk logprobs of one streaming
+// choice: an OpenAI-compatible upstream with logprobs=true sends one content
+// entry per token, in the same shape the non-stream response uses
+// (bytes/logprob/token/top_logprobs). Kept as raw JSON so no provider field is
+// dropped when the stream is reassembled into a single non-stream body.
+type OpenAIStreamingLogprobs struct {
+	Content []json.RawMessage `json:"content,omitempty"`
+	Refusal json.RawMessage   `json:"refusal,omitempty"`
 }
 
 type OpenAIStreamingDelta struct {
@@ -252,6 +277,10 @@ type OpenAIStreamingDelta struct {
 	ReasoningContent string                    `json:"reasoning_content,omitempty"`
 	Images           []ImageData               `json:"images,omitempty"`
 	ThinkingBlocks   interface{}               `json:"thinking_blocks,omitempty"` // see OpenAIResponseMessage.ThinkingBlocks
+	// Annotations carries url_citation (and similar) entries an
+	// OpenAI-compatible upstream streams on the delta, one or more per chunk,
+	// in the same shape the non-stream message.annotations uses.
+	Annotations []json.RawMessage `json:"annotations,omitempty"`
 }
 
 type OpenAIStreamingToolCall struct {

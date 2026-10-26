@@ -22,6 +22,9 @@ import (
 //     concatenated per choice; the reasoning field keeps the name the deltas
 //     used; empty reasoning and refusal are left out;
 //   - images deltas (Gemini image generation) are appended per choice;
+//   - annotations (url_citation and the like), streamed on delta.annotations
+//     or the non-standard message.annotations carrier (Requesty), are
+//     appended per choice;
 //   - tool_calls are assembled by index, arguments concatenated;
 //   - content is null when a choice made tool calls and its text is only
 //     whitespace (the streaming tool parser emits blanks before a call), as
@@ -48,19 +51,21 @@ type chatStreamAggregator struct {
 }
 
 type aggChoice struct {
-	index          int
-	role           string
-	content        strings.Builder
-	contentSeen    bool
-	reasoning      strings.Builder
-	reasoningField string
-	refusal        strings.Builder
-	images         []json.RawMessage
-	toolCalls      map[int]*aggToolCall
-	finishReason   *string
-	stopReason     json.RawMessage
-	logprobs       []json.RawMessage
-	logprobsSeen   bool
+	index           int
+	role            string
+	content         strings.Builder
+	contentSeen     bool
+	reasoning       strings.Builder
+	reasoningField  string
+	refusal         strings.Builder
+	images          []json.RawMessage
+	annotations     []json.RawMessage
+	toolCalls       map[int]*aggToolCall
+	finishReason    *string
+	stopReason      json.RawMessage
+	logprobs        []json.RawMessage
+	logprobsRefusal json.RawMessage
+	logprobsSeen    bool
 }
 
 type aggToolCall struct {
@@ -91,6 +96,7 @@ type aggStreamChunk struct {
 			Reasoning        *string           `json:"reasoning"`
 			Refusal          *string           `json:"refusal"`
 			Images           []json.RawMessage `json:"images"`
+			Annotations      []json.RawMessage `json:"annotations"`
 			ToolCalls        []struct {
 				Index    int    `json:"index"`
 				ID       string `json:"id"`
@@ -101,10 +107,14 @@ type aggStreamChunk struct {
 				} `json:"function"`
 			} `json:"tool_calls"`
 		} `json:"delta"`
+		Message *struct {
+			Annotations []json.RawMessage `json:"annotations"`
+		} `json:"message"`
 		FinishReason *string         `json:"finish_reason"`
 		StopReason   json.RawMessage `json:"stop_reason"`
 		Logprobs     *struct {
 			Content []json.RawMessage `json:"content"`
+			Refusal json.RawMessage   `json:"refusal"`
 		} `json:"logprobs"`
 	} `json:"choices"`
 }
@@ -250,6 +260,14 @@ func (a *chatStreamAggregator) addChunk(chunk *aggStreamChunk, payload []byte) {
 		for _, img := range d.Images {
 			c.images = append(c.images, append(json.RawMessage(nil), img...))
 		}
+		for _, ann := range d.Annotations {
+			c.annotations = append(c.annotations, append(json.RawMessage(nil), ann...))
+		}
+		if in.Message != nil {
+			for _, ann := range in.Message.Annotations {
+				c.annotations = append(c.annotations, append(json.RawMessage(nil), ann...))
+			}
+		}
 		for _, tc := range d.ToolCalls {
 			call := c.toolCalls[tc.Index]
 			if call == nil {
@@ -279,6 +297,9 @@ func (a *chatStreamAggregator) addChunk(chunk *aggStreamChunk, payload []byte) {
 		if in.Logprobs != nil {
 			c.logprobsSeen = true
 			c.logprobs = append(c.logprobs, in.Logprobs.Content...)
+			if !isJSONNull(in.Logprobs.Refusal) {
+				c.logprobsRefusal = append(json.RawMessage(nil), in.Logprobs.Refusal...)
+			}
 		}
 	}
 }
@@ -341,6 +362,7 @@ type aggMessage struct {
 	Refusal          *string           `json:"refusal,omitempty"`
 	Images           []json.RawMessage `json:"images,omitempty"`
 	ToolCalls        []aggToolCallOut  `json:"tool_calls,omitempty"`
+	Annotations      []json.RawMessage `json:"annotations,omitempty"`
 }
 
 type aggToolCallOut struct {
@@ -399,6 +421,7 @@ func (c *aggChoice) out() aggChoiceOut {
 		msg.Refusal = &refusal
 	}
 	msg.Images = c.images
+	msg.Annotations = c.annotations
 	if len(c.toolCalls) > 0 {
 		indexes := make([]int, 0, len(c.toolCalls))
 		for i := range c.toolCalls {
@@ -417,7 +440,8 @@ func (c *aggChoice) out() aggChoiceOut {
 	if c.logprobsSeen {
 		lp, err := json.Marshal(struct {
 			Content []json.RawMessage `json:"content"`
-		}{Content: c.logprobs})
+			Refusal json.RawMessage   `json:"refusal,omitempty"`
+		}{Content: c.logprobs, Refusal: c.logprobsRefusal})
 		if err == nil {
 			choice.Logprobs = lp
 		}
