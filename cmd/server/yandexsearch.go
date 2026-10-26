@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/budget"
 	"github.com/mixaill76/auto_ai_router/internal/proxy"
@@ -37,7 +38,12 @@ import (
 // budgetReserver may be nil (budget reservation disabled system-wide, or
 // Redis just connected for other reasons) — yandexsearch.Handler degrades
 // to always-allow/no-op settle in that case, same as the LLM request path.
-func initializeYandexSearchOrExit(cfg *config.Config, prx *proxy.Proxy, db litellmdb.Manager, redisBackend *ratelimit.RedisBackend, budgetReserver *budget.Reserver, logger *slog.Logger) http.Handler {
+//
+// kafkaLog is the analytics write-path (kafkalog.Manager, feeding ClickHouse's
+// air.logs). Passing a NoopManager when Kafka is disabled keeps the handler's
+// publishing a no-op, exactly as the LLM path does; unlike Postgres it is
+// never required for startup.
+func initializeYandexSearchOrExit(cfg *config.Config, prx *proxy.Proxy, db litellmdb.Manager, kafkaLog kafkalog.Manager, redisBackend *ratelimit.RedisBackend, budgetReserver *budget.Reserver, logger *slog.Logger) http.Handler {
 	if cfg == nil || !cfg.YandexSearch.Enabled {
 		return nil
 	}
@@ -89,6 +95,8 @@ func initializeYandexSearchOrExit(cfg *config.Config, prx *proxy.Proxy, db litel
 		Client:         client,
 		Auth:           prx, // *proxy.Proxy satisfies yandexsearch.Authenticator structurally
 		Spend:          committer,
+		Kafka:          kafkaLog, // analytics projection ClickHouse's air.logs ingests; NoopManager when Kafka is off
+		Identity:       prx,      // *proxy.Proxy satisfies yandexsearch.RouterIdentity structurally
 		Quota:          quota,
 		Pricing:        cfg.YandexSearch.Pricing, // config.YandexSearchPricing satisfies yandexsearch.PricingTable structurally
 		Budget:         budgetReserver,

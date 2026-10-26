@@ -703,6 +703,14 @@ func (p *Proxy) GetCommit() string {
 	return p.commit
 }
 
+// GetRouterID returns this router's identity, the same value the proxy writes
+// as kafkalog.SpendEvent.ServerRouterID. Non-LLM handlers that publish their
+// own spend events (internal/yandexsearch) read it through this accessor
+// rather than duplicating the hostname-fallback logic.
+func (p *Proxy) GetRouterID() string {
+	return p.routerID
+}
+
 // ProxyResponse holds response details from a proxy credential
 type ProxyResponse struct {
 	StatusCode           int
