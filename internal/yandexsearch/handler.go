@@ -239,7 +239,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // processed (and will bill us for) a request whose response we never saw,
 // so the reservation is still released (never billed to the client) but a
 // $0 row is kept for manual reconciliation against Yandex's own invoice.
-func (h *Handler) handleUpstreamError(w http.ResponseWriter, r *http.Request, tokenInfo *dbmodels.TokenInfo, res *reservation, err error, start, sendTime time.Time, duration time.Duration) {
+func (h *Handler) handleUpstreamError(w http.ResponseWriter, r *http.Request, tokenInfo *dbmodels.TokenInfo, _ *reservation, err error, start, sendTime time.Time, duration time.Duration) {
 	h.logger.WarnContext(r.Context(), "Yandex search request failed",
 		"error", err, "duration_ms", duration.Milliseconds())
 
