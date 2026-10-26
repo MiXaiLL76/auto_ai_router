@@ -10,34 +10,41 @@ import (
 	"strings"
 
 	json "github.com/goccy/go-json"
+
+	"github.com/mixaill76/auto_ai_router/internal/loopgate"
 )
 
 // chatStreamAggregator rebuilds the chat.completion a non-streamed request
-// would have received from the chat.completion.chunk events of the stream
-// the loop gate asked for instead:
+// would have received from the chat.completion.chunk events of a stream sent
+// upstream instead (the loop gate's force_stream, force_stream_for_ttft):
 //
 //   - text deltas (content, reasoning_content / reasoning, refusal) are
 //     concatenated per choice; the reasoning field keeps the name the deltas
-//     used;
+//     used; empty reasoning and refusal are left out;
+//   - images deltas (Gemini image generation) are appended per choice;
 //   - tool_calls are assembled by index, arguments concatenated;
 //   - content is null when a choice made tool calls and its text is only
 //     whitespace (the streaming tool parser emits blanks before a call), as
 //     non-streamed vLLM returns;
-//   - usage comes from the final chunk;
+//   - usage comes from the final chunk, web_search (search citations, in a
+//     chunk of its own) and service_tier from the last chunk carrying them;
+//   - finish_reason is left out of a choice whose stream never carried one;
 //   - an error event inside the stream becomes the response: its status and
-//     body, not a 200.
+//     body, not a 200. Nothing after it is aggregated.
 type chatStreamAggregator struct {
 	id                string
 	created           int64
 	model             string
 	systemFingerprint json.RawMessage
+	serviceTier       string
+	webSearch         json.RawMessage
 	usage             json.RawMessage
 	loopGate          *loopGateMarker
 	choices           map[int]*aggChoice
 
 	errStatus int
 	errBody   []byte
-	sawChunk  bool
+	sawChunk  bool // a chunk (not an error event) was aggregated
 }
 
 type aggChoice struct {
@@ -48,7 +55,7 @@ type aggChoice struct {
 	reasoning      strings.Builder
 	reasoningField string
 	refusal        strings.Builder
-	refusalSeen    bool
+	images         []json.RawMessage
 	toolCalls      map[int]*aggToolCall
 	finishReason   *string
 	stopReason     json.RawMessage
@@ -70,17 +77,20 @@ type aggStreamChunk struct {
 	Created           int64           `json:"created"`
 	Model             string          `json:"model"`
 	SystemFingerprint json.RawMessage `json:"system_fingerprint"`
+	ServiceTier       string          `json:"service_tier"`
+	WebSearch         json.RawMessage `json:"web_search"`
 	Usage             json.RawMessage `json:"usage"`
 	Error             json.RawMessage `json:"error"`
 	LoopGate          *loopGateMarker `json:"air_loop_gate"`
 	Choices           []struct {
 		Index int `json:"index"`
 		Delta struct {
-			Role             *string `json:"role"`
-			Content          *string `json:"content"`
-			ReasoningContent *string `json:"reasoning_content"`
-			Reasoning        *string `json:"reasoning"`
-			Refusal          *string `json:"refusal"`
+			Role             *string           `json:"role"`
+			Content          *string           `json:"content"`
+			ReasoningContent *string           `json:"reasoning_content"`
+			Reasoning        *string           `json:"reasoning"`
+			Refusal          *string           `json:"refusal"`
+			Images           []json.RawMessage `json:"images"`
 			ToolCalls        []struct {
 				Index    int    `json:"index"`
 				ID       string `json:"id"`
@@ -115,15 +125,10 @@ func (a *chatStreamAggregator) consume(r io.Reader, limit int64) error {
 		if limit > 0 && read > limit {
 			return ErrResponseBodyTooLarge
 		}
-		if len(line) > 0 {
-			if payload, ok := bytes.CutPrefix(bytes.TrimSpace(line), sseDataPrefix); ok {
-				payload = bytes.TrimSpace(payload)
-				if len(payload) > 0 && !bytes.Equal(payload, sseDoneSentinel) {
-					a.add(payload)
-					if a.errStatus != 0 {
-						return nil
-					}
-				}
+		if payload, ok := sseLinePayload(line); ok {
+			a.add(payload)
+			if a.errStatus != 0 {
+				return nil
 			}
 		}
 		if err == io.EOF {
@@ -135,9 +140,51 @@ func (a *chatStreamAggregator) consume(r io.Reader, limit int64) error {
 	}
 }
 
-func (a *chatStreamAggregator) add(payload []byte) {
+// parseAggStreamChunk decodes one chat completion chunk payload.
+func parseAggStreamChunk(payload []byte) (*aggStreamChunk, bool) {
 	var chunk aggStreamChunk
 	if err := json.Unmarshal(payload, &chunk); err != nil {
+		return nil, false
+	}
+	return &chunk, true
+}
+
+// meta returns the ids the loop gate detector keeps of the chunk.
+func (c *aggStreamChunk) meta() loopgate.ChunkMeta {
+	return loopgate.ChunkMeta{ID: c.ID, Created: c.Created, Model: c.Model}
+}
+
+// delta0 returns what the loop gate detector reads of choice 0.
+func (c *aggStreamChunk) delta0() loopgate.ChatDelta {
+	var out loopgate.ChatDelta
+	for i := range c.Choices {
+		in := &c.Choices[i]
+		if in.Index != 0 {
+			continue
+		}
+		out.Content = in.Delta.Content
+		out.Reasoning = in.Delta.ReasoningContent
+		if out.Reasoning == nil {
+			out.Reasoning = in.Delta.Reasoning
+		}
+		out.ToolCalls = len(in.Delta.ToolCalls) > 0
+		if in.FinishReason != nil {
+			out.FinishReason = *in.FinishReason
+		}
+		break
+	}
+	return out
+}
+
+func (a *chatStreamAggregator) add(payload []byte) {
+	if chunk, ok := parseAggStreamChunk(payload); ok {
+		a.addChunk(chunk, payload)
+	}
+}
+
+// addChunk aggregates chunk, decoded from payload.
+func (a *chatStreamAggregator) addChunk(chunk *aggStreamChunk, payload []byte) {
+	if a.errStatus != 0 {
 		return
 	}
 	if status, ok := chatStreamErrorStatus(chunk, payload); ok {
@@ -157,6 +204,12 @@ func (a *chatStreamAggregator) add(payload []byte) {
 	}
 	if !isJSONNull(chunk.SystemFingerprint) {
 		a.systemFingerprint = append(json.RawMessage(nil), chunk.SystemFingerprint...)
+	}
+	if chunk.ServiceTier != "" {
+		a.serviceTier = chunk.ServiceTier
+	}
+	if !isJSONNull(chunk.WebSearch) {
+		a.webSearch = append(json.RawMessage(nil), chunk.WebSearch...)
 	}
 	if !isJSONNull(chunk.Usage) {
 		a.usage = append(json.RawMessage(nil), chunk.Usage...)
@@ -193,7 +246,9 @@ func (a *chatStreamAggregator) add(payload []byte) {
 		}
 		if d.Refusal != nil {
 			c.refusal.WriteString(*d.Refusal)
-			c.refusalSeen = true
+		}
+		for _, img := range d.Images {
+			c.images = append(c.images, append(json.RawMessage(nil), img...))
 		}
 		for _, tc := range d.ToolCalls {
 			call := c.toolCalls[tc.Index]
@@ -230,7 +285,7 @@ func (a *chatStreamAggregator) add(payload []byte) {
 
 // chatStreamErrorStatus recognizes an error event: vLLM sends
 // {"error": {"message", "type", "code"}} (older: {"object": "error", ...}).
-func chatStreamErrorStatus(chunk aggStreamChunk, payload []byte) (int, bool) {
+func chatStreamErrorStatus(chunk *aggStreamChunk, payload []byte) (int, bool) {
 	isErr := chunk.Object == "error" || !isJSONNull(chunk.Error)
 	if !isErr {
 		return 0, false
@@ -262,9 +317,11 @@ type aggCompletion struct {
 	Object            string          `json:"object"`
 	Created           int64           `json:"created"`
 	Model             string          `json:"model"`
+	SystemFingerprint json.RawMessage `json:"system_fingerprint,omitempty"`
+	ServiceTier       string          `json:"service_tier,omitempty"`
+	WebSearch         json.RawMessage `json:"web_search,omitempty"`
 	Choices           []aggChoiceOut  `json:"choices"`
 	Usage             json.RawMessage `json:"usage,omitempty"`
-	SystemFingerprint json.RawMessage `json:"system_fingerprint,omitempty"`
 	LoopGate          *loopGateMarker `json:"air_loop_gate,omitempty"`
 }
 
@@ -272,17 +329,18 @@ type aggChoiceOut struct {
 	Index        int             `json:"index"`
 	Message      aggMessage      `json:"message"`
 	Logprobs     json.RawMessage `json:"logprobs"`
-	FinishReason *string         `json:"finish_reason"`
+	FinishReason *string         `json:"finish_reason,omitempty"`
 	StopReason   json.RawMessage `json:"stop_reason,omitempty"`
 }
 
 type aggMessage struct {
-	Role             string           `json:"role"`
-	Content          *string          `json:"content"`
-	ReasoningContent *string          `json:"reasoning_content,omitempty"`
-	Reasoning        *string          `json:"reasoning,omitempty"`
-	Refusal          *string          `json:"refusal,omitempty"`
-	ToolCalls        []aggToolCallOut `json:"tool_calls,omitempty"`
+	Role             string            `json:"role"`
+	Content          *string           `json:"content"`
+	ReasoningContent *string           `json:"reasoning_content,omitempty"`
+	Reasoning        *string           `json:"reasoning,omitempty"`
+	Refusal          *string           `json:"refusal,omitempty"`
+	Images           []json.RawMessage `json:"images,omitempty"`
+	ToolCalls        []aggToolCallOut  `json:"tool_calls,omitempty"`
 }
 
 type aggToolCallOut struct {
@@ -303,8 +361,10 @@ func (a *chatStreamAggregator) completion() ([]byte, error) {
 		Object:            "chat.completion",
 		Created:           a.created,
 		Model:             a.model,
-		Usage:             a.usage,
 		SystemFingerprint: a.systemFingerprint,
+		ServiceTier:       a.serviceTier,
+		WebSearch:         a.webSearch,
+		Usage:             a.usage,
 		LoopGate:          a.loopGate,
 	}
 	indexes := make([]int, 0, len(a.choices))
@@ -328,18 +388,17 @@ func (c *aggChoice) out() aggChoiceOut {
 	case c.contentSeen || len(c.toolCalls) == 0:
 		msg.Content = &content
 	}
-	if c.reasoningField != "" {
-		reasoning := c.reasoning.String()
+	if reasoning := c.reasoning.String(); reasoning != "" {
 		if c.reasoningField == "reasoning" {
 			msg.Reasoning = &reasoning
 		} else {
 			msg.ReasoningContent = &reasoning
 		}
 	}
-	if c.refusalSeen {
-		refusal := c.refusal.String()
+	if refusal := c.refusal.String(); refusal != "" {
 		msg.Refusal = &refusal
 	}
+	msg.Images = c.images
 	if len(c.toolCalls) > 0 {
 		indexes := make([]int, 0, len(c.toolCalls))
 		for i := range c.toolCalls {

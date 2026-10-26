@@ -215,45 +215,21 @@ func (o *LoopGateOverride) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
+// UnmarshalYAML parses the section's settings as a LoopGateOverride applied
+// over DefaultLoopGateConfig, so both blocks share one parser.
 func (c *LoopGateConfig) UnmarshalYAML(value *yaml.Node) error {
-	type rawLoopGateConfig struct {
-		rawLoopGateFields `yaml:",inline"`
-		Providers         []string `yaml:"providers"`
+	var o LoopGateOverride
+	if err := o.UnmarshalYAML(value); err != nil {
+		return err
 	}
-	var raw rawLoopGateConfig
+	var raw struct {
+		Providers []string `yaml:"providers"`
+	}
 	if err := value.Decode(&raw); err != nil {
 		return err
 	}
-	*c = LoopGateConfig{}
-	c.Mode = parseLoopGateMode(raw.Mode)
-	var err error
-	if c.NGram, err = parseField(raw.NGram, 0, strconv.Atoi, "loop_gate.ngram"); err != nil {
-		return err
-	}
-	if c.ArmWords, err = parseField(raw.ArmWords, DefaultLoopGateArmWords, strconv.Atoi, "loop_gate.arm_words"); err != nil {
-		return err
-	}
-	if c.MinRepeat, err = parseField(raw.MinRepeat, 0, strconv.Atoi, "loop_gate.min_repeat"); err != nil {
-		return err
-	}
-	if c.MinRatio, err = parseField(raw.MinRatio, 0, parseFloat64, "loop_gate.min_ratio"); err != nil {
-		return err
-	}
-	if c.CutMinRatio, err = parseField(raw.CutMinRatio, 0, parseFloat64, "loop_gate.cut_min_ratio"); err != nil {
-		return err
-	}
-	if c.MaxAttempts, err = parseField(raw.MaxAttempts, 0, strconv.Atoi, "loop_gate.max_attempts"); err != nil {
-		return err
-	}
-	if c.RetryDeadline, err = parseField(raw.RetryDeadline, 0, time.ParseDuration, "loop_gate.retry_deadline"); err != nil {
-		return err
-	}
-	if c.RetryPresencePenalty, err = parsePresencePenalties(raw.RetryPresencePenalty, "loop_gate.retry_presence_penalty"); err != nil {
-		return err
-	}
-	if c.ForceStream, err = parseOptionalBool(raw.ForceStream, "loop_gate.force_stream"); err != nil {
-		return err
-	}
+	*c = DefaultLoopGateConfig()
+	o.applyTo(&c.LoopGateSettings)
 	for _, p := range raw.Providers {
 		if p = strings.TrimSpace(resolveEnvString(p)); p != "" {
 			c.Providers = append(c.Providers, normalizeProviderType(p))
@@ -365,39 +341,7 @@ func (c *LoopGateConfig) Resolve(providerType ProviderType, overrides ...*LoopGa
 		s.Mode = LoopGateOff
 	}
 	for _, o := range overrides {
-		if o == nil {
-			continue
-		}
-		if o.Mode != nil {
-			s.Mode = *o.Mode
-		}
-		if o.NGram != nil {
-			s.NGram = *o.NGram
-		}
-		if o.ArmWords != nil {
-			s.ArmWords = *o.ArmWords
-		}
-		if o.MinRepeat != nil {
-			s.MinRepeat = *o.MinRepeat
-		}
-		if o.MinRatio != nil {
-			s.MinRatio = *o.MinRatio
-		}
-		if o.CutMinRatio != nil {
-			s.CutMinRatio = *o.CutMinRatio
-		}
-		if o.MaxAttempts != nil {
-			s.MaxAttempts = *o.MaxAttempts
-		}
-		if o.RetryDeadline != nil {
-			s.RetryDeadline = *o.RetryDeadline
-		}
-		if len(o.RetryPresencePenalty) > 0 {
-			s.RetryPresencePenalty = o.RetryPresencePenalty
-		}
-		if o.ForceStream != nil {
-			s.ForceStream = o.ForceStream
-		}
+		o.applyTo(&s)
 	}
 	if !s.Enabled() {
 		return s, nil
@@ -408,46 +352,61 @@ func (c *LoopGateConfig) Resolve(providerType ProviderType, overrides ...*LoopGa
 	return s, nil
 }
 
-// Validate checks the fields the override sets. Thresholds are checked in
-// combination with the inherited ones by LoopGateConfig.Resolve.
+// applyTo replaces the fields of s the override sets; a nil override changes
+// nothing.
+func (o *LoopGateOverride) applyTo(s *LoopGateSettings) {
+	if o == nil {
+		return
+	}
+	if o.Mode != nil {
+		s.Mode = *o.Mode
+	}
+	if o.NGram != nil {
+		s.NGram = *o.NGram
+	}
+	if o.ArmWords != nil {
+		s.ArmWords = *o.ArmWords
+	}
+	if o.MinRepeat != nil {
+		s.MinRepeat = *o.MinRepeat
+	}
+	if o.MinRatio != nil {
+		s.MinRatio = *o.MinRatio
+	}
+	if o.CutMinRatio != nil {
+		s.CutMinRatio = *o.CutMinRatio
+	}
+	if o.MaxAttempts != nil {
+		s.MaxAttempts = *o.MaxAttempts
+	}
+	if o.RetryDeadline != nil {
+		s.RetryDeadline = *o.RetryDeadline
+	}
+	if len(o.RetryPresencePenalty) > 0 {
+		s.RetryPresencePenalty = o.RetryPresencePenalty
+	}
+	if o.ForceStream != nil {
+		s.ForceStream = o.ForceStream
+	}
+}
+
+// Validate checks the fields the override sets, applied over the defaults as
+// Resolve applies them. Thresholds are checked in combination with the
+// inherited ones by LoopGateConfig.Resolve.
 func (o *LoopGateOverride) Validate(path string) error {
 	if o == nil {
 		return nil
-	}
-	if o.Mode != nil {
-		if err := validateLoopGateMode(*o.Mode, path); err != nil {
-			return err
-		}
 	}
 	probe := LoopGateSettings{
 		NGram: DefaultLoopGateNGram, ArmWords: DefaultLoopGateArmWords,
 		MinRepeat: DefaultLoopGateMinRepeat, MinRatio: DefaultLoopGateMinRatio,
 		MaxAttempts: DefaultLoopGateMaxAttempts, RetryDeadline: DefaultLoopGateRetryDeadline,
-		RetryPresencePenalty: o.RetryPresencePenalty,
 	}
-	if o.MaxAttempts != nil {
-		probe.MaxAttempts = *o.MaxAttempts
+	o.applyTo(&probe)
+	// Checked against min_ratio by Resolve, where the inherited value is known.
+	if probe.CutMinRatio < 0 || probe.CutMinRatio > 1 {
+		return fmt.Errorf("%s.cut_min_ratio must be in [0, 1], got %v", path, probe.CutMinRatio)
 	}
-	if o.RetryDeadline != nil {
-		probe.RetryDeadline = *o.RetryDeadline
-	}
-	if o.NGram != nil {
-		probe.NGram = *o.NGram
-	}
-	if o.ArmWords != nil {
-		probe.ArmWords = *o.ArmWords
-	}
-	if o.MinRepeat != nil {
-		probe.MinRepeat = *o.MinRepeat
-	}
-	if o.MinRatio != nil {
-		probe.MinRatio = *o.MinRatio
-	}
-	if o.CutMinRatio != nil {
-		// Checked against min_ratio by Resolve, where the inherited value is known.
-		if *o.CutMinRatio < 0 || *o.CutMinRatio > 1 {
-			return fmt.Errorf("%s.cut_min_ratio must be in [0, 1], got %v", path, *o.CutMinRatio)
-		}
-	}
+	probe.CutMinRatio = 0
 	return probe.validate(path)
 }

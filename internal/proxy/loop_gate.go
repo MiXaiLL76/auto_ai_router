@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"math/rand/v2"
 	"net/http"
 	"strconv"
@@ -15,6 +16,7 @@ import (
 	json "github.com/goccy/go-json"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
 	"github.com/mixaill76/auto_ai_router/internal/loopgate"
 	"github.com/mixaill76/auto_ai_router/internal/proxy/modelutils"
 )
@@ -68,48 +70,26 @@ type loopGateRespawn func(restart int, presencePenalty float64) (io.ReadCloser, 
 
 // loopGateRespawner returns the restart function of one upstream attempt
 // served by cred for modelID: a copy of req (headers, auth, URL) with body
-// changed only in seed and presence_penalty (see loopGateRestartBody). The
-// clone keeps req's context, and with it the credential's proxy_url
-// (httputil.WithProxyURL). It refuses once the client is gone, so a drained
-// stream never starts a generation nobody reads.
-//
-// A restart is a request to the credential like any other: it counts toward
-// its RPM (while under the limit: a running stream is never refused or held
-// for RPM) and its outcome goes to fail2ban and the attempt error metric.
-func (p *Proxy) loopGateRespawner(client, req *http.Request, body []byte, cred, modelID string) loopGateRespawn {
+// changed only in seed and presence_penalty (see loopGateRestartBody), sent
+// with resendToCredential. The clone keeps req's context, and with it the
+// credential's proxy_url (httputil.WithProxyURL). It refuses once the client
+// is gone, so a drained stream never starts a generation nobody reads; a
+// restart counts toward the credential's RPM, fail2ban and the attempt error
+// metric like any other request.
+func (p *Proxy) loopGateRespawner(client, req *http.Request, body []byte, cred *config.CredentialConfig, modelID string) loopGateRespawn {
 	return func(attempt int, presencePenalty float64) (io.ReadCloser, error) {
-		if err := client.Context().Err(); err != nil {
-			return nil, err
-		}
-		if p.rateLimiter != nil {
-			p.rateLimiter.Allow(cred)
-			if modelID != "" {
-				p.rateLimiter.AllowModel(cred, modelID)
-			}
-		}
 		newBody, err := loopGateRestartBody(body, presencePenalty, attempt, rand.Int64N(1<<31))
 		if err != nil {
 			return nil, err
 		}
-		restart := req.Clone(req.Context())
-		restart.Body = io.NopCloser(bytes.NewReader(newBody))
-		restart.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(newBody)), nil }
-		restart.ContentLength = int64(len(newBody))
-		resp, err := p.client.Do(restart) //nolint:gosec // G704: same credential URL as the attempt being restarted
+		resp, err := p.resendToCredential(client.Context(), req, newBody, cred, modelID)
 		if err != nil {
-			status := http.StatusBadGateway
-			if isTimeoutError(err) {
-				status = http.StatusRequestTimeout
-			}
-			p.balancer.RecordResponse(cred, modelID, status)
-			p.metrics.RecordCredentialAttemptError(cred)
 			return nil, err
 		}
-		p.balancer.RecordResponse(cred, modelID, resp.StatusCode)
-		if resp.StatusCode != http.StatusOK || !IsStreamingResponse(resp) {
+		if !IsStreamingResponse(resp) {
 			_ = resp.Body.Close()
-			p.metrics.RecordCredentialAttemptError(cred)
-			return nil, fmt.Errorf("restart got status %d, content type %q", resp.StatusCode, resp.Header.Get("Content-Type"))
+			p.metrics.RecordCredentialAttemptError(cred.Name)
+			return nil, fmt.Errorf("restart answered content type %q, not an event stream", resp.Header.Get("Content-Type"))
 		}
 		return resp.Body, nil
 	}
@@ -177,8 +157,7 @@ type loopGateObserver struct {
 	settings    config.LoopGateSettings
 	detector    *loopgate.Detector
 	credential  string
-	modelID     string // routing alias, for rate limits
-	model       string // metrics label
+	model       string // routing alias: rate limits and metrics label
 	publicModel string // model name the client sees
 	requestID   string
 	firings     []loopgate.Firing
@@ -200,6 +179,7 @@ type loopGateObserver struct {
 	promptTokens func() int               // local prompt token estimate, 0 = unknown
 	lastUsage    loopGateChatUsage        // chat: the last usage the current attempt reported
 	responsesOut *loopGateResponsesOutput // enforced Responses stream: its output so far
+	agg          *chatStreamAggregator    // forced stream: the attempt's chunks are aggregated here
 
 	upstream     io.ReadCloser
 	carry        []byte // unfinished SSE line from the previous read
@@ -295,7 +275,6 @@ func (p *Proxy) newLoopGateObserverWith(ctx context.Context, logCtx *RequestLogC
 		settings:     settings,
 		format:       format,
 		credential:   logCtx.Credential.Name,
-		modelID:      metricModelID(modelID, logCtx),
 		model:        metricModelID(modelID, logCtx),
 		publicModel:  clientVisibleResponseModel(logCtx, modelID),
 		requestID:    logCtx.RequestID,
@@ -395,34 +374,59 @@ func (o *loopGateObserver) keep(rest []byte) {
 	if o.carryDropped || len(rest) == 0 {
 		return
 	}
-	if len(o.carry)+len(rest) > loopGateMaxLine {
+	if len(o.carry)+len(rest) > o.maxLine() {
 		o.carry, o.carryDropped = o.carry[:0], true
 		return
 	}
 	o.carry = append(o.carry, rest...)
 }
 
+// maxLine returns the longest SSE line the observer keeps. A forced stream's
+// lines are its answer (the aggregator would hold them anyway): only the
+// response size limit bounds them.
+func (o *loopGateObserver) maxLine() int {
+	if o.agg == nil {
+		return loopGateMaxLine
+	}
+	if limit := o.p.maxResponseBodySize; limit > 0 && limit < math.MaxInt {
+		return int(limit)
+	}
+	return math.MaxInt
+}
+
+// observeLine feeds one SSE line to the detector. An enforced chat stream is
+// parsed once here for the detector, the running usage and the forced
+// stream's aggregator; an enforced Responses stream once for the detector
+// and its output.
 func (o *loopGateObserver) observeLine(line []byte) {
-	payload, ok := bytes.CutPrefix(bytes.TrimSpace(line), sseDataPrefix)
+	payload, ok := sseLinePayload(line)
 	if !ok {
 		return
 	}
-	payload = bytes.TrimSpace(payload)
-	if len(payload) == 0 || bytes.Equal(payload, sseDoneSentinel) {
-		return
-	}
-	o.record(o.detector.Observe(o.format, payload, o.now()))
-	if !o.enforcing() {
-		return
-	}
 	switch {
-	case o.responsesOut != nil:
-		o.responsesOut.add(payload)
-	case o.format == loopgate.FormatChat:
-		var usage loopGateChatUsage
-		if start, end, ok := chatChunkUsageSpan(payload); ok && json.Unmarshal(payload[start:end], &usage) == nil {
-			o.lastUsage = usage
+	case o.enforcing() && o.format == loopgate.FormatChat:
+		o.observeChatChunk(payload)
+	case o.enforcing() && o.responsesOut != nil:
+		if ev, ok := o.responsesOut.add(payload); ok {
+			o.record(o.detector.ObserveResponses(ev, o.now()))
 		}
+	default:
+		o.record(o.detector.Observe(o.format, payload, o.now()))
+	}
+}
+
+func (o *loopGateObserver) observeChatChunk(payload []byte) {
+	chunk, ok := parseAggStreamChunk(payload)
+	if !ok {
+		return
+	}
+	o.record(o.detector.ObserveChat(chunk.meta(), chunk.delta0(), o.now()))
+	var usage loopGateChatUsage
+	if !isJSONNull(chunk.Usage) && json.Unmarshal(chunk.Usage, &usage) == nil {
+		o.lastUsage = usage
+	}
+	if o.agg != nil {
+		o.agg.addChunk(chunk, payload)
 	}
 }
 
@@ -438,14 +442,27 @@ type loopGateChatUsage struct {
 // exact), else the prompt estimate and the streamed words as tokens.
 func (o *loopGateObserver) cutUsage() loopGateChatUsage {
 	u := o.lastUsage
-	if u.PromptTokens <= 0 && o.promptTokens != nil {
-		u.PromptTokens = o.promptTokens()
-	}
+	u.PromptTokens = o.promptEstimate(u.PromptTokens)
 	if u.CompletionTokens <= 0 {
-		u.CompletionTokens = loopGateWordsToTokens(o.detector.Content().Words() + o.detector.Reasoning().Words())
+		u.CompletionTokens = o.generatedTokens()
 	}
 	u.TotalTokens = u.PromptTokens + u.CompletionTokens
 	return u
+}
+
+// promptEstimate returns reported, the prompt tokens the upstream reported,
+// or the local estimate when it reported none.
+func (o *loopGateObserver) promptEstimate(reported int) int {
+	if reported <= 0 && o.promptTokens != nil {
+		return o.promptTokens()
+	}
+	return reported
+}
+
+// generatedTokens estimates the tokens the current attempt generated from its
+// streamed words, answer and reasoning.
+func (o *loopGateObserver) generatedTokens() int {
+	return loopGateWordsToTokens(o.detector.Content().Words() + o.detector.Reasoning().Words())
 }
 
 func (o *loopGateObserver) channel(name string) *loopgate.Channel {
@@ -677,21 +694,19 @@ func (o *loopGateObserver) cutTail() []byte {
 // (reason max_output_tokens) carries the whole output and an estimated usage.
 func (o *loopGateObserver) cutTailResponses() []byte {
 	seq := o.detector.Sequence()
-	nextSeq := func() int { seq++; return seq }
-	var events []loopGateSSEEvent
+	var tail bytes.Buffer
+	tail.WriteByte('\n')
 	output := []any{}
 	response := map[string]any{}
 	inputTokens := 0
 	if out := o.responsesOut; out != nil {
-		events, output = out.closeOpen(nextSeq)
+		output = out.closeOpen(&tail, &seq)
 		for k, v := range out.response {
 			response[k] = v
 		}
 		inputTokens = out.inputTokens
 	}
-	if inputTokens <= 0 && o.promptTokens != nil {
-		inputTokens = o.promptTokens()
-	}
+	inputTokens = o.promptEstimate(inputTokens)
 	meta := o.detector.Meta()
 	for k, v := range map[string]any{"id": meta.ID, "created_at": meta.Created, "model": meta.Model} {
 		if _, ok := response[k]; !ok {
@@ -702,7 +717,7 @@ func (o *loopGateObserver) cutTailResponses() []byte {
 	response["status"] = "incomplete"
 	response["incomplete_details"] = map[string]any{"reason": "max_output_tokens"}
 	response["output"] = output
-	outputTokens := loopGateWordsToTokens(o.detector.Content().Words() + o.detector.Reasoning().Words())
+	outputTokens := o.generatedTokens()
 	response["usage"] = map[string]any{
 		"input_tokens":          inputTokens,
 		"input_tokens_details":  map[string]any{"cached_tokens": 0},
@@ -710,13 +725,10 @@ func (o *loopGateObserver) cutTailResponses() []byte {
 		"output_tokens_details": map[string]any{"reasoning_tokens": loopGateWordsToTokens(o.detector.Reasoning().Words())},
 		"total_tokens":          inputTokens + outputTokens,
 	}
-	events = append(events, loopGateSSEEvent{name: "response.incomplete", data: map[string]any{
-		"type":            "response.incomplete",
-		"sequence_number": nextSeq(),
-		"response":        response,
-		"air_loop_gate":   o.marker(),
-	}})
-	return loopGateSSEEvents(events)
+	incomplete := responses.BuildResponseEvent("response.incomplete", response)
+	incomplete["air_loop_gate"] = o.marker()
+	_ = responses.WriteSSEEvent(&tail, "response.incomplete", incomplete, &seq)
+	return tail.Bytes()
 }
 
 // cutTailMessages ends an Anthropic Messages stream the way it ends at
@@ -727,12 +739,11 @@ func (o *loopGateObserver) cutTailMessages() []byte {
 	if index, open := o.detector.OpenBlock(); open {
 		events = append(events, loopGateSSEEvent{name: "content_block_stop", data: map[string]any{"type": "content_block_stop", "index": index}})
 	}
-	words := o.detector.Content().Words() + o.detector.Reasoning().Words()
 	events = append(events,
 		loopGateSSEEvent{name: "message_delta", data: map[string]any{
 			"type":          "message_delta",
 			"delta":         map[string]any{"stop_reason": "max_tokens", "stop_sequence": nil},
-			"usage":         map[string]any{"output_tokens": loopGateWordsToTokens(words)},
+			"usage":         map[string]any{"output_tokens": o.generatedTokens()},
 			"air_loop_gate": o.marker(),
 		}},
 		loopGateSSEEvent{name: "message_stop", data: map[string]any{"type": "message_stop"}},
@@ -921,8 +932,8 @@ func (o *loopGateObserver) consumeTokens(tokens int) {
 		return
 	}
 	o.p.rateLimiter.ConsumeTokens(o.credential, tokens)
-	if o.modelID != "" {
-		o.p.rateLimiter.ConsumeModelTokens(o.credential, o.modelID, tokens)
+	if o.model != "" {
+		o.p.rateLimiter.ConsumeModelTokens(o.credential, o.model, tokens)
 	}
 }
 

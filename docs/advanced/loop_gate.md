@@ -83,9 +83,11 @@ for `continuous_usage_stats` itself gets it unchanged.
 With `force_stream: true` (off by default), enforce mode sends a non-streamed chat completion
 upstream as a stream (`stream: true`, `stream_options.include_usage`, and for vLLM
 `continuous_usage_stats`). AIR reads it through the gate and returns the one
-`chat.completion` the client asked for, rebuilt from the chunks: text and reasoning
-concatenated, tool calls assembled by index, `content: null` next to a tool call, usage from
-the stream, and an error event inside the stream returned with its own status.
+`chat.completion` the client asked for, rebuilt from the chunks (the same rebuild
+`force_stream_for_ttft` uses): text and reasoning concatenated, tool calls assembled by
+index, `content: null` next to a tool call, usage from the stream, and an error event inside
+the stream returned with its own status. A stream that ends without a single chunk fails
+the attempt (502, retried on the next credential), not an empty answer.
 
 The client sees nothing until the answer is complete, so a loop is restarted **wherever** it
 is (reasoning or answer). When `max_attempts` or `retry_deadline` run out, the best attempt
@@ -118,11 +120,11 @@ non-streamed request:
   `tool_calls` where the non-streamed request had them right.
 - **Rejected options:** vLLM refuses `best_of` and `use_beam_search` with `stream: true`
   (400).
-- **Dropped fields:** the rebuild keeps id, model, created, system_fingerprint, usage,
-  and per choice: role, content, reasoning, refusal, tool_calls, logprobs (`content`),
-  finish_reason and stop_reason. It drops `prompt_logprobs`, `prompt_token_ids` /
-  `token_ids` (`return_token_ids`), `kv_transfer_params`, `message.annotations`,
-  `service_tier` and any other vLLM extension.
+- **Dropped fields:** the rebuild keeps id, model, created, system_fingerprint,
+  service_tier, web_search, usage, and per choice: role, content, reasoning, refusal,
+  images, tool_calls, logprobs (`content`), finish_reason and stop_reason. It drops
+  `prompt_logprobs`, `prompt_token_ids` / `token_ids` (`return_token_ids`),
+  `kv_transfer_params`, `message.annotations` and any other vLLM extension.
 - **Response size limit:** `max_response_body_size` applies to the bytes of the stream,
   not of the rebuilt JSON. A stream is several times larger than the answer (an event
   envelope per token, plus the usage on every chunk with `continuous_usage_stats`), so a
@@ -150,7 +152,7 @@ the descriptions were injected into the first attempt only. Such streams are cut
 ### Billing and rate limits
 
 The client is billed for what the returned attempt reports in `usage`. The abandoned
-attempts are not billed, but they used the engine (each one ran the prefill again), so their
+attempts (a restart that failed midway included) are not billed, but they used the engine (each one ran the prefill again), so their
 prompt and generated tokens count against the credential's and the model's TPM: the running
 usage vLLM reported (`continuous_usage_stats`), otherwise the local prompt estimate plus 4
 tokens per 3 streamed words. This holds for cut streams too: their usage covers the last

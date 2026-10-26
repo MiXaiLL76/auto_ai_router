@@ -1399,6 +1399,71 @@ func TestLoopGate_NonStreamFailedRestartStillCountsTheCut(t *testing.T) {
 	assert.Equal(t, 1.0, testutil.ToFloat64(monitoring.LoopGateCutsTotal.WithLabelValues("lg-cred", "qwen", "content")))
 }
 
+func TestLoopGate_NonStreamFailedRestartCountsAgainstTPM(t *testing.T) {
+	resetLoopGateEnforceMetrics()
+	const restartWords = 20000
+	_, url := newScriptedVLLM(t, func(n int, w http.ResponseWriter, r *http.Request) bool {
+		if n == 0 {
+			return writeLoopGateEndlessField(w, r, "c1", "content")
+		}
+		writeLoopGateStream(w, r, "c2", loopGateWords(restartWords), nil, "")
+		panic(http.ErrAbortHandler) // the restart's connection drops after a long generation
+	})
+	prx := newLoopGateProxyWithGate(t, url, forcedGate(0, 3))
+	tpmBefore := prx.rateLimiter.GetCurrentTPM("lg-cred")
+
+	out := decodeCompletion(t, postChat(t, prx, loopGateNonStreamRequest))
+
+	assert.Equal(t, "c1", out["id"], "answered with the trimmed first attempt")
+	assert.GreaterOrEqual(t, prx.rateLimiter.GetCurrentTPM("lg-cred")-tpmBefore, restartWords*4/3,
+		"the failed restart's generation counts against the credential TPM")
+}
+
+func TestLoopGate_NonStreamStreamWithoutChunksIsNotAnEmpty200(t *testing.T) {
+	for name, body := range map[string]string{
+		"only [DONE]":      "data: [DONE]\n\n",
+		"nothing":          "",
+		"JSON, not events": `{"id":"c1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			resetLoopGateEnforceMetrics()
+			_, url := newScriptedVLLM(t, func(n int, w http.ResponseWriter, r *http.Request) bool {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, body)
+				return false
+			})
+			prx := newLoopGateProxyWithGate(t, url, forcedGate(0, 3))
+
+			w := postChat(t, prx, loopGateNonStreamRequest)
+
+			assert.Equal(t, http.StatusBadGateway, w.Code, "a stream without a chunk fails the attempt: %s", w.Body.String())
+		})
+	}
+}
+
+func TestLoopGate_NonStreamKeepsChunksLongerThanTheDetectorLine(t *testing.T) {
+	resetLoopGateEnforceMetrics()
+	args := `{"data":"` + strings.Repeat("x", 2*loopGateMaxLine) + `"}`
+	_, url := newScriptedVLLM(t, func(n int, w http.ResponseWriter, r *http.Request) bool {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		call, _ := json.Marshal(args)
+		_, _ = fmt.Fprintf(w, "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"t\",\"function\":{\"name\":\"f\",\"arguments\":%s}}]}}]}\n\n", call)
+		_, _ = io.WriteString(w, "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n")
+		return false
+	})
+	prx := newLoopGateProxyWithGate(t, url, forcedGate(0, 3))
+
+	out := decodeCompletion(t, postChat(t, prx, loopGateNonStreamRequest))
+
+	msg, finish := completionChoice0(t, out)
+	assert.Equal(t, "tool_calls", finish)
+	calls := msg["tool_calls"].([]any)
+	require.Len(t, calls, 1)
+	assert.Equal(t, args, calls[0].(map[string]any)["function"].(map[string]any)["arguments"], "a chunk over the detector's line limit is still the answer")
+}
+
 func TestLoopGateObserver_FinishClosesRestartedUpstream(t *testing.T) {
 	o := newTestLoopGateObserver(t, config.LoopGateEnforce)
 	var reasoning []string

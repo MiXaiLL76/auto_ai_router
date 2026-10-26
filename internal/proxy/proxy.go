@@ -2035,10 +2035,10 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		logCtx.loopGateRespawn = nil
 		if streaming && logCtx.loopGateFormat == loopgate.FormatChat && logCtx.loopGateSettings.Mode == config.LoopGateEnforce {
-			logCtx.loopGateRespawn = p.loopGateRespawner(r, proxyReq, requestBody, cred.Name, modelID)
+			logCtx.loopGateRespawn = p.loopGateRespawner(r, proxyReq, requestBody, cred, modelID)
 		}
 		if loopGateForced != nil {
-			loopGateForced.respawn = p.loopGateRespawner(r, proxyReq, requestBody, cred.Name, modelID)
+			loopGateForced.respawn = p.loopGateRespawner(r, proxyReq, requestBody, cred, modelID)
 			// The prompt estimate of a cut attempt without upstream usage.
 			p.setPromptTokensEstimate(logCtx, body, realModelID)
 		}

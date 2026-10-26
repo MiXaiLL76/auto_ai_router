@@ -138,3 +138,21 @@ func TestAggregatedResponse(t *testing.T) {
 	assert.Equal(t, `{"e":1}`, string(body))
 	assert.Equal(t, "text/event-stream", upstream.Header.Get("Content-Type"), "the upstream response is not modified")
 }
+
+func TestChatStreamAggregator_ImagesWebSearchServiceTier(t *testing.T) {
+	sse := strings.Join([]string{
+		`data: {"id":"c1","service_tier":"default","web_search":[{"title":"t","url":"https://example.com"}],"choices":[{"index":0,"delta":{"role":"assistant","content":"see"}}]}`,
+		`data: {"id":"c1","choices":[{"index":0,"delta":{"images":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]},"finish_reason":"stop"}]}`,
+	}, "\n\n") + "\n\n"
+	assert.JSONEq(t, `{"id":"c1","object":"chat.completion","created":0,"model":"","service_tier":"default",
+		"web_search":[{"title":"t","url":"https://example.com"}],
+		"choices":[{"index":0,"message":{"role":"assistant","content":"see",
+			"images":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]},"logprobs":null,"finish_reason":"stop"}]}`,
+		aggregatedJSON(t, sse))
+}
+
+func TestReassembleChatCompletion_ErrorEventIsNotReassembled(t *testing.T) {
+	stream := `data: {"id":"c1","choices":[{"index":0,"delta":{"content":"partial"}}]}` + "\n\n" +
+		`data: {"error":{"message":"engine dead","code":500}}` + "\n\ndata: [DONE]\n\n"
+	assert.Nil(t, reassembleChatCompletion([]byte(stream)), "an error event fails the simulated response instead of a partial 200")
+}

@@ -234,6 +234,53 @@ credentials:
 	}
 }
 
+func TestLoad_LoopGateCombinationsFollowTheModelLookup(t *testing.T) {
+	const credentials = `
+server:
+  master_key: sk-test
+loop_gate:
+  mode: enforce
+credentials:
+  - name: vllm-a
+    type: vllm
+    base_url: http://vllm-a:8000
+    rpm: -1
+  - name: vllm-b
+    type: vllm
+    base_url: http://vllm-b:8000
+    rpm: -1
+    loop_gate:
+      min_ratio: 0.5
+models:
+  - name: glm
+    loop_gate:
+      cut_min_ratio: 0.4
+`
+	for name, tc := range map[string]struct {
+		vllmBEntry string
+		wantErr    string
+	}{
+		// vllm-b serves glm with its own loop_gate: the credential-less entry
+		// never applies there.
+		"pair shadowed by the credential's own entry": {vllmBEntry: "    loop_gate:\n      max_attempts: 2\n"},
+		// Without a loop_gate of its own the credential-less entry applies
+		// on vllm-b: cut_min_ratio 0.4 is below its min_ratio 0.5.
+		"pair the request lookup resolves": {wantErr: "model glm on credential vllm-b"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			doc := credentials + "  - name: glm\n    credential: vllm-b\n" + tc.vllmBEntry
+			require.NoError(t, os.WriteFile(configPath, []byte(doc), 0600))
+			_, err := Load(configPath)
+			if tc.wantErr != "" {
+				assert.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
 func TestLoopGate_RetrySettings(t *testing.T) {
 	var cfg LoopGateConfig
 	require.NoError(t, yaml.Unmarshal([]byte("mode: enforce\nmax_attempts: 2\nretry_deadline: 90s\nretry_presence_penalty: [0.5, \"0.8\", 1.2]\n"), &cfg))

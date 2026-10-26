@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -142,7 +143,8 @@ func (p *Proxy) collectLoopGateStream(ctx context.Context, logCtx *RequestLogCon
 	start := time.Now()
 	var attempts []loopGateAttempt
 	var last *loopGateObserver
-	total := 0 // attempts sent upstream, failed ones included
+	total := 0  // attempts sent upstream, failed ones included
+	failed := 0 // tokens of a restart that failed midway
 	body := resp.Body
 	for n := 1; ; n++ {
 		total = n
@@ -153,9 +155,15 @@ func (p *Proxy) collectLoopGateStream(ctx context.Context, logCtx *RequestLogCon
 			p.metrics.RecordLoopGateStream(o.credential, o.model, string(plan.settings.Mode))
 		}
 		agg := newChatStreamAggregator()
+		o.agg = agg
 		err := p.consumeLoopGateAttempt(agg, o, body)
 		_ = body.Close()
 		last = o
+		if err == nil && agg.errStatus == 0 && !agg.sawChunk {
+			// A 200 event stream that ended without a chunk (or was not SSE at
+			// all) is a failed attempt, not an empty answer.
+			err = fmt.Errorf("loop gate: upstream stream carried no chat completion chunk: %w", io.ErrUnexpectedEOF)
+		}
 
 		if err != nil || agg.errStatus != 0 {
 			o.finishAttempt("")
@@ -171,9 +179,20 @@ func (p *Proxy) collectLoopGateStream(ctx context.Context, logCtx *RequestLogCon
 				"credential", o.credential, "model", o.model, "attempt", n,
 				"error", err, "status", agg.errStatus, "request_id", o.requestID)
 			attempts[len(attempts)-1].obs.reportCut(n)
+			// The engine worked on the failed restart (prompt and what it
+			// streamed) as on any other attempt that is not returned.
+			failed = o.cutUsage().TotalTokens
 			break
 		}
 
+		if o.cut != nil {
+			// The usage of a cut attempt: the running usage at the cut, or the
+			// estimate (the cut tail's usage chunk, which the aggregator does
+			// not see).
+			if usage, err := json.Marshal(o.cutUsage()); err == nil {
+				agg.usage = usage
+			}
+		}
 		attempts = append(attempts, loopGateAttempt{agg: agg, obs: o, cut: o.cut})
 		if o.cut == nil {
 			o.finishAttempt("")
@@ -210,7 +229,7 @@ func (p *Proxy) collectLoopGateStream(ctx context.Context, logCtx *RequestLogCon
 	// The response's usage covers the returned attempt only (for a cut vLLM
 	// attempt: the running usage at the cut): every other attempt counts
 	// against the credential's TPM, prompt included, not the client's bill.
-	other := 0
+	other := failed
 	for i, a := range attempts {
 		if i != chosen {
 			other += a.obs.cutUsage().TotalTokens
@@ -225,14 +244,14 @@ func (p *Proxy) collectLoopGateStream(ctx context.Context, logCtx *RequestLogCon
 	return aggregatedResponse(resp, http.StatusOK, out)
 }
 
-// consumeLoopGateAttempt reads one forced-stream attempt into agg within
-// request_timeout, as the regular non-streamed body read is bounded: a hung
-// upstream fails the attempt with a read error (retried on another
-// credential for the first attempt) instead of holding the request until the
-// client leaves.
+// consumeLoopGateAttempt reads one forced-stream attempt through o, which
+// aggregates its chunks into agg, within request_timeout, as the regular
+// non-streamed body read is bounded: a hung upstream fails the attempt with a
+// read error (retried on another credential for the first attempt) instead
+// of holding the request until the client leaves.
 func (p *Proxy) consumeLoopGateAttempt(agg *chatStreamAggregator, o *loopGateObserver, body io.ReadCloser) error {
 	if p.requestTimeout <= 0 {
-		return agg.consume(o.wrap(body), p.maxResponseBodySize)
+		return drainLoopGateAttempt(agg, o.wrap(body), p.maxResponseBodySize)
 	}
 	// A body closed mid-read may read as a clean EOF: the flag, not the read
 	// error, tells a timed-out attempt.
@@ -241,12 +260,34 @@ func (p *Proxy) consumeLoopGateAttempt(agg *chatStreamAggregator, o *loopGateObs
 		timedOut.Store(true)
 		_ = body.Close()
 	})
-	err := agg.consume(o.wrap(body), p.maxResponseBodySize)
+	err := drainLoopGateAttempt(agg, o.wrap(body), p.maxResponseBodySize)
 	timer.Stop()
 	if timedOut.Load() {
 		return fmt.Errorf("loop gate: upstream stream exceeded request_timeout %s: %w", p.requestTimeout, context.DeadlineExceeded)
 	}
 	return err
+}
+
+// drainLoopGateAttempt reads r to the end, or to the error event agg kept. A
+// read error is returned as is, and ErrResponseBodyTooLarge once more than
+// limit bytes were read (limit <= 0 = no limit).
+func drainLoopGateAttempt(agg *chatStreamAggregator, r io.Reader, limit int64) error {
+	buf := make([]byte, 32*1024)
+	var read int64
+	for agg.errStatus == 0 {
+		n, err := r.Read(buf)
+		read += int64(n)
+		if limit > 0 && read > limit {
+			return ErrResponseBodyTooLarge
+		}
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // loopGateBestAttempt trims the looped tail off every cut attempt (one round

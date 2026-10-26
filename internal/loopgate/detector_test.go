@@ -365,3 +365,24 @@ func TestChannel_LateLoopIsNotDiluted(t *testing.T) {
 	assert.Less(t, float64(6000)/36000, testCfg.MinRatio)
 	assert.NotNil(t, c.Check(time.Second))
 }
+
+func TestDetector_ObserveChatMatchesObserveChatChunk(t *testing.T) {
+	cfg := Config{NGram: 4, ArmWords: 10, MinRepeat: 3, MinRatio: 0.3}
+	start := time.Unix(0, 0)
+	parsed, raw := NewDetector(cfg, start), NewDetector(cfg, start)
+	for i := range 30 {
+		text := fmt.Sprintf("a b c d e%d ", i%3)
+		payload := fmt.Sprintf(`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"reasoning":%q}}]}`, text)
+		raw.ObserveChatChunk([]byte(payload), start)
+		parsed.ObserveChat(ChunkMeta{ID: "c1", Model: "m"}, ChatDelta{Reasoning: &text}, start)
+	}
+	answer := "done"
+	raw.ObserveChatChunk([]byte(`{"choices":[{"index":0,"delta":{"content":"done"},"finish_reason":"stop"}]}`), start)
+	parsed.ObserveChat(ChunkMeta{}, ChatDelta{Content: &answer, FinishReason: "stop"}, start)
+
+	assert.Equal(t, raw.Reasoning().Words(), parsed.Reasoning().Words())
+	assert.Equal(t, raw.Reasoning().Ratio(), parsed.Reasoning().Ratio())
+	assert.Equal(t, raw.Meta(), parsed.Meta())
+	assert.Equal(t, "stop", parsed.FinishReason())
+	assert.True(t, parsed.AnswerStarted())
+}

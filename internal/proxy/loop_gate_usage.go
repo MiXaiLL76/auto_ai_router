@@ -64,7 +64,7 @@ var loopGateNullUsage = []byte("null")
 // stripRunningUsage returns line with the usage of a chat chunk with choices
 // replaced by null; any other line is returned as is.
 func stripRunningUsage(line []byte) []byte {
-	payload, ok := bytes.CutPrefix(bytes.TrimLeft(line, " \t"), sseDataPrefix)
+	payload, ok := sseLinePayload(line)
 	if !ok {
 		return line
 	}
@@ -72,7 +72,7 @@ func stripRunningUsage(line []byte) []byte {
 	if !ok || !chatChunkHasChoices(payload) {
 		return line
 	}
-	offset := len(line) - len(payload)
+	offset := cap(line) - cap(payload) // payload is a sub-slice of line
 	return slices.Concat(line[:offset+start], loopGateNullUsage, line[offset+end:])
 }
 

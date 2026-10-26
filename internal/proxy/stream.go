@@ -598,12 +598,8 @@ func splitSSEPayloads(chunk []byte, dst [][]byte) [][]byte {
 			line = rest
 			rest = nil
 		}
-		line = bytes.TrimSpace(line)
-		if bytes.HasPrefix(line, sseDataPrefix) {
-			payload := bytes.TrimSpace(line[len(sseDataPrefix):])
-			if len(payload) > 0 && !bytes.Equal(payload, sseDoneSentinel) {
-				dst = append(dst, payload)
-			}
+		if payload, ok := sseLinePayload(line); ok {
+			dst = append(dst, payload)
 		}
 		if rest == nil {
 			break
@@ -611,6 +607,21 @@ func splitSSEPayloads(chunk []byte, dst [][]byte) [][]byte {
 	}
 
 	return dst
+}
+
+// sseLinePayload returns the data payload of one SSE line: the text after
+// "data:" with surrounding whitespace trimmed, a sub-slice of line. ok is false
+// for any other line, an empty payload and the [DONE] sentinel.
+func sseLinePayload(line []byte) ([]byte, bool) {
+	payload, ok := bytes.CutPrefix(bytes.TrimSpace(line), sseDataPrefix)
+	if !ok {
+		return nil, false
+	}
+	payload = bytes.TrimSpace(payload)
+	if len(payload) == 0 || bytes.Equal(payload, sseDoneSentinel) {
+		return nil, false
+	}
+	return payload, true
 }
 
 // getStreamUsageExtractor returns the appropriate usage extractor for a provider.

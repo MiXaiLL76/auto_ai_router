@@ -2,10 +2,14 @@ package proxy
 
 import (
 	"bytes"
+	"io"
 	"sort"
 	"strings"
 
 	json "github.com/goccy/go-json"
+
+	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
+	"github.com/mixaill76/auto_ai_router/internal/loopgate"
 )
 
 // loopGateResponsesOutput rebuilds the output of a Responses API stream from
@@ -40,30 +44,59 @@ type loopGateResponsesPart struct {
 }
 
 type loopGateResponsesEvent struct {
-	Type         string                     `json:"type"`
-	OutputIndex  int                        `json:"output_index"`
-	ContentIndex int                        `json:"content_index"`
-	SummaryIndex int                        `json:"summary_index"`
-	ItemID       string                     `json:"item_id"`
-	Delta        string                     `json:"delta"`
-	Item         map[string]json.RawMessage `json:"item"`
-	Part         map[string]json.RawMessage `json:"part"`
-	Response     map[string]json.RawMessage `json:"response"`
+	Type           string                     `json:"type"`
+	SequenceNumber int                        `json:"sequence_number"`
+	OutputIndex    int                        `json:"output_index"`
+	ContentIndex   int                        `json:"content_index"`
+	SummaryIndex   int                        `json:"summary_index"`
+	ItemID         string                     `json:"item_id"`
+	Delta          string                     `json:"delta"`
+	Item           map[string]json.RawMessage `json:"item"`
+	Part           map[string]json.RawMessage `json:"part"`
+	Response       map[string]json.RawMessage `json:"response"`
 }
 
 func newLoopGateResponsesOutput() *loopGateResponsesOutput {
 	return &loopGateResponsesOutput{items: make(map[int]*loopGateResponsesItem)}
 }
 
-// add applies one Responses API event payload.
-func (r *loopGateResponsesOutput) add(payload []byte) {
+// add applies one Responses API event payload and returns what the loop gate
+// detector reads of it, so the event is parsed once; ok is false when the
+// payload is not an event.
+func (r *loopGateResponsesOutput) add(payload []byte) (loopgate.ResponsesEvent, bool) {
 	if !bytes.Contains(payload, sseTypeNeedle) {
-		return
+		return loopgate.ResponsesEvent{}, false
 	}
 	var ev loopGateResponsesEvent
 	if json.Unmarshal(payload, &ev) != nil {
-		return
+		return loopgate.ResponsesEvent{}, false
 	}
+	r.apply(&ev)
+	return ev.detected(), true
+}
+
+// detected returns what the loop gate detector reads of ev.
+func (ev *loopGateResponsesEvent) detected() loopgate.ResponsesEvent {
+	out := loopgate.ResponsesEvent{Type: ev.Type, SequenceNumber: ev.SequenceNumber, Delta: &ev.Delta}
+	if ev.Item != nil {
+		out.ItemType = rawString(ev.Item["type"])
+	}
+	if ev.Response != nil {
+		var created int64
+		_ = json.Unmarshal(ev.Response["created_at"], &created)
+		var incomplete struct {
+			Reason string `json:"reason"`
+		}
+		_ = json.Unmarshal(ev.Response["incomplete_details"], &incomplete)
+		out.Response = &loopgate.ResponsesResponse{
+			ID: rawString(ev.Response["id"]), CreatedAt: created, Model: rawString(ev.Response["model"]),
+			Status: rawString(ev.Response["status"]), IncompleteReason: incomplete.Reason,
+		}
+	}
+	return out
+}
+
+func (r *loopGateResponsesOutput) apply(ev *loopGateResponsesEvent) {
 	if ev.Type == "response.created" || ev.Type == "response.in_progress" {
 		if ev.Response != nil {
 			r.response = ev.Response
@@ -160,17 +193,14 @@ func (r *loopGateResponsesOutput) sortedItems() []*loopGateResponsesItem {
 	return items
 }
 
-// closeOpen returns the events that close every item left open (the *.done
-// events of its open parts, then response.output_item.done with status
-// "incomplete"), and the full output: finished items as the upstream sent
-// them, closed ones as rebuilt here. nextSeq numbers the events.
-func (r *loopGateResponsesOutput) closeOpen(nextSeq func() int) ([]loopGateSSEEvent, []any) {
-	var events []loopGateSSEEvent
-	var output []any
-	emit := func(name string, fields map[string]any) {
-		fields["type"] = name
-		fields["sequence_number"] = nextSeq()
-		events = append(events, loopGateSSEEvent{name: name, data: fields})
+// closeOpen writes to w the events that close every item left open (the
+// *.done events of its open parts, then response.output_item.done with status
+// "incomplete"), numbered from *seq on, and returns the full output: finished
+// items as the upstream sent them, closed ones as rebuilt here.
+func (r *loopGateResponsesOutput) closeOpen(w io.Writer, seq *int) []any {
+	output := []any{}
+	emit := func(ev map[string]interface{}) {
+		_ = responses.WriteSSEEvent(w, ev["type"].(string), ev, seq)
 	}
 	for _, it := range r.sortedItems() {
 		if it.done {
@@ -196,28 +226,20 @@ func (r *loopGateResponsesOutput) closeOpen(nextSeq func() int) ([]loopGateSSEEv
 			if p.done {
 				continue
 			}
-			base := func() map[string]any {
-				return map[string]any{"item_id": it.id, "output_index": it.outputIndex, "content_index": p.index}
-			}
 			switch p.typ {
 			case "refusal":
-				ev := base()
-				ev["refusal"] = p.text.String()
-				emit("response.refusal.done", ev)
+				emit(responses.BuildRefusalDoneEvent(it.id, it.outputIndex, p.index, p.text.String()))
 			case "reasoning_text":
-				ev := base()
-				ev["text"] = p.text.String()
-				emit("response.reasoning_text.done", ev)
+				emit(responses.BuildReasoningTextDoneEvent(it.id, it.outputIndex, p.index, p.text.String()))
 			default:
-				ev := base()
-				ev["text"] = p.text.String()
+				ev := responses.BuildOutputTextDoneEvent(it.id, it.outputIndex, p.index, p.text.String())
 				ev["logprobs"] = []any{}
-				emit("response.output_text.done", ev)
+				emit(ev)
 			}
 			if p.part != nil {
-				ev := base()
+				ev := responses.BuildContentPartDoneEvent(it.id, it.outputIndex, p.index, "")
 				ev["part"] = part
-				emit("response.content_part.done", ev)
+				emit(ev)
 			}
 		}
 		summary := make([]any, 0, len(it.summary))
@@ -227,13 +249,11 @@ func (r *loopGateResponsesOutput) closeOpen(nextSeq func() int) ([]loopGateSSEEv
 			if p.done {
 				continue
 			}
-			emit("response.reasoning_summary_text.done", map[string]any{
-				"item_id": it.id, "output_index": it.outputIndex, "summary_index": p.index, "text": p.text.String(),
-			})
+			emit(responses.BuildReasoningSummaryTextDoneEvent(it.id, it.outputIndex, p.index, p.text.String()))
 			if p.part != nil {
-				emit("response.reasoning_summary_part.done", map[string]any{
-					"item_id": it.id, "output_index": it.outputIndex, "summary_index": p.index, "part": part,
-				})
+				ev := responses.BuildReasoningSummaryPartDoneEvent(it.id, it.outputIndex, p.index, "")
+				ev["part"] = part
+				emit(ev)
 			}
 		}
 		switch it.typ {
@@ -247,17 +267,12 @@ func (r *loopGateResponsesOutput) closeOpen(nextSeq func() int) ([]loopGateSSEEv
 		case "function_call":
 			args := it.arguments.String()
 			item["arguments"] = args
-			emit("response.function_call_arguments.done", map[string]any{
-				"item_id": it.id, "output_index": it.outputIndex, "arguments": args,
-			})
+			emit(responses.BuildFunctionCallArgumentsDoneEvent(it.id, it.outputIndex, args))
 		}
-		emit("response.output_item.done", map[string]any{"output_index": it.outputIndex, "item": item})
+		emit(responses.BuildOutputItemDoneEvent(it.outputIndex, item))
 		output = append(output, item)
 	}
-	if output == nil {
-		output = []any{}
-	}
-	return events, output
+	return output
 }
 
 func sortedParts(parts []*loopGateResponsesPart) []*loopGateResponsesPart {

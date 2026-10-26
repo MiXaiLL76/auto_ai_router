@@ -2138,15 +2138,35 @@ func mappingValueIsNull(node *yaml.Node, key string) bool {
 // credential and model pair, so a credential or model override that is valid
 // alone but not together with the inherited values (cut_min_ratio below the
 // effective min_ratio) fails at startup instead of disabling the gate at
-// request time.
+// request time. A model's loop_gate is looked up as at request time
+// (models.Manager.GetLoopGateOverride): a model entry without a credential
+// serves every credential, except one with its own entry for that model and a
+// loop_gate of its own, which wins there.
 func (c *Config) validateLoopGateCombinations() error {
+	// model name -> credential ("" = every credential) -> the entry, the last
+	// one winning as in the models manager.
+	gates := make(map[string]map[string]ModelRPMConfig)
+	var names []string
+	for _, model := range c.Models {
+		if model.LoopGate == nil {
+			continue
+		}
+		if gates[model.Name] == nil {
+			gates[model.Name] = make(map[string]ModelRPMConfig)
+			names = append(names, model.Name)
+		}
+		gates[model.Name][model.Credential] = model
+	}
 	for _, cred := range c.Credentials {
 		if _, err := c.LoopGate.Resolve(cred.Type, cred.LoopGate); err != nil {
 			return fmt.Errorf("credential %s: %w", cred.Name, err)
 		}
-		for _, model := range c.Models {
-			if model.LoopGate == nil || (model.Credential != "" && model.Credential != cred.Name) {
-				continue
+		for _, name := range names {
+			model, ok := gates[name][cred.Name]
+			if !ok {
+				if model, ok = gates[name][""]; !ok {
+					continue
+				}
 			}
 			if _, err := c.LoopGate.Resolve(cred.Type, cred.LoopGate, model.LoopGate); err != nil {
 				return fmt.Errorf("model %s on credential %s: %w", model.Name, cred.Name, err)

@@ -111,6 +111,26 @@ func (d *Detector) feedContent(text string) {
 	}
 }
 
+// ResponsesEvent is what the detector reads from one Responses API event, for
+// a caller that has parsed the event itself (ObserveResponses).
+type ResponsesEvent struct {
+	Type           string
+	SequenceNumber int
+	Delta          *string
+	ItemType       string             // the item of response.output_item.added
+	Response       *ResponsesResponse // the response of response.* lifecycle events
+}
+
+// ResponsesResponse is the part of a Responses API response object the
+// detector reads.
+type ResponsesResponse struct {
+	ID               string
+	CreatedAt        int64
+	Model            string
+	Status           string
+	IncompleteReason string
+}
+
 type responsesEvent struct {
 	Type           string  `json:"type"`
 	SequenceNumber int     `json:"sequence_number"`
@@ -139,23 +159,30 @@ func (d *Detector) ObserveResponsesEvent(payload []byte, now time.Time) []Firing
 	if !bytes.Contains(payload, typeKey) {
 		return nil
 	}
-	var ev responsesEvent
-	if err := json.Unmarshal(payload, &ev); err != nil {
+	var raw responsesEvent
+	if err := json.Unmarshal(payload, &raw); err != nil {
 		return nil
 	}
+	ev := ResponsesEvent{Type: raw.Type, SequenceNumber: raw.SequenceNumber, Delta: raw.Delta}
+	if raw.Item != nil {
+		ev.ItemType = raw.Item.Type
+	}
+	if r := raw.Response; r != nil {
+		ev.Response = &ResponsesResponse{ID: r.ID, CreatedAt: r.CreatedAt, Model: r.Model, Status: r.Status}
+		if r.IncompleteDetails != nil {
+			ev.Response.IncompleteReason = r.IncompleteDetails.Reason
+		}
+	}
+	return d.ObserveResponses(ev, now)
+}
+
+// ObserveResponses is ObserveResponsesEvent for an event the caller parsed.
+func (d *Detector) ObserveResponses(ev ResponsesEvent, now time.Time) []Firing {
 	if ev.SequenceNumber > d.sequence {
 		d.sequence = ev.SequenceNumber
 	}
 	if r := ev.Response; r != nil {
-		if r.ID != "" {
-			d.meta.ID = r.ID
-		}
-		if r.CreatedAt != 0 {
-			d.meta.Created = r.CreatedAt
-		}
-		if r.Model != "" {
-			d.meta.Model = r.Model
-		}
+		d.setMeta(ChunkMeta{ID: r.ID, Created: r.CreatedAt, Model: r.Model})
 	}
 	switch {
 	case ev.Type == "response.output_text.delta" || ev.Type == "response.refusal.delta":
@@ -169,18 +196,31 @@ func (d *Detector) ObserveResponsesEvent(payload []byte, now time.Time) []Firing
 	case ev.Type == "response.function_call_arguments.delta":
 		d.answered = true
 	case ev.Type == "response.output_item.added":
-		if ev.Item != nil && ev.Item.Type != "reasoning" && ev.Item.Type != "message" {
+		if ev.ItemType != "" && ev.ItemType != "reasoning" && ev.ItemType != "message" {
 			d.answered = true
 		}
 	case ev.Type == "response.completed" || ev.Type == "response.incomplete" || ev.Type == "response.failed":
 		if r := ev.Response; r != nil {
 			d.finishReason = r.Status
-			if r.IncompleteDetails != nil && r.IncompleteDetails.Reason != "" {
-				d.finishReason = r.IncompleteDetails.Reason
+			if r.IncompleteReason != "" {
+				d.finishReason = r.IncompleteReason
 			}
 		}
 	}
 	return d.check(now)
+}
+
+// setMeta keeps the non-empty fields of m.
+func (d *Detector) setMeta(m ChunkMeta) {
+	if m.ID != "" {
+		d.meta.ID = m.ID
+	}
+	if m.Created != 0 {
+		d.meta.Created = m.Created
+	}
+	if m.Model != "" {
+		d.meta.Model = m.Model
+	}
 }
 
 type messagesEvent struct {
@@ -313,37 +353,60 @@ func (d *Detector) ObserveChatChunk(payload []byte, now time.Time) []Firing {
 	if err := json.Unmarshal(payload, &chunk); err != nil {
 		return nil
 	}
-	if chunk.ID != "" {
-		d.meta.ID = chunk.ID
-	}
-	if chunk.Created != 0 {
-		d.meta.Created = chunk.Created
-	}
-	if chunk.Model != "" {
-		d.meta.Model = chunk.Model
-	}
+	d.setMeta(ChunkMeta{ID: chunk.ID, Created: chunk.Created, Model: chunk.Model})
 	for i := range chunk.Choices {
 		choice := &chunk.Choices[i]
 		if choice.Index != 0 {
 			continue
 		}
-		if choice.FinishReason != nil && *choice.FinishReason != "" {
-			d.finishReason = *choice.FinishReason
-		}
-		if choice.Delta.Content != nil {
-			d.feedContent(*choice.Delta.Content)
-		}
-		if len(choice.Delta.ToolCalls) > 0 && !bytes.Equal(choice.Delta.ToolCalls, jsonNull) && !bytes.Equal(choice.Delta.ToolCalls, emptyJSONArray) {
-			d.answered = true
+		delta := ChatDelta{
+			Content:   choice.Delta.Content,
+			Reasoning: choice.Delta.ReasoningContent,
+			ToolCalls: len(choice.Delta.ToolCalls) > 0 && !bytes.Equal(choice.Delta.ToolCalls, jsonNull) && !bytes.Equal(choice.Delta.ToolCalls, emptyJSONArray),
 		}
 		// vLLM names the field reasoning_content (older) or reasoning (newer).
-		if choice.Delta.ReasoningContent != nil {
-			d.reasoning.Feed(*choice.Delta.ReasoningContent)
-		} else if choice.Delta.Reasoning != nil {
-			d.reasoning.Feed(*choice.Delta.Reasoning)
+		if delta.Reasoning == nil {
+			delta.Reasoning = choice.Delta.Reasoning
 		}
+		if choice.FinishReason != nil {
+			delta.FinishReason = *choice.FinishReason
+		}
+		d.feedChat(delta)
 	}
 	return d.check(now)
+}
+
+// ChatDelta is what the detector reads from choice 0 of one
+// chat.completion.chunk, for a caller that has parsed the chunk itself
+// (ObserveChat). The zero value is a chunk without choice 0.
+type ChatDelta struct {
+	Content      *string
+	Reasoning    *string // reasoning_content, else reasoning
+	ToolCalls    bool    // the delta carries a tool call
+	FinishReason string
+}
+
+// ObserveChat is ObserveChatChunk for a chunk the caller parsed: meta are its
+// id, created and model, delta its choice 0.
+func (d *Detector) ObserveChat(meta ChunkMeta, delta ChatDelta, now time.Time) []Firing {
+	d.setMeta(meta)
+	d.feedChat(delta)
+	return d.check(now)
+}
+
+func (d *Detector) feedChat(delta ChatDelta) {
+	if delta.FinishReason != "" {
+		d.finishReason = delta.FinishReason
+	}
+	if delta.Content != nil {
+		d.feedContent(*delta.Content)
+	}
+	if delta.ToolCalls {
+		d.answered = true
+	}
+	if delta.Reasoning != nil {
+		d.reasoning.Feed(*delta.Reasoning)
+	}
 }
 
 // ObserveText feeds the complete reasoning and answer text of a non-streamed
