@@ -284,6 +284,7 @@ type Config struct {
 	OTEL                 OTELConfig                 `yaml:"otel,omitempty"`
 	Kafka                KafkaConfig                `yaml:"kafka,omitempty"`
 	Video                VideoConfig                `yaml:"video,omitempty"`
+	YandexSearch         YandexSearchConfig         `yaml:"yandex_search,omitempty"`
 	VisionFallback       VisionFallbackConfig       `yaml:"vision_fallback,omitempty"`
 	// ModelTemplates stores x-model-templates entries as raw interface{} so that
 	// both single-model mappings and lists of models can be defined as YAML anchors
@@ -318,6 +319,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		OTEL                 OTELConfig                 `yaml:"otel,omitempty"`
 		Kafka                KafkaConfig                `yaml:"kafka,omitempty"`
 		Video                VideoConfig                `yaml:"video,omitempty"`
+		YandexSearch         YandexSearchConfig         `yaml:"yandex_search,omitempty"`
 		VisionFallback       VisionFallbackConfig       `yaml:"vision_fallback,omitempty"`
 		ModelTemplates       map[string]interface{}     `yaml:"x-model-templates,omitempty"`
 	}
@@ -344,6 +346,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.OTEL = raw.OTEL
 	c.Kafka = raw.Kafka
 	c.Video = raw.Video
+	c.YandexSearch = raw.YandexSearch
 	c.VisionFallback = raw.VisionFallback
 	c.ModelTemplates = raw.ModelTemplates
 
@@ -2123,6 +2126,9 @@ func (c *Config) Normalize() {
 
 func (c *Config) Validate() error {
 	if err := c.Video.Validate(); err != nil {
+		return err
+	}
+	if err := c.YandexSearch.Validate(); err != nil {
 		return err
 	}
 	if err := c.VisionFallback.Validate(); err != nil {

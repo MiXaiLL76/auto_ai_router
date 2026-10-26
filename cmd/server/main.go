@@ -300,6 +300,7 @@ func main() {
 	})
 
 	videoRuntime := initializeVideoOrExit(cfg, prx, litellmDBManager, log)
+	yandexSearchHandler := initializeYandexSearchOrExit(cfg, prx, litellmDBManager, redisBackend, budgetReserver, log)
 
 	// ==================== Background Goroutines ====================
 	bgCtx, bgCancel := context.WithCancel(context.Background())
@@ -347,6 +348,9 @@ func main() {
 	rtr := router.New(prx, modelManager, &cfg.Monitoring, log, cfg)
 	if videoRuntime != nil {
 		rtr.SetVideoHandler(videoRuntime.handler)
+	}
+	if yandexSearchHandler != nil {
+		rtr.SetYandexSearchHandler(yandexSearchHandler)
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/", rtr)

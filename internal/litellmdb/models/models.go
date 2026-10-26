@@ -245,6 +245,14 @@ type TokenInfo struct {
 	// Metadata
 	Metadata map[string]interface{}
 
+	// TeamMetadata and OrganizationMetadata are the key's team's and
+	// organization's own metadata columns, fetched in the same query as
+	// Metadata (QueryValidateTokenWithHierarchy) but kept separate: a
+	// feature flag (e.g. air_scopes) set at team/org level should apply to
+	// every key in that team/org, not be confused with the key's own.
+	TeamMetadata         map[string]interface{}
+	OrganizationMetadata map[string]interface{}
+
 	// Cost margin layers in priority order: key, then team and organization
 	// (or user for a personal key) (see CostMargin)
 	CostMarginConfigs []CostMarginConfig
@@ -405,6 +413,12 @@ func (t *TokenInfo) Clone() *TokenInfo {
 	clone.Tags = append([]string(nil), t.Tags...)
 	if t.Metadata != nil {
 		clone.Metadata = cloneMetadataValue(t.Metadata).(map[string]interface{})
+	}
+	if t.TeamMetadata != nil {
+		clone.TeamMetadata = cloneMetadataValue(t.TeamMetadata).(map[string]interface{})
+	}
+	if t.OrganizationMetadata != nil {
+		clone.OrganizationMetadata = cloneMetadataValue(t.OrganizationMetadata).(map[string]interface{})
 	}
 	if t.CostMarginConfigs != nil {
 		clone.CostMarginConfigs = make([]CostMarginConfig, len(t.CostMarginConfigs))
