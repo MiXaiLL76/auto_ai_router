@@ -19,6 +19,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	promanutils "github.com/mixaill76/auto_ai_router/internal/converter/proman/utils"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
+	"github.com/mixaill76/auto_ai_router/internal/loopgate"
 	"github.com/mixaill76/auto_ai_router/internal/proxy/modelutils"
 )
 
@@ -501,6 +502,9 @@ var (
 	// cannot possibly carry usage/total_tokens — skip the unmarshal attempt
 	// entirely rather than paying for it on every content-only chunk.
 	sseUsageNeedle = []byte(`"usage"`)
+	// sseTypeNeedle prefilters Responses / Messages events, which all carry a
+	// "type".
+	sseTypeNeedle = []byte(`"type"`)
 	// sseWebSearchCallNeedle and sseAnnotationsNeedle catch the two other
 	// shapes converter.ExtractTokenUsageWithOptions can derive a non-nil,
 	// billable TokenUsage from *without* any "usage" key present at all:
@@ -594,12 +598,8 @@ func splitSSEPayloads(chunk []byte, dst [][]byte) [][]byte {
 			line = rest
 			rest = nil
 		}
-		line = bytes.TrimSpace(line)
-		if bytes.HasPrefix(line, sseDataPrefix) {
-			payload := bytes.TrimSpace(line[len(sseDataPrefix):])
-			if len(payload) > 0 && !bytes.Equal(payload, sseDoneSentinel) {
-				dst = append(dst, payload)
-			}
+		if payload, ok := sseLinePayload(line); ok {
+			dst = append(dst, payload)
 		}
 		if rest == nil {
 			break
@@ -607,6 +607,21 @@ func splitSSEPayloads(chunk []byte, dst [][]byte) [][]byte {
 	}
 
 	return dst
+}
+
+// sseLinePayload returns the data payload of one SSE line: the text after
+// "data:" with surrounding whitespace trimmed, a sub-slice of line. ok is false
+// for any other line, an empty payload and the [DONE] sentinel.
+func sseLinePayload(line []byte) ([]byte, bool) {
+	payload, ok := bytes.CutPrefix(bytes.TrimSpace(line), sseDataPrefix)
+	if !ok {
+		return nil, false
+	}
+	payload = bytes.TrimSpace(payload)
+	if len(payload) == 0 || bytes.Equal(payload, sseDoneSentinel) {
+		return nil, false
+	}
+	return payload, true
 }
 
 // getStreamUsageExtractor returns the appropriate usage extractor for a provider.
@@ -811,6 +826,18 @@ func (p *Proxy) handleTransformedStreaming(
 	rawProviderStreamError := &proxyStreamErrorCapture{}
 	outputStreamError := &proxyStreamErrorCapture{}
 	providerReader := io.Reader(resp.Body)
+	// Loop gate on the upstream stream, before conversion: a chat completion
+	// converted to Responses / Messages events, or a Messages stream relayed as
+	// is. The closing events it adds go through the same conversion. Its
+	// reads run in the transform goroutine, which ends before this returns.
+	// A converter drops SSE comments, so keepalives during a restart go
+	// straight to the client stream: the converter is blocked in its read
+	// between two events, nothing else writes to pw meanwhile.
+	if loopGate := p.newLoopGateObserver(respCtx(resp), logCtx, modelID, resp.StatusCode, loopGateFormatOf(logCtx)); loopGate != nil {
+		defer loopGate.finish()
+		loopGate.keepalive = pw
+		providerReader = loopGate.wrap(resp.Body)
+	}
 	if detectProviderStreamError {
 		// Some converters normalize a provider error event into an apparently
 		// successful output chunk. Observe both sides so the original terminal
@@ -953,6 +980,16 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 	detectProviderStreamError := resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
 	providerStreamError := &proxyStreamErrorCapture{}
 	providerReader := io.Reader(resp.Body)
+	// Loop gate: watches the generated text for a model stuck repeating itself
+	// and, in enforce mode, ends the stream there. It reads the raw upstream
+	// body, so the closing chunk it adds goes through the same sanitizing and
+	// usage accounting as the upstream chunks. Reports when the handler returns.
+	loopGate := p.newLoopGateObserver(respCtx(resp), logCtx, modelID, resp.StatusCode, loopgate.FormatChat)
+	if loopGate != nil {
+		defer loopGate.finish()
+		loopGate.normalizeUsage = true // handleProviderStreaming wrapped resp.Body
+		providerReader = loopGate.wrap(resp.Body)
+	}
 	if detectProviderStreamError {
 		providerReader = io.TeeReader(providerReader, proxyStreamErrorObserver{capture: providerStreamError})
 	}
@@ -1945,6 +1982,10 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 		providerStreamError   = &proxyStreamErrorCapture{}
 	)
 	providerReader := io.Reader(resp.Body)
+	if loopGate := p.newLoopGateObserver(respCtx(resp), logCtx, modelID, resp.StatusCode, loopgate.FormatResponses); loopGate != nil {
+		defer loopGate.finish()
+		providerReader = loopGate.wrap(resp.Body)
+	}
 	if detectStreamError {
 		providerReader = io.TeeReader(providerReader, proxyStreamErrorObserver{capture: providerStreamError})
 	}

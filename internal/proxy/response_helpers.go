@@ -239,7 +239,7 @@ func extractSessionIDFromHeaders(header http.Header) string {
 	return ""
 }
 
-var rawIncludeUsageTrue = goccyjson.RawMessage("true")
+var rawJSONTrue = goccyjson.RawMessage("true")
 
 // injectIncludeUsageRaw ensures reqBody["stream_options"]["include_usage"] is
 // true, merging into whatever stream_options object the client sent rather
@@ -253,15 +253,18 @@ var rawIncludeUsageTrue = goccyjson.RawMessage("true")
 // sub-slices so the rest of reqBody (in particular messages/input) is never
 // boxed into interface{}.
 func injectIncludeUsageRaw(reqBody map[string]goccyjson.RawMessage) error {
-	streamOptionsRaw, exists := reqBody["stream_options"]
-	var streamOptions map[string]goccyjson.RawMessage
-	if exists {
-		_ = goccyjson.Unmarshal(streamOptionsRaw, &streamOptions)
-	}
+	return setStreamOptionsRaw(reqBody, "include_usage")
+}
+
+// setStreamOptionsRaw sets each of keys to true in reqBody["stream_options"],
+// merging into whatever stream_options object the client sent.
+func setStreamOptionsRaw(reqBody map[string]goccyjson.RawMessage, keys ...string) error {
+	streamOptions := streamOptionsRaw(reqBody)
 	if streamOptions == nil {
-		streamOptions = map[string]goccyjson.RawMessage{"include_usage": rawIncludeUsageTrue}
-	} else {
-		streamOptions["include_usage"] = rawIncludeUsageTrue
+		streamOptions = make(map[string]goccyjson.RawMessage, len(keys))
+	}
+	for _, key := range keys {
+		streamOptions[key] = rawJSONTrue
 	}
 
 	marshaled, err := goccyjson.Marshal(streamOptions)
@@ -270,6 +273,18 @@ func injectIncludeUsageRaw(reqBody map[string]goccyjson.RawMessage) error {
 	}
 	reqBody["stream_options"] = marshaled
 	return nil
+}
+
+// streamOptionsRaw returns reqBody's stream_options object, nil when it is
+// absent or not an object.
+func streamOptionsRaw(reqBody map[string]goccyjson.RawMessage) map[string]goccyjson.RawMessage {
+	raw, exists := reqBody["stream_options"]
+	if !exists {
+		return nil
+	}
+	var streamOptions map[string]goccyjson.RawMessage
+	_ = goccyjson.Unmarshal(raw, &streamOptions)
+	return streamOptions
 }
 
 // clientControlledBillingParams are request parameters through which a client

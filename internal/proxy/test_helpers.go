@@ -113,6 +113,7 @@ type TestProxyConfig struct {
 	CredentialNameAsTeamID bool
 	OrganizationPolicies   *models.OrganizationPolicyRegistry
 	VisionFallback         config.VisionFallbackConfig
+	LoopGate               config.LoopGateConfig
 }
 
 // NewTestProxyBuilder creates a builder with default configuration.
@@ -330,6 +331,7 @@ func (b *TestProxyBuilder) Build() *Proxy {
 		CredentialNameAsTeamID: b.config.CredentialNameAsTeamID,
 		OrganizationPolicies:   b.config.OrganizationPolicies,
 		VisionFallback:         b.config.VisionFallback,
+		LoopGate:               b.config.LoopGate,
 	})
 }
 

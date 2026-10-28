@@ -416,6 +416,8 @@ func (p *Proxy) setPromptTokensEstimate(logCtx *RequestLogContext, body []byte, 
 	if logCtx == nil || !p.tiktokenEnabled {
 		return
 	}
+	// Re-armed for another attempt's body: the memoized value is stale.
+	logCtx.promptTokensEstimateReady = false
 	logCtx.promptTokensEstimateFn = func() int {
 		tokens := estimatePromptTokensForModel(body, model)
 		tokens = addNativeWSHistoryTokens(logCtx.Context(), tokens)
@@ -492,7 +494,7 @@ func appendDeltaTextForPayload(b *strings.Builder, payload []byte) {
 	if bytes.Contains(payload, []byte(`"content_block_delta"`)) {
 		appendMessagesDeltaText(b, payload)
 	}
-	if bytes.Contains(payload, []byte(`"type"`)) {
+	if bytes.Contains(payload, sseTypeNeedle) {
 		appendResponsesDeltaText(b, payload)
 	}
 }

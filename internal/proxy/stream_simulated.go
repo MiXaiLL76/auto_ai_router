@@ -96,11 +96,19 @@ func (p *Proxy) handleSimulatedNonStream(
 	var lastChunk []byte
 	rawProviderStreamError := &proxyStreamErrorCapture{}
 	outputStreamError := &proxyStreamErrorCapture{}
-	providerReader := io.Reader(resp.Body)
+	upstream := io.ReadCloser(resp.Body)
 	// Same as handleProviderStreaming's default branch: OpenAI-compatible
 	// providers get their usage deltas normalized before conversion.
 	if conv.IsPassthrough() {
-		providerReader, _ = modelutils.NewUsageNormalizingReadCloser(resp.Body, publicModel)
+		upstream, _ = modelutils.NewUsageNormalizingReadCloser(resp.Body, publicModel)
+	}
+	providerReader := io.Reader(upstream)
+	// Loop gate: the client asked for a non-streamed answer, which the gate
+	// only observes unless it streams the request itself (force_stream). Its
+	// reads run in the transform goroutine, which ends before this returns.
+	if loopGate := p.newLoopGateWatcher(respCtx(resp), logCtx, modelID, resp.StatusCode); loopGate != nil {
+		defer loopGate.finish()
+		providerReader = loopGate.wrap(upstream)
 	}
 	providerReader = io.TeeReader(providerReader, proxyStreamErrorObserver{capture: rawProviderStreamError})
 
@@ -881,278 +889,20 @@ func (p *Proxy) simulatedTransformer(
 // Chat-Completions SSE → single non-stream JSON reassembly
 // ---------------------------------------------------------------------------
 
-// simToolCallState accumulates one tool call across streaming deltas.
-type simToolCallState struct {
-	id        string
-	name      strings.Builder
-	arguments strings.Builder
-}
-
-// simLogprobs is the choice-level logprobs shape the reassembled non-stream
-// body emits when the client asked for logprobs.
-type simLogprobs struct {
-	Content []json.RawMessage `json:"content"`
-	Refusal json.RawMessage   `json:"refusal"`
-}
-
-// simChoiceState accumulates one choice across streaming deltas.
-type simChoiceState struct {
-	index        int
-	role         string
-	content      strings.Builder
-	refusal      strings.Builder
-	reasoning    strings.Builder
-	images       []openai.ImageData
-	toolCalls    map[int]*simToolCallState
-	toolOrder    []int
-	finishReason *string
-	// logprobs accumulates the per-token entries the upstream streams when the
-	// client asked for logprobs=true (one content entry per chunk, same shape
-	// the non-stream response uses). Without this the reassembled body silently
-	// dropped them.
-	logprobsContent []json.RawMessage
-	logprobsRefusal json.RawMessage
-	hasLogprobs     bool
-	// annotations accumulates url_citation (and similar) entries streamed on
-	// either delta.annotations or the non-standard message.annotations
-	// carrier (Requesty). Without this the reassembled body silently dropped
-	// citations.
-	annotations []json.RawMessage
-}
-
-func newSimChoiceState(index int) *simChoiceState {
-	return &simChoiceState{index: index, toolCalls: make(map[int]*simToolCallState)}
-}
-
 // reassembleChatCompletion folds an OpenAI Chat-Completions SSE body (as
 // produced by the provider converters after conv.StreamTo) into a single
-// Chat-Completions non-stream JSON body. Returns nil when nothing reassemblable
-// was found. Deltas are accumulated per choice index; tool-call id/name/
-// arguments are stitched from their fragment chunks; id/model/created/usage are
-// taken from the chunk that carried them (usage: the last one, matching
-// OpenAI's final-usage-chunk convention).
+// Chat-Completions non-stream JSON body with chatStreamAggregator, the
+// rebuild the loop gate's force_stream uses too. Returns nil when nothing
+// reassemblable was found or the stream carried an error event.
 func reassembleChatCompletion(stream []byte) []byte {
-	var (
-		id, model, systemFingerprint, serviceTier string
-		createdAt                                 int64
-		usage                                     json.RawMessage
-		webSearch                                 json.RawMessage
-		choices                                   = map[int]*simChoiceState{}
-		choiceOrder                               []int
-	)
-
-	for _, line := range strings.Split(string(stream), "\n") {
-		line = strings.TrimRight(line, "\r")
-		if !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-		if payload == "" || payload == "[DONE]" {
-			continue
-		}
-		var chunk openai.OpenAIStreamingChunk
-		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
-			continue
-		}
-		// Top-level "web_search" (search citations) rides in a chunk of its
-		// own, outside the OpenAIStreamingChunk struct (no such field there).
-		// The cheap substring prefilter avoids an extra unmarshal on ordinary
-		// content chunks; a false positive (the key in delta text) costs one
-		// harmless unmarshal that finds nothing.
-		if bytes.Contains([]byte(payload), []byte(`"web_search"`)) {
-			var withSearch struct {
-				WebSearch json.RawMessage `json:"web_search"`
-			}
-			if err := json.Unmarshal([]byte(payload), &withSearch); err == nil && len(withSearch.WebSearch) > 0 && string(withSearch.WebSearch) != "null" {
-				webSearch = withSearch.WebSearch
-			}
-		}
-		if chunk.ID != "" {
-			id = chunk.ID
-		}
-		if chunk.Model != "" {
-			model = chunk.Model
-		}
-		if chunk.Created != 0 {
-			createdAt = chunk.Created
-		}
-		if chunk.SystemFingerprint != "" {
-			systemFingerprint = chunk.SystemFingerprint
-		}
-		if chunk.ServiceTier != "" {
-			serviceTier = chunk.ServiceTier
-		}
-		for _, c := range chunk.Choices {
-			st := choices[c.Index]
-			if st == nil {
-				st = newSimChoiceState(c.Index)
-				choices[c.Index] = st
-				choiceOrder = append(choiceOrder, c.Index)
-			}
-			if st.role == "" && c.Delta.Role != "" {
-				st.role = c.Delta.Role
-			}
-			if c.Delta.Content != "" {
-				st.content.WriteString(c.Delta.Content)
-			}
-			if c.Delta.Refusal != "" {
-				st.refusal.WriteString(c.Delta.Refusal)
-			}
-			if c.Delta.ReasoningContent != "" {
-				st.reasoning.WriteString(c.Delta.ReasoningContent)
-			}
-			if len(c.Delta.Images) > 0 {
-				// Gemini image generation streams its images as deltas
-				// (vertex/streaming.go) — mirror the non-stream message shape.
-				st.images = append(st.images, c.Delta.Images...)
-			}
-			if len(c.Delta.Annotations) > 0 {
-				st.annotations = append(st.annotations, c.Delta.Annotations...)
-			}
-			if c.Message != nil && len(c.Message.Annotations) > 0 {
-				st.annotations = append(st.annotations, c.Message.Annotations...)
-			}
-			if c.Logprobs != nil {
-				// logprobs=true: the upstream sends one content entry per token,
-				// chunk by chunk — concatenate them into the final choice's
-				// logprobs.content, matching the non-stream shape.
-				st.hasLogprobs = true
-				if len(c.Logprobs.Content) > 0 {
-					st.logprobsContent = append(st.logprobsContent, c.Logprobs.Content...)
-				}
-				if len(c.Logprobs.Refusal) > 0 && string(c.Logprobs.Refusal) != "null" {
-					st.logprobsRefusal = c.Logprobs.Refusal
-				}
-			}
-			for _, tc := range c.Delta.ToolCalls {
-				idx := tc.Index
-				t := st.toolCalls[idx]
-				if t == nil {
-					t = &simToolCallState{}
-					st.toolCalls[idx] = t
-					st.toolOrder = append(st.toolOrder, idx)
-				}
-				if t.id == "" && tc.ID != "" {
-					t.id = tc.ID
-				}
-				if tc.Function != nil {
-					if tc.Function.Name != "" {
-						t.name.WriteString(tc.Function.Name)
-					}
-					if tc.Function.Arguments != "" {
-						t.arguments.WriteString(tc.Function.Arguments)
-					}
-				}
-			}
-			if c.FinishReason != nil {
-				st.finishReason = c.FinishReason
-			}
-		}
-		if chunk.Usage != nil {
-			if b, err := json.Marshal(chunk.Usage); err == nil {
-				usage = b
-			}
-		}
-	}
-
-	if len(choiceOrder) == 0 {
+	agg := newChatStreamAggregator()
+	if err := agg.consume(bytes.NewReader(stream), 0); err != nil || agg.errStatus != 0 || len(agg.choices) == 0 {
 		return nil
 	}
-	sort.Ints(choiceOrder)
-
-	type simToolCall struct {
-		ID       string `json:"id"`
-		Type     string `json:"type"`
-		Function struct {
-			Name      string `json:"name"`
-			Arguments string `json:"arguments"`
-		} `json:"function"`
+	if agg.id == "" {
+		agg.id = "chatcmpl-simulated"
 	}
-	type simMessage struct {
-		Role             string             `json:"role"`
-		Content          string             `json:"content"`
-		Refusal          *string            `json:"refusal,omitempty"`
-		ReasoningContent *string            `json:"reasoning_content,omitempty"`
-		Images           []openai.ImageData `json:"images,omitempty"`
-		ToolCalls        []simToolCall      `json:"tool_calls,omitempty"`
-		Annotations      []json.RawMessage  `json:"annotations,omitempty"`
-	}
-	type simChoice struct {
-		Index   int        `json:"index"`
-		Message simMessage `json:"message"`
-		// finish_reason is omitted (never null) when the stream ended without
-		// ever carrying one: the native non-stream contract is a string.
-		FinishReason *string `json:"finish_reason,omitempty"`
-		// Logprobs is emitted only when the client asked for logprobs (the
-		// upstream then streamed per-token entries), mirroring the non-stream
-		// shape: {content:[...], refusal:...}.
-		Logprobs *simLogprobs `json:"logprobs,omitempty"`
-	}
-	type simCompletion struct {
-		ID                string          `json:"id"`
-		Object            string          `json:"object"`
-		Created           int64           `json:"created"`
-		Model             string          `json:"model"`
-		SystemFingerprint string          `json:"system_fingerprint,omitempty"`
-		ServiceTier       string          `json:"service_tier,omitempty"`
-		WebSearch         json.RawMessage `json:"web_search,omitempty"`
-		Choices           []simChoice     `json:"choices"`
-		Usage             json.RawMessage `json:"usage,omitempty"`
-	}
-
-	out := simCompletion{
-		ID:                id,
-		Object:            "chat.completion",
-		Created:           createdAt,
-		Model:             model,
-		SystemFingerprint: systemFingerprint,
-		ServiceTier:       serviceTier,
-		WebSearch:         webSearch,
-		Usage:             usage,
-	}
-	if out.ID == "" {
-		out.ID = "chatcmpl-simulated"
-	}
-	for _, idx := range choiceOrder {
-		st := choices[idx]
-		msg := simMessage{
-			Role:        st.role,
-			Content:     st.content.String(),
-			Images:      st.images,
-			Annotations: st.annotations,
-		}
-		if msg.Role == "" {
-			msg.Role = "assistant"
-		}
-		if refusal := st.refusal.String(); refusal != "" {
-			msg.Refusal = &refusal
-		}
-		if reasoning := st.reasoning.String(); reasoning != "" {
-			msg.ReasoningContent = &reasoning
-		}
-		if len(st.toolOrder) > 0 {
-			sort.Ints(st.toolOrder)
-			for _, tidx := range st.toolOrder {
-				t := st.toolCalls[tidx]
-				tc := simToolCall{ID: t.id, Type: "function"}
-				tc.Function.Name = t.name.String()
-				tc.Function.Arguments = t.arguments.String()
-				msg.ToolCalls = append(msg.ToolCalls, tc)
-			}
-		}
-		var lp *simLogprobs
-		if st.hasLogprobs {
-			lp = &simLogprobs{Content: st.logprobsContent, Refusal: st.logprobsRefusal}
-		}
-		out.Choices = append(out.Choices, simChoice{
-			Index:        st.index,
-			Message:      msg,
-			FinishReason: st.finishReason,
-			Logprobs:     lp,
-		})
-	}
-
-	b, err := json.Marshal(out)
+	b, err := agg.completion()
 	if err != nil {
 		return nil
 	}

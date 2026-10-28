@@ -128,6 +128,54 @@ var (
 		[]string{"credential", "model", "endpoint"},
 	)
 
+	LoopGateStreamsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_loop_gate_streams_total",
+			Help: "Total number of streamed generations watched by the loop gate detector",
+		},
+		[]string{"credential", "model", "mode"},
+	)
+
+	LoopGateFiringsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_loop_gate_firings_total",
+			Help: "Total number of streamed generations the loop gate detector saw looping, by text channel (content or reasoning)",
+		},
+		[]string{"credential", "model", "channel", "mode"},
+	)
+
+	LoopGateWordsAfterFiringTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_loop_gate_words_after_firing_total",
+			Help: "Total number of words a looping generation produced after the loop gate detector fired",
+		},
+		[]string{"credential", "model", "channel", "mode"},
+	)
+
+	LoopGateCutsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_loop_gate_cuts_total",
+			Help: "Total number of streamed generations the loop gate cut short (enforce mode), by the looping text channel",
+		},
+		[]string{"credential", "model", "channel"},
+	)
+
+	LoopGateRestartsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_loop_gate_restarts_total",
+			Help: "Total number of looping streamed generations the loop gate restarted (enforce mode), by the looping text channel",
+		},
+		[]string{"credential", "model", "channel"},
+	)
+
+	LoopGateRecoveredTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_loop_gate_recovered_total",
+			Help: "Total number of restarted streamed generations that then finished without being cut",
+		},
+		[]string{"credential", "model"},
+	)
+
 	CredentialRPMCurrent = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "auto_ai_router_credential_rpm_current",
@@ -606,6 +654,55 @@ func (m *Metrics) RecordAbortedRequest(credential, endpoint, model string) {
 		return
 	}
 	AbortedRequestsTotal.WithLabelValues(credential, model, endpoint).Inc()
+}
+
+// RecordLoopGateStream counts a stream watched by the loop gate detector.
+func (m *Metrics) RecordLoopGateStream(credential, model, mode string) {
+	if !m.isEnabled() {
+		return
+	}
+	LoopGateStreamsTotal.WithLabelValues(credential, model, mode).Inc()
+}
+
+// RecordLoopGateFiring counts a loop gate firing on one text channel.
+func (m *Metrics) RecordLoopGateFiring(credential, model, channel, mode string) {
+	if !m.isEnabled() {
+		return
+	}
+	LoopGateFiringsTotal.WithLabelValues(credential, model, channel, mode).Inc()
+}
+
+// RecordLoopGateWordsAfterFiring adds the words a looping channel produced
+// after its firing, recorded once at the end of the stream.
+func (m *Metrics) RecordLoopGateWordsAfterFiring(credential, model, channel, mode string, words int) {
+	if !m.isEnabled() || words <= 0 {
+		return
+	}
+	LoopGateWordsAfterFiringTotal.WithLabelValues(credential, model, channel, mode).Add(float64(words))
+}
+
+// RecordLoopGateCut counts a stream the loop gate cut short.
+func (m *Metrics) RecordLoopGateCut(credential, model, channel string) {
+	if !m.isEnabled() {
+		return
+	}
+	LoopGateCutsTotal.WithLabelValues(credential, model, channel).Inc()
+}
+
+// RecordLoopGateRestart counts a looping generation the loop gate restarted.
+func (m *Metrics) RecordLoopGateRestart(credential, model, channel string) {
+	if !m.isEnabled() {
+		return
+	}
+	LoopGateRestartsTotal.WithLabelValues(credential, model, channel).Inc()
+}
+
+// RecordLoopGateRecovered counts a restarted generation that finished uncut.
+func (m *Metrics) RecordLoopGateRecovered(credential, model string) {
+	if !m.isEnabled() {
+		return
+	}
+	LoopGateRecoveredTotal.WithLabelValues(credential, model).Inc()
 }
 
 func (m *Metrics) UpdateCredentialRPM(credential string, rpm int) {

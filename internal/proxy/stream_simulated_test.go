@@ -1025,16 +1025,16 @@ func TestReassembleChatCompletion_Logprobs(t *testing.T) {
 	assert.Equal(t, "!", out.Choices[0].Logprobs.Content[1].Token)
 }
 
-// TestReassembleChatCompletion_NoLogprobsWhenAbsent verifies the logprobs field
-// is omitted entirely (not emitted as null) for an ordinary stream that never
-// carried it, keeping the plain non-stream shape.
+// TestReassembleChatCompletion_NoLogprobsWhenAbsent verifies logprobs is null
+// for an ordinary stream that never carried it, as the plain non-stream
+// response has it.
 func TestReassembleChatCompletion_NoLogprobsWhenAbsent(t *testing.T) {
 	stream := openAIChatSSE(
 		`{"id":"c1","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":"stop"}]}`,
 	)
 	body := reassembleChatCompletion([]byte(stream))
 	require.NotNil(t, body)
-	assert.NotContains(t, string(body), `"logprobs"`)
+	assert.Contains(t, string(body), `"logprobs":null`)
 }
 
 // TestReassembleChatCompletion_Annotations verifies url_citation annotations
