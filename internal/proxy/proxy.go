@@ -2157,9 +2157,18 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			"headers", debugRespHeaders)
 
 		isStreamingResp = IsStreamingResponse(resp)
-		// Bedrock HTTP errors must be buffered even when the content type is an
-		// event stream so the provider-specific error body can be classified.
-		if cred.Type == config.ProviderTypeBedrock && resp.StatusCode >= http.StatusBadRequest {
+		// An HTTP error status is an error, not a stream, even when the provider
+		// labels it event-stream: Google's SSE endpoints (Vertex's
+		// streamGenerateContent?alt=sse) answer an early 4xx/5xx with the error
+		// JSON under a text/event-stream Content-Type. Reading it as
+		// non-streaming lets the error be classified and, when retryable,
+		// replayed on the next credential; left streaming it hits the "Cannot
+		// retry streaming responses" break below, and a force_stream_for_ttft
+		// request (whose upstream is now the SSE endpoint) returns the
+		// provider's first 400 to the client with no retry at all. Bedrock's
+		// HTTP errors were already buffered for the same classification reason;
+		// this is the general case.
+		if resp.StatusCode >= http.StatusBadRequest {
 			isStreamingResp = false
 		}
 		// Some providers reject a streaming request with HTTP 200 and a stream whose
