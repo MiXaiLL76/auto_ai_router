@@ -15,8 +15,10 @@
 --
 -- Column list below matches internal/kafkalog.SpendEvent (internal/kafkalog/event.go)
 -- field-for-field, but for `attempts`, which air.attempts_kafka reads (at the
--- end of this file). Columns backed by a Go field with `,omitempty` are Nullable,
--- since JSONEachRow will see the key entirely absent (not `null`) for a zero value.
+-- end of this file), and `air_event_id`, which this schema does not store (see
+-- "Deduplication" in docs/litellm-integration/kafka_spend_log.md). Columns
+-- backed by a Go field with `,omitempty` are Nullable, since JSONEachRow will
+-- see the key entirely absent (not `null`) for a zero value.
 -- ClickHouse's `CREATE TABLE ... (LIKE other_table)` used as a parenthesized column
 -- list is not valid DDL (that's MySQL/Postgres syntax) and fails with
 -- SYNTAX_ERROR (code 62) -- both tables below spell out the same column list
