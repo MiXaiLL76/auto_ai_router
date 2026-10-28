@@ -24,9 +24,8 @@
 --
 -- Run it after 005_tool_usage_columns.sql: the Kafka table below carries 005's
 -- columns too. Pause AIR Kafka publishing before running this migration. Safe
--- to re-run on its own -- but this is currently the last migration in the
--- chain, so that's the only direction that's safe: once a migration after
--- this one exists, never run 006 again on its own afterwards, for the same
+-- to re-run on its own only while it is the last applied migration: never run
+-- 006 again once 007_air_event_id.sql has been applied, for the same
 -- reason 002_cache_web_search_columns.sql's doc comment spells out -- it would
 -- rebuild air.spend_logs_kafka from only 006's column set, narrowing it back
 -- below whatever the later migration added, and break ingestion with
