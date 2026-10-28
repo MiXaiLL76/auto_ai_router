@@ -230,6 +230,22 @@ func TestBuildKafkaSpendEvent_UpstreamAttemptsAndExit(t *testing.T) {
 	assert.Contains(t, string(payload), `"is_final":false},{"credential":"openai_primary","kind":"retry","http_status":0,"start_time":"`)
 }
 
+// TestBuildKafkaSpendEvent_AirEventIDIsServerEventID guards the dedup key:
+// request_id follows the provider's response id, which two calls can share,
+// while air_event_id must be the server-minted EventID of this call.
+func TestBuildKafkaSpendEvent_AirEventIDIsServerEventID(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	logCtx := testLogCtx(t)
+	logCtx.EventID = "evt-456"
+	logCtx.ClientResponseID = "chatcmpl-shared"
+
+	event := prx.buildKafkaSpendEvent(logCtx, "cred", "cred:model", "hash",
+		"", "", "", "", "api.openai.com", "success", 0, nil, 0, logCtx.StartTime)
+
+	assert.Equal(t, "chatcmpl-shared", event.RequestID)
+	assert.Equal(t, "evt-456", event.AirEventID)
+}
+
 func TestBuildKafkaSpendEvent_NilTokenUsage(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
 	logCtx := testLogCtx(t)
