@@ -87,6 +87,11 @@ type TokenUsage struct {
 	// us (xAI usage.cost_in_usd_ticks, aggregators' usage.cost). It is kept
 	// for reconciliation only and never added to the billed price.
 	ProviderCostUSD float64
+	// InitialPromptTokens is the prompt of the first upstream request when a
+	// generation was continued over several (Gemini long decode): PromptTokens
+	// then sums every request's prompt, which re-reads the output so far, while
+	// this stays the size of the context the client sent. Logged, never billed.
+	InitialPromptTokens int
 }
 
 // HasServerToolUsage reports whether the per-tool counters are worth logging:
@@ -290,6 +295,9 @@ func (tu *TokenUsage) MergeNonZero(src *TokenUsage) {
 	}
 	if src.ImageBilling != nil {
 		tu.ImageBilling = src.ImageBilling
+	}
+	if src.InitialPromptTokens != 0 {
+		tu.InitialPromptTokens = src.InitialPromptTokens
 	}
 	tu.MergeUsageExtensions(src)
 }

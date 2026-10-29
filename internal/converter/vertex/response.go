@@ -26,6 +26,9 @@ func VertexToOpenAI(vertexBody []byte, model string) ([]byte, error) {
 		Model:   model,
 		Choices: make([]openai.OpenAIChoice, 0),
 	}
+	var toolUse ToolUseSources
+	toolUse.Add(vertexResp.Candidates, vertexResp.ModelVersion)
+	keepCallIDs := UsesFunctionCallIDs(toolUse.AnsweringModel(model))
 
 	// Convert candidates to choices
 	for _, candidate := range vertexResp.Candidates {
@@ -52,7 +55,7 @@ func VertexToOpenAI(vertexBody []byte, model string) ([]byte, error) {
 				}
 				// Handle function calls from Vertex response
 				if part.FunctionCall != nil {
-					toolCall := convertGenaiToOpenAIFunctionCall(part.FunctionCall, part.ThoughtSignature)
+					toolCall := convertGenaiToOpenAIFunctionCall(part.FunctionCall, part.ThoughtSignature, keepCallIDs)
 					toolCalls = append(toolCalls, toolCall)
 				}
 				// Handle code execution results (model executed code and returned output)
@@ -124,11 +127,15 @@ func VertexToOpenAI(vertexBody []byte, model string) ([]byte, error) {
 
 	// Convert usage metadata
 	if vertexResp.UsageMetadata != nil {
-		var toolUse ToolUseSources
-		toolUse.Add(vertexResp.Candidates, vertexResp.ModelVersion)
 		openAIResp.Usage = convertVertexUsageMetadata(BillableUsageMetadata(vertexResp.UsageMetadata, toolUse, model))
+		if initial := InitialPromptTokens(vertexBody); initial > 0 {
+			if openAIResp.Usage.PromptTokensDetails == nil {
+				openAIResp.Usage.PromptTokensDetails = &openai.TokenDetails{}
+			}
+			openAIResp.Usage.PromptTokensDetails.InitialPromptTokens = int(initial)
+		}
 	}
-	if webSearchRequests := CountWebSearchRequests(vertexResp.Candidates); webSearchRequests > 0 {
+	if webSearchRequests := CountResponseWebSearchRequests(vertexBody, vertexResp.Candidates, toolUse.AnsweringModel(model)); webSearchRequests > 0 {
 		if openAIResp.Usage == nil {
 			openAIResp.Usage = &openai.OpenAIUsage{}
 		}
@@ -165,6 +172,10 @@ func mapFinishReason(vertexReason string) string {
 		return "stop"
 	case "MAX_TOKENS":
 		return "length"
+	case "CONTINUATION":
+		// Generation stopped at the per-request output cap and was not continued
+		// (see continuation.go): the answer is cut short, as with MAX_TOKENS.
+		return "length"
 	case "SAFETY", "RECITATION":
 		return "content_filter"
 	case "BLOCKLIST", "PROHIBITED_CONTENT", "SPII":
@@ -182,7 +193,7 @@ func mapFinishReason(vertexReason string) string {
 // Preserves thoughtSignature in provider_specific_fields for Gemini 3.x multi-turn conversations.
 // Per litellm >= 1.80.5 and Google Gemini 3 requirements, thoughtSignature must be preserved
 // when sending tool results back to maintain context and avoid 400 errors.
-func convertGenaiToOpenAIFunctionCall(genaiCall *genai.FunctionCall, thoughtSignature []byte) openai.OpenAIToolCall {
+func convertGenaiToOpenAIFunctionCall(genaiCall *genai.FunctionCall, thoughtSignature []byte, keepID bool) openai.OpenAIToolCall {
 	// Convert args to JSON string
 	argsJSON := "{}"
 	if genaiCall.Args != nil {
@@ -192,7 +203,7 @@ func convertGenaiToOpenAIFunctionCall(genaiCall *genai.FunctionCall, thoughtSign
 	}
 
 	toolCall := openai.OpenAIToolCall{
-		ID:   converterutil.GenerateID(),
+		ID:   functionCallID(genaiCall, keepID),
 		Type: "function",
 		Function: openai.OpenAIToolFunction{
 			Name:      genaiCall.Name,
@@ -215,4 +226,16 @@ func convertGenaiToOpenAIFunctionCall(genaiCall *genai.FunctionCall, thoughtSign
 
 	toolCall.ProviderSpecificFields = providerFields
 	return toolCall
+}
+
+// functionCallID returns the tool call ID the client sees for a function call. With
+// keepID (see UsesFunctionCallIDs) it is the ID Gemini gave the call, or a new one
+// when it gave none: the client sends it back as the tool call's and the tool
+// result's ID, and Gemini 4 refuses a function response whose ID is not its call's.
+// Without keepID it is always a new one.
+func functionCallID(call *genai.FunctionCall, keepID bool) string {
+	if keepID && call.ID != "" {
+		return call.ID
+	}
+	return converterutil.GenerateID()
 }

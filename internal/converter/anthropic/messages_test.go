@@ -661,6 +661,33 @@ func TestOpenAIToAnthropic_ClaudeModelOmitsThinkingByDefault(t *testing.T) {
 	assert.NotContains(t, request, "thinking")
 }
 
+// Thinking off on Claude 5 models, which think when "thinking" is omitted: Sonnet 5.5
+// takes between_tools ("disabled" is a 400 there), and the gateway default-off sends
+// nothing to a model that can't turn thinking off.
+func TestOpenAIToAnthropic_ThinkingOffOnClaude5(t *testing.T) {
+	convert := func(t *testing.T, body, model string, realBackend bool) map[string]interface{} {
+		t.Helper()
+		out, err := OpenAIToAnthropic([]byte(body), model, realBackend)
+		require.NoError(t, err)
+		var request map[string]interface{}
+		require.NoError(t, json.Unmarshal(out, &request))
+		return request
+	}
+	const plain = `{"model":"m","messages":[{"role":"user","content":"hi"}]}`
+	const none = `{"model":"m","reasoning_effort":"none","messages":[{"role":"user","content":"hi"}]}`
+	betweenTools := map[string]interface{}{"type": "between_tools"}
+
+	for _, realBackend := range []bool{true, false} {
+		got := convert(t, none, "claude-sonnet-5-5", realBackend)
+		assert.Equal(t, betweenTools, got["thinking"])
+		assert.NotContains(t, got, "temperature")
+	}
+	assert.Equal(t, betweenTools, convert(t, plain, "claude-sonnet-5-5", false)["thinking"], "gateway default-off")
+	for _, model := range []string{"claude-opus-5-5", "claude-fable-5-1", "claude-mythos-5-1"} {
+		assert.NotContains(t, convert(t, plain, model, false), "thinking", "%s can't turn thinking off", model)
+	}
+}
+
 func TestExtractSystemBlocks(t *testing.T) {
 	ephemeral := map[string]interface{}{"type": "ephemeral"}
 

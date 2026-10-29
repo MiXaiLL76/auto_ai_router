@@ -224,10 +224,11 @@ type TokenInfo struct {
 	TeamRPMLimit  *int64   // Team's RPM limit
 
 	// ==================== Organization Level (external budget) ====================
-	OrgSpend     *float64 // Organization's current spend
-	OrgMaxBudget *float64 // Organization's max budget from BudgetTable (nil = unlimited)
-	OrgTPMLimit  *int64   // Organization's TPM limit from BudgetTable
-	OrgRPMLimit  *int64   // Organization's RPM limit from BudgetTable
+	OrganizationAlias string   // Organization alias (optional) - user-friendly name
+	OrgSpend          *float64 // Organization's current spend
+	OrgMaxBudget      *float64 // Organization's max budget from BudgetTable (nil = unlimited)
+	OrgTPMLimit       *int64   // Organization's TPM limit from BudgetTable
+	OrgRPMLimit       *int64   // Organization's RPM limit from BudgetTable
 
 	// ==================== TeamMembership Level (external budget) ====================
 	TeamMemberSpend     *float64 // Team member's spend within team
@@ -244,6 +245,14 @@ type TokenInfo struct {
 
 	// Metadata
 	Metadata map[string]interface{}
+
+	// TeamMetadata and OrganizationMetadata are the key's team's and
+	// organization's own metadata columns, fetched in the same query as
+	// Metadata (QueryValidateTokenWithHierarchy) but kept separate: a
+	// feature flag (e.g. air_scopes) set at team/org level should apply to
+	// every key in that team/org, not be confused with the key's own.
+	TeamMetadata         map[string]interface{}
+	OrganizationMetadata map[string]interface{}
 
 	// Cost margin layers in priority order: key, then team and organization
 	// (or user for a personal key) (see CostMargin)
@@ -405,6 +414,12 @@ func (t *TokenInfo) Clone() *TokenInfo {
 	clone.Tags = append([]string(nil), t.Tags...)
 	if t.Metadata != nil {
 		clone.Metadata = cloneMetadataValue(t.Metadata).(map[string]interface{})
+	}
+	if t.TeamMetadata != nil {
+		clone.TeamMetadata = cloneMetadataValue(t.TeamMetadata).(map[string]interface{})
+	}
+	if t.OrganizationMetadata != nil {
+		clone.OrganizationMetadata = cloneMetadataValue(t.OrganizationMetadata).(map[string]interface{})
 	}
 	if t.CostMarginConfigs != nil {
 		clone.CostMarginConfigs = make([]CostMarginConfig, len(t.CostMarginConfigs))

@@ -54,6 +54,7 @@ CREATE TABLE air.spend_logs_kafka
     server_router_id LowCardinality(String),
     server_version String,
     server_commit String,
+    service_name LowCardinality(String),
 
     prompt_tokens UInt32,
     completion_tokens UInt32,
@@ -116,6 +117,7 @@ CREATE TABLE air.spend_logs_kafka
     key_alias Nullable(String),
     user_alias Nullable(String),
     team_alias Nullable(String),
+    organization_alias Nullable(String),
 
     requester_ip String,
     session_id String,
@@ -189,6 +191,7 @@ CREATE TABLE air.spend_logs
     server_router_id LowCardinality(String),
     server_version String,
     server_commit String,
+    service_name LowCardinality(String),
 
     prompt_tokens UInt32,
     completion_tokens UInt32,
@@ -251,6 +254,7 @@ CREATE TABLE air.spend_logs
     key_alias Nullable(String),
     user_alias Nullable(String),
     team_alias Nullable(String),
+    organization_alias Nullable(String),
 
     requester_ip String,
     session_id String,

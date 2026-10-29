@@ -49,6 +49,7 @@ type SpendEvent struct {
 	ServerRouterID string `json:"server_router_id"`
 	ServerVersion  string `json:"server_version"`
 	ServerCommit   string `json:"server_commit"`
+	ServiceName    string `json:"service_name"`
 
 	PromptTokens           int `json:"prompt_tokens"`
 	CompletionTokens       int `json:"completion_tokens"`
@@ -114,14 +115,15 @@ type SpendEvent struct {
 	// total_cost.
 	ProviderReportedCost *float64 `json:"provider_reported_cost,omitempty"`
 
-	APIKeyHash     string `json:"api_key_hash"`
-	UserID         string `json:"user_id"`
-	TeamID         string `json:"team_id"`
-	OrganizationID string `json:"organization_id"`
-	EndUser        string `json:"end_user"`
-	KeyAlias       string `json:"key_alias,omitempty"`
-	UserAlias      string `json:"user_alias,omitempty"`
-	TeamAlias      string `json:"team_alias,omitempty"`
+	APIKeyHash        string `json:"api_key_hash"`
+	UserID            string `json:"user_id"`
+	TeamID            string `json:"team_id"`
+	OrganizationID    string `json:"organization_id"`
+	EndUser           string `json:"end_user"`
+	KeyAlias          string `json:"key_alias,omitempty"`
+	UserAlias         string `json:"user_alias,omitempty"`
+	TeamAlias         string `json:"team_alias,omitempty"`
+	OrganizationAlias string `json:"organization_alias,omitempty"`
 
 	RequesterIP string  `json:"requester_ip"`
 	SessionID   string  `json:"session_id"`

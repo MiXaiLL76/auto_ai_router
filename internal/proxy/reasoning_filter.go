@@ -74,7 +74,7 @@ func normalizeThinkingMode(value interface{}) string {
 	switch strings.ToLower(strings.TrimSpace(kind)) {
 	case thinkingModeAdaptive:
 		return thinkingModeAdaptive
-	case thinkingModeDisabled:
+	case thinkingModeDisabled, "between_tools": // Sonnet 5.5's "disabled"
 		return thinkingModeDisabled
 	case thinkingModeEnabled:
 		return thinkingModeEnabled
@@ -181,7 +181,7 @@ func reasoningBudgetEnabled(value interface{}) bool {
 
 func reasoningStringEnabled(value string) bool {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "", "0", "false", "none", "disable", "disabled", "off":
+	case "", "0", "false", "none", "disable", "disabled", "off", "between_tools":
 		return false
 	default:
 		return true
