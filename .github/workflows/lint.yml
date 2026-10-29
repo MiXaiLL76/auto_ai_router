@@ -26,7 +26,7 @@ name: Lint
 #     already reported.
 
 env:
-  GOLANGCI_LINT_VERSION: v2.13.1
+  GOLANGCI_LINT_VERSION: v2.15.0
   MIN_COVERAGE: 72
 
 # Called from ci.yml (PRs, pushes to main/develop) and release.yml.
@@ -48,7 +48,7 @@ jobs:
     name: Checks
     runs-on: baremetal-mixaill
     container:
-      image: golang:1.27.1  # 1.27.2 export data v5 breaks golangci-lint v2.13.1 typecheck
+      image: golang:1.27.3
       # Named Docker volumes live on the host between runs: a warm Go
       # module/build cache without moving an Actions cache tarball around.
       # PRs run untrusted code as root, so they get their own volumes and
@@ -199,16 +199,9 @@ jobs:
         # Unbounded, govulncheck peaks at ~3.2 GB on this repo; with a soft
         # limit the GC keeps it at ~2.1 GB (slower: ~30s instead of ~10s).
         GOMEMLIMIT: 1500MiB
-        # The container stays on 1.27.1 for golangci-lint (see the image
-        # comment), but the stdlib advisories GO-2026-6609/6613 (net/http)
-        # and GO-2026-6610/6611/6612/6617 (net/http/internal/http2) are only
-        # fixed in go1.27.2. govulncheck reads the stdlib version from
-        # `go env GOVERSION` (x/vuln internal/scan/run.go), so pinning the
-        # toolchain here — and only here — makes the check analyze exactly
-        # what release builds ship: golang:1.27 and golang:1.27-alpine float
-        # to the newest 1.27.x patch. The toolchain is downloaded once into
-        # the persistent /go/pkg/mod volume.
-        GOTOOLCHAIN: go1.27.2
+        # Analyze the same patched standard library used by release builds,
+        # including the crypto/x509 mitigation in Go 1.27.3.
+        GOTOOLCHAIN: go1.27.3
       run: |
         status=0
         govulncheck ./... > govulncheck.log 2>&1 || status=$?

@@ -542,8 +542,8 @@ func (p *Proxy) writeFallbackResponse(
 	}
 	if logCtx != nil && logCtx.Status == "success" {
 		logCtx.RequestCompleted = true
-		p.setSessionBinding(logCtx.SessionID, modelID, fallbackCred.Name)
-		p.logger.DebugContext(r.Context(), "Session-sticky routing: updated session after failover",
+		p.bindSessionAfterSuccess(logCtx, modelID, fallbackCred.Name)
+		p.logger.DebugContext(r.Context(), "Session-sticky routing: failover served the session",
 			"session_id", logCtx.SessionID,
 			"old_credential", originalCredName,
 			"new_credential", fallbackCred.Name,

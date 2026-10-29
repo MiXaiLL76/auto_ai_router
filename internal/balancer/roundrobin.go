@@ -979,6 +979,36 @@ func (r *RoundRobin) BanUntil(credentialName, modelID string, statusCode int, un
 	r.fail2ban.BanUntil(credentialName, modelID, statusCode, until, reason)
 }
 
+// IsTopPriorityForModel reports whether credentialName sits in the best
+// (lowest-numbered) primary priority group among the non-fallback credentials
+// that serve modelID, are visible to visibility and are not in exclude. Bans and
+// rate limits do not matter: the tier is a property of the configuration, so a
+// credential that only serves because the primary tier is down is not "top".
+func (r *RoundRobin) IsTopPriorityForModel(credentialName, modelID string, exclude map[string]bool, visibility scope.Context) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	target := r.getCredentialByName(credentialName)
+	if target == nil || target.IsFallback {
+		return false
+	}
+	checkModels := modelID != "" && r.modelChecker != nil && r.modelChecker.IsEnabled()
+	mine := r.primaryPriority(target, modelID)
+	for i := range r.credentials {
+		c := &r.credentials[i]
+		if c.Name == credentialName || c.IsFallback || exclude[c.Name] || !c.VisibleTo(visibility) {
+			continue
+		}
+		if checkModels && !r.hasModel(c.Name, modelID, visibility) {
+			continue
+		}
+		if r.primaryPriority(c, modelID) < mine {
+			return false
+		}
+	}
+	return true
+}
+
 // HasCredential reports whether a credential with this name is configured
 // (static or DB-sourced).
 func (r *RoundRobin) HasCredential(credentialName string) bool {

@@ -66,8 +66,19 @@ func supportsPenalty(model string) bool {
 // It runs after every request source is merged, so none can put one back.
 // Exported for use by sub-packages (e.g. vertex/responses).
 func ApplyGenerationConstraints(cfg *genai.GenerationConfig, model string) {
-	if profile := lookupGeminiModelProfile(model); cfg != nil && profile != nil && profile.rejectsSamplingParams {
+	profile := lookupGeminiModelProfile(model)
+	if cfg == nil || profile == nil {
+		return
+	}
+	if profile.rejectsSamplingParams {
 		cfg.Temperature, cfg.TopP, cfg.TopK, cfg.Seed = nil, nil, nil, nil
 		cfg.ResponseLogprobs, cfg.Logprobs = false, nil
+	}
+	if profile.ignoresSamplingParams {
+		cfg.Temperature, cfg.TopP, cfg.TopK = nil, nil, nil
+	}
+	// n>1 was refused before the config was built (see request_rules.go).
+	if profile.singleCandidate {
+		cfg.CandidateCount = 0
 	}
 }

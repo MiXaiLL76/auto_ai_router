@@ -2,10 +2,92 @@ package anthropic
 
 import (
 	"encoding/json"
+	"regexp"
 	"strings"
 
 	converterutil "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 )
+
+// forcedToolChoiceRejected matches the models that answer a forced tool_choice
+// ({"type":"any"} or {"type":"tool"}) with a 400 on every platform: Claude Sonnet 5.5,
+// Opus 5.5, Fable 5.1 and Mythos 5.1, under any provider spelling.
+var forcedToolChoiceRejected = regexp.MustCompile(`claude-(?:(?:sonnet|opus)-5[.-]5|(?:fable|mythos)-5[.-]1)(?:[^0-9]|$)`)
+
+// RequestAPI is the API shape of a client request body.
+type RequestAPI int
+
+const (
+	ChatAPI RequestAPI = iota
+	MessagesAPI
+	ResponsesAPI
+)
+
+// ValidateToolChoice rejects a client tool_choice that reaches model as a forced choice
+// when model rejects those: the upstream 400 would reach the client masked and be
+// retried on other credentials. body is the client request in the api shape; a choice
+// is forced when the converter turns it into {"type":"any"} or {"type":"tool"}
+// (mapToolChoice and expandAllowedTools for Chat, the field itself for Messages,
+// responsesToolChoiceToAnthropic for Responses), so choices a converter drops pass.
+func ValidateToolChoice(body []byte, model string, api RequestAPI) error {
+	if !forcedToolChoiceRejected.MatchString(strings.ToLower(model)) {
+		return nil
+	}
+	var request struct {
+		Tools      []json.RawMessage `json:"tools"`
+		ToolChoice interface{}       `json:"tool_choice"`
+		ExtraBody  struct {
+			ToolChoice interface{} `json:"tool_choice"`
+		} `json:"extra_body"`
+	}
+	if json.Unmarshal(body, &request) != nil || len(request.Tools) == 0 {
+		return nil // malformed: fails later with its own error; no tools: tool_choice is dropped
+	}
+	var forced bool
+	switch api {
+	case MessagesAPI:
+		forced = anthropicToolChoiceForced(request.ToolChoice)
+	case ResponsesAPI:
+		forced = responsesToolChoiceForced(request.ToolChoice)
+	default:
+		choice := mapToolChoice(request.ToolChoice)
+		if request.ExtraBody.ToolChoice != nil { // OpenAIToAnthropic lets extra_body win
+			choice = request.ExtraBody.ToolChoice
+		}
+		forced = anthropicToolChoiceForced(choice)
+	}
+	if forced {
+		return converterutil.NewRequestValidationError("tool_choice",
+			`this model does not support a forced tool_choice ("required", "any" or a named tool): use "auto" and name the tool in the prompt`)
+	}
+	return nil
+}
+
+// anthropicToolChoiceForced reports whether an Anthropic tool_choice forces a tool call,
+// reading the allowed_tools form the way expandAllowedTools resolves it.
+func anthropicToolChoiceForced(choice interface{}) bool {
+	c, _ := choice.(map[string]interface{})
+	switch c["type"] {
+	case "any", "tool":
+		return true
+	case "allowed_tools":
+		return c["mode"] == "any"
+	}
+	return false
+}
+
+// responsesToolChoiceForced mirrors responsesToolChoiceToAnthropic (anthropic/responses):
+// "required", a function and a web search become forced choices; the other hosted tool
+// choices (mcp, file_search, custom, allowed_tools, ...) are dropped.
+func responsesToolChoiceForced(choice interface{}) bool {
+	switch c := choice.(type) {
+	case string:
+		return c == "required"
+	case map[string]interface{}:
+		choiceType, _ := c["type"].(string)
+		return choiceType == "function" || strings.HasPrefix(choiceType, "web_search")
+	}
+	return false
+}
 
 // mapToolChoice maps an OpenAI tool_choice value to the Anthropic tool_choice format.
 //

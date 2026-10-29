@@ -395,6 +395,19 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	metadata = addOrganizationPolicySpendMetadata(metadata, logCtx)
 
 	var completionStartTime *time.Time
+	if logCtx.StreamOutcome == "" && logCtx.CompletionStartTime.IsZero() {
+		// Only requests that never streamed qualify for the definitional
+		// fill: a non-streaming response delivers its first (and only) token
+		// when the response completes, so TTFT equals total latency. Real
+		// streaming paths (including the simulated force_stream_for_ttft
+		// reassembly) always stamp StreamOutcome — "completed", "stream_error"
+		// or "client_aborted" — by the time the log runs, so a stream that
+		// died before its first token, only carried keep-alives, or exhausted
+		// the TTFT detector budget keeps its honest null instead of a fake
+		// ttft_ms = duration_ms mixed into the same column as real TTFT
+		// measurements.
+		logCtx.CompletionStartTime = endTime
+	}
 	if !logCtx.CompletionStartTime.IsZero() {
 		completionStartTime = &logCtx.CompletionStartTime
 	}

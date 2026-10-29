@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -422,9 +423,10 @@ func TestBuildKafkaSpendEvent_KeyAliasesFromTokenInfo(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
 	logCtx := testLogCtx(t)
 	logCtx.TokenInfo = &litellmdb.TokenInfo{
-		KeyAlias:  "my-key",
-		UserAlias: "my-user",
-		TeamAlias: "my-team",
+		KeyAlias:          "my-key",
+		UserAlias:         "my-user",
+		TeamAlias:         "my-team",
+		OrganizationAlias: "my-org",
 	}
 
 	event := prx.buildKafkaSpendEvent(logCtx, "cred", "cred:model", "hash",
@@ -433,6 +435,29 @@ func TestBuildKafkaSpendEvent_KeyAliasesFromTokenInfo(t *testing.T) {
 	assert.Equal(t, "my-key", event.KeyAlias)
 	assert.Equal(t, "my-user", event.UserAlias)
 	assert.Equal(t, "my-team", event.TeamAlias)
+	assert.Equal(t, "my-org", event.OrganizationAlias)
+}
+
+// Without a token (the master key, a failed authentication) the organization
+// alias stays empty and is left out of the JSON, as the other aliases are;
+// service_name names the deployment on every event, beside the process's
+// server_router_id.
+func TestBuildKafkaSpendEvent_ServiceNameAndNoOrganization(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	logCtx := testLogCtx(t)
+	logCtx.TokenInfo = nil
+
+	event := prx.buildKafkaSpendEvent(logCtx, "cred", "cred:model", "hash",
+		"", "", "", "", "api.openai.com", "success", 0, nil, 0, logCtx.StartTime)
+
+	assert.Equal(t, "test-service", event.ServiceName)
+	assert.Equal(t, "test-version", event.ServerVersion)
+	assert.Empty(t, event.OrganizationAlias)
+
+	raw, err := json.Marshal(event)
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), `"service_name":"test-service"`)
+	assert.NotContains(t, string(raw), `"organization_alias"`)
 }
 
 func TestLogSpendToKafka_PublishesBuiltEvent(t *testing.T) {

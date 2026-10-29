@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
@@ -1035,6 +1036,94 @@ func TestPrepareRequestForCredential_ResponsesRecomputesProviderMode(t *testing.
 	// primary attempt used.
 	require.Contains(t, string(anthropicReq.proxyBody), `"messages"`)
 	require.NotContains(t, string(anthropicReq.proxyBody), `"input"`)
+}
+
+// A forced tool_choice for a model that rejects it is answered by the router as a 400
+// on every dispatch path, in the request's own API shape: the upstream 400 would come
+// back masked and be retried on other credentials.
+func TestPrepareRequestForCredential_RejectsForcedToolChoice(t *testing.T) {
+	cred := config.CredentialConfig{Name: "anthropic", Type: config.ProviderTypeAnthropic, APIKey: "key", BaseURL: "http://anthropic.local", RPM: 100}
+	prx := NewTestProxyBuilder().WithCredentials(cred).Build()
+
+	tests := []struct {
+		name, path, model, body string
+		isResponsesAPI, wantErr bool
+	}{
+		{name: "chat required", path: "/v1/chat/completions", model: "claude-sonnet-5-5", wantErr: true,
+			body: `{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"f"}}],"tool_choice":"required"}`},
+		{name: "messages any", path: "/v1/messages", model: "claude-opus-5-5", wantErr: true,
+			body: `{"model":"m","max_tokens":100,"messages":[{"role":"user","content":"hi"}],"tools":[{"name":"f","input_schema":{"type":"object"}}],"tool_choice":{"type":"any"}}`},
+		// The Responses function form has no "function" object: read as Chat it would pass.
+		{name: "responses function", path: "/v1/responses", model: "claude-fable-5-1", isResponsesAPI: true, wantErr: true,
+			body: `{"model":"m","input":"hi","tools":[{"type":"function","name":"f","parameters":{"type":"object"}}],"tool_choice":{"type":"function","name":"f"}}`},
+		{name: "older model passes", path: "/v1/chat/completions", model: "claude-sonnet-4-5",
+			body: `{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"f"}}],"tool_choice":"required"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest("POST", tt.path, nil)
+			body := []byte(tt.body)
+			_, err := prx.prepareRequestForCredential(req, body, body, tt.model, tt.model, tt.path,
+				false, &cred, tt.isResponsesAPI, false, false)
+			if !tt.wantErr {
+				require.NoError(t, err)
+				return
+			}
+			var validationErr *converterutil.RequestValidationError
+			require.ErrorAs(t, err, &validationErr)
+			assert.Contains(t, err.Error(), "tool_choice")
+		})
+	}
+}
+
+// Thinking off that Sonnet 5.5 rejects is a router 400 on the Messages round trip too,
+// not only on passthrough: the upstream 400 would come back masked and be retried.
+func TestPrepareRequestForCredential_RejectsInvalidThinkingOffOnEveryMessagesPath(t *testing.T) {
+	logger := testhelpers.NewTestLogger()
+	disabled := false
+	creds := []config.CredentialConfig{
+		{Name: "anthropic", Type: config.ProviderTypeAnthropic, APIKey: "key", BaseURL: "http://anthropic.local", RPM: 100},
+		{Name: "comet-openai", Type: config.ProviderTypeCometAPI, OpenAIProtocol: true, APIKey: "key", BaseURL: "http://comet.local", RPM: 100},
+		{Name: "openai", Type: config.ProviderTypeOpenAI, APIKey: "key", BaseURL: "http://openai.local", RPM: 100},
+	}
+	paths := []struct {
+		name, modelID string
+		cred          config.CredentialConfig
+		passthrough   bool
+	}{
+		{"anthropic passthrough", "claude-sonnet-5-5", creds[0], true},
+		{"anthropic round trip", "sonnet-no-passthrough", creds[0], false},
+		{"comet openai_proto round trip", "claude-sonnet-5-5", creds[1], false},
+		{"openai round trip", "claude-sonnet-5-5", creds[2], false},
+	}
+	bodies := []struct{ name, fields, param string }{
+		{"effort above high", `,"thinking":{"type":"disabled"},"output_config":{"effort":"max"}`, "output_config.effort"},
+		{"extra thinking field", `,"thinking":{"type":"between_tools","display":"summarized"}`, "thinking"},
+	}
+
+	mm := models.New(logger, 50, []config.ModelRPMConfig{{Name: "sonnet-no-passthrough", PassthroughMessages: &disabled}})
+	mm.LoadModelsFromConfig(creds)
+	builder := NewTestProxyBuilder().WithCredentials(creds...)
+	builder.config.ModelManager = mm
+	prx := builder.Build()
+
+	for _, path := range paths {
+		t.Run(path.name, func(t *testing.T) {
+			cred := path.cred
+			valid := []byte(`{"model":"claude-sonnet-5-5","max_tokens":100,"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"disabled"},"output_config":{"effort":"high"}}`)
+			prepared, err := prx.prepareRequestForCredential(httptest.NewRequest("POST", "/v1/messages", nil),
+				valid, valid, path.modelID, "claude-sonnet-5-5", "/v1/messages", false, &cred, false, false, false)
+			require.NoError(t, err)
+			require.Equal(t, path.passthrough, prepared.passthroughMessages)
+
+			for _, tt := range bodies {
+				body := []byte(`{"model":"claude-sonnet-5-5","max_tokens":100,"messages":[{"role":"user","content":"hi"}]` + tt.fields + `}`)
+				_, err := prx.prepareRequestForCredential(httptest.NewRequest("POST", "/v1/messages", nil),
+					body, body, path.modelID, "claude-sonnet-5-5", "/v1/messages", false, &cred, false, false, false)
+				testhelpers.RequireValidationError(t, err, tt.param, "")
+			}
+		})
+	}
 }
 
 func TestProxyRequest_ResponsesRetryRecomputesProviderMode(t *testing.T) {

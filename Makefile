@@ -6,7 +6,7 @@ BUILD_DIR=.
 CMD_DIR=./cmd/server
 GO=go
 GOFLAGS=-v
-GOLANGCI_LINT_VERSION ?= v2.13.1
+GOLANGCI_LINT_VERSION ?= v2.15.0
 GOLANGCI_LINT_VERSION_NO_V=$(patsubst v%,%,$(GOLANGCI_LINT_VERSION))
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
@@ -179,10 +179,9 @@ lint:
 ## exactly as it fails the Lint workflow.
 vuln:
 	@echo "Running govulncheck..."
-	# GOTOOLCHAIN mirrors the CI step: stdlib advisories are fixed per 1.27.x
-	# patch release, so analyze with the newest patch regardless of the Go
-	# installed locally, the same toolchain the release images float to.
-	export PATH=/usr/local/go/bin:$$PATH && GOTOOLCHAIN=go1.27.2 $(GO) run golang.org/x/vuln/cmd/govulncheck@latest ./...
+	# Analyze the same patched standard library as CI and release builds,
+	# including the crypto/x509 mitigation in Go 1.27.3.
+	export PATH=/usr/local/go/bin:$$PATH && GOTOOLCHAIN=go1.27.3 $(GO) run golang.org/x/vuln/cmd/govulncheck@latest ./...
 	@echo "Vuln check complete"
 
 ## install-lint: Install pinned golangci-lint

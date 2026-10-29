@@ -1,6 +1,10 @@
 package openai
 
-import "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
+import (
+	"encoding/json"
+
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
+)
 
 // Request types
 
@@ -120,6 +124,10 @@ type OpenAIResponseMessage struct {
 	Refusal          string           `json:"refusal,omitempty"`
 	ReasoningContent string           `json:"reasoning_content,omitempty"`
 	Images           []ImageData      `json:"images,omitempty"` // custom extension for Gemini image responses
+	// ThinkingBlocks carries Anthropic thinking/redacted_thinking blocks with their
+	// signature/data and list index, for the client to echo back as
+	// OpenAIMessage.ThinkingBlocks.
+	ThinkingBlocks interface{} `json:"thinking_blocks,omitempty"`
 }
 
 type OpenAIToolCall struct {
@@ -159,6 +167,9 @@ type TokenDetails struct {
 	// prompt_tokens_details.cache_type.
 	CacheType string `json:"cache_type,omitempty"`
 	converterutil.CachingTokensExtension
+	// InitialPromptTokens is the context the client sent when a generation ran
+	// over several upstream requests; see converter.TokenUsage.InitialPromptTokens.
+	InitialPromptTokens int `json:"initial_prompt_tokens,omitempty"`
 }
 
 // CacheWrite returns the cache-write total and its 5m / 1h split under any
@@ -232,9 +243,30 @@ type OpenAIStreamingChunk struct {
 }
 
 type OpenAIStreamingChoice struct {
-	Index        int                  `json:"index"`
-	Delta        OpenAIStreamingDelta `json:"delta"`
-	FinishReason *string              `json:"finish_reason"`
+	Index        int                      `json:"index"`
+	Delta        OpenAIStreamingDelta     `json:"delta"`
+	FinishReason *string                  `json:"finish_reason"`
+	Logprobs     *OpenAIStreamingLogprobs `json:"logprobs,omitempty"`
+	// Message carries choices[].message.annotations: some aggregators (e.g.
+	// Requesty) inject url_citation annotations into an SSE chunk under
+	// "message" instead of "delta".
+	Message *OpenAIStreamingMessageAnnotations `json:"message,omitempty"`
+}
+
+// OpenAIStreamingMessageAnnotations is the non-standard choices[].message
+// carrier described on OpenAIStreamingChoice.Message above.
+type OpenAIStreamingMessageAnnotations struct {
+	Annotations []json.RawMessage `json:"annotations,omitempty"`
+}
+
+// OpenAIStreamingLogprobs carries the per-chunk logprobs of one streaming
+// choice: an OpenAI-compatible upstream with logprobs=true sends one content
+// entry per token, in the same shape the non-stream response uses
+// (bytes/logprob/token/top_logprobs). Kept as raw JSON so no provider field is
+// dropped when the stream is reassembled into a single non-stream body.
+type OpenAIStreamingLogprobs struct {
+	Content []json.RawMessage `json:"content,omitempty"`
+	Refusal json.RawMessage   `json:"refusal,omitempty"`
 }
 
 type OpenAIStreamingDelta struct {
@@ -244,6 +276,11 @@ type OpenAIStreamingDelta struct {
 	Refusal          string                    `json:"refusal,omitempty"`
 	ReasoningContent string                    `json:"reasoning_content,omitempty"`
 	Images           []ImageData               `json:"images,omitempty"`
+	ThinkingBlocks   interface{}               `json:"thinking_blocks,omitempty"` // see OpenAIResponseMessage.ThinkingBlocks
+	// Annotations carries url_citation (and similar) entries an
+	// OpenAI-compatible upstream streams on the delta, one or more per chunk,
+	// in the same shape the non-stream message.annotations uses.
+	Annotations []json.RawMessage `json:"annotations,omitempty"`
 }
 
 type OpenAIStreamingToolCall struct {

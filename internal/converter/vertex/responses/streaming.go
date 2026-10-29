@@ -42,14 +42,14 @@ type vertexStreamAccumulator struct {
 	// Completed output items (for building the final Response)
 	// outputItems []responses.OutputItem
 
-	// Usage from the final chunk
-	usage *genai.GenerateContentResponseUsageMetadata
+	// Usage of the generation, over all its upstream requests when it was continued
+	usage vertex.ContinuationUsage
 	// Confirmed Google Search queries from grounding metadata.
-	webSearchQueries map[string]struct{}
+	webSearch vertex.WebSearchQueries
 	// What fed the tool-use prompt tokens, for billing them.
 	toolUse vertex.ToolUseSources
 
-	// Finish reason (string)
+	// Finish reason (string); CONTINUATION until the next upstream request answers
 	finishReason string
 
 	// SSE state
@@ -92,11 +92,10 @@ func TransformVertexStreamToResponses(
 		responseID = generateResponseID()
 	}
 	acc := &vertexStreamAccumulator{
-		responseID:       responseID,
-		model:            model,
-		createdAt:        time.Now().Unix(),
-		meta:             meta,
-		webSearchQueries: make(map[string]struct{}),
+		responseID: responseID,
+		model:      model,
+		createdAt:  time.Now().Unix(),
+		meta:       meta,
 	}
 
 	scanner := bufio.NewScanner(reader)
@@ -123,28 +122,38 @@ func TransformVertexStreamToResponses(
 		}
 
 		if chunk.UsageMetadata != nil {
-			acc.usage = chunk.UsageMetadata
+			acc.usage.Observe(chunk.UsageMetadata)
 		}
 
 		if len(chunk.Candidates) == 0 {
 			continue
 		}
-		vertex.AddWebSearchQueries(acc.webSearchQueries, chunk.Candidates)
+		acc.webSearch.Add(chunk.Candidates)
 		acc.toolUse.Add(chunk.Candidates, chunk.ModelVersion)
 
 		candidate := chunk.Candidates[0]
-		if vertex.HasFinishReason(candidate) {
+		switch {
+		case vertex.HasFinishReason(candidate):
 			acc.finishReason = string(candidate.FinishReason)
+		case vertex.IsContinuation(acc.finishReason):
+			// The next upstream request of a continued generation is answering.
+			acc.finishReason = ""
 		}
 
-		if candidate.Content == nil {
-			continue
-		}
-
-		for _, part := range candidate.Content.Parts {
-			if err := processPart(writer, acc, part); err != nil {
-				return err
+		if candidate.Content != nil {
+			for _, part := range candidate.Content.Parts {
+				if err := processPart(writer, acc, part); err != nil {
+					return err
+				}
 			}
+		}
+
+		// The upstream request stopped at its output cap and the generation goes
+		// on in the next one (see vertex/continuation.go): its usage and searches
+		// add up with the next request's.
+		if vertex.IsContinuation(string(candidate.FinishReason)) {
+			acc.usage.CloseRequest()
+			acc.webSearch.CloseResponse()
 		}
 	}
 
@@ -175,7 +184,7 @@ func processPart(w io.Writer, acc *vertexStreamAccumulator, part *genai.Part) er
 		return processThoughtDelta(w, acc, part.Text)
 
 	case part.FunctionCall != nil:
-		return processFunctionCallPart(w, acc, part.FunctionCall)
+		return processFunctionCallPart(w, acc, part.FunctionCall, part.ThoughtSignature)
 
 	case part.ExecutableCode != nil:
 		return processCodePart(w, acc, part.ExecutableCode)
@@ -262,7 +271,7 @@ func processThoughtDelta(w io.Writer, acc *vertexStreamAccumulator, delta string
 		responses.BuildReasoningSummaryTextDeltaEvent(acc.reasoningItemID, acc.reasoningOutputIndex, 0, delta), acc)
 }
 
-func processFunctionCallPart(w io.Writer, acc *vertexStreamAccumulator, fc *genai.FunctionCall) error {
+func processFunctionCallPart(w io.Writer, acc *vertexStreamAccumulator, fc *genai.FunctionCall, thoughtSignature []byte) error {
 	if !acc.headerEmitted {
 		if err := emitVertexHeaderEvents(w, acc); err != nil {
 			return err
@@ -274,10 +283,7 @@ func processFunctionCallPart(w io.Writer, acc *vertexStreamAccumulator, fc *gena
 			argsJSON = string(b)
 		}
 	}
-	callID := fc.ID
-	if callID == "" {
-		callID = generateItemID("call_")
-	}
+	callID := encodeCallID(fc, thoughtSignature, acc.toolUse.AnsweringModel(acc.model))
 	itemID := generateItemID("fc_")
 	outputIdx := currentOutputIndex(acc)
 
@@ -623,10 +629,13 @@ func buildVertexCompletedResponse(acc *vertexStreamAccumulator) *responses.Respo
 	}
 
 	var usage *responses.Usage
-	if acc.usage != nil {
-		usage = usageMetadataToUsage(vertex.BillableUsageMetadata(acc.usage, acc.toolUse, acc.model))
+	if total := acc.usage.Total(); total != nil {
+		usage = usageMetadataToUsage(vertex.BillableUsageMetadata(total, acc.toolUse, acc.model))
+		if acc.usage.Continued() {
+			usage.InputTokensDetails.InitialPromptTokens = int(acc.usage.InitialPromptTokens)
+		}
 	}
-	webSearchRequests := len(acc.webSearchQueries)
+	webSearchRequests := acc.webSearch.Count(acc.toolUse.AnsweringModel(acc.model))
 	if usage == nil && webSearchRequests > 0 {
 		usage = &responses.Usage{}
 	}
@@ -660,7 +669,9 @@ func buildVertexCompletedResponse(acc *vertexStreamAccumulator) *responses.Respo
 
 func vertexFinishReasonToStatus(reason string) (string, *responses.IncompleteDetails) {
 	switch reason {
-	case string(genai.FinishReasonMaxTokens):
+	case string(genai.FinishReasonMaxTokens), string(genai.FinishReasonContinuation):
+		// CONTINUATION here: the stream ended at a request's output cap and was
+		// not continued.
 		return "incomplete", &responses.IncompleteDetails{Reason: "max_output_tokens"}
 	case string(genai.FinishReasonSafety), string(genai.FinishReasonRecitation):
 		return "incomplete", &responses.IncompleteDetails{Reason: "content_filter"}

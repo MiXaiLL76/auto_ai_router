@@ -135,7 +135,7 @@ func TestConvertVertexFunctionCallToStreamingOpenAI(t *testing.T) {
 		}
 		thoughtSig := []byte("test-signature")
 
-		result := convertVertexFunctionCallToStreamingOpenAI(fc, thoughtSig, 0)
+		result := convertVertexFunctionCallToStreamingOpenAI(fc, thoughtSig, 0, false)
 
 		assert.Equal(t, 0, result.Index)
 		assert.Equal(t, "function", result.Type)
@@ -155,7 +155,7 @@ func TestConvertVertexFunctionCallToStreamingOpenAI(t *testing.T) {
 			Args: nil,
 		}
 
-		result := convertVertexFunctionCallToStreamingOpenAI(fc, nil, 1)
+		result := convertVertexFunctionCallToStreamingOpenAI(fc, nil, 1, false)
 
 		assert.Equal(t, 1, result.Index)
 		require.NotNil(t, result.Function)
@@ -169,7 +169,7 @@ func TestConvertVertexFunctionCallToStreamingOpenAI(t *testing.T) {
 			Args: map[string]interface{}{},
 		}
 
-		result := convertVertexFunctionCallToStreamingOpenAI(fc, nil, 0)
+		result := convertVertexFunctionCallToStreamingOpenAI(fc, nil, 0, false)
 
 		require.NotNil(t, result.ProviderSpecificFields)
 		assert.Equal(t, true, result.ProviderSpecificFields["skip_thought_signature_validator"])
@@ -181,7 +181,7 @@ func TestConvertVertexFunctionCallToStreamingOpenAI(t *testing.T) {
 			Args: map[string]interface{}{},
 		}
 
-		result := convertVertexFunctionCallToStreamingOpenAI(fc, []byte{}, 0)
+		result := convertVertexFunctionCallToStreamingOpenAI(fc, []byte{}, 0, false)
 
 		require.NotNil(t, result.ProviderSpecificFields)
 		assert.Equal(t, true, result.ProviderSpecificFields["skip_thought_signature_validator"])
@@ -193,7 +193,7 @@ func TestConvertVertexFunctionCallToStreamingOpenAI(t *testing.T) {
 			Args: map[string]interface{}{},
 		}
 
-		result := convertVertexFunctionCallToStreamingOpenAI(fc, nil, 5)
+		result := convertVertexFunctionCallToStreamingOpenAI(fc, nil, 5, false)
 		assert.Equal(t, 5, result.Index)
 	})
 }

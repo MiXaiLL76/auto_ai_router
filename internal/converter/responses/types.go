@@ -267,6 +267,9 @@ type InputDetails struct {
 	// CacheType is Alibaba's explicit cache mode marker ("ephemeral") from
 	// prompt_tokens_details.cache_type; see converter.TokenUsage.CacheType.
 	CacheType string `json:"cache_type,omitempty"`
+	// InitialPromptTokens is the context the client sent when a generation ran
+	// over several upstream requests; see converter.TokenUsage.InitialPromptTokens.
+	InitialPromptTokens int `json:"initial_prompt_tokens,omitempty"`
 }
 
 // CacheCreationTokenDetails preserves Anthropic's cache-write TTL breakdown.
@@ -368,6 +371,20 @@ type OutputItem struct {
 
 	// custom_tool_call: JSON input to the custom tool
 	Input interface{} `json:"input,omitempty"`
+}
+
+// MarshalJSON keeps "summary":[] on a reasoning item with no summary (one carrying
+// only encrypted_content): the schema requires the list, and strict clients such as
+// Codex drop a reasoning item without it.
+func (o OutputItem) MarshalJSON() ([]byte, error) {
+	type plain OutputItem
+	if o.Type != "reasoning" || len(o.Summary) > 0 {
+		return json.Marshal(plain(o))
+	}
+	return json.Marshal(struct {
+		plain
+		Summary []OutputContent `json:"summary"`
+	}{plain(o), []OutputContent{}})
 }
 
 // ===== Response Types =====

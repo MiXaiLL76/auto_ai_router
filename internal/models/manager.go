@@ -839,7 +839,14 @@ func (m *Manager) IsResponsesOnlyForCredential(modelID, credential string) bool 
 //     in openai_proto (ProviderTypeOpenAI) or google_proto (ProviderTypeGemini)
 //     mode already reports a non-Anthropic wire protocol here and defaults to
 //     false — /v1/messages is converted to that provider's format instead.
+//
+// Bedrock, Vertex AI and Gemini never pass through: their converters can't send a native
+// Messages body nor read their answer as one, so an override can't turn it on for them.
 func (m *Manager) IsPassthroughMessagesForProvider(modelID string, providerType config.ProviderType) bool {
+	switch providerType {
+	case config.ProviderTypeBedrock, config.ProviderTypeVertexAI, config.ProviderTypeGemini:
+		return false
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if v, ok := m.modelPassthroughMessages[modelID]; ok && v != nil {

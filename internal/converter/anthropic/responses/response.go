@@ -110,23 +110,10 @@ func anthropicContentToOutputItems(blocks []anthropic.ContentBlock) ([]responses
 			// either); their content surfaces via the text block's
 			// citations above instead — nothing to do here.
 
-		case "thinking":
+		case "thinking", "redacted_thinking":
 			// Flush any accumulated text first.
 			flushMessage()
-			reasoningItem := responses.OutputItem{
-				Type:   "reasoning",
-				ID:     responses.GenerateItemID("rs_"),
-				Status: "completed",
-			}
-			if block.Thinking != "" {
-				reasoningItem.Summary = []responses.OutputContent{
-					{Type: "summary_text", Text: block.Thinking},
-				}
-			}
-			if block.Signature != "" {
-				reasoningItem.EncryptedContent = block.Signature
-			}
-			output = append(output, reasoningItem)
+			output = append(output, reasoningOutputItem(responses.GenerateItemID("rs_"), block.Thinking, thinkingEncryptedContent(block)))
 
 		case "tool_use":
 			// Flush accumulated text before a tool call.

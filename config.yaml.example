@@ -6,11 +6,14 @@ server:
   request_timeout: 60s  # Request timeout (default: 60s)
   write_timeout: 60s  # HTTP server write timeout (default: 60s)
   idle_timeout: 2m  # HTTP server idle timeout (default: 2*write_timeout)
+  shutdown_delay: 5s  # After SIGTERM, keep serving while not ready so the load balancer stops sending requests (default: 5s)
+  shutdown_timeout: 30s  # Then give in-flight requests this long to finish before cancelling them; set it to the longest a request may run (default: 30s)
   idle_conn_timeout: 120s  # HTTP idle connection timeout (default: 120s)
   max_idle_conns: 200  # Maximum idle connections (default: 200)
   max_idle_conns_per_host: 20  # Maximum idle connections per host (default: 20)
   http2_idle_ping_timeout: 15s  # How long a pooled provider HTTP/2 connection may go without any frame before a liveness PING is sent (default: 15s; a negative duration, e.g. -1s, disables HTTP/2 ping liveness checking — either this or http2_ping_timeout alone turns it off)
   http2_ping_timeout: 10s  # How long to wait for a liveness PING to be acked before closing the connection (default: 10s; a negative duration, e.g. -1s, disables the check too)
+  max_connection_lifetime: 0s  # How long a provider connection takes new requests; it closes once its last request ends, so that a proxy on the way can drain (default: 0s, reused for as long as requests come; e.g. 10m)
   logging_level: info  # Options: info, debug, error (default: info)
   stdout_logs_enabled: true  # Write logs to stdout (default: true); set false to ship logs only via OTEL
   master_key: "sk-your-master-key-here"  # Required: Master key for authentication
@@ -18,6 +21,7 @@ server:
   strict_all_team_models_acl: false  # Enforce key/team/user model ACLs (default: false)
   credential_name_as_team_id: false  # Use provider credential name as team_id when auth has no team_id (default: false)
   tiktoken_enabled: true  # Local fallback token estimation when a provider omits usage (default: true)
+  # force_stream_for_ttft: false  # Force "stream": true upstream for chat-shaped non-streaming requests (/v1/chat/completions, /v1/messages, converted /v1/responses) and reassemble the response back into non-stream JSON, so every request gets a measurable TTFT. Native/passthrough Responses API and responses_only requests are exempt. (default: false)
   model_prices_link: ""  # Optional: URL or file path to model prices JSON (supports os.environ/VAR_NAME)
   model_prices_sync_interval: 5m  # How often model prices are re-fetched from model_prices_link (default: 5m)
   response_headers:
@@ -52,7 +56,7 @@ otel:
   endpoint: "localhost:4317"  # OTLP collector: host:port for grpc, host:port or URL for http (defaults: 4317 grpc / 4318 http)
   protocol: "grpc"  # grpc | http (http/protobuf)
   insecure: true  # Disable TLS for the exporter connection (default: true)
-  service_name: "auto-ai-router"  # Reported as service.name resource attribute
+  service_name: "auto-ai-router"  # Reported as service.name resource attribute and as service_name on Kafka spend events
   logs_enabled: true  # Ship slog records via OTLP in addition to stdout
   traces_enabled: true  # Server/client spans + traceparent propagation to providers and chained routers
   metric_export_interval: 60s  # OTLP metric push interval. When otel.enabled is true, metrics are always pushed via OTLP (bridged from the Prometheus registry), independently of the pull-based /metrics endpoint (which is gated by monitoring.prometheus_enabled).
@@ -311,3 +315,67 @@ litellm_db:
   log_retry_delay: 1s  # Spend log retry delay (default: 1s)
   daily_spend_timezone: "Europe/Moscow"  # Timezone of the daily spend tables (default: UTC)
   enable_cost_margin: false  # Apply metadata.cost_margin_config markup of key/user/team/org (default: false)
+
+# Optional: POST /v1/search/yandex passthrough to Yandex Cloud's Search API
+# (WebSearch.Search, v2/web/search). The router injects its own Yandex
+# api_key/folder_id and never forwards the client's own
+# Authorization/X-Forwarded-For upstream, so Yandex only ever sees the
+# router's egress IP. Requires litellm_db (spend accounting + the existing
+# client-key auth). Also needs redis for the shared RPS/hourly quota below
+# (coordinated across every router replica) — with redis.enabled: false (or
+# Redis unreachable at startup) the endpoint simply stays unwired (404;
+# check the startup logs) rather than taking the whole router down.
+# Enabling this section alone does NOT expose the endpoint to every client:
+# each key/team/organization must additionally opt in via its LiteLLM
+# metadata, e.g. metadata.air_scopes: ["yandex_search"].
+yandex_search:
+  enabled: false
+  api_key: "os.environ/YANDEX_SEARCH_API_KEY"
+  folder_id: "os.environ/YANDEX_SEARCH_FOLDER_ID"
+  base_url: "https://searchapi.api.cloud.yandex.net"
+  # proxy_url: "os.environ/YANDEX_SEARCH_PROXY_URL"  # Optional: route the router's own outbound call through an upstream HTTP/HTTPS proxy
+  rpm: 60              # Per-key request-per-minute limit for this endpoint (independent of model RPM)
+  rps: 1                # Yandex's own quota for the whole folder_id, shared across every replica via Redis — verify the catalog's actual number before launch
+  hourly_limit: 10000    # Yandex's hourly quota for the whole folder_id, shared the same way
+  redis_key_prefix: "yssq:"  # Dedicated Redis namespace for the shared quota counters
+  request_timeout: 10s
+  max_body_bytes: 16384
+  pricing:
+    # Cost figures are already marked up (rate) and converted to USD — do
+    # not multiply cost_per_query by rate again. The day/night rate is
+    # selected by the wall-clock time (in pricing_timezone) at which the
+    # router sends the request upstream. Example below matches Yandex's
+    # documented RUB price list as of 2026-10-23, an 85 RUB/$1 FX rate, and
+    # a 1.3x markup — all three are config, re-derive and update them when
+    # Yandex's price list or the FX rate moves.
+    exchange_rate_rub_per_usd: 85
+    rate: 1.3
+    pricing_timezone: "Europe/Moscow"
+    night_start: "00:00"
+    night_end: "08:00"
+    # enabled_operations is the actual runtime gate on which Yandex Search
+    # operation this deployment may serve: a price existing in
+    # cost_per_query below does NOT by itself enable the operation it
+    # prices — this router implements web_sync (POST /v1/search/yandex)
+    # only, so it's the only entry that belongs here today. The other
+    # cost_per_query entries document Yandex's price list for operations
+    # with no adapter yet (async search, image search, smart snippets,
+    # generative search, Wordstat) — listing their price now lets this
+    # config be reviewed ahead of the code that would use it, without
+    # enabling anything.
+    enabled_operations: ["web_sync"]
+    cost_per_query:
+      web_sync:
+        day: 0.007463529412
+        night: 0.005597647059
+      # Catalog for future adapters — not enabled, see enabled_operations above.
+      # web_async:
+      #   day: 0.000466470588    # Yandex docs currently list this as available 00:00-06:00 MSK only
+      #   night: 0.000388623529
+      # image_search: 0.013994117647
+      # smart_snippets_ru: 0.022941176471  # select by metadata.fields.x-genesis-info-context: on, never auto-added to web_sync
+      # generative_search_sync: 0.077694117647
+      # wordstat_get_top: 0.000305882353
+      # wordstat_get_dynamics: 0.000305882353
+      # wordstat_get_regions_distribution: 0.000764705882
+      # wordstat_get_regions_tree: 0  # Yandex's only free operation
