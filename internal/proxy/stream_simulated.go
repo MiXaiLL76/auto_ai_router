@@ -421,6 +421,12 @@ func (p *Proxy) handleSimulatedNonStream(
 				break
 			}
 			resp = sendOutcome.resp
+			// Track the URL this credential actually sent to, so a failure on a
+			// retried attempt reports the credential that produced it (targetURL
+			// is captured by value at attempt 0 otherwise).
+			if sendOutcome.targetURL != "" {
+				targetURL = sendOutcome.targetURL
+			}
 		}
 
 		result = p.attemptSimulatedNonStream(resp, prepared, cred, modelID, logCtx)
@@ -487,6 +493,10 @@ func (p *Proxy) finishSimulatedNonStream(
 		p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerLabel, result.httpStatus, !tokenUsageOptions.AudioInputIncludesCachedAudio)
 		clientBody, _, _ := clientResponseBodyForCredential(result.httpStatus, result.httpBody, cred, modelID, logCtx.RequestID)
 		logCtx.ClientResponseBody = string(clientBody)
+		// A surfaced 429 must carry a Retry-After header, exactly as the main
+		// loop's final-error path does (ensureRetryAfterOn429): a client told to
+		// back off with no hint will otherwise hammer the pool immediately.
+		p.ensureRetryAfterOn429(w, result.httpStatus, nil, modelID, logCtx.Scope)
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(clientBody)))
 		w.WriteHeader(result.httpStatus)

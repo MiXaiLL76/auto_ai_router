@@ -1697,3 +1697,40 @@ func TestHandleSimulatedNonStream_MidStreamBreakRecordsCredentialError(t *testin
 	// would ban it after maxAttempts; here one call is below the threshold, so
 	// the observable surface is the metric above.
 }
+
+// TestHandleSimulatedNonStream_Surfaced429CarriesRetryAfter: a 429 that the
+// retry chain surfaces to the client (every remaining credential answered a
+// retryable error) must carry a Retry-After header, exactly as the main loop's
+// final-error path adds via ensureRetryAfterOn429 -- otherwise a client told to
+// back off has no hint and hammers the pool immediately.
+func TestHandleSimulatedNonStream_Surfaced429CarriesRetryAfter(t *testing.T) {
+	primary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hijackAfterPartialSSE(w, `data: {"id":"c1","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}`+"\n\n")
+	}))
+	defer primary.Close()
+	secondary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"error":{"message":"rate limited","type":"rate_limit_error"}}`)
+	}))
+	defer secondary.Close()
+
+	prx := NewTestProxyBuilder().WithCredentials(
+		config.CredentialConfig{Name: "primary", Type: config.ProviderTypeOpenAI, BaseURL: primary.URL, APIKey: "primary-key", RPM: 100, TPM: 100000},
+		config.CredentialConfig{Name: "secondary", Type: config.ProviderTypeOpenAI, BaseURL: secondary.URL, APIKey: "secondary-key", Priority: 1, RPM: 100, TPM: 100000},
+	).WithMaxProviderRetries(3).WithForceStreamForTTFT(true).Build()
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{
+		"model":"gpt-4o",
+		"messages":[{"role":"user","content":"hi"}],
+		"stream":false
+	}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusTooManyRequests, w.Code, w.Body.String())
+	assert.NotEmpty(t, w.Header().Get("Retry-After"), "a surfaced 429 must carry a Retry-After header")
+}
