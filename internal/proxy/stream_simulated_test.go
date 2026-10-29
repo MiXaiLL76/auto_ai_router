@@ -14,6 +14,8 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
 	"github.com/mixaill76/auto_ai_router/internal/models"
+	"github.com/mixaill76/auto_ai_router/internal/monitoring"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1556,4 +1558,142 @@ func TestHandleSimulatedNonStream_SuccessfulRetryDoesNotLeakTokenUsage(t *testin
 	assert.Equal(t, 5, logCtx.TokenUsage.CompletionTokens)
 	assert.Zero(t, logCtx.TokenUsage.CachedInputTokens, "cached-token usage from the dead primary attempt must not be billed on the successful retry")
 	assert.Zero(t, logCtx.TokenUsage.WebSearchRequests, "web-search usage from the dead primary attempt must not be billed on the successful retry")
+}
+
+// TestHandleSimulatedNonStream_RetryOntoHTTPErrorUsesNextCredential covers a
+// gap the plain transport-retry tests miss: a retried credential can answer
+// with an HTTP error (429, 5xx) instead of a stream. Before the fix, that error
+// body was fed into the SSE reassembler, which found no content and reported a
+// terminal 502 -- never trying the healthy credential still left in the pool.
+// A retryable status must be classified like the main retry loop does and move
+// on to the next credential.
+func TestHandleSimulatedNonStream_RetryOntoHTTPErrorUsesNextCredential(t *testing.T) {
+	var primaryHits, secondaryHits, thirdHits atomic.Int32
+	primary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		primaryHits.Add(1)
+		hijackAfterPartialSSE(w, `data: {"id":"c1","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}`+"\n\n")
+	}))
+	defer primary.Close()
+	// Secondary answers 429 (retryable), not a stream.
+	secondary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secondaryHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"error":{"message":"rate limited","type":"rate_limit_error"}}`)
+	}))
+	defer secondary.Close()
+	third := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		thirdHits.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, openAIChatSSE(
+			`{"id":"c3","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant","content":"third works"},"finish_reason":"stop"}]}`,
+		))
+	}))
+	defer third.Close()
+
+	prx := NewTestProxyBuilder().WithCredentials(
+		config.CredentialConfig{Name: "primary", Type: config.ProviderTypeOpenAI, BaseURL: primary.URL, APIKey: "primary-key", RPM: 100, TPM: 100000},
+		config.CredentialConfig{Name: "secondary", Type: config.ProviderTypeOpenAI, BaseURL: secondary.URL, APIKey: "secondary-key", Priority: 1, RPM: 100, TPM: 100000},
+		config.CredentialConfig{Name: "third", Type: config.ProviderTypeOpenAI, BaseURL: third.URL, APIKey: "third-key", Priority: 2, RPM: 100, TPM: 100000},
+	).WithMaxProviderRetries(3).WithForceStreamForTTFT(true).Build()
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{
+		"model":"gpt-4o",
+		"messages":[{"role":"user","content":"hi"}],
+		"stream":false
+	}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Equal(t, int32(1), primaryHits.Load())
+	assert.Equal(t, int32(1), secondaryHits.Load())
+	assert.Equal(t, int32(1), thirdHits.Load(), "a retryable HTTP error on the second credential must not stop the retry chain")
+}
+
+// TestHandleSimulatedNonStream_RetryHTTPErrorsExhaustedSurfacesRealStatus: when
+// every remaining credential answers a retryable HTTP error, the client gets
+// the real upstream status (429) rather than a generic 502.
+func TestHandleSimulatedNonStream_RetryHTTPErrorsExhaustedSurfacesRealStatus(t *testing.T) {
+	primary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hijackAfterPartialSSE(w, `data: {"id":"c1","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}`+"\n\n")
+	}))
+	defer primary.Close()
+	secondary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"error":{"message":"rate limited","type":"rate_limit_error"}}`)
+	}))
+	defer secondary.Close()
+
+	prx := NewTestProxyBuilder().WithCredentials(
+		config.CredentialConfig{Name: "primary", Type: config.ProviderTypeOpenAI, BaseURL: primary.URL, APIKey: "primary-key", RPM: 100, TPM: 100000},
+		config.CredentialConfig{Name: "secondary", Type: config.ProviderTypeOpenAI, BaseURL: secondary.URL, APIKey: "secondary-key", Priority: 1, RPM: 100, TPM: 100000},
+	).WithMaxProviderRetries(3).WithForceStreamForTTFT(true).Build()
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{
+		"model":"gpt-4o",
+		"messages":[{"role":"user","content":"hi"}],
+		"stream":false
+	}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusTooManyRequests, w.Code, w.Body.String())
+}
+
+// TestHandleSimulatedNonStream_MidStreamBreakRecordsCredentialError covers the
+// accounting gap around the transport-retry: a credential whose stream breaks
+// mid-body (after the 200 header, so sendToCredential's own transport-failure
+// recording never runs) was retried away without being counted against it --
+// no balancer RecordResponse, no CredentialErrorsTotal. A credential that keeps
+// dropping streams was invisible to fail2ban and the error metric.
+func TestHandleSimulatedNonStream_MidStreamBreakRecordsCredentialError(t *testing.T) {
+	monitoring.CredentialErrorsTotal.Reset()
+
+	primary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hijackAfterPartialSSE(w, `data: {"id":"c1","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}`+"\n\n")
+	}))
+	defer primary.Close()
+	secondary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, openAIChatSSE(
+			`{"id":"c2","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant","content":"fallback answer"},"finish_reason":"stop"}]}`,
+		))
+	}))
+	defer secondary.Close()
+
+	builder := NewTestProxyBuilder().WithCredentials(
+		config.CredentialConfig{Name: "breaker", Type: config.ProviderTypeOpenAI, BaseURL: primary.URL, APIKey: "primary-key", RPM: 100, TPM: 100000},
+		config.CredentialConfig{Name: "healthy", Type: config.ProviderTypeOpenAI, BaseURL: secondary.URL, APIKey: "secondary-key", Priority: 1, RPM: 100, TPM: 100000},
+	).WithMaxProviderRetries(2).WithForceStreamForTTFT(true)
+	builder.config.Metrics = monitoring.New(true)
+	prx := builder.Build()
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{
+		"model":"gpt-4o",
+		"messages":[{"role":"user","content":"hi"}],
+		"stream":false
+	}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	count := testutil.ToFloat64(monitoring.CredentialErrorsTotal.WithLabelValues("breaker"))
+	assert.Equal(t, float64(1), count, "a credential whose stream breaks mid-body must record one CredentialErrorsTotal")
+	// The companion balancer.RecordResponse call is asserted indirectly: the
+	// test balancer's fail2ban tracks 500s, so a 502 recorded for the breaker
+	// would ban it after maxAttempts; here one call is below the threshold, so
+	// the observable surface is the metric above.
 }
