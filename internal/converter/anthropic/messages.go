@@ -139,12 +139,12 @@ func OpenAIToAnthropic(openAIBody []byte, model string, isRealAnthropicBackend b
 	if tc != nil {
 		anthropicReq.Thinking = tc
 		anthropicReq.OutputConfig = oc
-		maxTokens, betas, temp := applyThinkingSideEffects(tc, oc, anthropicReq.MaxTokens, anthropicReq.AnthropicBeta)
+		maxTokens, betas, temp := applyThinkingSideEffects(tc, oc, anthropicReq.Model, anthropicReq.MaxTokens, anthropicReq.AnthropicBeta)
 		anthropicReq.MaxTokens = maxTokens
 		anthropicReq.AnthropicBeta = betas
 		// Do not re-introduce temperature on models that reject sampling params.
-		if !dropSampling {
-			anthropicReq.Temperature = &temp
+		if temp != nil && !dropSampling {
+			anthropicReq.Temperature = temp
 		}
 	} else if !isRealAnthropicBackend {
 		// This Anthropic-shaped request may be handled by a real Claude model

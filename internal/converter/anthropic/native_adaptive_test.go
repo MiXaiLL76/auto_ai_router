@@ -18,13 +18,13 @@ var nativeAdaptiveEffortLevels = []string{"low", "medium", "high", "xhigh", "max
 
 func TestIsNativeAdaptiveModel(t *testing.T) {
 	for _, model := range []string{"MiniMax-M3.1-Flash", "minimax-m3.1-flash", "minimax/minimax-m3.1-flash", "MiniMax-M3.1-Flash-Preview"} {
-		assert.True(t, isNativeAdaptiveModel(model), model)
+		assert.True(t, IsNativeAdaptiveModel(model), model)
 		assert.True(t, isAdaptiveThinkingModel(model), model)
 		assert.Equal(t, thinkingAlwaysOn, thinkingOffModeFor(model), model)
 		assert.Nil(t, thinkingOff(model, ""), model)
 	}
 	for _, model := range []string{"MiniMax-M3", "minimax-m2.7", "claude-sonnet-5.5", "gpt-6-luna"} {
-		assert.False(t, isNativeAdaptiveModel(model), model)
+		assert.False(t, IsNativeAdaptiveModel(model), model)
 	}
 }
 
@@ -125,8 +125,20 @@ func TestOpenAIToAnthropic_NativeAdaptiveEffort(t *testing.T) {
 			assert.Equal(t, map[string]interface{}{"type": "adaptive"}, request["thinking"])
 			assert.Equal(t, map[string]interface{}{"effort": effort}, request["output_config"])
 			assert.Equal(t, float64(1000), request["max_tokens"])
+			// Claude-only side effects of thinking stay off.
+			assert.NotContains(t, request, "anthropic_beta")
+			assert.NotContains(t, request, "temperature")
 		})
 	}
+
+	t.Run("client temperature stands", func(t *testing.T) {
+		body := `{"model":"m","max_tokens":1000,"temperature":0.3,"reasoning_effort":"high","messages":[{"role":"user","content":"hi"}]}`
+		converted, err := OpenAIToAnthropic([]byte(body), nativeAdaptiveModel, true)
+		require.NoError(t, err)
+		request := decodeAnthropicRequest(t, converted)
+		assert.Equal(t, 0.3, request["temperature"])
+		assert.NotContains(t, request, "anthropic_beta")
+	})
 
 	t.Run("minimal maps to low", func(t *testing.T) {
 		body := `{"model":"m","max_tokens":1000,"reasoning_effort":"minimal","messages":[{"role":"user","content":"hi"}]}`
@@ -176,6 +188,16 @@ func TestOpenAIToAnthropic_NativeAdaptiveEffort(t *testing.T) {
 		converted, err := OpenAIToAnthropic([]byte(body), "claude-opus-4-7", true)
 		require.NoError(t, err)
 		assert.Equal(t, map[string]interface{}{"type": "adaptive", "display": "summarized"}, decodeAnthropicRequest(t, converted)["thinking"])
+	})
+
+	// Regression guard: Claude keeps the effort beta and temperature 1.
+	t.Run("claude keeps the thinking side effects", func(t *testing.T) {
+		body := `{"model":"m","max_tokens":1000,"temperature":0.3,"reasoning_effort":"high","messages":[{"role":"user","content":"hi"}]}`
+		converted, err := OpenAIToAnthropic([]byte(body), "claude-sonnet-4-6", true)
+		require.NoError(t, err)
+		request := decodeAnthropicRequest(t, converted)
+		assert.Equal(t, float64(1), request["temperature"])
+		assert.Equal(t, []interface{}{"effort-2025-11-24"}, request["anthropic_beta"])
 	})
 }
 
@@ -237,6 +259,7 @@ func TestNormalizeMessagesForPassthrough_NativeAdaptive(t *testing.T) {
 			assert.Equal(t, map[string]interface{}{"effort": effort}, request["output_config"], effort)
 			assert.Equal(t, float64(1000), request["max_tokens"], effort)
 			assert.NotContains(t, request, "anthropic_beta", effort)
+			assert.NotContains(t, request, "temperature", effort)
 		}
 	})
 
@@ -248,6 +271,22 @@ func TestNormalizeMessagesForPassthrough_NativeAdaptive(t *testing.T) {
 		assert.Equal(t, map[string]interface{}{"type": "adaptive"}, request["thinking"])
 		assert.Equal(t, map[string]interface{}{"effort": "high"}, request["output_config"])
 		assert.Equal(t, float64(1000), request["max_tokens"])
+		assert.NotContains(t, request, "anthropic_beta")
+		assert.NotContains(t, request, "temperature")
+	})
+
+	t.Run("client temperature stands", func(t *testing.T) {
+		for _, controls := range []string{
+			`"thinking":{"type":"adaptive","effort":"high"}`,
+			`"thinking":{"type":"adaptive"},"output_config":{"effort":"high"}`,
+		} {
+			body := `{"model":"MiniMax-M3.1-Flash","max_tokens":1000,"temperature":0.3,` + controls + `,"messages":[]}`
+			normalized, err := NormalizeMessagesForPassthrough([]byte(body), nativeAdaptiveModel, true)
+			require.NoError(t, err)
+			request := decodeAnthropicRequest(t, normalized)
+			assert.Equal(t, 0.3, request["temperature"], controls)
+			assert.NotContains(t, request, "anthropic_beta", controls)
+		}
 	})
 
 	t.Run("effort without thinking passes as sent", func(t *testing.T) {

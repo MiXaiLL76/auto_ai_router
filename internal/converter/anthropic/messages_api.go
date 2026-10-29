@@ -116,7 +116,7 @@ func MessagesToChat(body []byte) ([]byte, MessagesAdapterMetadata, error) {
 		return nil, MessagesAdapterMetadata{}, err
 	}
 	thinking, hasThinking := request["thinking"].(map[string]interface{})
-	if isNativeAdaptiveModel(model) {
+	if IsNativeAdaptiveModel(model) {
 		// Thinking is always adaptive here (ValidateThinkingControls rejects the rest), so
 		// the Chat form carries just the effort: OpenAIToAnthropic turns it back into
 		// adaptive thinking, an OpenAI-compatible endpoint reads it as is. Without one the
@@ -205,7 +205,7 @@ func NormalizeMessagesForPassthrough(body []byte, model string, isRealAnthropicB
 	if tc != nil {
 		request["thinking"] = tc
 		existingMaxTokens, hasMaxTokens := request["max_tokens"].(float64)
-		maxTokens, betas, temp := applyThinkingSideEffects(tc, oc, int(existingMaxTokens), extractBetaStrings(request["anthropic_beta"]))
+		maxTokens, betas, temp := applyThinkingSideEffects(tc, oc, model, int(existingMaxTokens), extractBetaStrings(request["anthropic_beta"]))
 		if hasMaxTokens {
 			request["max_tokens"] = maxTokens
 		}
@@ -220,8 +220,8 @@ func NormalizeMessagesForPassthrough(body []byte, model string, isRealAnthropicB
 				request["output_config"] = oc
 			}
 		}
-		if !dropSampling {
-			request["temperature"] = temp
+		if temp != nil && !dropSampling {
+			request["temperature"] = *temp
 		}
 	} else if thinking, _ := request["thinking"].(map[string]interface{}); !isRealAnthropicBackend || thinking["type"] == "between_tools" {
 		// between_tools exists on Sonnet 5.5 only (mapped above); elsewhere it means off.

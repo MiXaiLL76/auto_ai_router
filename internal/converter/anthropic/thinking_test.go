@@ -239,7 +239,7 @@ func TestMapThinkingConfig_AdaptiveBlockBindingAndDefaultEffort(t *testing.T) {
 	_, oc = mapThinkingConfig(map[string]interface{}{"type": "adaptive"}, "high", model)
 	assert.Equal(t, &AnthropicOutputConfig{Effort: "high"}, oc, "reasoning_effort fills a missing effort")
 
-	_, betas, _ := applyThinkingSideEffects(tc, nil, 100, []string{"x"})
+	_, betas, _ := applyThinkingSideEffects(tc, nil, model, 100, []string{"x"})
 	assert.Equal(t, []string{"x", thinkingBindingBeta}, betas)
 }
 

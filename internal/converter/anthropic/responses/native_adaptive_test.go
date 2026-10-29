@@ -31,6 +31,7 @@ func TestResponsesRequestToAnthropic_NativeAdaptiveEffort(t *testing.T) {
 			assert.Equal(t, map[string]interface{}{"type": "adaptive"}, request["thinking"])
 			assert.Equal(t, map[string]interface{}{"effort": effort}, request["output_config"])
 			assert.Equal(t, float64(1000), request["max_tokens"])
+			assert.NotContains(t, request, "anthropic_beta")
 		})
 	}
 
