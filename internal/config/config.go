@@ -284,6 +284,7 @@ type Config struct {
 	OTEL                 OTELConfig                 `yaml:"otel,omitempty"`
 	Kafka                KafkaConfig                `yaml:"kafka,omitempty"`
 	Video                VideoConfig                `yaml:"video,omitempty"`
+	YandexSearch         YandexSearchConfig         `yaml:"yandex_search,omitempty"`
 	VisionFallback       VisionFallbackConfig       `yaml:"vision_fallback,omitempty"`
 	// ModelTemplates stores x-model-templates entries as raw interface{} so that
 	// both single-model mappings and lists of models can be defined as YAML anchors
@@ -318,6 +319,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		OTEL                 OTELConfig                 `yaml:"otel,omitempty"`
 		Kafka                KafkaConfig                `yaml:"kafka,omitempty"`
 		Video                VideoConfig                `yaml:"video,omitempty"`
+		YandexSearch         YandexSearchConfig         `yaml:"yandex_search,omitempty"`
 		VisionFallback       VisionFallbackConfig       `yaml:"vision_fallback,omitempty"`
 		ModelTemplates       map[string]interface{}     `yaml:"x-model-templates,omitempty"`
 	}
@@ -344,6 +346,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.OTEL = raw.OTEL
 	c.Kafka = raw.Kafka
 	c.Video = raw.Video
+	c.YandexSearch = raw.YandexSearch
 	c.VisionFallback = raw.VisionFallback
 	c.ModelTemplates = raw.ModelTemplates
 
@@ -1159,9 +1162,10 @@ type MonitoringConfig struct {
 type KeyMetricsConfig struct {
 	Enabled bool `yaml:"enabled"` // default: false
 	// InfoLabels selects the owner labels on auto_ai_router_key_info
-	// (key_alias, user_id, user_email, team_id, team_alias, organization_id).
-	// Unset (nil) means monitoring.DefaultKeyInfoLabels (everything but
-	// user_email); an explicit empty list disables owner labels entirely.
+	// (key_alias, user_id, user_email, team_id, team_alias, organization_id,
+	// organization_alias). Unset (nil) means
+	// monitoring.DefaultKeyInfoLabels (everything but user_email); an
+	// explicit empty list disables owner labels entirely.
 	InfoLabels []string `yaml:"info_labels,omitempty"`
 	// MaxKeys caps distinct key label values; keys first seen past the cap
 	// are counted under key="__other__". 0 = unlimited. default: 5000
@@ -1174,7 +1178,7 @@ type KeyMetricsConfig struct {
 // KeyMetricsInfoLabels lists the accepted info_labels values. It mirrors
 // monitoring.KeyInfoLabels (kept in sync by a test) so config does not pull in
 // the metrics package.
-var KeyMetricsInfoLabels = []string{"key_alias", "user_id", "user_email", "team_id", "team_alias", "organization_id"}
+var KeyMetricsInfoLabels = []string{"key_alias", "user_id", "user_email", "team_id", "team_alias", "organization_id", "organization_alias"}
 
 const (
 	defaultKeyMetricsMaxKeys = 5000
@@ -2123,6 +2127,9 @@ func (c *Config) Normalize() {
 
 func (c *Config) Validate() error {
 	if err := c.Video.Validate(); err != nil {
+		return err
+	}
+	if err := c.YandexSearch.Validate(); err != nil {
 		return err
 	}
 	if err := c.VisionFallback.Validate(); err != nil {
