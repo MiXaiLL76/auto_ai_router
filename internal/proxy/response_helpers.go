@@ -202,14 +202,23 @@ func extractSessionIDFromRawBody(reqBody map[string]goccyjson.RawMessage) string
 	if sid, ok := rawJSONString(reqBody["session_id"]); ok && sid != "" {
 		return sid
 	}
-	if uid, ok := rawJSONString(reqBody["user"]); ok && uid != "" {
-		return uid
-	}
-	if sid, ok := rawJSONString(reqBody["safety_identifier"]); ok && sid != "" {
-		return sid
-	}
 	if pck, ok := rawJSONString(reqBody["prompt_cache_key"]); ok && pck != "" {
 		return pck
+	}
+	return ""
+}
+
+// extractClientIDFromRawBody returns the per-client identifier
+// (safety_identifier, then the user field it replaces, the precedence OpenAI
+// applies). It is the last-resort session key, after the body session fields
+// and the session headers: binding to it pins every conversation of a client
+// to one credential instead of balancing each one.
+func extractClientIDFromRawBody(reqBody map[string]goccyjson.RawMessage) string {
+	if cid, ok := rawJSONString(reqBody["safety_identifier"]); ok && cid != "" {
+		return cid
+	}
+	if cid, ok := rawJSONString(reqBody["user"]); ok && cid != "" {
+		return cid
 	}
 	return ""
 }
@@ -344,6 +353,7 @@ type sanitizedRequestBody struct {
 	ModelID   string
 	Streaming bool
 	SessionID string
+	ClientID  string
 	Changed   bool
 }
 
@@ -420,6 +430,7 @@ func sanitizeJSONRequestBody(body []byte, isMessagesAPI bool) (sanitizedRequestB
 
 	// Extract session ID before removing LiteLLM-only request metadata.
 	result.SessionID = extractSessionIDFromRawBody(reqBody)
+	result.ClientID = extractClientIDFromRawBody(reqBody)
 	// litellm_session_id/session_id only ever drive AIR's own sticky-routing
 	// decision (already captured above into result.SessionID); no provider
 	// understands either as a wire-protocol field, and both are gone from
@@ -547,10 +558,10 @@ func sanitizeMultipartRequestBody(body []byte, params map[string]string) (saniti
 			switch name {
 			case "model":
 				result.ModelID = value
-			case "session_id", "user":
-				if result.SessionID == "" {
-					result.SessionID = value
-				}
+			case "session_id":
+				result.SessionID = value
+			case "user":
+				result.ClientID = value
 			}
 		}
 
