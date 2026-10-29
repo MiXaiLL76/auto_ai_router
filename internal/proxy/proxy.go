@@ -406,6 +406,7 @@ type Config struct {
 	ModelManager                 *models.Manager
 	Version                      string
 	Commit                       string
+	ServiceName                  string                     // otel.service_name: the deployment's name on every spend event (service_name)
 	LiteLLMDB                    litellmdb.Manager          // LiteLLM database integration (optional)
 	KafkaLog                     kafkalog.Manager           // Kafka spend-log publishing (optional, analytics write-path)
 	RawBodyLog                   kafkalog.RawBodyManager    // Kafka raw-body publishing (optional, separate topic, failure-only)
@@ -492,6 +493,7 @@ type Proxy struct {
 	responseCompat                   *compatlitellm.Transformer
 	version                          string
 	commit                           string
+	serviceName                      string // Config.ServiceName
 }
 
 func New(cfg *Config) *Proxy {
@@ -589,6 +591,7 @@ func New(cfg *Config) *Proxy {
 		client:                           httputil.NewHTTPClient(httpClientCfg),
 		version:                          cfg.Version,
 		commit:                           cfg.Commit,
+		serviceName:                      cfg.ServiceName,
 	}
 }
 

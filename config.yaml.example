@@ -56,7 +56,7 @@ otel:
   endpoint: "localhost:4317"  # OTLP collector: host:port for grpc, host:port or URL for http (defaults: 4317 grpc / 4318 http)
   protocol: "grpc"  # grpc | http (http/protobuf)
   insecure: true  # Disable TLS for the exporter connection (default: true)
-  service_name: "auto-ai-router"  # Reported as service.name resource attribute
+  service_name: "auto-ai-router"  # Reported as service.name resource attribute and as service_name on Kafka spend events
   logs_enabled: true  # Ship slog records via OTLP in addition to stdout
   traces_enabled: true  # Server/client spans + traceparent propagation to providers and chained routers
   metric_export_interval: 60s  # OTLP metric push interval. When otel.enabled is true, metrics are always pushed via OTLP (bridged from the Prometheus registry), independently of the pull-based /metrics endpoint (which is gated by monitoring.prometheus_enabled).

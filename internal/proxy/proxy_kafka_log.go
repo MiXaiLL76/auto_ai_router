@@ -81,11 +81,12 @@ func (p *Proxy) buildKafkaSpendEvent(
 		upstreamSendMs = &us
 	}
 
-	var keyAlias, userAlias, teamAlias string
+	var keyAlias, userAlias, teamAlias, organizationAlias string
 	if logCtx.TokenInfo != nil {
 		keyAlias = logCtx.TokenInfo.KeyAlias
 		userAlias = logCtx.TokenInfo.UserAlias
 		teamAlias = logCtx.TokenInfo.TeamAlias
+		organizationAlias = logCtx.TokenInfo.OrganizationAlias
 	}
 
 	event := &kafkalog.SpendEvent{
@@ -117,6 +118,7 @@ func (p *Proxy) buildKafkaSpendEvent(
 		ServerRouterID: p.routerID,
 		ServerVersion:  p.version,
 		ServerCommit:   p.commit,
+		ServiceName:    p.serviceName,
 
 		PromptTokens:             usage.PromptTokens,
 		CompletionTokens:         usage.CompletionTokens,
@@ -151,14 +153,15 @@ func (p *Proxy) buildKafkaSpendEvent(
 
 		TotalCost: cost,
 
-		APIKeyHash:     hashedToken,
-		UserID:         userID,
-		TeamID:         teamID,
-		OrganizationID: organizationID,
-		EndUser:        endUser,
-		KeyAlias:       keyAlias,
-		UserAlias:      userAlias,
-		TeamAlias:      teamAlias,
+		APIKeyHash:        hashedToken,
+		UserID:            userID,
+		TeamID:            teamID,
+		OrganizationID:    organizationID,
+		EndUser:           endUser,
+		KeyAlias:          keyAlias,
+		UserAlias:         userAlias,
+		TeamAlias:         teamAlias,
+		OrganizationAlias: organizationAlias,
 
 		RequesterIP: getClientIP(logCtx.Request),
 		SessionID:   logCtx.SessionID,

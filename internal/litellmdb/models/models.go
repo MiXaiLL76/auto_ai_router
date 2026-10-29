@@ -224,10 +224,11 @@ type TokenInfo struct {
 	TeamRPMLimit  *int64   // Team's RPM limit
 
 	// ==================== Organization Level (external budget) ====================
-	OrgSpend     *float64 // Organization's current spend
-	OrgMaxBudget *float64 // Organization's max budget from BudgetTable (nil = unlimited)
-	OrgTPMLimit  *int64   // Organization's TPM limit from BudgetTable
-	OrgRPMLimit  *int64   // Organization's RPM limit from BudgetTable
+	OrganizationAlias string   // Organization alias (optional) - user-friendly name
+	OrgSpend          *float64 // Organization's current spend
+	OrgMaxBudget      *float64 // Organization's max budget from BudgetTable (nil = unlimited)
+	OrgTPMLimit       *int64   // Organization's TPM limit from BudgetTable
+	OrgRPMLimit       *int64   // Organization's RPM limit from BudgetTable
 
 	// ==================== TeamMembership Level (external budget) ====================
 	TeamMemberSpend     *float64 // Team member's spend within team

@@ -194,6 +194,11 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 		return nil, models.ErrConnectionFailed
 	}
 	defer conn.Release()
+	return a.tokenFromRow(conn.QueryRow(ctx, queries.QueryValidateTokenWithHierarchy, hashedToken), hashedToken)
+}
+
+// tokenFromRow reads one QueryValidateTokenWithHierarchy row into a TokenInfo.
+func (a *Authenticator) tokenFromRow(row pgx.Row, hashedToken string) (*models.TokenInfo, error) {
 	var info models.TokenInfo
 
 	// ============ Token fields ============
@@ -222,7 +227,7 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	var teamMetadata []byte
 
 	// ============ Organization fields (with external budget) ============
-	var orgIDCheck *string
+	var orgIDCheck, orgAlias *string
 	var orgSpend *float64
 	var orgMaxBudget *float64
 	var orgTPMLimit, orgRPMLimit *int64
@@ -239,7 +244,7 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	var orgMemberMaxBudget *float64
 	var orgMemberTPMLimit, orgMemberRPMLimit *int64
 
-	err = conn.QueryRow(ctx, queries.QueryValidateTokenWithHierarchy, hashedToken).Scan(
+	err := row.Scan(
 		// Token
 		&info.Token,
 		&keyName,
@@ -281,6 +286,7 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 
 		// Organization
 		&orgIDCheck,
+		&orgAlias,
 		&orgSpend,
 		&orgMaxBudget,
 		&orgTPMLimit,
@@ -342,6 +348,9 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	info.Metadata = decodeMetadata(tokenMetadata)
 	info.TeamMetadata = decodeMetadata(teamMetadata)
 	info.OrganizationMetadata = decodeMetadata(orgMetadata)
+	if orgAlias != nil {
+		info.OrganizationAlias = *orgAlias
+	}
 
 	info.MaxBudget = tokenMaxBudget
 	info.Expires = expires
