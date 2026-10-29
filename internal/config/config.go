@@ -1162,9 +1162,10 @@ type MonitoringConfig struct {
 type KeyMetricsConfig struct {
 	Enabled bool `yaml:"enabled"` // default: false
 	// InfoLabels selects the owner labels on auto_ai_router_key_info
-	// (key_alias, user_id, user_email, team_id, team_alias, organization_id).
-	// Unset (nil) means monitoring.DefaultKeyInfoLabels (everything but
-	// user_email); an explicit empty list disables owner labels entirely.
+	// (key_alias, user_id, user_email, team_id, team_alias, organization_id,
+	// organization_alias). Unset (nil) means
+	// monitoring.DefaultKeyInfoLabels (everything but user_email); an
+	// explicit empty list disables owner labels entirely.
 	InfoLabels []string `yaml:"info_labels,omitempty"`
 	// MaxKeys caps distinct key label values; keys first seen past the cap
 	// are counted under key="__other__". 0 = unlimited. default: 5000
@@ -1177,7 +1178,7 @@ type KeyMetricsConfig struct {
 // KeyMetricsInfoLabels lists the accepted info_labels values. It mirrors
 // monitoring.KeyInfoLabels (kept in sync by a test) so config does not pull in
 // the metrics package.
-var KeyMetricsInfoLabels = []string{"key_alias", "user_id", "user_email", "team_id", "team_alias", "organization_id"}
+var KeyMetricsInfoLabels = []string{"key_alias", "user_id", "user_email", "team_id", "team_alias", "organization_id", "organization_alias"}
 
 const (
 	defaultKeyMetricsMaxKeys = 5000

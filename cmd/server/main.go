@@ -263,6 +263,7 @@ func main() {
 		ModelManager:                 modelManager,
 		Version:                      Version,
 		Commit:                       Commit,
+		ServiceName:                  cfg.OTEL.ServiceName,
 		LiteLLMDB:                    litellmDBManager,
 		KafkaLog:                     kafkaLogManager,
 		RawBodyLog:                   rawBodyLogManager,
