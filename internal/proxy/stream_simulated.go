@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"sort"
 	"strings"
@@ -51,29 +52,47 @@ func (p *Proxy) simulatedNonStreamSupported(prepared *orchestratedRequest) bool 
 	return !prepared.nativeResponses && !prepared.passthroughResponses
 }
 
-// handleSimulatedNonStream consumes an upstream SSE response that was produced
-// because applyForceStream set "stream": true, reassembles it into the non-stream
-// JSON body the client actually asked for, and writes that body to w. It owns
-// the whole client-facing outcome: headers, compression, spend logging and the
-// TTFT metric. The caller must return immediately afterwards.
-func (p *Proxy) handleSimulatedNonStream(
-	w http.ResponseWriter,
-	r *http.Request,
+// simulatedNonStreamAttemptResult carries what one attemptSimulatedNonStream
+// call decided about a single upstream response: either enough to finish
+// successfully (finalChatBody and friends) or enough to classify a failure
+// (streamErr, already passed to markStreamFailure). transportFailure is true
+// only for the specific shape handleSimulatedNonStream's retry loop acts on —
+// a genuine transport break (readErrForResolve != nil, excluding io.EOF) —
+// never set for overflow or "no reassemblable content", which stay
+// non-retryable exactly as before retry support existed.
+type simulatedNonStreamAttemptResult struct {
+	finalChatBody     []byte
+	conv              *converter.ProviderConverter
+	providerLabel     string
+	tokenUsageOptions converter.TokenUsageExtractionOptions
+	logTokens         int
+	lastChunk         []byte
+
+	streamErr        error
+	transportFailure bool
+
+	// httpStatus > 0 means a retried credential answered with an HTTP error
+	// (429/5xx/...), not a stream, and that status is the terminal outcome:
+	// the client gets its masked body and status, exactly as the main retry
+	// loop surfaces a non-retryable upstream error. httpBody is the raw
+	// provider body used to build that masked response.
+	httpStatus int
+	httpBody   []byte
+}
+
+// attemptSimulatedNonStream drains and reassembles one upstream SSE response
+// for the force_stream_for_ttft chat-shaped path, without writing anything to
+// the client or finalizing the spend log — the retryable half of what
+// handleSimulatedNonStream used to do in a single pass. Closing resp.Body
+// remains the caller's responsibility, so a retry can close the dead one
+// before opening the next.
+func (p *Proxy) attemptSimulatedNonStream(
 	resp *http.Response,
 	prepared *orchestratedRequest,
 	cred *config.CredentialConfig,
-	modelID, realModelID string,
+	modelID string,
 	logCtx *RequestLogContext,
-	saveResponseFn func(*responses.Response),
-	targetURL string,
-	requestBody []byte,
-) {
-	defer func() {
-		if closeErr := resp.Body.Close(); closeErr != nil {
-			p.logger.WarnContext(respCtx(resp), "Failed to close simulated non-stream response body", "error", closeErr)
-		}
-	}()
-
+) simulatedNonStreamAttemptResult {
 	publicModel := clientVisibleResponseModel(logCtx, modelID)
 	converterModelID := modelID
 	if logCtx != nil && logCtx.RealModelID != "" {
@@ -215,15 +234,291 @@ func (p *Proxy) handleSimulatedNonStream(
 			markStreamFailure(logCtx, streamErr)
 		}
 	}
-	chatBody := reassembledBody
 
-	if streamErr != nil {
+	return simulatedNonStreamAttemptResult{
+		finalChatBody:     reassembledBody,
+		conv:              conv,
+		providerLabel:     providerLabel,
+		tokenUsageOptions: tokenUsageOptions,
+		logTokens:         logTokens,
+		lastChunk:         lastChunk,
+		streamErr:         streamErr,
+		// The only retryable shape: a genuine transport break. Overflow and
+		// "no reassemblable content" above both leave readErrForResolve nil,
+		// so they can never mark this true (see package doc, out-of-scope).
+		transportFailure: readErrForResolve != nil,
+	}
+}
+
+// handleSimulatedNonStream consumes the upstream SSE response produced
+// because applyForceStream set "stream": true for a client that asked for a
+// non-streaming response, reassembles it into the non-stream JSON the client
+// actually wanted, and writes that body to w. It owns the whole client-facing
+// outcome: headers, compression, spend logging and the TTFT metric. The
+// caller must return immediately afterwards.
+//
+// On a genuine transport break mid-stream (connection reset, timeout — never
+// on overflow or "no reassemblable content", see simulatedNonStreamSupported's
+// doc and attemptSimulatedNonStream) it retries on the next credential, up to
+// p.maxProviderRetries, using the same balancer/prepare/send machinery
+// proxyRequest's own retry loop uses (nextRetryCredential, sendToCredential).
+// Nothing is ever written to the client before the outcome is fully decided
+// (confirmed: the only w.WriteHeader calls below are the final success write
+// and writeSimulatedError), so unlike live client-streaming, a retry here is
+// fully transparent — the client never sees the failed attempt.
+func (p *Proxy) handleSimulatedNonStream(
+	w http.ResponseWriter,
+	r *http.Request,
+	resp *http.Response,
+	prepared *orchestratedRequest,
+	cred *config.CredentialConfig,
+	modelID, realModelID string,
+	logCtx *RequestLogContext,
+	saveResponseFn func(*responses.Response),
+	targetURL string,
+	requestBody []byte,
+	streaming, isEmbeddings, isImageEdit bool,
+	start time.Time,
+	triedCreds, attemptedCreds map[string]bool,
+) {
+	var embedFanOutReplies embedContentFanOutReplies
+	var result simulatedNonStreamAttemptResult
+
+	for attempt := 0; attempt <= p.maxProviderRetries; attempt++ {
+		// A prior attempt on this same logCtx may have called markStreamFailure
+		// or markProxyProviderStreamError, which sets Status/StreamOutcome/
+		// ErrorMsg/HTTPStatus/ErrorOrigin directly on logCtx. Without clearing
+		// them here, a credential that gets retried away still leaves its
+		// failure stamped on logCtx even once a later attempt succeeds --
+		// finalizeStreamingLog only treats StreamOutcome=="" as "no verdict
+		// yet", so a stale "stream_error" from the dead attempt would log a
+		// successful response as a failure. CompletionStartTime is reset for
+		// the same reason: content read from a dead attempt never reached the
+		// client, so it must not be credited as this request's TTFT.
+		resetSimulatedAttemptState(logCtx)
+
+		if attempt > 0 {
+			nextCred, nextReq, ready := p.nextRetryCredential(
+				r, logCtx, modelID, cred, prepared, streaming, attempt, triedCreds, attemptedCreds,
+			)
+			if !ready {
+				break
+			}
+
+			if resp != nil {
+				if closeErr := resp.Body.Close(); closeErr != nil {
+					p.logger.WarnContext(respCtx(resp), "Failed to close simulated non-stream response body before retry", "error", closeErr)
+				}
+				resp = nil
+			}
+
+			cred = nextCred
+			triedCreds[cred.Name] = true
+			logCtx.Credential = cred
+			requestBody = nextReq.body
+			realModelID = nextReq.realModelID
+			r.URL.Path = nextReq.path
+			prepared.body = nextReq.body
+			prepared.proxyBody = nextReq.proxyBody
+			prepared.proxyPath = nextReq.proxyPath
+			prepared.realModelID = nextReq.realModelID
+			prepared.convertedResp = nextReq.convertedResp
+			prepared.convertedMessages = nextReq.convertedMessages
+			prepared.convertedToResponses = nextReq.convertedToResponses
+			prepared.passthroughResponses = nextReq.passthroughResponses
+			prepared.passthroughMessages = nextReq.passthroughMessages
+			prepared.nativeResponses = nextReq.nativeResponses
+			prepared.forcedNativeNonStream = nextReq.forcedNativeNonStream
+			prepared.forcedPassthroughNonStream = nextReq.forcedPassthroughNonStream
+			prepared.forcedChatNonStream = nextReq.forcedChatNonStream
+			prepared.completionsPath = nextReq.completionsPath
+			prepared.messagesMetadata = nextReq.messagesMetadata
+			logCtx.RealModelID = realModelID
+
+			p.logger.InfoContext(r.Context(), "Retrying simulated non-stream with next credential",
+				"credential", cred.Name, "model", modelID,
+				"attempt", attempt+1, "max_attempts", p.maxProviderRetries+1,
+				"retry_reason", RetryReasonNetErr, "prior_error", result.streamErr)
+
+			time.Sleep(time.Duration(rand.IntN(50)) * time.Millisecond)
+
+			sendOutcome, done, isClientGone, shouldRetry, _, sendErr := p.sendToCredential(
+				r, w, logCtx, cred, prepared, modelID, realModelID, requestBody, streaming, isEmbeddings, isImageEdit,
+				attempt, start, attemptedCreds, &embedFanOutReplies,
+			)
+			if done {
+				// sendToCredential already wrote the client response itself
+				// (fatal conversion/validation error, request-build failure,
+				// oversized fanned-out reply).
+				return
+			}
+			// Track the URL this credential actually sent to, so any failure on
+			// this attempt (mid-stream break, surfaced HTTP error) reports the
+			// credential that produced it -- targetURL is captured by value at
+			// attempt 0 otherwise. Set before the error classification below,
+			// which breaks/continues without reaching the success assignment.
+			if sendOutcome.targetURL != "" {
+				targetURL = sendOutcome.targetURL
+			}
+			providerLabel := streamingProviderLabel(cred, prepared.convertedMessages)
+			if isClientGone {
+				markStreamFailure(logCtx, sendErr)
+				result = simulatedNonStreamAttemptResult{streamErr: sendErr, providerLabel: providerLabel}
+				break
+			}
+			if shouldRetry {
+				// sendToCredential couldn't even get a response from this
+				// credential (transport failure before any body) -- nothing
+				// to reassemble, try the next one up to the same bound.
+				markStreamFailure(logCtx, sendErr)
+				result = simulatedNonStreamAttemptResult{streamErr: sendErr, transportFailure: true, providerLabel: providerLabel}
+				continue
+			}
+			// A retried credential can answer with an HTTP error status (429,
+			// 5xx, ...) instead of a stream. Unlike attempt 0 (which the caller
+			// only enters on a 2xx), this must be classified here exactly as the
+			// main retry loop classifies a non-streaming upstream error: retry a
+			// retryable status on the next credential, and surface a
+			// non-retryable one (with its real status and masked body) rather
+			// than feeding an error body into the SSE reassembler, which would
+			// misreport it as "no reassemblable content" (502) and stop without
+			// using any credentials still left.
+			if sendOutcome.resp != nil && sendOutcome.resp.StatusCode >= http.StatusBadRequest {
+				httpResp := sendOutcome.resp
+				errBody, readErr := p.readLimitedResponseBody(httpResp.Body)
+				_ = httpResp.Body.Close()
+				// Mirror the main loop: a failed attempt counts against the
+				// credential (balancer + per-attempt error metric).
+				p.balancer.RecordResponse(cred.Name, modelID, httpResp.StatusCode)
+				p.metrics.RecordCredentialAttemptError(cred.Name)
+				if readErr != nil {
+					// Couldn't even read the error body -- treat as a transport
+					// failure and let the next credential try.
+					p.logger.WarnContext(r.Context(), "Failed to read retried credential's error body, will retry",
+						"credential", cred.Name, "model", modelID, "status", httpResp.StatusCode,
+						"error", readErr, "attempt", attempt+1)
+					markStreamFailure(logCtx, readErr)
+					result = simulatedNonStreamAttemptResult{streamErr: readErr, transportFailure: true, providerLabel: providerLabel}
+					resp = nil
+					continue
+				}
+				if retry, reason := p.shouldRetry(cred, httpResp.StatusCode, errBody); retry {
+					p.logger.WarnContext(r.Context(), "Retried credential returned retryable error, will retry",
+						"error_code", httpResp.StatusCode, "credential", cred.Name, "reason", reason,
+						"model", modelID, "attempt", attempt+1, "max_attempts", p.maxProviderRetries+1)
+					markStreamFailure(logCtx, fmt.Errorf("simulated retry: upstream %d", httpResp.StatusCode))
+					// Keep this error as the terminal outcome until (and unless) a
+					// later attempt succeeds: if no further credential is available
+					// the loop breaks with this result and the client gets the real
+					// upstream status, not a generic 502.
+					resp = nil
+					result = simulatedNonStreamAttemptResult{
+						httpStatus:    httpResp.StatusCode,
+						httpBody:      errBody,
+						providerLabel: providerLabel,
+					}
+					continue
+				}
+				// Non-retryable upstream error -- this is the terminal outcome.
+				resp = nil
+				result = simulatedNonStreamAttemptResult{
+					httpStatus:    httpResp.StatusCode,
+					httpBody:      errBody,
+					providerLabel: providerLabel,
+				}
+				break
+			}
+			resp = sendOutcome.resp
+		}
+
+		result = p.attemptSimulatedNonStream(resp, prepared, cred, modelID, logCtx)
+		if result.streamErr == nil || !result.transportFailure {
+			break
+		}
+		// A mid-stream transport break left this credential's response half-read;
+		// count the failed attempt against it (balancer + per-attempt metric), as
+		// sendToCredential does for a break before any body arrives, so a credential
+		// that keeps dropping streams is demoted and its error rate reflects it.
+		p.balancer.RecordResponse(cred.Name, modelID, http.StatusBadGateway)
+		p.metrics.RecordCredentialAttemptError(cred.Name)
+	}
+
+	p.finishSimulatedNonStream(w, r, resp, prepared, cred, modelID, realModelID, logCtx, saveResponseFn, targetURL, requestBody, result)
+}
+
+// finishSimulatedNonStream writes the client-facing outcome of a (possibly
+// retried) simulated non-stream attempt: a masked error for a failed result,
+// or the fully converted, reassembled body for a successful one. This is
+// exactly what handleSimulatedNonStream used to do inline in a single pass,
+// before retry support split it into attemptSimulatedNonStream + this tail.
+func (p *Proxy) finishSimulatedNonStream(
+	w http.ResponseWriter,
+	r *http.Request,
+	resp *http.Response,
+	prepared *orchestratedRequest,
+	cred *config.CredentialConfig,
+	modelID, realModelID string,
+	logCtx *RequestLogContext,
+	saveResponseFn func(*responses.Response),
+	targetURL string,
+	requestBody []byte,
+	result simulatedNonStreamAttemptResult,
+) {
+	if resp != nil {
+		defer func() {
+			if closeErr := resp.Body.Close(); closeErr != nil {
+				p.logger.WarnContext(respCtx(resp), "Failed to close simulated non-stream response body", "error", closeErr)
+			}
+		}()
+	}
+
+	publicModel := clientVisibleResponseModel(logCtx, modelID)
+	tokenUsageOptions := result.tokenUsageOptions
+	providerLabel := result.providerLabel
+	logTokens := result.logTokens
+	lastChunk := result.lastChunk
+
+	// A retried credential answered with a non-retryable HTTP error (429/5xx
+	// with no more credentials left, or a permanently non-retryable status):
+	// surface its real status with a masked body, exactly as the main loop
+	// surfaces a final upstream error, instead of a generic 502.
+	if result.httpStatus >= http.StatusBadRequest {
+		p.logger.ErrorContext(respCtx(resp), "Simulated non-stream retry ended on an upstream error",
+			"credential", cred.Name, "provider", providerLabel, "model", modelID,
+			"error_code", result.httpStatus, "request_id", logCtx.RequestID)
+		p.setPromptTokensEstimate(logCtx, requestBody, realModelID)
+		// Same classification the main loop applies to a final non-2xx upstream
+		// response (see proxy.go's "Process final response" error branch), so the
+		// spend-log/analytics row matches what the client actually receives.
+		logCtx.ErrorMsg = classifiedErrorMessage(result.httpStatus, result.httpBody)
+		logCtx.ErrorBodyRaw = extractErrorBodyRaw(result.httpBody)
+		// finalizeStreamingLog writes the spend row synchronously from logCtx
+		// (TargetURL -> api_base), so set it before that write, not after.
+		logCtx.TargetURL = targetURL
+		p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerLabel, result.httpStatus, !tokenUsageOptions.AudioInputIncludesCachedAudio)
+		clientBody, _, _ := clientResponseBodyForCredential(result.httpStatus, result.httpBody, cred, modelID, logCtx.RequestID)
+		logCtx.ClientResponseBody = string(clientBody)
+		// A surfaced 429 must carry a Retry-After header, exactly as the main
+		// loop's final-error path does (ensureRetryAfterOn429): a client told to
+		// back off with no hint will otherwise hammer the pool immediately.
+		p.ensureRetryAfterOn429(w, result.httpStatus, nil, modelID, logCtx.Scope)
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(clientBody)))
+		w.WriteHeader(result.httpStatus)
+		_, _ = w.Write(clientBody)
+		logCtx.Status = "failure"
+		logCtx.HTTPStatus = result.httpStatus
+		return
+	}
+
+	if result.streamErr != nil {
 		p.logger.ErrorContext(respCtx(resp), "Simulated non-stream response failed",
 			"credential", cred.Name, "provider", providerLabel, "model", modelID,
-			"error", streamErr, "request_id", logCtx.RequestID)
+			"error", result.streamErr, "request_id", logCtx.RequestID)
 		p.setPromptTokensEstimate(logCtx, requestBody, realModelID)
-		p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerLabel, resp.StatusCode, !tokenUsageOptions.AudioInputIncludesCachedAudio)
-		p.writeSimulatedError(w, logCtx, http.StatusBadGateway, targetURL)
+		failureStatus := simulatedFailureStatus(result.streamErr)
+		p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerLabel, failureStatus, !tokenUsageOptions.AudioInputIncludesCachedAudio)
+		p.writeSimulatedError(w, logCtx, failureStatus, targetURL)
 		return
 	}
 
@@ -234,10 +529,11 @@ func (p *Proxy) handleSimulatedNonStream(
 		}
 	}
 
+	conv := result.conv
 	// Client-format conversion chain — mirrors the plain non-stream path
 	// (proxy.go "Process final response"): the reassembled body is OpenAI
 	// Chat-shaped, so the same converters run on it.
-	finalBody := chatBody
+	finalBody := result.finalChatBody
 	if conv.IsPassthrough() {
 		finalBody = rewriteResponseModelAlias(finalBody, realModelID, modelID)
 		finalBody = openai.StripServerToolCalls(finalBody)
@@ -499,8 +795,9 @@ func (p *Proxy) handleSimulatedNativeNonStream(
 			"credential", cred.Name, "provider", providerLabel, "model", modelID,
 			"error", streamErr, "request_id", logCtx.RequestID)
 		p.setPromptTokensEstimate(logCtx, bodyBytesForEstimate(prepared), modelID)
-		p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerLabel, resp.StatusCode, true)
-		p.writeSimulatedError(w, logCtx, http.StatusBadGateway, targetURL)
+		failureStatus := simulatedFailureStatus(streamErr)
+		p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerLabel, failureStatus, true)
+		p.writeSimulatedError(w, logCtx, failureStatus, targetURL)
 		return
 	}
 
@@ -681,8 +978,9 @@ func (p *Proxy) handleSimulatedPassthroughNonStream(
 			"credential", cred.Name, "model", modelID,
 			"error", streamErr, "request_id", logCtx.RequestID)
 		p.setPromptTokensEstimate(logCtx, bodyBytesForEstimate(prepared), modelID)
-		p.finalizeStreamingLog(logCtx, logTokens, lastChunk, "openai", resp.StatusCode, true)
-		p.writeSimulatedError(w, logCtx, http.StatusBadGateway, targetURL)
+		failureStatus := simulatedFailureStatus(streamErr)
+		p.finalizeStreamingLog(logCtx, logTokens, lastChunk, "openai", failureStatus, true)
+		p.writeSimulatedError(w, logCtx, failureStatus, targetURL)
 		return
 	}
 
@@ -793,6 +1091,50 @@ func (p *Proxy) writeSimulatedBody(
 			p.logger.ErrorContext(r.Context(), "Failed to copy simulated non-stream response body", "error", err)
 		}
 	}
+}
+
+// simulatedFailureStatus classifies a failed simulated non-stream attempt for
+// both the client response and the spend log -- 504 for a timeout-shaped
+// error (mirrors the isTimeoutError convention used elsewhere, e.g. the "all
+// attempts exhausted" tail), 502 otherwise. Used in place of resp.StatusCode
+// (the *upstream's* original 2xx, meaningless once the attempt has actually
+// failed) at every failure call site in this file: finalizeStreamingLog bakes
+// its statusCode argument into the spend log synchronously, and does so
+// *before* writeSimulatedError ever runs, so passing resp.StatusCode there
+// logged a clean 200 for a request the client was about to receive 502/504
+// for -- nothing after finalizeStreamingLog can correct that row after the
+// fact, Logged is already true.
+func simulatedFailureStatus(err error) int {
+	if isTimeoutError(err) {
+		return http.StatusGatewayTimeout
+	}
+	return http.StatusBadGateway
+}
+
+// resetSimulatedAttemptState clears the outcome fields a failed attempt may
+// have set on logCtx via markStreamFailure or markProxyProviderStreamError
+// (Status, StreamOutcome, ErrorMsg, ErrorBodyRaw, ClientResponseBody,
+// ErrorOrigin, HTTPStatus) plus CompletionStartTime, so a dead attempt on a
+// credential that handleSimulatedNonStream's retry loop moves past never
+// leaks into the outcome of a later attempt on the same logCtx.
+func resetSimulatedAttemptState(logCtx *RequestLogContext) {
+	if logCtx == nil {
+		return
+	}
+	logCtx.Status = ""
+	logCtx.StreamOutcome = ""
+	logCtx.ErrorMsg = ""
+	logCtx.ErrorBodyRaw = ""
+	logCtx.ClientResponseBody = ""
+	logCtx.ErrorOrigin = ""
+	logCtx.HTTPStatus = 0
+	logCtx.CompletionStartTime = time.Time{}
+	// TokenUsage is accumulated via MergeNonZero (onChunk, below) -- a field
+	// a dead attempt's usage chunk reported (e.g. cached/web-search tokens)
+	// but the attempt that actually succeeds never does is NOT overwritten
+	// back to zero by MergeNonZero, so it would otherwise survive into the
+	// billed usage of a response that never had it.
+	logCtx.TokenUsage = nil
 }
 
 // writeSimulatedError writes a masked JSON error for a failed simulated
