@@ -37,7 +37,7 @@ func UpdateJSONField(body []byte, mapping ModelParamsMapping) []byte {
 }
 
 // applyMapping renames mapping.KeysToReplace and removes mapping.KeysToRemove in data.
-func applyMapping(data map[string]any, mapping ModelParamsMapping) {
+func applyMapping[V any](data map[string]V, mapping ModelParamsMapping) {
 	// 1. Replace keys (rename parameters)
 	for oldKey, newKey := range mapping.KeysToReplace {
 		if val, ok := data[oldKey]; ok {
@@ -354,6 +354,26 @@ func reasoningOff(modelID string, effort any) bool {
 	return false
 }
 
+// chatReasoningEffort returns the effort a Chat Completions body carries: the
+// top-level reasoning_effort, else the nested reasoning.effort (the same fields
+// MapReasoningEffort rewrites). nil when neither is set.
+func chatReasoningEffort(data map[string]json.RawMessage) any {
+	var effort any
+	if raw, ok := data["reasoning_effort"]; ok {
+		_ = json.Unmarshal(raw, &effort)
+	}
+	if effort != nil {
+		return effort
+	}
+	var reasoning struct {
+		Effort any `json:"effort"`
+	}
+	if raw, ok := data["reasoning"]; ok {
+		_ = json.Unmarshal(raw, &reasoning)
+	}
+	return reasoning.Effort
+}
+
 // ReplaceBodyParam applies the reasoning model rules to a Chat Completions body: it
 // renames max_tokens to max_completion_tokens, drops chatLogprobsParams, and drops
 // samplingParams unless the request runs with reasoning off. Bodies for other models
@@ -362,7 +382,7 @@ func ReplaceBodyParam(modelID string, body []byte) []byte {
 	if !IsReasoningModel(modelID) {
 		return body
 	}
-	var data map[string]any
+	var data map[string]json.RawMessage
 	if err := json.Unmarshal(body, &data); err != nil {
 		return body
 	}
@@ -370,7 +390,7 @@ func ReplaceBodyParam(modelID string, body []byte) []byte {
 		KeysToReplace: map[string]string{"max_tokens": "max_completion_tokens"},
 		KeysToRemove:  chatLogprobsParams,
 	}
-	if !reasoningOff(modelID, data["reasoning_effort"]) {
+	if !reasoningOff(modelID, chatReasoningEffort(data)) {
 		mapping.KeysToRemove = slices.Concat(chatLogprobsParams, samplingParams)
 	}
 	applyMapping(data, mapping)

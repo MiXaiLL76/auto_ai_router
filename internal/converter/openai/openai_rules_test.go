@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -1248,5 +1249,18 @@ func TestSupportsReasoningEffortNone(t *testing.T) {
 	}
 	for model, want := range tests {
 		assert.Equal(t, want, SupportsReasoningEffortNone(model), model)
+	}
+}
+
+func TestReplaceBodyParam_NestedReasoningEffortAndBigInt(t *testing.T) {
+	// nested reasoning.effort "high" keeps reasoning on, so sampling params go
+	out := ReplaceBodyParam("gpt-5.1", []byte(`{"reasoning":{"effort":"high"},"temperature":0.5}`))
+	if strings.Contains(string(out), "temperature") {
+		t.Fatalf("temperature must be dropped with nested effort high: %s", out)
+	}
+	// large integers must survive untouched (no float64 round-trip)
+	out = ReplaceBodyParam("gpt-5.1", []byte(`{"seed":9007199254740993,"reasoning_effort":"none","temperature":0.5}`))
+	if !strings.Contains(string(out), "9007199254740993") || !strings.Contains(string(out), "temperature") {
+		t.Fatalf("seed must be preserved and temperature kept: %s", out)
 	}
 }
