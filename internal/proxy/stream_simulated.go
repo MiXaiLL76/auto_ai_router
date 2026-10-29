@@ -352,6 +352,14 @@ func (p *Proxy) handleSimulatedNonStream(
 				// oversized fanned-out reply).
 				return
 			}
+			// Track the URL this credential actually sent to, so any failure on
+			// this attempt (mid-stream break, surfaced HTTP error) reports the
+			// credential that produced it -- targetURL is captured by value at
+			// attempt 0 otherwise. Set before the error classification below,
+			// which breaks/continues without reaching the success assignment.
+			if sendOutcome.targetURL != "" {
+				targetURL = sendOutcome.targetURL
+			}
 			providerLabel := streamingProviderLabel(cred, prepared.convertedMessages)
 			if isClientGone {
 				markStreamFailure(logCtx, sendErr)
@@ -421,12 +429,6 @@ func (p *Proxy) handleSimulatedNonStream(
 				break
 			}
 			resp = sendOutcome.resp
-			// Track the URL this credential actually sent to, so a failure on a
-			// retried attempt reports the credential that produced it (targetURL
-			// is captured by value at attempt 0 otherwise).
-			if sendOutcome.targetURL != "" {
-				targetURL = sendOutcome.targetURL
-			}
 		}
 
 		result = p.attemptSimulatedNonStream(resp, prepared, cred, modelID, logCtx)
@@ -490,6 +492,9 @@ func (p *Proxy) finishSimulatedNonStream(
 		// spend-log/analytics row matches what the client actually receives.
 		logCtx.ErrorMsg = classifiedErrorMessage(result.httpStatus, result.httpBody)
 		logCtx.ErrorBodyRaw = extractErrorBodyRaw(result.httpBody)
+		// finalizeStreamingLog writes the spend row synchronously from logCtx
+		// (TargetURL -> api_base), so set it before that write, not after.
+		logCtx.TargetURL = targetURL
 		p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerLabel, result.httpStatus, !tokenUsageOptions.AudioInputIncludesCachedAudio)
 		clientBody, _, _ := clientResponseBodyForCredential(result.httpStatus, result.httpBody, cred, modelID, logCtx.RequestID)
 		logCtx.ClientResponseBody = string(clientBody)
@@ -503,7 +508,6 @@ func (p *Proxy) finishSimulatedNonStream(
 		_, _ = w.Write(clientBody)
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = result.httpStatus
-		logCtx.TargetURL = targetURL
 		return
 	}
 

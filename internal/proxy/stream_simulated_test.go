@@ -1734,3 +1734,46 @@ func TestHandleSimulatedNonStream_Surfaced429CarriesRetryAfter(t *testing.T) {
 	require.Equal(t, http.StatusTooManyRequests, w.Code, w.Body.String())
 	assert.NotEmpty(t, w.Header().Get("Retry-After"), "a surfaced 429 must carry a Retry-After header")
 }
+
+// TestHandleSimulatedNonStream_SurfacedErrorReportsFailingCredentialURL: the
+// spend row's api_base is derived from logCtx.TargetURL, which targetURL is
+// captured by value at attempt 0 -- so a surfaced error on a retried credential
+// must report that credential's URL, not the original one's, and must be set
+// before finalizeStreamingLog writes the row.
+func TestHandleSimulatedNonStream_SurfacedErrorReportsFailingCredentialURL(t *testing.T) {
+	primary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hijackAfterPartialSSE(w, `data: {"id":"c1","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}`+"\n\n")
+	}))
+	defer primary.Close()
+	secondary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":{"message":"bad request","type":"invalid_request_error"}}`)
+	}))
+	defer secondary.Close()
+
+	prx := NewTestProxyBuilder().WithCredentials(
+		config.CredentialConfig{Name: "primary", Type: config.ProviderTypeOpenAI, BaseURL: primary.URL, APIKey: "primary-key", RPM: 100, TPM: 100000},
+		config.CredentialConfig{Name: "secondary", Type: config.ProviderTypeOpenAI, BaseURL: secondary.URL, APIKey: "secondary-key", Priority: 1, RPM: 100, TPM: 100000},
+	).WithMaxProviderRetries(2).WithForceStreamForTTFT(true).Build()
+	setTestModelPrice(prx, "gpt-4o", &models.ModelPrice{InputCostPerToken: 0.001, OutputCostPerToken: 0.001})
+	db := &stubLiteLLMManager{}
+	prx.LiteLLMDB = db
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{
+		"model":"gpt-4o",
+		"messages":[{"role":"user","content":"hi"}],
+		"stream":false
+	}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+	require.Len(t, db.loggedEntries, 1)
+	wantHost := strings.TrimPrefix(secondary.URL, "http://")
+	assert.Equal(t, wantHost, db.loggedEntries[0].APIBase,
+		"the spend row's api_base must name the credential that actually failed, not the original one")
+}
