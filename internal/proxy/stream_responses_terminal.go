@@ -135,6 +135,22 @@ func decodeOptionalJSON(raw json.RawMessage, v any) bool {
 	return len(raw) == 0 || json.Unmarshal(raw, v) == nil
 }
 
+// terminalResponseJSON returns the response object of payload, a terminal
+// event's JSON, as the upstream sent it, or nil when it has none. Unlike
+// decodeTerminalResponse it does not need to fit responses.Response.
+func terminalResponseJSON(payload []byte) []byte {
+	var event struct {
+		Response json.RawMessage `json:"response"`
+	}
+	if json.Unmarshal(payload, &event) != nil {
+		return nil
+	}
+	if trimmed := bytes.TrimSpace(event.Response); len(trimmed) == 0 || trimmed[0] != '{' {
+		return nil
+	}
+	return event.Response
+}
+
 // decodeTerminalResponse decodes the response object of payload, a terminal
 // event's JSON. Only a stored response needs it whole.
 func decodeTerminalResponse(payload []byte) (*responses.Response, bool) {

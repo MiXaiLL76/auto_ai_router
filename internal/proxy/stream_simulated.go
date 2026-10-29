@@ -628,24 +628,21 @@ func (p *Proxy) handleSimulatedPassthroughNonStream(
 				// "data: " made every event invisible and the terminal event
 				// never seen.
 				jsonData := responsesStreamDataPayload(line)
-				if jsonData == nil || !mayBeTerminalResponsesEvent(jsonData) {
+				if jsonData == nil {
 					return
 				}
-				var event struct {
-					Type     string             `json:"type"`
-					Response responses.Response `json:"response"`
+				// As in handlePassthroughResponsesStreaming, the event need
+				// not fit responses.Response (e.g. non-string metadata values):
+				// its response object is returned as sent, and decoded whole
+				// only best-effort, below.
+				event, ok := parseResponsesTerminalEvent(jsonData)
+				if !ok {
+					return
 				}
-				if json.Unmarshal(jsonData, &event) == nil && isTerminalResponsesEventType(event.Type) {
-					sawTerminal = true
-					completedEvent = bytes.Clone(jsonData) // line is only valid during this call
-					completedEventParse = nil
-					if parsed, ok := parseResponsesTerminalEvent(completedEvent); ok {
-						completedEventParse = parsed.finalChunkParse(completedEvent, true)
-					}
-					if enriched, mErr := json.Marshal(&event.Response); mErr == nil {
-						finalBody = enriched
-					}
-				}
+				sawTerminal = true
+				completedEvent = bytes.Clone(jsonData) // line is only valid during this call
+				completedEventParse = event.finalChunkParse(completedEvent, true)
+				finalBody = terminalResponseJSON(completedEvent)
 			})
 		}
 		if readErr != nil {
@@ -699,6 +696,9 @@ func (p *Proxy) handleSimulatedPassthroughNonStream(
 		if saveResponseFn != nil {
 			saveResponseFn(&respObj)
 		}
+	} else {
+		p.logger.WarnContext(respCtx(resp), "Simulated passthrough non-stream response does not decode as a Responses object; returned as sent, not stored",
+			"credential", cred.Name, "model", modelID, "error", err, "request_id", logCtx.RequestID)
 	}
 
 	if normalizedBody := normalizeSuccessfulResponseModel(finalBody, endpointFromLogContext(logCtx), publicModel); !bytes.Equal(normalizedBody, finalBody) {

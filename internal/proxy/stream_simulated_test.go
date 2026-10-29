@@ -799,6 +799,68 @@ func TestHandleSimulatedPassthroughNonStream_CapturesTTFT(t *testing.T) {
 	assert.Equal(t, "Hello world", out.Output[0].Content[0].Text)
 }
 
+// TestSimulatedPassthrough_TerminalEventWithoutTypedResponse: a terminal event
+// that does not fit responses.Response (here a non-string metadata value) still
+// ends the stream. Its response is returned as sent and billed; only the store,
+// which needs the typed response, is skipped. It used to be a 502.
+func TestSimulatedPassthrough_TerminalEventWithoutTypedResponse(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		metadata  string
+		wantSaved bool
+	}{
+		{name: "untyped metadata", metadata: `{"attempt":1}`, wantSaved: false},
+		{name: "typed metadata", metadata: `{"attempt":"1"}`, wantSaved: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			finalJSON := `{"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","model":"m",` +
+				`"metadata":` + tt.metadata + `,"output":[{"type":"message","id":"msg_1","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Hello"}]}],` +
+				`"usage":{"input_tokens":700,"output_tokens":42,"total_tokens":742}}}`
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader(responsesSSE(finalJSON))),
+			}
+			prx := NewTestProxyBuilder().WithSingleCredential("intl", config.ProviderTypeOpenAI, "http://x", "key").Build()
+			req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(`{}`))
+			req.Header.Set("Authorization", "Bearer master-key")
+			logCtx := &RequestLogContext{Request: req}
+			cred := &config.CredentialConfig{Name: "intl", Type: config.ProviderTypeOpenAI, BaseURL: "http://x"}
+			prepared := &orchestratedRequest{passthroughResponses: true, forcedPassthroughNonStream: true, body: []byte(`{}`)}
+			var saved []*responses.Response
+			saveFn := func(r *responses.Response) { saved = append(saved, r) }
+			w := httptest.NewRecorder()
+
+			prx.handleSimulatedPassthroughNonStream(w, req, resp, prepared, cred, "m", logCtx, saveFn, "http://x")
+
+			require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+			var out struct {
+				ID       string          `json:"id"`
+				Status   string          `json:"status"`
+				Metadata json.RawMessage `json:"metadata"`
+				Output   []struct {
+					Content []struct {
+						Text string `json:"text"`
+					} `json:"content"`
+				} `json:"output"`
+			}
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &out))
+			assert.Equal(t, "resp_1", out.ID)
+			assert.Equal(t, "completed", out.Status)
+			assert.JSONEq(t, tt.metadata, string(out.Metadata))
+			require.Len(t, out.Output, 1)
+			require.Len(t, out.Output[0].Content, 1)
+			assert.Equal(t, "Hello", out.Output[0].Content[0].Text)
+
+			require.NotNil(t, logCtx.TokenUsage)
+			assert.Equal(t, 700, logCtx.TokenUsage.PromptTokens)
+			assert.Equal(t, 42, logCtx.TokenUsage.CompletionTokens)
+			assert.Equal(t, 742, prx.rateLimiter.GetCurrentTPM("intl"))
+			assert.Equal(t, tt.wantSaved, len(saved) == 1)
+		})
+	}
+}
+
 // responsesOnlySSETransport simulates a responses_only upstream (only /v1/responses)
 // answering with a Responses API SSE stream — the shape force_stream_for_ttft now
 // handles for convertedToResponses requests.
