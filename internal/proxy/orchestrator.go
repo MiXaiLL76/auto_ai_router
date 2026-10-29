@@ -1148,6 +1148,9 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 	if sessionID == "" {
 		sessionID = extractSessionIDFromHeaders(r.Header)
 	}
+	if sessionID == "" {
+		sessionID = sanitized.ClientID
+	}
 	if sanitized.Changed {
 		r.ContentLength = int64(len(body))
 		r.Header.Del("Content-Length")

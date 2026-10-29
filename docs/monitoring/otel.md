@@ -14,7 +14,7 @@ otel:
   endpoint: "localhost:4317"      # OTLP collector endpoint
   protocol: "grpc"                # grpc | http (http/protobuf)
   insecure: true                  # Disable TLS for the exporter connection (default: true)
-  service_name: "auto-ai-router"  # Reported as the service.name resource attribute
+  service_name: "auto-ai-router"  # Reported as the service.name resource attribute and on spend events
   logs_enabled: true              # Ship slog records via OTLP in addition to stdout
   traces_enabled: true            # Server/client spans + traceparent propagation
   metric_export_interval: 60s     # OTLP metric push interval
@@ -30,7 +30,7 @@ otel:
 | `endpoint`                   | `localhost:4317` / `:4318` | OTLP collector. `host:port` for grpc; `host:port` or full URL for http. Default port depends on protocol. |
 | `protocol`                   | `grpc`                     | OTLP transport: `grpc` or `http` (http/protobuf).                                                         |
 | `insecure`                   | `true`                     | Disable TLS for the exporter connection (typical for an in-cluster collector).                            |
-| `service_name`               | `auto-ai-router`           | Reported as the `service.name` resource attribute.                                                        |
+| `service_name`               | `auto-ai-router`           | Reported as the `service.name` resource attribute, and as `service_name` on every Kafka spend event.      |
 | `headers`                    | —                          | Extra headers added to every OTLP export request (e.g. auth tokens). Supports `os.environ/VAR_NAME`.      |
 | `logs_enabled`               | `true`                     | Ship `slog` records via OTLP in addition to stdout.                                                       |
 | `traces_enabled`             | `true`                     | Create server/client spans and propagate trace context to upstreams.                                      |

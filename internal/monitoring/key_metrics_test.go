@@ -43,7 +43,8 @@ func TestKeyMetrics_ObserveCountsByKeyAndStatus(t *testing.T) {
 	assert.Equal(t, 1.0, keyRequests(m, "abc123def456", "429"))
 	assert.Equal(t, 1.0, keyRequests(m, "abc123def456", "unknown"))
 	assert.Equal(t, 1, testutil.CollectAndCount(m.info))
-	assert.Equal(t, 1.0, testutil.ToFloat64(m.info.WithLabelValues("abc123def456", "ci", "", "", "ml", "")))
+	// the default owner labels, in DefaultKeyInfoLabels' order
+	assert.Equal(t, 1.0, testutil.ToFloat64(m.info.WithLabelValues("abc123def456", "ci", "", "", "ml", "", "")))
 }
 
 func TestKeyMetrics_EmptyKeyAndNilAreNoops(t *testing.T) {
@@ -278,4 +279,15 @@ func TestKeyMetrics_MiddlewareClientGoneIs499(t *testing.T) {
 	}
 	assert.Equal(t, 1.0, keyRequests(m, "k", "499"))
 	assert.Equal(t, 1.0, keyRequests(m, "k", "200"))
+}
+
+func TestKeyMetrics_OrganizationLabels(t *testing.T) {
+	m, reg := newTestKeyMetrics(t, KeyMetricsOptions{InfoLabels: []string{KeyInfoLabelOrganizationAlias}})
+	m.Observe(KeyIdentity{Key: "k", OrganizationAlias: "acme"}, 200)
+	expected := `
+# HELP auto_ai_router_key_info Owner metadata for each API key seen by the router (value is always 1)
+# TYPE auto_ai_router_key_info gauge
+auto_ai_router_key_info{key="k",organization_alias="acme"} 1
+`
+	require.NoError(t, testutil.GatherAndCompare(reg, strings.NewReader(expected), "auto_ai_router_key_info"))
 }
