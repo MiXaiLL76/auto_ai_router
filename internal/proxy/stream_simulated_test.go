@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -415,6 +416,73 @@ func TestHandleSimulatedNonStream_MidStreamTransportError(t *testing.T) {
 	require.Equal(t, http.StatusBadGateway, w.Code)
 	assert.Equal(t, "failure", logCtx.Status)
 	assert.Equal(t, "stream_error", logCtx.StreamOutcome)
+	// Final in-memory state only -- writeSimulatedError unconditionally sets
+	// logCtx.HTTPStatus itself right after finalizeStreamingLog runs, so this
+	// passes either way and is NOT the regression guard for the spend-log bug
+	// (see TestFinalizeStreamingLogArgument_UsesClassifiedFailureStatus below,
+	// which catches the actual mechanism: what finalizeStreamingLog bakes into
+	// the spend log *before* that overwrite ever happens).
+	assert.Equal(t, http.StatusBadGateway, logCtx.HTTPStatus)
+}
+
+// The spend log is written synchronously inside finalizeStreamingLog, before
+// writeSimulatedError's later (client-facing only) assignment to
+// logCtx.HTTPStatus -- so the status finalizeStreamingLog is CALLED WITH is
+// what actually lands in spend logs/ClickHouse, independent of whatever
+// happens to logCtx afterward. This is the real regression guard for the bug
+// TestHandleSimulatedNonStream_MidStreamTransportError's own HTTPStatus
+// assertion can't catch (writeSimulatedError papers over it in-memory
+// either way): previously all three simulated handlers called
+// finalizeStreamingLog with resp.StatusCode (the upstream's original 2xx)
+// instead of the classified failure status, so a request failing 40+ seconds
+// in still logged a clean 200 even though the client got 502/504.
+func TestFinalizeStreamingLogArgument_UsesClassifiedFailureStatus(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	logCtx := &RequestLogContext{
+		Request:       httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
+		StreamOutcome: "stream_error", // what markStreamFailure would have set
+	}
+
+	// What handleSimulatedNonStream (and its two siblings) must now pass as
+	// finalizeStreamingLog's statusCode argument for a transport failure --
+	// simulatedFailureStatus's own result, not resp.StatusCode.
+	prx.finalizeStreamingLog(logCtx, 0, nil, "openai", simulatedFailureStatus(context.DeadlineExceeded), false)
+	assert.Equal(t, http.StatusGatewayTimeout, logCtx.HTTPStatus, "a timeout-shaped failure must bake 504 into the spend log")
+
+	logCtx2 := &RequestLogContext{
+		Request:       httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
+		StreamOutcome: "stream_error",
+	}
+	prx.finalizeStreamingLog(logCtx2, 0, nil, "openai", simulatedFailureStatus(io.ErrUnexpectedEOF), false)
+	assert.Equal(t, http.StatusBadGateway, logCtx2.HTTPStatus, "a plain connection-drop failure must bake 502 into the spend log")
+}
+
+// A timeout-shaped transport failure classifies as 504, not a bare 502 -- for
+// both the client response and the spend log, mirroring the isTimeoutError
+// convention used elsewhere (e.g. the "all attempts exhausted" tail).
+func TestHandleSimulatedNonStream_TimeoutClassifiesAsGatewayTimeout(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+
+	sse := openAIChatSSE(
+		`{"id":"chatcmpl-1","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}`,
+	)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(&errReader{data: []byte(sse), err: context.DeadlineExceeded}),
+	}
+	logCtx := &RequestLogContext{StartTime: time.Now(), RequestID: "test-req-timeout", Request: req}
+	cred := &config.CredentialConfig{Name: "openai", Type: config.ProviderTypeOpenAI}
+	prepared := &orchestratedRequest{streaming: false}
+	w := httptest.NewRecorder()
+
+	prx.handleSimulatedNonStream(w, req, resp, prepared, cred, "gpt-4o", "gpt-4o",
+		logCtx, nil, "http://upstream", []byte(`{"model":"gpt-4o","messages":[]}`))
+
+	assert.Equal(t, http.StatusGatewayTimeout, w.Code)
+	assert.Equal(t, http.StatusGatewayTimeout, logCtx.HTTPStatus)
 }
 
 // TestReassembleChatCompletion_Images verifies streamed image deltas (Gemini

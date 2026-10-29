@@ -222,8 +222,9 @@ func (p *Proxy) handleSimulatedNonStream(
 			"credential", cred.Name, "provider", providerLabel, "model", modelID,
 			"error", streamErr, "request_id", logCtx.RequestID)
 		p.setPromptTokensEstimate(logCtx, requestBody, realModelID)
-		p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerLabel, resp.StatusCode, !tokenUsageOptions.AudioInputIncludesCachedAudio)
-		p.writeSimulatedError(w, logCtx, http.StatusBadGateway, targetURL)
+		failureStatus := simulatedFailureStatus(streamErr)
+		p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerLabel, failureStatus, !tokenUsageOptions.AudioInputIncludesCachedAudio)
+		p.writeSimulatedError(w, logCtx, failureStatus, targetURL)
 		return
 	}
 
@@ -499,8 +500,9 @@ func (p *Proxy) handleSimulatedNativeNonStream(
 			"credential", cred.Name, "provider", providerLabel, "model", modelID,
 			"error", streamErr, "request_id", logCtx.RequestID)
 		p.setPromptTokensEstimate(logCtx, bodyBytesForEstimate(prepared), modelID)
-		p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerLabel, resp.StatusCode, true)
-		p.writeSimulatedError(w, logCtx, http.StatusBadGateway, targetURL)
+		failureStatus := simulatedFailureStatus(streamErr)
+		p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerLabel, failureStatus, true)
+		p.writeSimulatedError(w, logCtx, failureStatus, targetURL)
 		return
 	}
 
@@ -681,8 +683,9 @@ func (p *Proxy) handleSimulatedPassthroughNonStream(
 			"credential", cred.Name, "model", modelID,
 			"error", streamErr, "request_id", logCtx.RequestID)
 		p.setPromptTokensEstimate(logCtx, bodyBytesForEstimate(prepared), modelID)
-		p.finalizeStreamingLog(logCtx, logTokens, lastChunk, "openai", resp.StatusCode, true)
-		p.writeSimulatedError(w, logCtx, http.StatusBadGateway, targetURL)
+		failureStatus := simulatedFailureStatus(streamErr)
+		p.finalizeStreamingLog(logCtx, logTokens, lastChunk, "openai", failureStatus, true)
+		p.writeSimulatedError(w, logCtx, failureStatus, targetURL)
 		return
 	}
 
@@ -793,6 +796,24 @@ func (p *Proxy) writeSimulatedBody(
 			p.logger.ErrorContext(r.Context(), "Failed to copy simulated non-stream response body", "error", err)
 		}
 	}
+}
+
+// simulatedFailureStatus classifies a failed simulated non-stream attempt for
+// both the client response and the spend log -- 504 for a timeout-shaped
+// error (mirrors the isTimeoutError convention used elsewhere, e.g. the "all
+// attempts exhausted" tail), 502 otherwise. Used in place of resp.StatusCode
+// (the *upstream's* original 2xx, meaningless once the attempt has actually
+// failed) at every failure call site in this file: finalizeStreamingLog bakes
+// its statusCode argument into the spend log synchronously, and does so
+// *before* writeSimulatedError ever runs, so passing resp.StatusCode there
+// logged a clean 200 for a request the client was about to receive 502/504
+// for -- nothing after finalizeStreamingLog can correct that row after the
+// fact, Logged is already true.
+func simulatedFailureStatus(err error) int {
+	if isTimeoutError(err) {
+		return http.StatusGatewayTimeout
+	}
+	return http.StatusBadGateway
 }
 
 // writeSimulatedError writes a masked JSON error for a failed simulated
