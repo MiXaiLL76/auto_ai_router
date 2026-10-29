@@ -11,9 +11,15 @@ import "time"
 // Request/response body capture is intentionally out of scope here (separate
 // ТЗ/PR) — the Body* fields are always zero-value placeholders.
 type SpendEvent struct {
-	RequestID string    `json:"request_id"`
-	StartTime time.Time `json:"start_time"`
-	EndTime   time.Time `json:"end_time"`
+	// RequestID is the provider's response id when one was captured, so two
+	// different calls can share it; it is also the Kafka message key.
+	RequestID string `json:"request_id"`
+	// AirEventID is minted by AIR for every call and never taken from the
+	// client. It stays the same on every resend of the event, so consumers
+	// deduplicate on it: Kafka delivers at least once.
+	AirEventID string    `json:"air_event_id"`
+	StartTime  time.Time `json:"start_time"`
+	EndTime    time.Time `json:"end_time"`
 	// CompletionStartTime is the time-to-first-token (TTFT) timestamp, nil
 	// when the request wasn't streamed or no chunk was ever written.
 	CompletionStartTime *time.Time `json:"completion_start_time,omitempty"`

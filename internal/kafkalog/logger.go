@@ -28,6 +28,11 @@ const dlqRecoveryInterval = 5 * time.Minute
 // dlqMaxSize caps the in-memory dead letter queue (same bound as spendlog).
 const dlqMaxSize = 10
 
+// defaultBackoffDurations is the wait before each produce attempt of a
+// batch; its length is the number of attempts before the batch goes to the
+// DLQ.
+var defaultBackoffDurations = []time.Duration{0, 1 * time.Second, 5 * time.Second, 30 * time.Second}
+
 // Keyed is the constraint Logger[T] events must satisfy: a stable key so
 // retries/reprocessing of the same logical event stay ordered on the same
 // Kafka partition. Both *SpendEvent and *RawBodyEvent key by request_id.
@@ -74,6 +79,13 @@ type Logger[T Keyed] struct {
 	topic  string
 	logger *slog.Logger
 	config *Config
+
+	// produce is the synchronous produce call every flush goes through and
+	// backoffDurations the retry schedule; NewLogger binds them to
+	// client.ProduceSync and defaultBackoffDurations, tests substitute both
+	// so the retry/DLQ paths run without a broker or real waits.
+	produce          func(ctx context.Context, rs ...*kgo.Record) kgo.ProduceResults
+	backoffDurations []time.Duration
 
 	queue chan T
 
@@ -145,12 +157,14 @@ func NewLogger[T Keyed](cfg *Config) (*Logger[T], error) {
 	}
 
 	l := &Logger[T]{
-		client:   client,
-		topic:    cfg.Topic,
-		logger:   cfg.Logger,
-		config:   cfg,
-		queue:    make(chan T, cfg.LogQueueSize),
-		stopChan: make(chan struct{}),
+		client:           client,
+		topic:            cfg.Topic,
+		logger:           cfg.Logger,
+		config:           cfg,
+		produce:          client.ProduceSync,
+		backoffDurations: defaultBackoffDurations,
+		queue:            make(chan T, cfg.LogQueueSize),
+		stopChan:         make(chan struct{}),
 	}
 	return l, nil
 }
@@ -337,34 +351,38 @@ func (l *Logger[T]) flushBatch(batch []T) {
 		return
 	}
 
-	const maxAttempts = 4
-	backoffDurations := []time.Duration{0, 1 * time.Second, 5 * time.Second, 30 * time.Second}
+	backoffDurations := l.backoffDurations
+	if len(backoffDurations) == 0 {
+		backoffDurations = defaultBackoffDurations
+	}
+	maxAttempts := len(backoffDurations)
 
+	// pending shrinks to the records Kafka rejected after every attempt:
+	// resending the whole batch would publish the accepted records again.
+	pending := batch
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if attempt > 0 {
-			backoff := backoffDurations[attempt]
 			select {
-			case <-time.After(backoff):
+			case <-time.After(backoffDurations[attempt]):
 			case <-l.stopChan:
-				if finalErr := l.produceBatch(batch); finalErr == nil {
-					atomic.AddUint64(&l.produced, uint64(len(batch)))
+				failed, finalErr := l.produceBatch(pending)
+				atomic.AddUint64(&l.produced, uint64(len(pending))-uint64(len(failed)))
+				if finalErr == nil {
 					atomic.AddUint64(&l.batchesOK, 1)
 					l.healthy.Store(true)
 					return
-				} else {
-					lastErr = finalErr
 				}
-				atomic.AddUint64(&l.errors, uint64(len(batch)))
+				atomic.AddUint64(&l.errors, uint64(len(failed)))
 				l.healthy.Store(false)
-				l.addToDLQ(batch, lastErr, attempt)
+				l.addToDLQ(failed, finalErr, attempt)
 				return
 			}
 		}
 
-		err := l.produceBatch(batch)
+		failed, err := l.produceBatch(pending)
+		atomic.AddUint64(&l.produced, uint64(len(pending))-uint64(len(failed)))
 		if err == nil {
-			atomic.AddUint64(&l.produced, uint64(len(batch)))
 			atomic.AddUint64(&l.batchesOK, 1)
 			l.healthy.Store(true)
 			return
@@ -375,19 +393,25 @@ func (l *Logger[T]) flushBatch(batch []T) {
 		l.logger.Warn("[Kafka] Batch produce failed",
 			"attempt", attempt+1,
 			"max_attempts", maxAttempts,
-			"batch_size", len(batch),
+			"batch_size", len(pending),
+			"failed_count", len(failed),
 			"error", err,
 		)
+		pending = failed
 	}
 
-	atomic.AddUint64(&l.errors, uint64(len(batch)))
-	l.addToDLQ(batch, lastErr, maxAttempts)
+	atomic.AddUint64(&l.errors, uint64(len(pending)))
+	l.addToDLQ(pending, lastErr, maxAttempts)
 }
 
 // produceBatch marshals and synchronously produces a batch of events, keyed
-// by request_id so retries/reprocessing stay ordered per request.
-func (l *Logger[T]) produceBatch(batch []T) error {
+// by request_id so retries/reprocessing stay ordered per request. It returns
+// the events whose records Kafka did not accept, matched by record rather
+// than by position, together with the first produce error; events that fail
+// to marshal are logged and skipped, never retried.
+func (l *Logger[T]) produceBatch(batch []T) ([]T, error) {
 	records := make([]*kgo.Record, 0, len(batch))
+	events := make(map[*kgo.Record]T, len(batch))
 	for _, event := range batch {
 		value, err := json.Marshal(event)
 		if err != nil {
@@ -395,21 +419,41 @@ func (l *Logger[T]) produceBatch(batch []T) error {
 				"request_id", string(event.Key()), "error", err)
 			continue
 		}
-		records = append(records, &kgo.Record{
+		record := &kgo.Record{
 			Key:   event.Key(),
 			Value: value,
 			Topic: l.topic,
-		})
+		}
+		records = append(records, record)
+		events[record] = event
 	}
 	if len(records) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	results := l.client.ProduceSync(ctx, records...)
-	return results.FirstErr()
+	return failedEvents(l.produce(ctx, records...), events)
+}
+
+// failedEvents returns the events behind the records that came back with an
+// error, plus the first such error (nil when every record was accepted).
+func failedEvents[T Keyed](results kgo.ProduceResults, events map[*kgo.Record]T) ([]T, error) {
+	var failed []T
+	var firstErr error
+	for _, result := range results {
+		if result.Err == nil {
+			continue
+		}
+		if firstErr == nil {
+			firstErr = result.Err
+		}
+		if event, ok := events[result.Record]; ok {
+			failed = append(failed, event)
+		}
+	}
+	return failed, firstErr
 }
 
 // appendToDLQLocked appends dlb to the DLQ, evicting the oldest entry first
@@ -560,9 +604,9 @@ func (l *Logger[T]) flushDLQ() {
 	l.dlqMu.Unlock()
 
 	for _, dlb := range dlqCopy {
-		err := l.produceBatch(dlb.batch)
+		failed, err := l.produceBatch(dlb.batch)
+		atomic.AddUint64(&l.produced, uint64(len(dlb.batch))-uint64(len(failed)))
 		if err == nil {
-			atomic.AddUint64(&l.produced, uint64(len(dlb.batch)))
 			atomic.AddUint64(&l.batchesOK, 1)
 			atomic.AddUint64(&l.dlqRecovered, 1)
 			l.healthy.Store(true)
@@ -573,6 +617,9 @@ func (l *Logger[T]) flushDLQ() {
 			continue
 		}
 
+		// Only the records Kafka still rejected go back; the rest were
+		// published by this attempt and must not be sent again.
+		dlb.batch = failed
 		l.dlqMu.Lock()
 		l.appendToDLQLocked(dlb)
 		l.dlqMu.Unlock()

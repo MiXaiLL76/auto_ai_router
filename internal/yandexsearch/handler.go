@@ -351,7 +351,13 @@ func (h *Handler) publishSpendEvent(entry *dbmodels.SpendLogEntry, upstreamStatu
 		return
 	}
 	event := &kafkalog.SpendEvent{
-		RequestID:      entry.RequestID,
+		RequestID: entry.RequestID,
+		// Minted here rather than copied from entry.AirEventID: that one is
+		// the request id from the context, which a trusted inbound
+		// traceparent makes client-supplied and shared across calls (see
+		// eventID in proxy.proxyRequest). The event is built once per call,
+		// so every Kafka resend carries the same value.
+		AirEventID:     requestid.New(),
 		StartTime:      entry.StartTime,
 		EndTime:        entry.EndTime,
 		DurationMs:     int64(entry.RequestDurationMS),

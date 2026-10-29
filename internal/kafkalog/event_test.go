@@ -43,6 +43,18 @@ func TestSpendEvent_JSONMarshal_OmitsNilOptionalFields(t *testing.T) {
 	assert.Equal(t, float64(0), raw["body_response_bytes"])
 }
 
+func TestSpendEvent_JSONMarshal_IncludesAirEventID(t *testing.T) {
+	e := &SpendEvent{RequestID: "chatcmpl-shared", AirEventID: "evt-456"}
+
+	data, err := json.Marshal(e)
+	require.NoError(t, err)
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(data, &raw))
+	assert.Equal(t, "chatcmpl-shared", raw["request_id"])
+	assert.Equal(t, "evt-456", raw["air_event_id"])
+}
+
 func TestRawBodyEvent_Key(t *testing.T) {
 	e := &RawBodyEvent{RequestID: "req-123"}
 	assert.Equal(t, []byte("req-123"), e.Key())
