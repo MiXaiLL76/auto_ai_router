@@ -1239,14 +1239,23 @@ type simLogprobs struct {
 
 // simChoiceState accumulates one choice across streaming deltas.
 type simChoiceState struct {
-	index        int
-	role         string
-	content      strings.Builder
-	refusal      strings.Builder
-	reasoning    strings.Builder
-	images       []openai.ImageData
-	toolCalls    map[int]*simToolCallState
-	toolOrder    []int
+	index     int
+	role      string
+	content   strings.Builder
+	refusal   strings.Builder
+	reasoning strings.Builder
+	images    []openai.ImageData
+	toolCalls map[int]*simToolCallState
+	toolOrder []int
+	// toolSeq is the next real slot to use when a delta carries a new tool-call
+	// id under an incoming index already taken by a different call.
+	toolSeq int
+	// callByIndex maps an incoming delta index to the real slot the current call
+	// at that index lives in. A provider that reuses one index for two distinct
+	// calls (see the ToolCalls loop) gets a fresh slot per new id, and the later
+	// id-less argument deltas — which carry only the incoming index — are routed
+	// to that same fresh slot instead of the first call.
+	callByIndex  map[int]int
 	finishReason *string
 	// logprobs accumulates the per-token entries the upstream streams when the
 	// client asked for logprobs=true (one content entry per chunk, same shape
@@ -1263,7 +1272,11 @@ type simChoiceState struct {
 }
 
 func newSimChoiceState(index int) *simChoiceState {
-	return &simChoiceState{index: index, toolCalls: make(map[int]*simToolCallState)}
+	return &simChoiceState{
+		index:       index,
+		toolCalls:   make(map[int]*simToolCallState),
+		callByIndex: make(map[int]int),
+	}
 }
 
 // reassembleChatCompletion folds an OpenAI Chat-Completions SSE body (as
@@ -1367,12 +1380,39 @@ func reassembleChatCompletion(stream []byte) []byte {
 				}
 			}
 			for _, tc := range c.Delta.ToolCalls {
-				idx := tc.Index
-				t := st.toolCalls[idx]
+				incoming := tc.Index
+				// Resolve the real slot for this incoming index: a provider (or an
+				// upstream converter) that reuses one index for a second, distinct
+				// tool call would otherwise make this loop append the second call's
+				// name/arguments onto the first, producing one merged call
+				// ("bash"+"avito_..." with two JSON objects). A non-empty id that
+				// differs from the one already parked at that index marks a new
+				// call: it gets a fresh slot, and later id-less argument deltas
+				// (which carry only the incoming index) are routed to that same
+				// fresh slot via callByIndex.
+				slot, ok := st.callByIndex[incoming]
+				if !ok {
+					slot = incoming
+				}
+				t := st.toolCalls[slot]
+				if t != nil && tc.ID != "" && t.id != "" && tc.ID != t.id {
+					for {
+						st.toolSeq++
+						if _, taken := st.toolCalls[st.toolSeq]; !taken {
+							break
+						}
+					}
+					slot = st.toolSeq
+					t = nil
+				}
+				st.callByIndex[incoming] = slot
 				if t == nil {
 					t = &simToolCallState{}
-					st.toolCalls[idx] = t
-					st.toolOrder = append(st.toolOrder, idx)
+					st.toolCalls[slot] = t
+					st.toolOrder = append(st.toolOrder, slot)
+					if slot >= st.toolSeq {
+						st.toolSeq = slot
+					}
 				}
 				if t.id == "" && tc.ID != "" {
 					t.id = tc.ID
