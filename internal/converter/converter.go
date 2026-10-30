@@ -649,7 +649,10 @@ type responsesUsageDetails struct {
 		CachedTokens    int `json:"cached_tokens,omitempty"`
 		ImageTokens     int `json:"image_tokens,omitempty"`
 		ReasoningTokens int `json:"reasoning_tokens,omitempty"`
-		TextTokens      int `json:"text_tokens,omitempty"`
+		// ThinkingTokens is the same count in a Messages API usage object, as some
+		// Anthropic-compatible providers report it (included in output_tokens).
+		ThinkingTokens int `json:"thinking_tokens,omitempty"`
+		TextTokens     int `json:"text_tokens,omitempty"`
 	} `json:"output_tokens_details,omitempty"`
 	ServerToolUse struct {
 		WebSearchRequests int `json:"web_search_requests,omitempty"`
@@ -958,6 +961,9 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 	reasoning := resp.Usage.CompletionTokensDetails.ReasoningTokens
 	if reasoning == 0 {
 		reasoning = resp.Usage.OutputTokensDetails.ReasoningTokens
+	}
+	if reasoning == 0 {
+		reasoning = resp.Usage.OutputTokensDetails.ThinkingTokens
 	}
 	outputImageTokens := resp.Usage.CompletionTokensDetails.ImageTokens
 	if outputImageTokens == 0 {

@@ -47,6 +47,7 @@ type anthropicStreamAccumulator struct {
 	// Usage
 	inputTokens           int
 	outputTokens          int
+	reasoningTokens       int // the thinking share of outputTokens, when the provider reports it
 	cachedTokens          int
 	cacheCreationTokens   int
 	cacheCreation5mTokens int
@@ -134,6 +135,7 @@ func processAnthropicEvent(w io.Writer, acc *anthropicStreamAccumulator, event *
 		if event.Message != nil {
 			if event.Message.Usage != nil {
 				acc.inputTokens = event.Message.Usage.InputTokens
+				acc.reasoningTokens = event.Message.Usage.ReasoningTokens()
 				acc.cachedTokens = event.Message.Usage.CacheReadInputTokens
 				acc.cacheCreationTokens, acc.cacheCreation5mTokens, acc.cacheCreation1hTokens = anthropic.NormalizeCacheCreationUsage(
 					event.Message.Usage.CacheCreationInputTokens, event.Message.Usage.CacheCreation,
@@ -301,6 +303,9 @@ func processAnthropicEvent(w io.Writer, acc *anthropicStreamAccumulator, event *
 			}
 			if event.Usage.OutputTokens != nil {
 				acc.outputTokens = *event.Usage.OutputTokens
+			}
+			if event.Usage.OutputTokensDetails != nil {
+				acc.reasoningTokens = nonNegativeAnthropicStreamTokenCount(event.Usage.OutputTokensDetails.ThinkingTokens)
 			}
 			if event.Usage.CacheReadInputTokens != nil {
 				acc.cachedTokens = nonNegativeAnthropicStreamTokenCount(*event.Usage.CacheReadInputTokens)
@@ -665,6 +670,7 @@ func buildAnthropicCompletedResponse(acc *anthropicStreamAccumulator) *responses
 			CacheCreationTokens: acc.cacheCreationTokens,
 			CacheType:           acc.cacheType,
 		},
+		OutputTokensDetails: responses.OutputDetails{ReasoningTokens: acc.reasoningTokens},
 	}
 	if acc.cacheCreation5mTokens > 0 || acc.cacheCreation1hTokens > 0 {
 		usage.InputTokensDetails.CacheCreationTokenDetails = &responses.CacheCreationTokenDetails{

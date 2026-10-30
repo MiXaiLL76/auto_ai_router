@@ -295,6 +295,7 @@ type RequestLogContext struct {
 	StickyHeldCredential  string                   // Credential the session stays bound to although it could not take this request (busy or excluded for it)
 	stickyExclude         map[string]bool          // Credentials excluded for this request (denylist, reasoning, tried); used to find the model's best tier
 	stickyRequestExcluded map[string]bool          // Subset excluded only because of this request's shape (reasoning-only credentials)
+	clientServiceTiers    []string                 // service_tier values the client sent, stripped from the body at ingress; checked per credential (see withClientServiceTiers)
 	TargetURL             string                   // Target URL (for APIBase extraction)
 	TokenInfo             *litellmdb.TokenInfo     // User/team/org info
 	IsImageGeneration     bool                     // True if this is an image generation request
