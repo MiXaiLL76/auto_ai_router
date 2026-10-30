@@ -26,14 +26,12 @@
 --
 -- Run it after 006_video_input_columns.sql: the Kafka table below carries
 -- 006's columns too. Pause AIR Kafka publishing before running this
--- migration. Safe to re-run on its own -- but this is currently the last
--- migration in the chain, so that's the only direction that's safe: once a
--- migration after this one exists, never run 007 again on its own
--- afterwards, for the same reason 002_cache_web_search_columns.sql's doc
--- comment spells out -- it would rebuild air.spend_logs_kafka from only 007's
--- column set, narrowing it back below whatever the later migration added, and
--- break ingestion with NUMBER_OF_COLUMNS_DOESNT_MATCH until that later
--- migration is re-applied.
+-- migration. Safe to re-run on its own -- but only before
+-- 008_cache_12h_column.sql: never run 007 again on its own afterwards, for
+-- the same reason 002_cache_web_search_columns.sql's doc comment spells out
+-- -- it would rebuild air.spend_logs_kafka from only 007's column set,
+-- narrowing it back below what 008 added, and break ingestion with
+-- NUMBER_OF_COLUMNS_DOESNT_MATCH until 008 is re-applied.
 --
 -- Events from AIR pods that predate these fields carry none of them: the row
 -- gets service_name '' (its default) and organization_alias NULL, like a
