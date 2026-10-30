@@ -3,6 +3,8 @@ package openai
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -341,11 +343,12 @@ func TestReplaceBodyParam_GPT5(t *testing.T) {
 	for _, model := range models {
 		t.Run(model, func(t *testing.T) {
 			body := makeBody(t, map[string]any{
-				"model":       model,
-				"max_tokens":  500,
-				"temperature": 0.5,
-				"top_p":       0.8,
-				"messages":    []any{},
+				"model":            model,
+				"max_tokens":       500,
+				"temperature":      0.5,
+				"top_p":            0.8,
+				"reasoning_effort": "low",
+				"messages":         []any{},
 			})
 
 			result := bodyToMap(t, ReplaceBodyParam(model, body))
@@ -362,6 +365,138 @@ func TestReplaceBodyParam_GPT5(t *testing.T) {
 			if _, ok := result["top_p"]; ok {
 				t.Error("top_p should be removed for gpt-5")
 			}
+		})
+	}
+}
+
+// TestReplaceBodyParam_SamplingWithReasoningOff pins the OpenAI contract: sampling
+// params are accepted only while reasoning is off, i.e.
+// reasoning_effort "none" on a model that supports it or, with no effort set, a model
+// whose default is "none" (GPT-5.1 to 5.4; 5.5+ default to "medium"). With reasoning on
+// they are still dropped, as OpenAI would return 400. logprobs/top_logprobs are always dropped.
+func TestReplaceBodyParam_SamplingWithReasoningOff(t *testing.T) {
+	sampling := []string{"temperature", "top_p", "frequency_penalty", "presence_penalty"}
+	tests := []struct {
+		model  string
+		effort any // nil: field absent
+		keep   bool
+	}{
+		{"gpt-5.6-luna", "none", true},
+		{"gpt-5.6-terra", "none", true},
+		{"openai/gpt-5.6-sol", "none", true},
+		{"gpt-5.5", "none", true},
+		{"gpt-5.4", "none", true},
+		{"gpt-5.1", "none", true},
+		{"gpt-5.6-luna", nil, false},
+		{"gpt-5.5", nil, false},
+		{"gpt-5.10", nil, false},
+		{"gpt-5.4", nil, true},
+		{"gpt-5.4-mini", nil, true},
+		{"gpt-5.2", nil, true},
+		{"gpt-5.1", nil, true},
+		{"gpt-5.6-luna", "low", false},
+		{"gpt-5.6-luna", "medium", false},
+		{"gpt-5.6-luna", "high", false},
+		{"gpt-5.4", "low", false},
+		{"gpt-5.1", "minimal", false},
+		{"gpt-5.4", "", true},
+		{"gpt-5.6-luna", "", false},
+		{"gpt-5.4", 0, false},
+		{"gpt-5", "none", false},
+		{"gpt-5-mini", nil, false},
+		{"gpt-5.4-pro", "none", false},
+		{"gpt-5.3-codex", "none", false},
+		{"gpt-5.3-chat", "none", false},
+		{"gpt-6-sol", "none", true},
+		{"openai/gpt-6-luna", "none", true},
+		{"gpt-6-sol", nil, false},
+		{"gpt-6-luna", "high", false},
+		{"gpt-6-astra", "none", false},
+		{"o3", "none", false},
+		{"o4-mini", nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%s/%v", tt.model, tt.effort), func(t *testing.T) {
+			fields := map[string]any{
+				"model":             tt.model,
+				"max_tokens":        100,
+				"temperature":       0.2,
+				"top_p":             0.5,
+				"frequency_penalty": 0.1,
+				"presence_penalty":  0.1,
+				"logprobs":          true,
+				"top_logprobs":      2,
+				"messages":          []any{},
+			}
+			if tt.effort != nil {
+				fields["reasoning_effort"] = tt.effort
+			}
+
+			result := bodyToMap(t, ReplaceBodyParam(tt.model, makeBody(t, fields)))
+
+			assert.NotContains(t, result, "max_tokens")
+			assert.EqualValues(t, 100, result["max_completion_tokens"])
+			assert.EqualValues(t, tt.effort, result["reasoning_effort"], "reasoning_effort must pass through as sent")
+			assert.NotContains(t, result, "logprobs")
+			assert.NotContains(t, result, "top_logprobs")
+			for _, key := range sampling {
+				if tt.keep {
+					assert.EqualValues(t, fields[key], result[key], key)
+				} else {
+					assert.NotContains(t, result, key)
+				}
+			}
+		})
+	}
+}
+
+// TestReplaceResponsesBodyParam_SamplingWithReasoningOff pins the same contract on the
+// Responses API, where the effort is reasoning.effort and logprobs are requested via include.
+func TestReplaceResponsesBodyParam_SamplingWithReasoningOff(t *testing.T) {
+	tests := []struct {
+		model     string
+		reasoning string // raw JSON for "reasoning", "" when absent
+		keep      bool
+	}{
+		{"gpt-5.6-luna", `{"effort":"none"}`, true},
+		{"gpt-5.6-terra", `{"effort":"none","summary":"auto"}`, true},
+		{"gpt-5.5", `{"effort":"none"}`, true},
+		{"gpt-6-sol", `{"effort":"none"}`, true},
+		{"gpt-5.4", ``, true},
+		{"gpt-5.1", `{}`, true},
+		{"gpt-5.4", `null`, true},
+		{"gpt-5.6-luna", ``, false},
+		{"gpt-5.6-luna", `{"effort":"low"}`, false},
+		{"gpt-5.6-luna", `{}`, false},
+		{"gpt-5.4", `{"effort":"medium"}`, false},
+		{"gpt-6-sol", ``, false},
+		{"gpt-6-astra", `{"effort":"none"}`, false},
+		{"gpt-5", `{"effort":"minimal"}`, false},
+		{"gpt-5.3-codex", `{"effort":"none"}`, false},
+		{"gpt-5.3-chat", ``, false},
+		{"o3", ``, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.model+"/"+tt.reasoning, func(t *testing.T) {
+			body := `{"model":"` + tt.model + `","input":"hi","temperature":0.2,"top_p":0.5,"top_logprobs":2,` +
+				`"include":["message.output_text.logprobs","reasoning.encrypted_content"]`
+			if tt.reasoning != "" {
+				body += `,"reasoning":` + tt.reasoning
+			}
+			body += `}`
+
+			result := ReplaceResponsesBodyParam(tt.model, []byte(body))
+
+			if tt.keep {
+				assert.Equal(t, body, string(result))
+				return
+			}
+			got := bodyToMap(t, result)
+			for _, key := range []string{"temperature", "top_p", "top_logprobs"} {
+				assert.NotContains(t, got, key)
+			}
+			assert.Equal(t, []any{"reasoning.encrypted_content"}, got["include"])
+			assert.Equal(t, "hi", got["input"])
 		})
 	}
 }
@@ -499,7 +634,7 @@ func TestReplaceBodyParam_WithProviderPrefixes(t *testing.T) {
 		{"openai/o1-mini", []string{"temperature", "top_p", "frequency_penalty", "presence_penalty", "logprobs"}, true},
 		{"openai:o3-mini", []string{"temperature", "top_p", "frequency_penalty", "presence_penalty", "logprobs"}, true},    //
 		{"openai/gpt-5_chat", []string{"temperature", "top_p", "frequency_penalty", "presence_penalty", "logprobs"}, true}, //
-		{"vertex/gpt-5.1", []string{"temperature", "top_p", "frequency_penalty", "presence_penalty", "logprobs"}, true},    //
+		{"vertex/gpt-5.5", []string{"temperature", "top_p", "frequency_penalty", "presence_penalty", "logprobs"}, true},    //
 		{"OpenAI/O1-Preview", []string{"temperature", "top_p", "frequency_penalty", "presence_penalty", "logprobs"}, true},
 	}
 
@@ -1114,5 +1249,18 @@ func TestSupportsReasoningEffortNone(t *testing.T) {
 	}
 	for model, want := range tests {
 		assert.Equal(t, want, SupportsReasoningEffortNone(model), model)
+	}
+}
+
+func TestReplaceBodyParam_NestedReasoningEffortAndBigInt(t *testing.T) {
+	// nested reasoning.effort "high" keeps reasoning on, so sampling params go
+	out := ReplaceBodyParam("gpt-5.1", []byte(`{"reasoning":{"effort":"high"},"temperature":0.5}`))
+	if strings.Contains(string(out), "temperature") {
+		t.Fatalf("temperature must be dropped with nested effort high: %s", out)
+	}
+	// large integers must survive untouched (no float64 round-trip)
+	out = ReplaceBodyParam("gpt-5.1", []byte(`{"seed":9007199254740993,"reasoning_effort":"none","temperature":0.5}`))
+	if !strings.Contains(string(out), "9007199254740993") || !strings.Contains(string(out), "temperature") {
+		t.Fatalf("seed must be preserved and temperature kept: %s", out)
 	}
 }
