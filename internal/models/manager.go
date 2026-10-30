@@ -130,8 +130,8 @@ type ModelPrice struct {
 	// _above_272k rate is the same tier once the prompt crosses the
 	// long-context threshold. A request may carry both a 30m and a 12h write at
 	// once, so the tiers bill independently rather than one rate by top TTL.
-	CacheCreationInputTokenCost12h             float64 `json:"cache_creation_input_token_cost_12h,omitempty"`
-	CacheCreationInputTokenCost12hAbove272k    float64 `json:"cache_creation_input_token_cost_12h_above_272k_tokens,omitempty"`
+	CacheCreationInputTokenCost12h          float64 `json:"cache_creation_input_token_cost_12h,omitempty"`
+	CacheCreationInputTokenCost12hAbove272k float64 `json:"cache_creation_input_token_cost_12h_above_272k_tokens,omitempty"`
 	// Explicit Cache (Alibaba/Qwen) read tokens are billed at their own rate,
 	// separate from Implicit Cache Read (cache_read_input_token_cost). A request
 	// runs in explicit cache mode when usage.prompt_tokens_details.cache_type ==

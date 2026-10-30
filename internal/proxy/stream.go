@@ -187,10 +187,10 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 			PromptTokens        *int `json:"prompt_tokens"`
 			CompletionTokens    *int `json:"completion_tokens"`
 			PromptTokensDetails struct {
-				CachedTokens              int `json:"cached_tokens,omitempty"`
-				CachedAudioTokens         int `json:"cached_audio_tokens,omitempty"`
-				CacheCreationTokens       int `json:"cache_creation_tokens,omitempty"`
-				CacheWriteTokens          int `json:"cache_write_tokens,omitempty"`
+				CachedTokens            int `json:"cached_tokens,omitempty"`
+				CachedAudioTokens       int `json:"cached_audio_tokens,omitempty"`
+				CacheCreationTokens     int `json:"cache_creation_tokens,omitempty"`
+				CacheWriteTokens        int `json:"cache_write_tokens,omitempty"`
 				CacheWriteTokensDetails struct {
 					TTL30mTokens int `json:"ttl_30m_tokens,omitempty"`
 					TTL12hTokens int `json:"ttl_12h_tokens,omitempty"`
@@ -264,15 +264,15 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 	toolUsage, _ := data.Usage.ServerSideToolUsage()
 
 	return &StreamUsageInfo{
-		PromptTokens:          intValue(data.Usage.PromptTokens),
-		CompletionTokens:      intValue(data.Usage.CompletionTokens),
-		CachedTokens:          cachedTokens,
-		CachedAudioTokens:     cachedAudioTokens,
-		CacheCreationTokens:   cacheCreationTokens,
-		CacheCreation5mTokens: cacheCreation5mTokens,
-		CacheCreation1hTokens: cacheCreation1hTokens,
+		PromptTokens:           intValue(data.Usage.PromptTokens),
+		CompletionTokens:       intValue(data.Usage.CompletionTokens),
+		CachedTokens:           cachedTokens,
+		CachedAudioTokens:      cachedAudioTokens,
+		CacheCreationTokens:    cacheCreationTokens,
+		CacheCreation5mTokens:  cacheCreation5mTokens,
+		CacheCreation1hTokens:  cacheCreation1hTokens,
 		CacheCreation12hTokens: cacheCreation12hTokens,
-		CacheType:             data.Usage.PromptTokensDetails.CacheType,
+		CacheType:              data.Usage.PromptTokensDetails.CacheType,
 		AudioInputTokens: normalizeStreamAudioInput(
 			data.Usage.PromptTokensDetails.AudioTokens,
 			cachedTokens,
@@ -361,15 +361,15 @@ func (o *openAIStreamUsageExtractor) extractResponsesAPIUsage(payload []byte) *S
 	}
 
 	return &StreamUsageInfo{
-		PromptTokens:          intValue(usage.InputTokens),
-		CompletionTokens:      intValue(usage.OutputTokens),
-		CachedTokens:          cachedTokens,
-		CachedAudioTokens:     cachedAudioTokens,
-		CacheCreationTokens:   cacheCreationTokens,
-		CacheCreation5mTokens: cacheCreation5mTokens,
-		CacheCreation1hTokens: cacheCreation1hTokens,
+		PromptTokens:           intValue(usage.InputTokens),
+		CompletionTokens:       intValue(usage.OutputTokens),
+		CachedTokens:           cachedTokens,
+		CachedAudioTokens:      cachedAudioTokens,
+		CacheCreationTokens:    cacheCreationTokens,
+		CacheCreation5mTokens:  cacheCreation5mTokens,
+		CacheCreation1hTokens:  cacheCreation1hTokens,
 		CacheCreation12hTokens: cacheCreation12hTokens,
-		CacheType:             usage.InputTokensDetails.CacheType,
+		CacheType:              usage.InputTokensDetails.CacheType,
 		AudioInputTokens: normalizeStreamAudioInput(
 			usage.InputTokensDetails.AudioTokens,
 			cachedTokens,
@@ -408,10 +408,10 @@ type responsesAPIUsage struct {
 	InputTokens        *int `json:"input_tokens"`
 	OutputTokens       *int `json:"output_tokens"`
 	InputTokensDetails struct {
-		CachedTokens              int `json:"cached_tokens,omitempty"`
-		CachedAudioTokens         int `json:"cached_audio_tokens,omitempty"`
-		CacheCreationTokens       int `json:"cache_creation_tokens,omitempty"`
-		CacheWriteTokens          int `json:"cache_write_tokens,omitempty"`
+		CachedTokens            int `json:"cached_tokens,omitempty"`
+		CachedAudioTokens       int `json:"cached_audio_tokens,omitempty"`
+		CacheCreationTokens     int `json:"cache_creation_tokens,omitempty"`
+		CacheWriteTokens        int `json:"cache_write_tokens,omitempty"`
 		CacheWriteTokensDetails struct {
 			TTL30mTokens int `json:"ttl_30m_tokens,omitempty"`
 			TTL12hTokens int `json:"ttl_12h_tokens,omitempty"`

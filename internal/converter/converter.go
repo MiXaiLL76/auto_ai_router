@@ -723,10 +723,10 @@ type tokenUsageShapeUsage struct {
 	// from PromptTokens+CompletionTokens rather than derived from them.
 	TotalTokens         int `json:"total_tokens,omitempty"`
 	PromptTokensDetails struct {
-		CachedTokens              int `json:"cached_tokens,omitempty"`
-		CachedAudioTokens         int `json:"cached_audio_tokens,omitempty"`
-		CacheCreationTokens       int `json:"cache_creation_tokens,omitempty"`
-		CacheWriteTokens          int `json:"cache_write_tokens,omitempty"`
+		CachedTokens            int `json:"cached_tokens,omitempty"`
+		CachedAudioTokens       int `json:"cached_audio_tokens,omitempty"`
+		CacheCreationTokens     int `json:"cache_creation_tokens,omitempty"`
+		CacheWriteTokens        int `json:"cache_write_tokens,omitempty"`
 		CacheWriteTokensDetails struct {
 			TTL30mTokens int `json:"ttl_30m_tokens,omitempty"`
 			TTL12hTokens int `json:"ttl_12h_tokens,omitempty"`
