@@ -717,8 +717,9 @@ func TestHandleSimulatedNativeNonStream_CapturesTTFT(t *testing.T) {
 	prepared := &orchestratedRequest{streaming: false, nativeResponses: true, forcedNativeNonStream: true, body: []byte(`{"model":"claude-haiku-4.5","input":"hi"}`)}
 	w := httptest.NewRecorder()
 
-	prx.handleSimulatedNativeNonStream(w, req, resp, prepared, cred, provResponses, "claude-haiku-4.5",
-		logCtx, nil, "http://upstream")
+	prx.handleSimulatedNativeNonStream(w, req, resp, prepared, cred, provResponses, "claude-haiku-4.5", "claude-haiku-4.5",
+		logCtx, nil, "http://upstream", prepared.body,
+		false, false, false, start, map[string]bool{}, map[string]bool{})
 
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
@@ -786,8 +787,9 @@ func TestHandleSimulatedNativeNonStream_SavesResponse(t *testing.T) {
 	var saved *responses.Response
 	saveResponseFn := func(r *responses.Response) { saved = r }
 
-	prx.handleSimulatedNativeNonStream(w, req, resp, prepared, cred, provResponses, "claude-haiku-4.5",
-		logCtx, saveResponseFn, "http://upstream")
+	prx.handleSimulatedNativeNonStream(w, req, resp, prepared, cred, provResponses, "claude-haiku-4.5", "claude-haiku-4.5",
+		logCtx, saveResponseFn, "http://upstream", prepared.body,
+		false, false, false, time.Now(), map[string]bool{}, map[string]bool{})
 
 	require.Equal(t, http.StatusOK, w.Code)
 	require.NotNil(t, saved, "saveResponseFn must be called so store: true responses are retrievable later")
@@ -849,7 +851,8 @@ func TestHandleSimulatedPassthroughNonStream_CapturesTTFT(t *testing.T) {
 	prepared := &orchestratedRequest{streaming: false, passthroughResponses: true, forcedPassthroughNonStream: true, body: []byte(`{"model":"gpt-4o-mini","input":"hi"}`)}
 	w := httptest.NewRecorder()
 
-	prx.handleSimulatedPassthroughNonStream(w, req, resp, prepared, cred, "gpt-4o-mini", logCtx, nil, "http://upstream")
+	prx.handleSimulatedPassthroughNonStream(w, req, resp, prepared, cred, "gpt-4o-mini", "gpt-4o-mini", logCtx, nil, "http://upstream", prepared.body,
+		false, false, false, start, map[string]bool{}, map[string]bool{})
 
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
@@ -1237,7 +1240,8 @@ func TestSimulatedPassthrough_DataWithoutSpace(t *testing.T) {
 	prepared := &orchestratedRequest{passthroughResponses: true, forcedPassthroughNonStream: true, body: []byte(`{}`)}
 	w := httptest.NewRecorder()
 
-	prx.handleSimulatedPassthroughNonStream(w, req, resp, prepared, cred, "m", logCtx, nil, "http://x")
+	prx.handleSimulatedPassthroughNonStream(w, req, resp, prepared, cred, "m", "m", logCtx, nil, "http://x", prepared.body,
+		false, false, false, time.Now(), map[string]bool{}, map[string]bool{})
 
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 	var out struct {
@@ -1821,4 +1825,169 @@ func TestReassembleChatCompletion_SameIndexDistinctToolCalls(t *testing.T) {
 	assert.Equal(t, "avito_internal_knowledge_search_tool", tcs[1].Function.Name)
 	assert.Equal(t, `{"query":"x"}`, tcs[1].Function.Arguments)
 	assert.NotContains(t, tcs[0].Function.Name, "avito", "first call must not absorb the second call's name")
+}
+
+// errorPropagatingProviderResponses is a local, registry-free
+// responses.ProviderResponses stand-in that -- unlike stubProviderResponses
+// above -- genuinely forwards whatever its reader returns instead of always
+// succeeding. Used to exercise attemptSimulatedNativeNonStream's own
+// transport-failure classification directly (no package-level registration
+// of a real provider needed: internal/proxy's test binary never imports
+// internal/converter/anthropic/responses, so registering it here as a
+// package-level init side effect would leak into unrelated orchestrator
+// tests that assert on native-Responses classification for other models).
+type errorPropagatingProviderResponses struct {
+	final *responses.Response
+}
+
+func (s *errorPropagatingProviderResponses) RequestFrom(body []byte) ([]byte, string, error) {
+	return body, "application/json", nil
+}
+
+func (s *errorPropagatingProviderResponses) ResponseTo(body []byte, displayModelID string) (*responses.Response, error) {
+	return s.final, nil
+}
+
+func (s *errorPropagatingProviderResponses) StreamTo(reader io.Reader, writer io.Writer, displayModelID string,
+	meta *responses.ResponsesMetadata, onComplete func(*responses.Response)) error {
+	if _, err := io.Copy(writer, reader); err != nil {
+		return err
+	}
+	if onComplete != nil {
+		onComplete(s.final)
+	}
+	return nil
+}
+
+func (s *errorPropagatingProviderResponses) BuildURL(cred *config.CredentialConfig) string {
+	return "http://upstream"
+}
+
+// TestHandleSimulatedNativeNonStream_TransportFailureRetriesOnNextCredential
+// mirrors TestHandleSimulatedNonStream_TransportFailureRetriesOnNextCredential
+// for the native-Responses path (Anthropic/Vertex): a transport break on the
+// first credential must retry on the next one instead of failing outright --
+// before retry support existed here, handleSimulatedNativeNonStream had no
+// way to try another credential at all. The retried-onto credential answers
+// a retryable HTTP error (429) rather than a second stream: sendToCredential
+// classifies that status before ever building a provResponses for it (see
+// errorPropagatingProviderResponses's doc comment for why this test cannot
+// use a second real native stream), so this still exercises the full retry
+// loop -- nextRetryCredential, sendToCredential, the ban-signal/metrics
+// accounting -- without a package-level provider registration.
+func TestHandleSimulatedNativeNonStream_TransportFailureRetriesOnNextCredential(t *testing.T) {
+	var secondaryHits atomic.Int32
+	secondary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secondaryHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"error":{"message":"rate limited","type":"rate_limit_error"}}`)
+	}))
+	defer secondary.Close()
+
+	prx := NewTestProxyBuilder().WithCredentials(
+		config.CredentialConfig{Name: "primary", Type: config.ProviderTypeAnthropic, BaseURL: "http://primary.invalid", APIKey: "primary-key", RPM: 100, TPM: 100000},
+		config.CredentialConfig{Name: "secondary", Type: config.ProviderTypeAnthropic, BaseURL: secondary.URL, APIKey: "secondary-key", Priority: 1, RPM: 100, TPM: 100000},
+	).WithMaxProviderRetries(2).Build()
+
+	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+
+	// Primary answers with real content before the transport breaks.
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(&errReader{data: []byte("partial content"), err: io.ErrUnexpectedEOF}),
+	}
+	logCtx := &RequestLogContext{StartTime: time.Now(), RequestID: "test-native-retry", Request: req}
+	cred := &config.CredentialConfig{Name: "primary", Type: config.ProviderTypeAnthropic, BaseURL: "http://primary.invalid"}
+	nativeBody := []byte(`{"model":"claude-haiku-4.5","input":"hi"}`)
+	prepared := &orchestratedRequest{
+		streaming: false, nativeResponses: true, forcedNativeNonStream: true,
+		body: nativeBody, responsesMetadata: &responses.ResponsesMetadata{},
+		// nextRetryCredential rebuilds the retry request from these base*
+		// fields (prepareRequestForCredential), not from body/realModelID --
+		// without them the retry attempt gets an empty/mismatched body.
+		baseBody: nativeBody, baseProxyBody: nativeBody, baseRealModelID: "claude-haiku-4.5", basePath: "/v1/responses",
+		isResponsesAPI: true,
+	}
+	provResponses := &errorPropagatingProviderResponses{final: &responses.Response{
+		ID: "resp_1", Object: "response", Model: "claude-haiku-4.5", Status: "in_progress",
+	}}
+	w := httptest.NewRecorder()
+
+	// Calling the handler directly (not through ProxyRequest) skips the main
+	// loop's own seeding of triedCreds with the initial credential's name --
+	// without it, a second retry attempt (there is no third credential, but
+	// the loop still tries) would be free to pick "primary" right back.
+	triedCreds := map[string]bool{"primary": true}
+	prx.handleSimulatedNativeNonStream(w, req, resp, prepared, cred, provResponses, "claude-haiku-4.5", "claude-haiku-4.5",
+		logCtx, nil, "http://upstream", prepared.body,
+		false, false, false, time.Now(), triedCreds, map[string]bool{"primary": true})
+
+	require.Equal(t, http.StatusTooManyRequests, w.Code, w.Body.String())
+	assert.Equal(t, int32(1), secondaryHits.Load(), "a transport break on the first credential must retry on the next one")
+}
+
+// TestHandleSimulatedPassthroughNonStream_TransportFailureRetriesOnNextCredential
+// mirrors TestHandleSimulatedNonStream_TransportFailureRetriesOnNextCredential
+// for the codex/OpenAI passthrough Responses path: a transport break (no
+// terminal response.completed event ever arrives) on the first credential
+// must retry on the next one instead of failing outright.
+func TestHandleSimulatedPassthroughNonStream_TransportFailureRetriesOnNextCredential(t *testing.T) {
+	var secondaryHits atomic.Int32
+	secondFinalJSON := `{"type":"response.completed","response":{"id":"resp_2","object":"response","model":"gpt-4o-mini","status":"completed","output":[{"type":"message","id":"msg_2","status":"completed","role":"assistant","content":[{"type":"output_text","text":"fallback answer"}]}],"usage":{"input_tokens":5,"output_tokens":3,"total_tokens":8}}}`
+	secondary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secondaryHits.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, responsesSSE(secondFinalJSON))
+	}))
+	defer secondary.Close()
+
+	prx := NewTestProxyBuilder().WithCredentials(
+		config.CredentialConfig{Name: "primary", Type: config.ProviderTypeOpenAI, BaseURL: "http://primary.invalid", APIKey: "primary-key", RPM: 100, TPM: 100000},
+		config.CredentialConfig{Name: "secondary", Type: config.ProviderTypeOpenAI, BaseURL: secondary.URL, APIKey: "secondary-key", Priority: 1, RPM: 100, TPM: 100000},
+	).WithMaxProviderRetries(2).Build()
+
+	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(`{"model":"gpt-4o-mini","input":"hi"}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+
+	// Primary emits the created + a delta event, then the connection breaks --
+	// no response.completed ever arrives.
+	partialSSE := "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"model\":\"gpt-4o-mini\",\"status\":\"in_progress\"}}\n\n" +
+		"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n"
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(&errReader{data: []byte(partialSSE), err: io.ErrUnexpectedEOF}),
+	}
+	logCtx := &RequestLogContext{StartTime: time.Now(), RequestID: "test-passthrough-retry", Request: req}
+	cred := &config.CredentialConfig{Name: "primary", Type: config.ProviderTypeOpenAI, BaseURL: "http://primary.invalid"}
+	prepared := &orchestratedRequest{streaming: false, passthroughResponses: true, forcedPassthroughNonStream: true, body: []byte(`{"model":"gpt-4o-mini","input":"hi"}`)}
+	w := httptest.NewRecorder()
+
+	prx.handleSimulatedPassthroughNonStream(w, req, resp, prepared, cred, "gpt-4o-mini", "gpt-4o-mini", logCtx, nil, "http://upstream", prepared.body,
+		false, false, false, time.Now(), map[string]bool{}, map[string]bool{})
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Equal(t, int32(1), secondaryHits.Load())
+
+	var out struct {
+		Object string `json:"object"`
+		Status string `json:"status"`
+		Output []struct {
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"output"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &out))
+	assert.Equal(t, "response", out.Object)
+	assert.Equal(t, "completed", out.Status)
+	require.NotEmpty(t, out.Output)
+	require.NotEmpty(t, out.Output[0].Content)
+	assert.Equal(t, "fallback answer", out.Output[0].Content[0].Text)
 }
