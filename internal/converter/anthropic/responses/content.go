@@ -6,7 +6,48 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/converter/anthropic"
 	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
+	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
 )
+
+// redactedThinkingPrefix marks a reasoning item's encrypted_content that carries a
+// redacted_thinking block's data rather than a thinking block's signature.
+const redactedThinkingPrefix = "redacted_thinking:"
+
+// thinkingEncryptedContent is the encrypted_content of the reasoning item that stands
+// for an Anthropic thinking or redacted_thinking block; reasoningItemToThinking
+// turns it back into the same block.
+func thinkingEncryptedContent(block anthropic.ContentBlock) string {
+	if block.Type == "redacted_thinking" {
+		return redactedThinkingPrefix + block.Data
+	}
+	return block.Signature
+}
+
+// reasoningOutputItem builds the reasoning item for a thinking block. A block with
+// empty text (display "omitted") still carries its signature and must be kept.
+func reasoningOutputItem(id, thinking, encryptedContent string) responses.OutputItem {
+	item := responses.OutputItem{Type: "reasoning", ID: id, Status: "completed", EncryptedContent: encryptedContent}
+	if thinking != "" {
+		item.Summary = []responses.OutputContent{{Type: "summary_text", Text: thinking}}
+	}
+	return item
+}
+
+// reasoningItemToThinking turns a reasoning input item back into its Anthropic block,
+// or returns nil when the item carries neither text nor encrypted_content.
+func reasoningItemToThinking(item map[string]interface{}) *anthropic.ContentBlock {
+	encrypted, _ := item["encrypted_content"].(string)
+	if data, ok := strings.CutPrefix(encrypted, redactedThinkingPrefix); ok {
+		return &anthropic.ContentBlock{Type: "redacted_thinking", Data: data}
+	}
+	// The signature is verified against the thinking text it was issued for, so the
+	// text travels with it: reasoningOutputItem put the full thinking into the summary.
+	text := responses.ReasoningItemText(item)
+	if text == "" && encrypted == "" {
+		return nil
+	}
+	return &anthropic.ContentBlock{Type: "thinking", Thinking: text, Signature: encrypted}
+}
 
 // contentPartToAnthropic converts a Responses API content part map to an Anthropic ContentBlock.
 // Returns nil when the part type is unknown and should be silently skipped.

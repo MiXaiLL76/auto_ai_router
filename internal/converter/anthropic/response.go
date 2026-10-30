@@ -9,6 +9,26 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 )
 
+// chatThinkingBlock is the thinking_blocks entry a Chat client gets for a thinking or
+// redacted_thinking block, to echo back on the next turn (convertOpenAIMessagesToAnthropic),
+// or nil for a block that can't be echoed: Anthropic rejects a thinking block without
+// its signature. index is the entry's position in the message's thinking_blocks; a
+// stream sends one entry per chunk, and stream accumulators such as the OpenAI SDK's
+// merge list entries by index and fail on entries without one.
+//
+// A Chat message keeps thinking, text and tool calls in separate fields, so the echo
+// replays every thinking block first: a turn that interleaved them (Sonnet 5.5 progress
+// notes between text and tool calls) comes back reordered, and its text joined.
+func chatThinkingBlock(block ContentBlock, index int) map[string]interface{} {
+	switch {
+	case block.Type == "thinking" && block.Signature != "":
+		return map[string]interface{}{"index": index, "type": "thinking", "thinking": block.Thinking, "signature": block.Signature}
+	case block.Type == "redacted_thinking" && block.Data != "":
+		return map[string]interface{}{"index": index, "type": "redacted_thinking", "data": block.Data}
+	}
+	return nil
+}
+
 // AnthropicToOpenAI converts an Anthropic Messages API response body to OpenAI
 // Chat Completions response format.
 func AnthropicToOpenAI(anthropicBody []byte, model string) ([]byte, error) {
@@ -28,6 +48,7 @@ func AnthropicToOpenAI(anthropicBody []byte, model string) ([]byte, error) {
 	// Translate content blocks to OpenAI message fields.
 	var textParts []string // collect text parts separately, join with separator
 	var reasoningContent string
+	var thinkingBlocks []map[string]interface{}
 	var toolCalls []openai.OpenAIToolCall
 	webSearchRequests := 0
 
@@ -37,8 +58,11 @@ func AnthropicToOpenAI(anthropicBody []byte, model string) ([]byte, error) {
 			if block.Text != "" {
 				textParts = append(textParts, block.Text)
 			}
-		case "thinking":
+		case "thinking", "redacted_thinking":
 			reasoningContent += block.Thinking
+			if entry := chatThinkingBlock(block, len(thinkingBlocks)); entry != nil {
+				thinkingBlocks = append(thinkingBlocks, entry)
+			}
 		case "server_tool_use":
 			// Server-side tool calls are executed by the provider and have no OpenAI
 			// equivalent to surface, but they are billable. Count them so a provider that
@@ -94,6 +118,9 @@ func AnthropicToOpenAI(anthropicBody []byte, model string) ([]byte, error) {
 	}
 	if reasoningContent != "" {
 		message.ReasoningContent = reasoningContent
+	}
+	if len(thinkingBlocks) > 0 {
+		message.ThinkingBlocks = thinkingBlocks
 	}
 	if len(toolCalls) > 0 {
 		message.ToolCalls = toolCalls

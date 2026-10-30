@@ -21,7 +21,7 @@ func TestConvertToolCallsToGenaiParts_NestedFormat(t *testing.T) {
 		},
 	}
 
-	parts := convertToolCallsToGenaiParts(toolCalls)
+	parts := convertToolCallsToGenaiParts(toolCalls, false)
 
 	if len(parts) != 1 {
 		t.Fatalf("expected 1 part, got %d", len(parts))
@@ -50,7 +50,7 @@ func TestConvertToolCallsToGenaiParts_FlatFormat(t *testing.T) {
 		},
 	}
 
-	parts := convertToolCallsToGenaiParts(toolCalls)
+	parts := convertToolCallsToGenaiParts(toolCalls, false)
 
 	if len(parts) != 1 {
 		t.Fatalf("expected 1 part, got %d", len(parts))
@@ -86,7 +86,7 @@ func TestConvertToolCallsToGenaiParts_FlatOverridesNested(t *testing.T) {
 		},
 	}
 
-	parts := convertToolCallsToGenaiParts(toolCalls)
+	parts := convertToolCallsToGenaiParts(toolCalls, false)
 
 	if len(parts) != 1 {
 		t.Fatalf("expected 1 part, got %d", len(parts))
@@ -121,7 +121,7 @@ func TestConvertToolCallsToGenaiParts_EmptyFuncName(t *testing.T) {
 		},
 	}
 
-	parts := convertToolCallsToGenaiParts(toolCalls)
+	parts := convertToolCallsToGenaiParts(toolCalls, false)
 
 	if len(parts) != 0 {
 		t.Fatalf("expected 0 parts for empty funcName, got %d", len(parts))
@@ -130,12 +130,12 @@ func TestConvertToolCallsToGenaiParts_EmptyFuncName(t *testing.T) {
 
 // TestConvertToolCallsToGenaiParts_EmptySlice verifies nil return for empty input.
 func TestConvertToolCallsToGenaiParts_EmptySlice(t *testing.T) {
-	parts := convertToolCallsToGenaiParts(nil)
+	parts := convertToolCallsToGenaiParts(nil, false)
 	if parts != nil {
 		t.Fatalf("expected nil for nil input, got %v", parts)
 	}
 
-	parts = convertToolCallsToGenaiParts([]interface{}{})
+	parts = convertToolCallsToGenaiParts([]interface{}{}, false)
 	if parts != nil {
 		t.Fatalf("expected nil for empty input, got %v", parts)
 	}
@@ -151,7 +151,7 @@ func TestConvertToolCallsToGenaiParts_InvalidArguments(t *testing.T) {
 		},
 	}
 
-	parts := convertToolCallsToGenaiParts(toolCalls)
+	parts := convertToolCallsToGenaiParts(toolCalls, false)
 
 	if len(parts) != 1 {
 		t.Fatalf("expected 1 part, got %d", len(parts))
@@ -181,7 +181,7 @@ func TestConvertToolCallsToGenaiParts_ThoughtSignatureFallback(t *testing.T) {
 		},
 	}
 
-	parts := convertToolCallsToGenaiParts(toolCalls)
+	parts := convertToolCallsToGenaiParts(toolCalls, false)
 
 	if len(parts) != 1 {
 		t.Fatalf("expected 1 part, got %d", len(parts))
@@ -217,7 +217,8 @@ func TestConvertOpenAIToolsToVertex_FunctionGrouping(t *testing.T) {
 		},
 	}
 
-	result := convertOpenAIToolsToVertex(openAITools)
+	result, err := convertOpenAIToolsToVertex(openAITools)
+	require.NoError(t, err)
 
 	assert.True(t, result.HasFunctionDecls, "should have function declarations")
 	assert.False(t, result.HasBuiltinTools, "should not have builtin tools")
@@ -244,7 +245,8 @@ func TestConvertOpenAIToolsToVertex_BuiltinToolsOnly(t *testing.T) {
 		map[string]interface{}{"type": "web_search"},
 	}
 
-	result := convertOpenAIToolsToVertex(openAITools)
+	result, err := convertOpenAIToolsToVertex(openAITools)
+	require.NoError(t, err)
 
 	assert.False(t, result.HasFunctionDecls, "should not have function declarations")
 	assert.True(t, result.HasBuiltinTools, "should have builtin tools")
@@ -257,7 +259,8 @@ func TestConvertOpenAIToolsToVertex_URLContext(t *testing.T) {
 		map[string]interface{}{"type": "url_context"},
 	}
 
-	result := convertOpenAIToolsToVertex(openAITools)
+	result, err := convertOpenAIToolsToVertex(openAITools)
+	require.NoError(t, err)
 
 	assert.False(t, result.HasFunctionDecls, "should not have function declarations")
 	assert.True(t, result.HasBuiltinTools, "url_context is a builtin tool")
@@ -283,7 +286,8 @@ func TestConvertOpenAIToolsToVertex_MixedToolsDropsFunctions(t *testing.T) {
 		},
 	}
 
-	result := convertOpenAIToolsToVertex(openAITools)
+	result, err := convertOpenAIToolsToVertex(openAITools)
+	require.NoError(t, err)
 
 	assert.True(t, result.HasFunctionDecls, "should detect function declarations")
 	assert.True(t, result.HasBuiltinTools, "should detect builtin tools")

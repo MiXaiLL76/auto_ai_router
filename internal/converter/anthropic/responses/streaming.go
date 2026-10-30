@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -32,6 +33,7 @@ type anthropicStreamAccumulator struct {
 	currentBlockName    string
 	currentText         string
 	currentThinking     string
+	currentEncrypted    string // signature (signature_delta) or redacted data, see thinkingEncryptedContent
 	currentToolArgs     string
 	currentReasoningID  string                        // ID assigned at content_block_start for "thinking"
 	currentReasoningIdx int                           // output_index the current reasoning item was announced at
@@ -152,10 +154,11 @@ func processAnthropicEvent(w io.Writer, acc *anthropicStreamAccumulator, event *
 		acc.currentBlockName = event.ContentBlock.Name
 		acc.currentText = ""
 		acc.currentThinking = ""
+		acc.currentEncrypted = thinkingEncryptedContent(*event.ContentBlock)
 		acc.currentToolArgs = ""
 
 		switch event.ContentBlock.Type {
-		case "thinking":
+		case "thinking", "redacted_thinking":
 			if !acc.headerEmitted {
 				if err := emitAnthropicHeaderEvents(w, acc); err != nil {
 					return err
@@ -164,6 +167,9 @@ func processAnthropicEvent(w io.Writer, acc *anthropicStreamAccumulator, event *
 			// Announce the reasoning item immediately so the client knows its output_index.
 			acc.currentReasoningID = generateItemID("rs_")
 			acc.currentReasoningIdx = len(acc.outputItems)
+			if acc.messageStarted {
+				acc.currentReasoningIdx++ // same slot accounting as tool_use below
+			}
 			for _, ev := range responses.BuildReasoningItemOpenEvents(acc.currentReasoningIdx, acc.currentReasoningID) {
 				if err := writeAnthropicSSE(w, ev["type"].(string), ev, acc); err != nil {
 					return err
@@ -245,6 +251,8 @@ func processAnthropicEvent(w io.Writer, acc *anthropicStreamAccumulator, event *
 					return err
 				}
 			}
+		case "signature_delta":
+			acc.currentEncrypted += event.Delta.Signature
 		case "citations_delta":
 			if event.Delta.Citation != nil {
 				acc.currentCitations = append(acc.currentCitations, *event.Delta.Citation)
@@ -353,6 +361,14 @@ func handleAnthropicTextDelta(w io.Writer, acc *anthropicStreamAccumulator, delt
 			return err
 		}
 	}
+	if acc.messageStarted && len(acc.outputItems) > acc.messageOutputIndex {
+		// A reasoning or tool item came after the open message: this text starts a new
+		// message after it, as anthropicContentToOutputItems does for a whole response,
+		// so a client replaying the output keeps the blocks in their order.
+		if err := closeAnthropicMessage(w, acc); err != nil {
+			return err
+		}
+	}
 	if !acc.messageStarted {
 		// Save the output index BEFORE emitAnthropicMessageStart sets messageStarted=true,
 		acc.messageOutputIndex = len(acc.outputItems)
@@ -363,6 +379,47 @@ func handleAnthropicTextDelta(w io.Writer, acc *anthropicStreamAccumulator, delt
 	acc.currentText += delta
 	return writeAnthropicSSE(w, "response.output_text.delta",
 		responses.BuildOutputTextDeltaEvent(acc.messageItemID, acc.messageOutputIndex, 0, delta), acc)
+}
+
+// closeAnthropicMessage closes the open message item before the stream ends: its text
+// done events go out now, and the item takes its announced slot in acc.outputItems, so
+// emitAnthropicCompletionEvents closes it with the other items.
+func closeAnthropicMessage(w io.Writer, acc *anthropicStreamAccumulator) error {
+	if _, err := emitAnthropicMessageTextDone(w, acc, acc.messageOutputIndex); err != nil {
+		return err
+	}
+	acc.outputItems = slices.Insert(acc.outputItems, acc.messageOutputIndex, anthropicMessageItem(acc))
+	acc.messageStarted = false
+	acc.messageItemID = ""
+	acc.msgContent = nil
+	return nil
+}
+
+// anthropicMessageItem is the open message item as it goes into the completed output.
+func anthropicMessageItem(acc *anthropicStreamAccumulator) responses.OutputItem {
+	content := acc.msgContent
+	if len(content) == 0 {
+		content = []responses.OutputContent{{Type: "output_text", Text: "", Annotations: []responses.Annotation{}}}
+	}
+	return responses.OutputItem{Type: "message", ID: acc.messageItemID, Status: "completed", Role: "assistant", Content: content}
+}
+
+// emitAnthropicMessageTextDone sends the open message's output_text.done and
+// content_part.done at outputIdx, and reports whether the message has any text.
+func emitAnthropicMessageTextDone(w io.Writer, acc *anthropicStreamAccumulator, outputIdx int) (bool, error) {
+	fullText := ""
+	for _, c := range acc.msgContent {
+		fullText += c.Text
+	}
+	if fullText == "" {
+		return false, nil
+	}
+	if err := writeAnthropicSSE(w, "response.output_text.done",
+		responses.BuildOutputTextDoneEvent(acc.messageItemID, outputIdx, 0, fullText), acc); err != nil {
+		return false, err
+	}
+	return true, writeAnthropicSSE(w, "response.content_part.done",
+		responses.BuildContentPartDoneEvent(acc.messageItemID, outputIdx, 0, fullText), acc)
 }
 
 func finalizeCurrentBlock(w io.Writer, acc *anthropicStreamAccumulator) error {
@@ -379,7 +436,7 @@ func finalizeCurrentBlock(w io.Writer, acc *anthropicStreamAccumulator) error {
 		acc.currentText = ""
 		acc.currentCitations = nil
 
-	case "thinking":
+	case "thinking", "redacted_thinking":
 		itemID := acc.currentReasoningID
 		if itemID == "" {
 			itemID = generateItemID("rs_")
@@ -395,26 +452,17 @@ func finalizeCurrentBlock(w io.Writer, acc *anthropicStreamAccumulator) error {
 				}
 			}
 		}
-		if acc.currentThinking != "" {
+		if acc.currentThinking != "" || acc.currentEncrypted != "" {
 			// Appended here, closed once by emitAnthropicCompletionEvents (which
 			// walks acc.outputItems and emits one output_item.done per entry) —
 			// emitting it again here as well would duplicate the done event.
-			item := responses.OutputItem{
-				Type:   "reasoning",
-				ID:     itemID,
-				Status: "completed",
-				Summary: []responses.OutputContent{
-					{Type: "summary_text", Text: acc.currentThinking},
-				},
-			}
-			acc.outputItems = append(acc.outputItems, item)
+			acc.outputItems = append(acc.outputItems, reasoningOutputItem(itemID, acc.currentThinking, acc.currentEncrypted))
 		} else {
 			// Nothing gets appended above, so the completion-time loop will
 			// never close this item — emit its done event now instead, to
 			// avoid leaving the "added" event from content_block_start
 			// dangling with no matching "done".
-			outputIdx := len(acc.outputItems)
-			if err := writeAnthropicSSE(w, "response.output_item.done", responses.BuildReasoningItemDoneEvent(outputIdx, itemID, ""), acc); err != nil {
+			if err := writeAnthropicSSE(w, "response.output_item.done", responses.BuildReasoningItemDoneEvent(acc.currentReasoningIdx, itemID, ""), acc); err != nil {
 				return err
 			}
 		}
@@ -534,19 +582,11 @@ func emitAnthropicCompletionEvents(w io.Writer, acc *anthropicStreamAccumulator)
 
 	// Close the message item at its announced output_index.
 	if acc.messageStarted {
-		fullText := ""
-		for _, c := range acc.msgContent {
-			fullText += c.Text
+		hasText, err := emitAnthropicMessageTextDone(w, acc, outputIdx)
+		if err != nil {
+			return err
 		}
-		if fullText != "" {
-			if err := writeAnthropicSSE(w, "response.output_text.done",
-				responses.BuildOutputTextDoneEvent(acc.messageItemID, outputIdx, 0, fullText), acc); err != nil {
-				return err
-			}
-			if err := writeAnthropicSSE(w, "response.content_part.done",
-				responses.BuildContentPartDoneEvent(acc.messageItemID, outputIdx, 0, fullText), acc); err != nil {
-				return err
-			}
+		if hasText {
 			if err := writeAnthropicSSE(w, "response.output_item.done", map[string]interface{}{
 				"type":         "response.output_item.done",
 				"output_index": outputIdx,
@@ -591,22 +631,19 @@ func buildAnthropicInProgressResponse(acc *anthropicStreamAccumulator) map[strin
 func buildAnthropicCompletedResponse(acc *anthropicStreamAccumulator) *responses.Response {
 	status, incompleteDetails := anthropicStopReasonToStatus(acc.stopReason)
 
-	var output []responses.OutputItem
-	output = append(output, acc.outputItems...)
-
+	// The open message goes where it was announced (as emitAnthropicCompletionEvents
+	// closes it), not last: a client replays output in this order, and moving text
+	// after a later tool call or thinking block changes the turn it replays. Earlier
+	// messages are in acc.outputItems already (closeAnthropicMessage).
+	msgIdx := len(acc.outputItems)
 	if acc.messageStarted {
-		msgContent := acc.msgContent
-		if len(msgContent) == 0 {
-			msgContent = []responses.OutputContent{{Type: "output_text", Text: "", Annotations: []responses.Annotation{}}}
-		}
-		output = append(output, responses.OutputItem{
-			Type:    "message",
-			ID:      acc.messageItemID,
-			Status:  "completed",
-			Role:    "assistant",
-			Content: msgContent,
-		})
+		msgIdx = acc.messageOutputIndex
 	}
+	output := append([]responses.OutputItem{}, acc.outputItems[:msgIdx]...)
+	if acc.messageStarted {
+		output = append(output, anthropicMessageItem(acc))
+	}
+	output = append(output, acc.outputItems[msgIdx:]...)
 
 	if len(output) == 0 {
 		output = []responses.OutputItem{{

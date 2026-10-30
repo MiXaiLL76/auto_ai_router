@@ -6,6 +6,7 @@ import "google.golang.org/genai"
 type VertexStreamingChunk struct {
 	Candidates    []*genai.Candidate                          `json:"candidates,omitempty"`
 	UsageMetadata *genai.GenerateContentResponseUsageMetadata `json:"usageMetadata,omitempty"`
+	ModelVersion  string                                      `json:"modelVersion,omitempty"`
 }
 
 type VertexGenerationConfig struct {

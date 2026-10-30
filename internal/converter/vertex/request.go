@@ -40,25 +40,38 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, isImageEdit bool,
 	if err := json.Unmarshal(openAIBody, &req); err != nil {
 		return nil, converterutil.RequestJSONValidationError(err)
 	}
+	if err := validateChatRequest(&req, model); err != nil {
+		return nil, err
+	}
 
 	vertexReq := VertexRequest{
 		Contents: make([]*genai.Content, 0),
 	}
 	var pendingToolParts []*genai.Part
+	callIDs := UsesFunctionCallIDs(model)
 
 	flushPendingToolParts := func() {
 		if len(pendingToolParts) == 0 {
 			return
 		}
+		var calls *genai.Content
+		if n := len(vertexReq.Contents); n > 0 {
+			calls = vertexReq.Contents[n-1]
+		}
 		vertexReq.Contents = append(vertexReq.Contents, &genai.Content{
 			Role:  "user",
-			Parts: pendingToolParts,
+			Parts: OrderFunctionResponses(pendingToolParts, calls),
 		})
 		pendingToolParts = nil
 	}
 
 	// Generation config
 	vertexReq.GenerationConfig = buildGenerationConfig(&req, model)
+	if vertexReq.GenerationConfig != nil {
+		if err := validateGeminiImageConfig(model, vertexReq.GenerationConfig.ImageConfig); err != nil {
+			return nil, err
+		}
+	}
 
 	// Messages → Contents + SystemInstruction
 	for _, msg := range req.Messages {
@@ -107,8 +120,15 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, isImageEdit bool,
 			} else {
 				responseData = map[string]interface{}{"output": ""}
 			}
+			// The call's own ID: Gemini 4 matches a response to its call by ID and
+			// name, see convertToolCallsToGenaiParts.
+			var responseID string
+			if callIDs {
+				responseID = msg.ToolCallID
+			}
 			pendingToolParts = append(pendingToolParts, &genai.Part{
 				FunctionResponse: &genai.FunctionResponse{
+					ID:       responseID,
 					Name:     funcName,
 					Response: responseData,
 				},
@@ -142,7 +162,7 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, isImageEdit bool,
 				}
 			}
 			if len(msg.ToolCalls) > 0 && role == "model" {
-				parts = append(parts, convertToolCallsToGenaiParts(msg.ToolCalls)...)
+				parts = append(parts, convertToolCallsToGenaiParts(msg.ToolCalls, callIDs)...)
 			}
 			// Gemini requires at least one text Part in user-role content.
 			// Multimodal messages with only images/audio/files will fail with
@@ -173,11 +193,20 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, isImageEdit bool,
 			Parts: []*genai.Part{{Text: "."}},
 		})
 	}
+	if err := ValidateInputImages(model, vertexReq.Contents); err != nil {
+		return nil, err
+	}
+	if err := ValidateLastTurn(model, vertexReq.Contents, "messages"); err != nil {
+		return nil, err
+	}
 
 	// Tools
 	var hasUserFunctions bool
 	if len(req.Tools) > 0 {
-		toolsResult := convertOpenAIToolsToVertex(req.Tools)
+		toolsResult, err := convertOpenAIToolsToVertex(req.Tools)
+		if err != nil {
+			return nil, err
+		}
 		if len(toolsResult.Tools) > 0 {
 			vertexReq.Tools = toolsResult.Tools
 		}
@@ -201,6 +230,47 @@ func partsHaveText(parts []*genai.Part) bool {
 		if p != nil && p.Text != "" {
 			return true
 		}
+	}
+	return false
+}
+
+// ValidateInputImages rejects a request with more images than the model accepts,
+// counting every image part of every turn: the upstream limit is per request.
+func ValidateInputImages(model string, contents []*genai.Content) error {
+	profile := lookupGeminiModelProfile(model)
+	if profile == nil || profile.maxInputImages <= 0 {
+		return nil
+	}
+	images := 0
+	for _, content := range contents {
+		if content == nil {
+			continue
+		}
+		for _, part := range content.Parts {
+			if isImagePart(part) {
+				images++
+			}
+		}
+	}
+	if images <= profile.maxInputImages {
+		return nil
+	}
+	return &converterutil.RequestValidationError{
+		Param: "image",
+		Code:  "too_many_images",
+		Message: fmt.Sprintf("Too many input images: %d were sent, this model accepts at most %d per request",
+			images, profile.maxInputImages),
+	}
+}
+
+func isImagePart(part *genai.Part) bool {
+	switch {
+	case part == nil:
+		return false
+	case part.InlineData != nil:
+		return IsImageMIME(part.InlineData.MIMEType)
+	case part.FileData != nil:
+		return IsImageMIME(part.FileData.MIMEType)
 	}
 	return false
 }

@@ -23,6 +23,11 @@ type blockState struct {
 	id          string // tool_use id
 	name        string // tool_use name
 	toolCallIdx int
+	// thinking / redacted_thinking block being assembled; the text is appended to a
+	// byte slice so a long stream of thinking_delta events is not copied quadratically.
+	thinkingText []byte
+	signature    string
+	data         string
 }
 
 // streamUsage keeps provider field presence separate from numeric values.
@@ -116,6 +121,7 @@ func TransformAnthropicStreamToOpenAI(anthropicStream io.Reader, model string, o
 	// Per-block state; Anthropic streams one block at a time.
 	var current blockState
 	toolCallIdx := 0
+	thinkingBlockIdx := 0 // index of the next thinking_blocks entry, see chatThinkingBlock
 
 	// Usage is accumulated across message_start / message_delta events.
 	var usage streamUsage
@@ -161,10 +167,13 @@ func TransformAnthropicStreamToOpenAI(anthropicStream io.Reader, model string, o
 				continue
 			}
 			current = blockState{
-				blockType:   event.ContentBlock.Type,
-				id:          event.ContentBlock.ID,
-				name:        event.ContentBlock.Name,
-				toolCallIdx: toolCallIdx,
+				blockType:    event.ContentBlock.Type,
+				id:           event.ContentBlock.ID,
+				name:         event.ContentBlock.Name,
+				toolCallIdx:  toolCallIdx,
+				thinkingText: []byte(event.ContentBlock.Thinking),
+				signature:    event.ContentBlock.Signature,
+				data:         event.ContentBlock.Data,
 			}
 			if current.blockType == "server_tool_use" {
 				usage.observeServerToolUse(current.name)
@@ -188,6 +197,14 @@ func TransformAnthropicStreamToOpenAI(anthropicStream io.Reader, model string, o
 				if err := writeChunk(output, chunk); err != nil {
 					return err
 				}
+				// Advance the index here, at the tool_use block's OPEN, not at its
+				// content_block_stop: a provider that opens the next tool_use block
+				// without a matching stop for the previous one (observed live with
+				// two parallel calls) would otherwise emit both with the same index,
+				// and a Chat-SSE consumer that stitches tool calls by index — the
+				// force_stream_for_ttft reassembler does — would merge them into a
+				// single call with concatenated name and arguments.
+				toolCallIdx++
 			}
 
 		case "content_block_delta":
@@ -205,6 +222,7 @@ func TransformAnthropicStreamToOpenAI(anthropicStream io.Reader, model string, o
 				}
 
 			case "thinking_delta":
+				current.thinkingText = append(current.thinkingText, event.Delta.Thinking...)
 				if event.Delta.Thinking != "" {
 					delta := openai.OpenAIStreamingDelta{ReasoningContent: event.Delta.Thinking}
 					chunk := buildStreamChunk(chatID, model, timestamp, delta, nil)
@@ -214,8 +232,7 @@ func TransformAnthropicStreamToOpenAI(anthropicStream io.Reader, model string, o
 				}
 
 			case "signature_delta":
-				// Anthropic sends this for multi-turn thinking verification.
-				// No OpenAI equivalent; silently consumed to avoid unknown-delta errors.
+				current.signature += event.Delta.Signature
 
 			case "input_json_delta":
 				// Stream partial tool arguments to the client, only for client tools:
@@ -238,9 +255,19 @@ func TransformAnthropicStreamToOpenAI(anthropicStream io.Reader, model string, o
 			}
 
 		case "content_block_stop":
-			// Increment tool_call index when a tool_use block finishes.
-			if current.blockType == "tool_use" {
-				toolCallIdx++
+			// The tool_use index is advanced at content_block_start (see there),
+			// not here: a provider may open the next tool_use block without a
+			// matching stop for the previous one, and advancing only on stop would
+			// leave both calls on the same index.
+			// The finished thinking block with its signature, as the non-streaming
+			// response's thinking_blocks carry it, one entry per chunk.
+			finished := ContentBlock{Type: current.blockType, Thinking: string(current.thinkingText), Signature: current.signature, Data: current.data}
+			if entry := chatThinkingBlock(finished, thinkingBlockIdx); entry != nil {
+				thinkingBlockIdx++
+				delta := openai.OpenAIStreamingDelta{ThinkingBlocks: []map[string]interface{}{entry}}
+				if err := writeChunk(output, buildStreamChunk(chatID, model, timestamp, delta, nil)); err != nil {
+					return err
+				}
 			}
 			// Reset current block state.
 			current = blockState{toolCallIdx: toolCallIdx}

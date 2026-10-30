@@ -2,6 +2,7 @@ package anthropic
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -108,14 +109,30 @@ func MessagesToChat(body []byte) ([]byte, MessagesAdapterMetadata, error) {
 	if choice, ok := request["tool_choice"].(map[string]interface{}); ok {
 		chat["tool_choice"] = toolChoiceToChat(choice)
 	}
-	if thinking, ok := request["thinking"].(map[string]interface{}); ok {
+	outputConfig, _ := request["output_config"].(map[string]interface{})
+	configuredEffort, _ := outputConfig["effort"].(string)
+	tc, _ := mapThinkingConfig(request["thinking"], "", model)
+	if err := validateBetweenTools(tc, configuredEffort); err != nil {
+		return nil, MessagesAdapterMetadata{}, err
+	}
+	thinking, hasThinking := request["thinking"].(map[string]interface{})
+	if !hasThinking && configuredEffort != "" && isClaudeModel(model) && thinksByDefault(model) {
+		// Omitting thinking runs adaptive on this model: say so, so the effort can go along.
+		thinking, hasThinking = map[string]interface{}{"type": "adaptive"}, true
+	}
+	if hasThinking {
 		if isClaudeModel(model) {
 			chat["thinking"] = thinking
+			// The Chat form has no output_config: OpenAIToAnthropic reads the effort back from
+			// reasoning_effort. Only next to a thinking config that thinks: beside "disabled",
+			// an OpenAI-compatible provider would read it as a request to reason. Effort with
+			// thinking off, or without thinking on a model where that means off, is not carried.
+			if configuredEffort != "" && (thinking["type"] == "adaptive" || thinking["type"] == "enabled") {
+				chat["reasoning_effort"] = configuredEffort
+			}
 		} else if effort := thinkingToReasoningEffort(thinking); effort != "" {
-			if outputConfig, ok := request["output_config"].(map[string]interface{}); ok && thinking["type"] == "adaptive" {
-				if configured, ok := outputConfig["effort"].(string); ok && configured != "" {
-					effort = configured
-				}
+			if configuredEffort != "" && thinking["type"] == "adaptive" {
+				effort = configuredEffort
 			}
 			chat["reasoning_effort"] = effort
 		}
@@ -141,12 +158,14 @@ func MessagesToChat(body []byte) ([]byte, MessagesAdapterMetadata, error) {
 // normalization OpenAIToAnthropic performs during the Messages->Chat->Messages round trip,
 // directly to a raw native Anthropic Messages API request body — for the /v1/messages
 // passthrough path, which forwards the client's body to an Anthropic-wire-compatible
-// provider without going through Chat Completions shape at all. Mirrors
-// OpenAIToAnthropic's thinking handling (messages.go) exactly, so real API requirements
+// provider without going through Chat Completions shape at all. Shares OpenAIToAnthropic's
+// thinking mapping (mapThinkingConfig, applyThinkingSideEffects), so real API requirements
 // (the effort-2025-11-24 beta for adaptive thinking, temperature=1.0 while thinking is
 // enabled, upgrading legacy enabled+budget_tokens to adaptive+effort on adaptive-only
 // models, and disabling autonomous thinking by default on non-Anthropic backends behind
-// CometAPI/ProMan) keep working without paying for the full round trip.
+// CometAPI/ProMan) keep working without paying for the full round trip. The client's
+// output_config is kept as sent; an effort derived from budget_tokens fills it only when
+// it has none.
 func NormalizeMessagesForPassthrough(body []byte, model string, isRealAnthropicBackend bool) ([]byte, error) {
 	var request map[string]interface{}
 	if err := json.Unmarshal(body, &request); err != nil {
@@ -164,6 +183,11 @@ func NormalizeMessagesForPassthrough(body []byte, model string, isRealAnthropicB
 	}
 
 	tc, oc := mapThinkingConfig(request["thinking"], "", model)
+	outputConfig, _ := request["output_config"].(map[string]interface{})
+	effort, _ := outputConfig["effort"].(string)
+	if err := validateBetweenTools(tc, effort); err != nil {
+		return nil, err
+	}
 	if tc != nil {
 		request["thinking"] = tc
 		existingMaxTokens, hasMaxTokens := request["max_tokens"].(float64)
@@ -171,19 +195,29 @@ func NormalizeMessagesForPassthrough(body []byte, model string, isRealAnthropicB
 		if hasMaxTokens {
 			request["max_tokens"] = maxTokens
 		}
-		if oc != nil {
-			if existing, ok := request["output_config"].(map[string]interface{}); ok {
-				existing["effort"] = oc.Effort
+		if len(betas) > 0 {
+			request["anthropic_beta"] = betas
+		}
+		// An effort the client set explicitly wins over the one derived from budget_tokens.
+		if oc != nil && effort == "" {
+			if outputConfig != nil {
+				outputConfig["effort"] = oc.Effort
 			} else {
 				request["output_config"] = oc
 			}
-			request["anthropic_beta"] = betas
 		}
 		if !dropSampling {
 			request["temperature"] = temp
 		}
-	} else if !isRealAnthropicBackend {
-		request["thinking"] = &AnthropicThinking{Type: "disabled"}
+	} else if thinking, _ := request["thinking"].(map[string]interface{}); !isRealAnthropicBackend || thinking["type"] == "between_tools" {
+		// between_tools exists on Sonnet 5.5 only (mapped above); elsewhere it means off.
+		// A model that can't turn thinking off (at this effort) gets no thinking field and
+		// runs adaptive, rather than a 400.
+		if off := thinkingOff(model, effort); off != nil {
+			request["thinking"] = off
+		} else {
+			delete(request, "thinking")
+		}
 	}
 
 	return json.Marshal(request)
@@ -722,10 +756,16 @@ func ChatToMessages(body []byte, metadata MessagesAdapterMetadata, cacheWriteTTL
 
 	choice := response.Choices[0]
 	content := make([]interface{}, 0, 1+len(choice.Message.ToolCalls))
+	// Only the block's own fields: a Chat entry also carries its list "index" (see
+	// chatThinkingBlock), which Anthropic rejects when the client echoes the block back.
 	for _, block := range choice.Message.ThinkingBlocks {
 		switch block["type"] {
-		case "thinking", "redacted_thinking":
-			content = append(content, block)
+		case "thinking":
+			content = append(content, map[string]interface{}{
+				"type": "thinking", "thinking": stringValue(block["thinking"]), "signature": block["signature"],
+			})
+		case "redacted_thinking":
+			content = append(content, map[string]interface{}{"type": "redacted_thinking", "data": block["data"]})
 		}
 	}
 	if len(choice.Message.ThinkingBlocks) == 0 && choice.Message.ReasoningContent != "" {
@@ -838,6 +878,7 @@ type messagesStreamState struct {
 	messageID                     string
 	blockIndex                    int
 	blockType                     string
+	thinkingStreamed              bool // the open thinking block got thinking_delta text
 	toolIndex                     int
 	finish                        string
 	usage                         *openai.OpenAIUsage
@@ -897,6 +938,13 @@ func TransformChatStreamToMessages(reader io.Reader, writer io.Writer, model str
 					return err
 				}
 			}
+			blocks, _ := choice.Delta.ThinkingBlocks.([]interface{})
+			for _, raw := range blocks {
+				block, _ := raw.(map[string]interface{})
+				if err := state.writeThinkingBlock(block); err != nil {
+					return err
+				}
+			}
 			if choice.Delta.Content != "" {
 				if err := state.writeDelta("text", -1, "", "", choice.Delta.Content); err != nil {
 					return err
@@ -926,6 +974,140 @@ func TransformChatStreamToMessages(reader io.Reader, writer io.Writer, model str
 		return fmt.Errorf("chat completions stream scanner: %w", err)
 	}
 	return state.finishStream()
+}
+
+// PassthroughMessagesStream relays a provider stream that already is in the Messages
+// API format, one SSE event per write, so thinking signatures, block order and
+// input_transformations reach the client untouched. Two things change: message_start's
+// message.model becomes model, and message_delta's usage gets the fields message_start
+// reported and it leaves out — Anthropic may report input and cache tokens in
+// message_start only, while billing reads the final message_delta. Provider fields are
+// copied as sent; only two counters are filled in when missing: web searches, from the
+// server_tool_use blocks, and the cache-write total, from its TTL split.
+func PassthroughMessagesStream(reader io.Reader, writer io.Writer, model string) error {
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	var state passthroughStreamState
+	var event []byte
+	flush := func() error {
+		if len(event) == 0 {
+			return nil
+		}
+		_, err := writer.Write(append(event, '\n'))
+		event = event[:0]
+		return err
+	}
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			if err := flush(); err != nil {
+				return err
+			}
+			continue
+		}
+		if payload, ok := bytes.CutPrefix(line, []byte("data:")); ok {
+			if rewritten, ok := rewritePassthroughEvent(bytes.TrimSpace(payload), model, &state); ok {
+				line = append([]byte("data: "), rewritten...)
+			}
+		}
+		event = append(append(event, line...), '\n')
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("messages stream scanner: %w", err)
+	}
+	return flush()
+}
+
+// passthroughStreamState is what PassthroughMessagesStream carries between events.
+type passthroughStreamState struct {
+	startUsage      map[string]json.RawMessage // message_start's message.usage, field by field as sent
+	webSearchBlocks int                        // server_tool_use web_search blocks opened so far
+}
+
+func rewritePassthroughEvent(payload []byte, model string, state *passthroughStreamState) ([]byte, bool) {
+	if !bytes.Contains(payload, []byte(`"message_`)) && !bytes.Contains(payload, []byte(`"server_tool_use"`)) {
+		return nil, false
+	}
+	var event map[string]json.RawMessage
+	if json.Unmarshal(payload, &event) != nil || event == nil {
+		return nil, false
+	}
+	switch string(bytes.TrimSpace(event["type"])) {
+	case `"content_block_start"`:
+		var block ContentBlock
+		if json.Unmarshal(event["content_block"], &block) == nil && block.Type == "server_tool_use" && isWebSearchToolName(block.Name) {
+			state.webSearchBlocks++
+		}
+		return nil, false
+	case `"message_start"`:
+		var message map[string]json.RawMessage
+		if json.Unmarshal(event["message"], &message) != nil || message == nil {
+			return nil, false
+		}
+		state.startUsage = decodeJSONObject(message["usage"])
+		message["model"], _ = json.Marshal(model)
+		event["message"], _ = json.Marshal(message)
+	case `"message_delta"`:
+		usage := decodeJSONObject(event["usage"])
+		for key, value := range state.startUsage {
+			if _, ok := usage[key]; !ok {
+				usage[key] = value
+			}
+		}
+		completeWebSearchCount(usage, state.webSearchBlocks)
+		completeCacheCreationTotal(usage)
+		if len(usage) == 0 {
+			return nil, false
+		}
+		event["usage"], _ = json.Marshal(usage)
+	default:
+		return nil, false
+	}
+	rewritten, err := json.Marshal(event)
+	return rewritten, err == nil
+}
+
+// decodeJSONObject decodes raw as a JSON object, field by field. Anything else (absent,
+// null, malformed) gives an empty, writable map.
+func decodeJSONObject(raw json.RawMessage) map[string]json.RawMessage {
+	var object map[string]json.RawMessage
+	if json.Unmarshal(raw, &object) != nil || object == nil {
+		return map[string]json.RawMessage{}
+	}
+	return object
+}
+
+// completeWebSearchCount sets server_tool_use.web_search_requests from the web_search
+// blocks seen when usage reports none: a provider that ran the searches still bills
+// them. The object's other counters (web_fetch_requests, ...) are kept as sent.
+func completeWebSearchCount(usage map[string]json.RawMessage, blocks int) {
+	if blocks == 0 {
+		return
+	}
+	serverToolUse := decodeJSONObject(usage["server_tool_use"])
+	var reported int
+	if json.Unmarshal(serverToolUse["web_search_requests"], &reported) == nil && reported > 0 {
+		return
+	}
+	serverToolUse["web_search_requests"], _ = json.Marshal(blocks)
+	usage["server_tool_use"], _ = json.Marshal(serverToolUse)
+}
+
+// completeCacheCreationTotal fills cache_creation_input_tokens from cache_creation's TTL
+// split when a provider reports only the split (see NormalizeCacheCreationUsage): the
+// rate limiter counts the flat fields only.
+func completeCacheCreationTotal(usage map[string]json.RawMessage) {
+	var total int
+	if json.Unmarshal(usage["cache_creation_input_tokens"], &total) == nil && total > 0 {
+		return
+	}
+	var details CacheCreationDetails
+	if json.Unmarshal(usage["cache_creation"], &details) != nil {
+		return
+	}
+	if total, _, _ = NormalizeCacheCreationUsage(0, &details); total > 0 {
+		usage["cache_creation_input_tokens"], _ = json.Marshal(total)
+	}
 }
 
 func (s *messagesStreamState) startMessage() error {
@@ -993,9 +1175,51 @@ func (s *messagesStreamState) writeDelta(blockType string, toolIndex int, id, na
 	if delta == "" {
 		return nil
 	}
+	if blockType == "thinking" {
+		s.thinkingStreamed = true
+	}
 	return writeMessagesSSE(s.writer, "content_block_delta", map[string]interface{}{
 		"type": "content_block_delta", "index": s.blockIndex, "delta": deltaBody,
 	})
+}
+
+// writeThinkingBlock finishes a thinking block from a Chat thinking_blocks entry: it
+// signs and closes the block the reasoning deltas streamed, or emits a redacted_thinking
+// block. When no reasoning streamed into it (display "omitted", or a producer that sends
+// the text only in thinking_blocks), the block is opened here with the entry's own text,
+// which is what the signature covers. Entries without a signature or data only repeat
+// streamed text and are skipped.
+func (s *messagesStreamState) writeThinkingBlock(block map[string]interface{}) error {
+	switch signature, data := stringValue(block["signature"]), stringValue(block["data"]); {
+	case block["type"] == "thinking" && signature != "":
+		text := ""
+		if s.blockType != "thinking" || !s.thinkingStreamed {
+			text = stringValue(block["thinking"])
+		}
+		if err := s.writeDelta("thinking", -1, "", "", text); err != nil {
+			return err
+		}
+		if err := writeMessagesSSE(s.writer, "content_block_delta", map[string]interface{}{
+			"type": "content_block_delta", "index": s.blockIndex,
+			"delta": map[string]interface{}{"type": "signature_delta", "signature": signature},
+		}); err != nil {
+			return err
+		}
+	case block["type"] == "redacted_thinking" && data != "":
+		if err := s.stopBlock(); err != nil {
+			return err
+		}
+		s.blockType = "redacted_thinking"
+		if err := writeMessagesSSE(s.writer, "content_block_start", map[string]interface{}{
+			"type": "content_block_start", "index": s.blockIndex,
+			"content_block": map[string]interface{}{"type": "redacted_thinking", "data": data},
+		}); err != nil {
+			return err
+		}
+	default:
+		return nil
+	}
+	return s.stopBlock()
 }
 
 func (s *messagesStreamState) stopBlock() error {
@@ -1009,6 +1233,7 @@ func (s *messagesStreamState) stopBlock() error {
 	}
 	s.blockIndex++
 	s.blockType = ""
+	s.thinkingStreamed = false
 	return nil
 }
 
@@ -1016,7 +1241,7 @@ func (s *messagesStreamState) finishStream() error {
 	if err := s.startMessage(); err != nil {
 		return err
 	}
-	if s.blockType == "" {
+	if s.blockType == "" && s.blockIndex == 0 {
 		if err := s.writeDelta("text", -1, "", "", ""); err != nil {
 			return err
 		}

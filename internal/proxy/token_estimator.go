@@ -500,6 +500,10 @@ func appendDeltaTextForPayload(b *strings.Builder, payload []byte) {
 func appendChatCompletionDeltaText(b *strings.Builder, payload []byte) {
 	var data struct {
 		Choices []struct {
+			// Legacy /v1/completions streams choices[].text instead of
+			// choices[].delta.content; read both shapes here so the TTFT scan
+			// and the completion-token estimate work for either endpoint.
+			Text  string `json:"text"`
 			Delta struct {
 				Content interface{} `json:"content"`
 				// Reasoning text is billed as completion tokens, so an aborted stream has
@@ -539,6 +543,9 @@ func appendChatCompletionDeltaText(b *strings.Builder, payload []byte) {
 		return
 	}
 	for _, choice := range data.Choices {
+		if choice.Text != "" {
+			b.WriteString(choice.Text)
+		}
 		appendDeltaValueText(b, choice.Delta.Content)
 		appendDeltaValueText(b, converterutil.PickReasoningField(choice.Delta.ReasoningContent, choice.Delta.Reasoning))
 		b.WriteString(choice.Delta.Refusal)

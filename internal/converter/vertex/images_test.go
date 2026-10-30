@@ -33,6 +33,8 @@ func TestMapGeminiImageSize(t *testing.T) {
 		{name: "3.1 Flash 2K", model: "gemini-3.1-flash-image", size: "1792x2400", aspectRatio: "3:4", imageSize: "2K"},
 		{name: "3.1 Flash nearest 4:5", model: "gemini-3.1-flash-image", size: "896x1152", aspectRatio: "4:5", imageSize: "1K"},
 		{name: "3.1 Flash nearest 2:3", model: "gemini-3.1-flash-image", size: "640x1024", aspectRatio: "2:3", imageSize: "1K"},
+		{name: "3.1 Flash nearest 21:9 uses the listed 512 size", model: "gemini-3.1-flash-image", size: "1024x400", aspectRatio: "21:9", imageSize: "1K"},
+		{name: "3.1 Flash nearest 21:9 512", model: "gemini-3.1-flash-image", size: "600x250", aspectRatio: "21:9", imageSize: "512"},
 		{name: "3.1 Flash extended ratio", model: "gemini-3.1-flash-image", size: "1:8", aspectRatio: "1:8", imageSize: "1K"},
 		{name: "3.1 Flash ratio with x", model: "gemini-3.1-flash-image", size: "16x9", aspectRatio: "16:9", imageSize: "1K"},
 		{name: "3.1 Flash Lite fixed 1K", model: "gemini-3.1-flash-lite-image", size: "1792x2400", aspectRatio: "3:4", imageSize: "1K"},
@@ -368,12 +370,15 @@ func TestImageEditRequestToOpenAIChatRequest(t *testing.T) {
 		result, err := ImageEditRequestToOpenAIChatRequest(body, contentType)
 		require.NoError(t, err)
 
+		// The explicit fields reach the chat request's own image fields, which the
+		// generation config merges over what size mapped to (1:1, 1K).
 		var chatReq openai.OpenAIRequest
 		require.NoError(t, json.Unmarshal(result, &chatReq))
-		genConfig := chatReq.ExtraBody["generation_config"].(map[string]interface{})
-		imageConfig := genConfig["image_config"].(map[string]interface{})
-		assert.Equal(t, "3:4", imageConfig["aspectRatio"])
-		assert.Equal(t, "2K", imageConfig["imageSize"])
+		cfg := buildGenerationConfig(&chatReq, chatReq.Model)
+		require.NotNil(t, cfg)
+		require.NotNil(t, cfg.ImageConfig)
+		assert.Equal(t, "3:4", cfg.ImageConfig.AspectRatio)
+		assert.Equal(t, "2K", cfg.ImageConfig.ImageSize)
 	})
 
 	t.Run("multipart edit explicit image config fields override size", func(t *testing.T) {
@@ -384,12 +389,15 @@ func TestImageEditRequestToOpenAIChatRequest(t *testing.T) {
 		result, err := ImageEditRequestToOpenAIChatRequest(body, contentType)
 		require.NoError(t, err)
 
+		// The explicit fields reach the chat request's own image fields, which the
+		// generation config merges over what size mapped to (1:1, 1K).
 		var chatReq openai.OpenAIRequest
 		require.NoError(t, json.Unmarshal(result, &chatReq))
-		genConfig := chatReq.ExtraBody["generation_config"].(map[string]interface{})
-		imageConfig := genConfig["image_config"].(map[string]interface{})
-		assert.Equal(t, "3:4", imageConfig["aspectRatio"])
-		assert.Equal(t, "2K", imageConfig["imageSize"])
+		cfg := buildGenerationConfig(&chatReq, chatReq.Model)
+		require.NotNil(t, cfg)
+		require.NotNil(t, cfg.ImageConfig)
+		assert.Equal(t, "3:4", cfg.ImageConfig.AspectRatio)
+		assert.Equal(t, "2K", cfg.ImageConfig.ImageSize)
 	})
 
 	t.Run("multipart edit rejects invalid image config json", func(t *testing.T) {

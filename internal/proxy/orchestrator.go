@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"strings"
 
@@ -44,6 +45,29 @@ type orchestratedRequest struct {
 	passthroughResponses bool // true for codex/OpenAI models: Responses API forwarded as-is (no conversion)
 	passthroughMessages  bool // true when /v1/messages is forwarded natively (no Messages->Chat->Messages round trip)
 	nativeResponses      bool // true when using Phase 4 ProviderResponses converter (Vertex/Anthropic)
+	// forcedNativeNonStream is true when force_stream_for_ttft forced the
+	// native-Responses upstream request to stream:true for a client that asked
+	// for a non-streaming response. The response path then consumes the
+	// provider SSE and reassembles it into the non-stream JSON the client
+	// expects (see handleSimulatedNativeNonStream).
+	forcedNativeNonStream bool
+	// forcedPassthroughNonStream is the same idea for codex/OpenAI passthrough
+	// Responses requests: the upstream SSE is already Responses-shaped, so the
+	// terminal response.completed event is written back as non-stream JSON (see
+	// handleSimulatedPassthroughNonStream).
+	forcedPassthroughNonStream bool
+	// forcedChatNonStream is true when force_stream_for_ttft forced a
+	// chat-shaped request to stream upstream. The response path reassembles it
+	// via handleSimulatedNonStream; the flag additionally tells the converter
+	// call site to build a streaming upstream request (Vertex/Gemini carry the
+	// stream switch in the URL, not the body, so a body-level stream:true alone
+	// leaves the upstream non-streaming and TTFT unmeasured).
+	forcedChatNonStream bool
+	// completionsPath is true when the client called the legacy /v1/completions
+	// endpoint. Its SSE carries choices[].text (not choices[].delta.content), so
+	// the simulated non-stream path reassembles that legacy shape separately
+	// (reassembleCompletions) instead of the chat-shaped one.
+	completionsPath      bool
 	responsesPrevHandled bool
 	responsesMetadata    *responses.ResponsesMetadata // non-nil for Responses API requests
 	messagesMetadata     anthropicconv.MessagesAdapterMetadata
@@ -51,18 +75,22 @@ type orchestratedRequest struct {
 }
 
 type credentialPreparedRequest struct {
-	body                 []byte
-	proxyBody            []byte
-	proxyPath            string
-	realModelID          string
-	path                 string
-	convertedResp        bool
-	convertedMessages    bool
-	convertedToResponses bool
-	passthroughResponses bool
-	passthroughMessages  bool
-	nativeResponses      bool
-	messagesMetadata     anthropicconv.MessagesAdapterMetadata
+	body                       []byte
+	proxyBody                  []byte
+	proxyPath                  string
+	realModelID                string
+	path                       string
+	convertedResp              bool
+	convertedMessages          bool
+	convertedToResponses       bool
+	passthroughResponses       bool
+	passthroughMessages        bool
+	nativeResponses            bool
+	forcedNativeNonStream      bool // see orchestratedRequest.forcedNativeNonStream
+	forcedPassthroughNonStream bool // see orchestratedRequest.forcedPassthroughNonStream
+	forcedChatNonStream        bool // see orchestratedRequest.forcedChatNonStream
+	completionsPath            bool // see orchestratedRequest.completionsPath
+	messagesMetadata           anthropicconv.MessagesAdapterMetadata
 }
 
 // orchestrateRequest performs auth and credential selection for an incoming request.
@@ -114,6 +142,7 @@ func (p *Proxy) orchestrateRequest(
 	effectiveDenylist := mergeCredentialDenylists(inboundDenylist, policyDenylist)
 	r = withEffectiveCredentialDenylist(r, effectiveDenylist)
 	routingExclusions := p.reasoningOnlyExclusions(logCtx.ReasoningRequested)
+	reasoningExcluded := maps.Clone(routingExclusions)
 	for _, credentialName := range effectiveDenylist {
 		if p.balancer.IsProxyCredential(credentialName) {
 			continue
@@ -224,7 +253,9 @@ func (p *Proxy) orchestrateRequest(
 		setBaseBody(visionBody)
 	}
 
-	cred, ok := p.selectCredentialForModel(w, modelID, logCtx.SessionID, preferredCredentialName, routingExclusions, logCtx)
+	logCtx.stickyExclude = routingExclusions
+	logCtx.stickyRequestExcluded = reasoningExcluded
+	cred, ok := p.selectCredentialForModel(w, modelID, p.stickySessionKey(logCtx), preferredCredentialName, routingExclusions, logCtx)
 	if !ok {
 		return nil, false
 	}
@@ -287,30 +318,34 @@ func (p *Proxy) orchestrateRequest(
 	r = markCredentialAsTried(r, cred.Name)
 
 	return &orchestratedRequest{
-		request:              r,
-		body:                 body,
-		proxyBody:            credentialReq.proxyBody,
-		proxyPath:            credentialReq.proxyPath,
-		baseBody:             baseBody,
-		baseProxyBody:        baseProxyBody,
-		modelID:              modelID,
-		realModelID:          realModelID,
-		baseRealModelID:      baseRealModelID,
-		basePath:             basePath,
-		streaming:            streaming,
-		cred:                 cred,
-		isResponsesAPI:       isResponsesAPI,
-		isMessagesAPI:        isMessagesAPI,
-		convertedResp:        credentialReq.convertedResp,
-		convertedMessages:    credentialReq.convertedMessages,
-		convertedToResponses: credentialReq.convertedToResponses,
-		passthroughResponses: credentialReq.passthroughResponses,
-		passthroughMessages:  credentialReq.passthroughMessages,
-		nativeResponses:      credentialReq.nativeResponses,
-		responsesPrevHandled: prevEntryHandled,
-		responsesMetadata:    responsesMetadata,
-		messagesMetadata:     credentialReq.messagesMetadata,
-		stickyCacheEligible:  stickyCacheEligible,
+		request:                    r,
+		body:                       body,
+		proxyBody:                  credentialReq.proxyBody,
+		proxyPath:                  credentialReq.proxyPath,
+		baseBody:                   baseBody,
+		baseProxyBody:              baseProxyBody,
+		modelID:                    modelID,
+		realModelID:                realModelID,
+		baseRealModelID:            baseRealModelID,
+		basePath:                   basePath,
+		streaming:                  streaming,
+		cred:                       cred,
+		isResponsesAPI:             isResponsesAPI,
+		isMessagesAPI:              isMessagesAPI,
+		convertedResp:              credentialReq.convertedResp,
+		convertedMessages:          credentialReq.convertedMessages,
+		convertedToResponses:       credentialReq.convertedToResponses,
+		passthroughResponses:       credentialReq.passthroughResponses,
+		passthroughMessages:        credentialReq.passthroughMessages,
+		nativeResponses:            credentialReq.nativeResponses,
+		forcedNativeNonStream:      credentialReq.forcedNativeNonStream,
+		forcedPassthroughNonStream: credentialReq.forcedPassthroughNonStream,
+		forcedChatNonStream:        credentialReq.forcedChatNonStream,
+		completionsPath:            credentialReq.completionsPath,
+		responsesPrevHandled:       prevEntryHandled,
+		responsesMetadata:          responsesMetadata,
+		messagesMetadata:           credentialReq.messagesMetadata,
+		stickyCacheEligible:        stickyCacheEligible,
 	}, true
 }
 
@@ -365,33 +400,154 @@ func (p *Proxy) prepareRequestForCredential(
 // sanitizeClientParams fixes client params that would only earn a 400 from the
 // upstream, on OpenAI-shaped bodies (Chat Completions, and Responses forwarded
 // natively): it drops an empty tools array with its tool_choice and
-// parallel_tool_calls, and rewrites the reasoning effort through the model's
-// reasoning_effort_map. Proxy-like credentials are skipped: the peer router owns
+// parallel_tool_calls, rewrites the reasoning effort through the model's
+// reasoning_effort_map, and then applies the reasoning model param rules
+// (openai.ReplaceBodyParam / ReplaceResponsesBodyParam). Those rules run last
+// because whether sampling params may stay depends on the effort the upstream
+// actually receives. Proxy-like credentials are skipped: the peer router owns
 // that model's config and does the same on its side.
 func (p *Proxy) sanitizeClientParams(r *http.Request, modelID string, cred *config.CredentialConfig, req credentialPreparedRequest) []byte {
+	chatShaped := strings.HasSuffix(req.path, "/chat/completions")
 	if cred.IsProxyLike() ||
-		(!strings.HasSuffix(req.path, "/chat/completions") && !req.passthroughResponses && !req.nativeResponses && !req.convertedToResponses) {
+		(!chatShaped && !req.passthroughResponses && !req.nativeResponses && !req.convertedToResponses) {
 		return req.body
 	}
 	body := openai.DropEmptyTools(req.body)
-	if p.modelManager == nil {
-		return body
-	}
-	effortMap := p.modelManager.GetReasoningEffortMap(modelID, cred.Name)
-	if effortMap == nil {
-		return body
-	}
-	return openai.MapReasoningEffort(body, func(v string) (string, bool) {
-		mapped, changed := effortMap.Resolve(v)
-		if changed {
-			p.logger.DebugContext(r.Context(), "Rewrote reasoning effort via reasoning_effort_map",
-				"model", modelID, "credential", cred.Name, "from", v, "to", mapped)
+	if p.modelManager != nil {
+		if effortMap := p.modelManager.GetReasoningEffortMap(modelID, cred.Name); effortMap != nil {
+			body = openai.MapReasoningEffort(body, func(v string) (string, bool) {
+				mapped, changed := effortMap.Resolve(v)
+				if changed {
+					p.logger.DebugContext(r.Context(), "Rewrote reasoning effort via reasoning_effort_map",
+						"model", modelID, "credential", cred.Name, "from", v, "to", mapped)
+				}
+				return mapped, changed
+			})
 		}
-		return mapped, changed
-	})
+	}
+	if chatShaped {
+		return openai.ReplaceBodyParam(req.realModelID, body)
+	}
+	return openai.ReplaceResponsesBodyParam(req.realModelID, body)
 }
 
 func (p *Proxy) buildCredentialRequest(
+	r *http.Request,
+	baseBody []byte,
+	baseProxyBody []byte,
+	modelID string,
+	baseRealModelID string,
+	basePath string,
+	streaming bool,
+	cred *config.CredentialConfig,
+	isResponsesAPI bool,
+	prevEntryHandled bool,
+	stickyCacheEligible bool,
+) (credentialPreparedRequest, error) {
+	req, err := p.buildCredentialRequestInner(r, baseBody, baseProxyBody, modelID, baseRealModelID,
+		basePath, streaming, cred, isResponsesAPI, prevEntryHandled, stickyCacheEligible)
+	if err != nil {
+		return req, err
+	}
+	return p.applyForceStream(req, streaming, cred, r), nil
+}
+
+// isChatShapedPath reports whether path is one force_stream_for_ttft may touch:
+// the request/response shapes the simulated non-stream path can rebuild (chat
+// completions, Anthropic messages, the Responses API and legacy completions —
+// the last two handled by their own branches below). Embeddings, images and
+// other non-chat endpoints are deliberately not chat-shaped: forcing
+// stream:true there is rejected by the provider and breaks a request that
+// otherwise worked.
+func isChatShapedPath(path string) bool {
+	switch path {
+	case "/v1/chat/completions", "/v1/messages", "/v1/responses", "/v1/completions":
+		return true
+	default:
+		return false
+	}
+}
+
+// applyForceStream mutates the outbound body to force "stream": true when the
+// force_stream_for_ttft toggle is on and the client asked for a non-stream
+// response. The upstream then responds with SSE, which the response path
+// reassembles back into the non-stream JSON the client expects (see
+// handleSimulatedNonStream). Only chat-shaped requests are eligible: every
+// provider this router already streams to understands stream:true. Native and
+// passthrough Responses API requests (native provider formats), responses_only
+// conversions and proxy-like (AIR-to-AIR) chains are left untouched — they
+// keep their existing behavior and merely miss the TTFT.
+func (p *Proxy) applyForceStream(req credentialPreparedRequest, streaming bool, cred *config.CredentialConfig, r *http.Request) credentialPreparedRequest {
+	if !p.forceStreamForTTFT || streaming {
+		return req
+	}
+	// Only chat-shaped requests are eligible: the simulated response path can
+	// rebuild their non-stream body, and every provider this router streams to
+	// understands a forced stream. Embeddings, images and any other non-chat
+	// endpoint must never be touched — a stray "stream": true there is rejected
+	// by the provider (e.g. gpt-image-1-mini 400 "unknown parameter: stream")
+	// while the original non-stream request worked.
+	if !isChatShapedPath(req.path) {
+		return req
+	}
+	if cred.IsProxyLike() {
+		// Proxy-like (AIR-to-AIR) chains forward the body as-is and their
+		// response path streams SSE straight to this router's client without
+		// ever reaching handleSimulatedNonStream's reassembly — forcing
+		// stream:true would hand a non-streaming client raw SSE.
+		return req
+	}
+	if req.nativeResponses {
+		// Native Responses (Anthropic, Vertex): forcing stream:true on the
+		// Responses-shaped body makes the provider converter emit the
+		// provider's own streaming request (Anthropic's `stream` field). For
+		// Vertex the streaming switch is the URL, driven by mode.IsStreaming
+		// at the converter call site, which reads forcedNativeNonStream. The
+		// provider SSE is then folded back into a single non-stream JSON via
+		// ProviderResponses.StreamTo's onComplete callback (see
+		// handleSimulatedNativeNonStream).
+		req.body = setStreamTrue(req.body)
+		req.proxyBody = setStreamTrue(req.proxyBody)
+		req.forcedNativeNonStream = true
+		p.logger.DebugContext(r.Context(), "Forced streaming upstream for non-streaming native Responses request",
+			"credential", cred.Name, "path", req.path, "model", req.realModelID)
+		return req
+	}
+	if req.passthroughResponses {
+		// Codex/OpenAI passthrough Responses API: the provider speaks the
+		// Responses wire format natively, so forcing stream:true is a plain
+		// body flag and the SSE it returns is already Responses-shaped — the
+		// terminal response.completed event carries the whole final Response,
+		// which handleSimulatedPassthroughNonStream writes back as non-stream
+		// JSON (no converter round-trip needed).
+		req.body = setStreamTrue(req.body)
+		req.proxyBody = setStreamTrue(req.proxyBody)
+		req.forcedPassthroughNonStream = true
+		p.logger.DebugContext(r.Context(), "Forced streaming upstream for non-streaming passthrough Responses request",
+			"credential", cred.Name, "path", req.path, "model", req.realModelID)
+		return req
+	}
+	req.body = setStreamTrue(req.body)
+	req.proxyBody = setStreamTrue(req.proxyBody)
+	// Chat-shaped upstream bodies additionally ask for usage in the stream
+	// (OpenAI-compatible providers honor stream_options.include_usage; the
+	// Anthropic-native body is never touched here because its field set is
+	// different and unknown fields must not be sent to Anthropic).
+	if req.path == "/v1/chat/completions" {
+		req.body = injectStreamOptions(req.body)
+		req.proxyBody = injectStreamOptions(req.proxyBody)
+	}
+	// Chat-shaped request forced to stream. Recorded so the converter mode can
+	// set IsStreaming=true: for Vertex/Gemini the streaming switch is the URL
+	// (streamGenerateContent?alt=sse), not a body field, so the body-level
+	// stream:true alone would leave the upstream non-streaming and TTFT unmeasured.
+	req.forcedChatNonStream = true
+	p.logger.DebugContext(r.Context(), "Forced streaming upstream for non-streaming request",
+		"credential", cred.Name, "path", req.path, "model", req.realModelID)
+	return req
+}
+
+func (p *Proxy) buildCredentialRequestInner(
 	r *http.Request,
 	baseBody []byte,
 	baseProxyBody []byte,
@@ -426,6 +582,15 @@ func (p *Proxy) buildCredentialRequest(
 			realModelID = credRealName
 		}
 	}
+	requestAPI := anthropicconv.ChatAPI
+	if basePath == "/v1/messages" {
+		requestAPI = anthropicconv.MessagesAPI
+	} else if isResponsesAPI {
+		requestAPI = anthropicconv.ResponsesAPI
+	}
+	if err := anthropicconv.ValidateToolChoice(body, realModelID, requestAPI); err != nil {
+		return credentialPreparedRequest{}, err
+	}
 
 	effectiveType := cred.EffectiveProviderType()
 	if p.stickyAutoCacheCtrl &&
@@ -440,6 +605,10 @@ func (p *Proxy) buildCredentialRequest(
 		proxyPath:   basePath,
 		realModelID: realModelID,
 		path:        basePath,
+		// The legacy /v1/completions endpoint answers with choices[].text, a
+		// different SSE/JSON shape than Chat Completions' choices[].delta.content;
+		// the simulated non-stream reassembly branches on this.
+		completionsPath: basePath == "/v1/completions",
 	}
 	if basePath == "/v1/messages" {
 		if cred.IsProxyLike() {
@@ -455,10 +624,10 @@ func (p *Proxy) buildCredentialRequest(
 			// trip and forward body (already carrying realModelID) as-is, aside from
 			// the thinking/anthropic_beta normalization real Anthropic API requests
 			// still need (see NormalizeMessagesForPassthrough).
-			// The response is still converted back through ChatToMessages downstream
-			// (convertedMessages stays true) because ResponseTo/StreamTo for this
-			// provider always normalize the native Anthropic response to Chat shape
-			// first regardless of how the request was built.
+			// The response goes back to the client as the provider sent it (model
+			// renamed): proxy.go and handleMessagesAPIStreaming skip ChatToMessages
+			// when passthroughMessages is set; non-stream billing still reads the
+			// Chat form ResponseTo builds.
 			passthroughBody, err := anthropicconv.NormalizeMessagesForPassthrough(body, realModelID, cred.Type == config.ProviderTypeAnthropic)
 			if err != nil {
 				return req, err
@@ -479,7 +648,7 @@ func (p *Proxy) buildCredentialRequest(
 		if err != nil {
 			return req, err
 		}
-		req.body = openai.ReplaceBodyParam(realModelID, chatBody)
+		req.body = chatBody
 		req.path = "/v1/chat/completions"
 		req.convertedMessages = true
 		req.messagesMetadata = metadata
@@ -511,25 +680,13 @@ func (p *Proxy) buildCredentialRequest(
 			// body. Proxy-like credentials are excluded: a chained AIR
 			// instance does its own model-specific handling on the request
 			// it actually receives.
-			// ReplaceBodyParam first, on the Chat-shaped body: o1/o3/o4/gpt-5 reject
-			// temperature/top_p/top_logprobs on the Responses API exactly like they do
-			// on Chat Completions, but deleteChatOnlyFields (chat_to_responses.go) only
-			// strips frequency_penalty/presence_penalty/logprobs -- not those three --
-			// so without this they survive into the Responses body and the upstream
-			// 400s. ReplaceBodyParam also renames max_tokens -> max_completion_tokens,
-			// which is safe to do before conversion: ChatRequestToResponses reads
-			// max_completion_tokens first anyway, falling back to max_tokens only when
-			// it's absent. ReplaceResponsesBodyParam still runs after conversion for
-			// gpt-6's include-list filtering (Responses-only field, no Chat equivalent
-			// to strip pre-conversion); its own temperature/top_p/top_logprobs removal
-			// is now redundant for gpt-6 (already gone via ReplaceBodyParam) but kept
-			// since gpt-6 must still work if ever called with a body ReplaceBodyParam
-			// didn't touch.
-			responsesBody, err := responses.ChatRequestToResponses(openai.ReplaceBodyParam(realModelID, body))
+			// The reasoning model sampling rule is applied after conversion, by
+			// sanitizeClientParams, on the effort the Responses body ends up with.
+			responsesBody, err := responses.ChatRequestToResponses(body)
 			if err != nil {
 				return req, err
 			}
-			req.body = openai.ReplaceResponsesBodyParam(realModelID, responsesBody)
+			req.body = responsesBody
 			// req.proxyBody/req.proxyPath are deliberately left at their
 			// defaults (baseProxyBody, the alias-restored *Chat Completions*
 			// body, and basePath, "/v1/chat/completions") rather than the
@@ -581,15 +738,15 @@ func (p *Proxy) buildCredentialRequest(
 			normalizedBody = openai.NormalizeDeveloperRole(body)
 			normalizedProxyBody = openai.NormalizeDeveloperRole(proxyBody)
 		}
-		req.body = openai.ReplaceBodyParam(realModelID, normalizedBody)
+		req.body = normalizedBody
 		req.proxyBody = normalizedProxyBody
 		return req, nil
 	}
 
 	switch {
 	case p.modelManager != nil && p.modelManager.IsPassthroughResponsesForProvider(modelID, cred.Type):
-		req.body = openai.ReplaceResponsesBodyParam(realModelID, responses.PrepareCodexPassthrough(body, prevEntryHandled))
-		req.proxyBody = openai.ReplaceResponsesBodyParam(realModelID, responses.PrepareCodexPassthrough(proxyBody, prevEntryHandled))
+		req.body = responses.PrepareCodexPassthrough(body, prevEntryHandled)
+		req.proxyBody = responses.PrepareCodexPassthrough(proxyBody, prevEntryHandled)
 		req.passthroughResponses = true
 		p.logger.DebugContext(r.Context(), "Native Responses API passthrough",
 			"model", modelID, "provider", cred.Type, "streaming", streaming)
@@ -627,8 +784,8 @@ func (p *Proxy) buildCredentialRequest(
 		// Without this, previous_response_id survived even when
 		// prevEntryHandled was true, and ttl/metadata leaked to the
 		// provider unstripped.
-		req.body = openai.ReplaceResponsesBodyParam(realModelID, responses.PrepareCodexPassthrough(body, prevEntryHandled))
-		req.proxyBody = openai.ReplaceResponsesBodyParam(realModelID, responses.PrepareCodexPassthrough(proxyBody, prevEntryHandled))
+		req.body = responses.PrepareCodexPassthrough(body, prevEntryHandled)
+		req.proxyBody = responses.PrepareCodexPassthrough(proxyBody, prevEntryHandled)
 		req.passthroughResponses = true
 		p.logger.DebugContext(r.Context(), "Responses API request for responses_only model forwarded as passthrough",
 			"model", modelID, "streaming", streaming)
@@ -648,14 +805,14 @@ func (p *Proxy) buildCredentialRequest(
 		if err != nil {
 			return req, err
 		}
-		req.body = openai.ReplaceBodyParam(realModelID, chatBody)
+		req.body = chatBody
 		// proxyBody must stay in sync with body: TryFallbackProxy forwards
 		// proxyBody, not body, to fallback credentials. Left as the original
 		// Responses-API-shaped bytes (still keyed on "input", not "messages"),
 		// a fallback to any Chat-Completions-only backend would reject the
 		// request outright ("specify prompt or messages") instead of the
 		// converted body the primary attempt used.
-		req.proxyBody = openai.ReplaceBodyParam(modelID, chatBody)
+		req.proxyBody = chatBody
 		req.convertedResp = true
 		if streaming {
 			req.body = injectStreamOptions(req.body)
@@ -976,6 +1133,9 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 	if sessionID == "" {
 		sessionID = extractSessionIDFromHeaders(r.Header)
 	}
+	if sessionID == "" {
+		sessionID = sanitized.ClientID
+	}
 	if sanitized.Changed {
 		r.ContentLength = int64(len(body))
 		r.Header.Del("Content-Length")
@@ -1144,23 +1304,36 @@ func (p *Proxy) selectCredentialForModel(
 	}
 
 	if sessionID != "" && p.sessionStore != nil {
-		if credName, ok := p.sessionStore.Get(sessionID, modelID); ok && !exclude[credName] {
-			cred, err := p.balancer.NextSpecificScoped(credName, modelID, logCtx.Scope)
-			if err == nil {
-				p.logger.DebugContext(logCtx.Context(), "Session-sticky routing: using cached credential",
-					"session_id", sessionID,
-					"credential", cred.Name,
+		if credName, ok := p.sessionStore.Get(sessionID, modelID); ok {
+			if exclude[credName] {
+				if logCtx.stickyRequestExcluded[credName] {
+					// Excluded for this request only (e.g. reasoning-only credential on a
+					// non-reasoning turn): serve elsewhere, keep the session.
+					logCtx.StickyHeldCredential = credName
+				}
+			} else {
+				cred, err := p.balancer.NextSpecificScoped(credName, modelID, logCtx.Scope)
+				if err == nil {
+					p.logger.DebugContext(logCtx.Context(), "Session-sticky routing: using cached credential",
+						"session_id", logCtx.SessionID,
+						"credential", cred.Name,
+						"model", modelID,
+					)
+					return cred, true
+				}
+				// Busy (its own RPM/TPM limit) is temporary: keep the binding. Banned,
+				// removed or not visible: let the cascade pick and the binding follow.
+				if errors.Is(err, balancer.ErrRateLimitExceeded) {
+					logCtx.StickyHeldCredential = credName
+				}
+				p.logger.DebugContext(logCtx.Context(), "Session-sticky routing: cached credential unavailable, falling back to standard selection",
+					"session_id", logCtx.SessionID,
+					"binding_kept", logCtx.StickyHeldCredential != "",
+					"credential", credName,
 					"model", modelID,
+					"error", err,
 				)
-				return cred, true
 			}
-
-			p.logger.DebugContext(logCtx.Context(), "Session-sticky routing: cached credential unavailable, falling back to standard selection",
-				"session_id", sessionID,
-				"credential", credName,
-				"model", modelID,
-				"error", err,
-			)
 		}
 	}
 

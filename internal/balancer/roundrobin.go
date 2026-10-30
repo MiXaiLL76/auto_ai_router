@@ -767,11 +767,22 @@ func (r *RoundRobin) NextRetryForModelExcludingScoped(modelID string, current *c
 	if current.IsProxyLike() || current.IsFallback {
 		return r.NextSameTypeForModelExcludingScoped(modelID, current.Type, exclude, visibility)
 	}
-	if current.EffectivePriority() <= 0 {
-		if r.hasTriedPriorityCredential(attempted) {
-			return r.nextUnprioritizedRetry(modelID, exclude, visibility)
-		}
-		return r.NextSameTypeForModelExcludingScoped(modelID, current.Type, exclude, visibility)
+	// No same-type-only step for an unprioritized current credential: nextPriorityRetry
+	// already is "every credential with an explicit priority tier, lowest tier first, any
+	// type, falling through to the unprioritized tail if none qualify" — passing 0 (which
+	// is exactly current.EffectivePriority() whenever current itself has none) covers the
+	// unprioritized case through the very same cascade used below for prioritized ones,
+	// instead of a separate same-type-only search. Trying same-type first and only
+	// widening on a dead end was its own source of confusion — the cascade order stopped
+	// matching what it looks like it does (retry through every credential of the model)
+	// and started silently depending on which types happen to be configured for it.
+	//
+	// The one remaining special case: once this chain has actually dispatched to a real
+	// priority tier (hasTriedPriorityCredential), a later unprioritized node must not pick
+	// up some unrelated credential's priority tier that this chain never cascaded through —
+	// narrow to the unprioritized pool instead of reopening the full priority search.
+	if current.EffectivePriority() <= 0 && r.hasTriedPriorityCredential(attempted) {
+		return r.nextUnprioritizedRetry(modelID, exclude, visibility)
 	}
 	return r.nextPriorityRetry(modelID, current.EffectivePriority(), exclude, visibility)
 }
@@ -788,6 +799,11 @@ func (r *RoundRobin) nextPriorityRetry(modelID string, minPriority int, exclude 
 	return r.selectUnprioritizedRetryCandidateLocked(modelID, unprioritizedCandidates, priorityRateLimitHit)
 }
 
+// nextUnprioritizedRetry searches only the unprioritized pool (no credential with an
+// explicit priority tier is considered, at any tier). Used once this retry chain has
+// already dispatched to a real priority-tiered credential — see NextRetryForModelExcludingScoped —
+// so a later unprioritized node doesn't pick up some other, unrelated priority tier that
+// was never part of this chain's own cascade.
 func (r *RoundRobin) nextUnprioritizedRetry(modelID string, exclude map[string]bool, visibility scope.Context) (*config.CredentialConfig, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -950,6 +966,11 @@ func (r *RoundRobin) selectUnprioritizedRetryCandidateLocked(modelID string, can
 	return r.selectWeightedLiveCandidate(modelID, live, key, rateLimitHit)
 }
 
+// hasTriedPriorityCredential reports whether this retry chain has already dispatched to
+// a credential with a real priority tier (not a fallback/proxy credential, whose tiers are
+// a different mechanism). Used by NextRetryForModelExcludingScoped to narrow a later
+// unprioritized node to the unprioritized pool instead of reopening the full priority
+// search and possibly landing on an unrelated tier this chain never cascaded through.
 func (r *RoundRobin) hasTriedPriorityCredential(attempted map[string]bool) bool {
 	if len(attempted) == 0 {
 		return false
@@ -982,6 +1003,36 @@ func (r *RoundRobin) RecordResponse(credentialName, modelID string, statusCode i
 
 func (r *RoundRobin) BanUntil(credentialName, modelID string, statusCode int, until time.Time, reason string) {
 	r.fail2ban.BanUntil(credentialName, modelID, statusCode, until, reason)
+}
+
+// IsTopPriorityForModel reports whether credentialName sits in the best
+// (lowest-numbered) primary priority group among the non-fallback credentials
+// that serve modelID, are visible to visibility and are not in exclude. Bans and
+// rate limits do not matter: the tier is a property of the configuration, so a
+// credential that only serves because the primary tier is down is not "top".
+func (r *RoundRobin) IsTopPriorityForModel(credentialName, modelID string, exclude map[string]bool, visibility scope.Context) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	target := r.getCredentialByName(credentialName)
+	if target == nil || target.IsFallback {
+		return false
+	}
+	checkModels := modelID != "" && r.modelChecker != nil && r.modelChecker.IsEnabled()
+	mine := r.primaryPriority(target, modelID)
+	for i := range r.credentials {
+		c := &r.credentials[i]
+		if c.Name == credentialName || c.IsFallback || exclude[c.Name] || !c.VisibleTo(visibility) {
+			continue
+		}
+		if checkModels && !r.hasModel(c.Name, modelID, visibility) {
+			continue
+		}
+		if r.primaryPriority(c, modelID) < mine {
+			return false
+		}
+	}
+	return true
 }
 
 // HasCredential reports whether a credential with this name is configured

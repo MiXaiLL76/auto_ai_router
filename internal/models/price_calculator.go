@@ -11,6 +11,7 @@ import (
 const (
 	tokenTiering200kThreshold = 200_000
 	tokenTiering32kThreshold  = 32_000
+	tokenTiering100kThreshold = 100_000
 	tokenTiering128kThreshold = 128_000
 	tokenTiering256kThreshold = 256_000
 	tokenTiering272kThreshold = 272_000
@@ -47,6 +48,10 @@ var toolCostAliases = map[string]string{
 // billed at this tier's rates. Zero-value rates mean "not configured for
 // this tier" and are skipped by fullSessionRate. An inclusive tier already
 // applies when the prompt equals threshold.
+//
+// cacheCreation1hRate is the tier's own rate for 1-hour cache writes. A tier
+// without one bills both TTLs at cacheCreationRate, as all tiers did before
+// the 100k tier, whose provider prices the two TTLs differently.
 type fullSessionTier struct {
 	threshold             int
 	inclusive             bool
@@ -54,6 +59,7 @@ type fullSessionTier struct {
 	outputRate            float64
 	cacheReadRate         float64
 	cacheCreationRate     float64
+	cacheCreation1hRate   float64
 	explicitCacheReadRate float64
 }
 
@@ -126,6 +132,14 @@ func fullSessionTiers(price *ModelPrice) []fullSessionTier {
 			explicitCacheReadRate: price.ExplicitCacheReadInputTokenCostAbove128k,
 		},
 		fullSessionTier{
+			threshold:           tokenTiering100kThreshold,
+			inputRate:           price.InputCostPerTokenAbove100k,
+			outputRate:          price.OutputCostPerTokenAbove100k,
+			cacheReadRate:       price.CacheReadInputTokenCostAbove100k,
+			cacheCreationRate:   price.CacheCreationInputTokenCostAbove100k,
+			cacheCreation1hRate: price.CacheCreationInputTokenCostAbove1hrAbove100k,
+		},
+		fullSessionTier{
 			threshold:             tokenTiering32kThreshold,
 			inputRate:             price.InputCostPerTokenAbove32k,
 			outputRate:            price.OutputCostPerTokenAbove32k,
@@ -142,15 +156,25 @@ func fullSessionTiers(price *ModelPrice) []fullSessionTier {
 // (non-zero). Returns ok=false when no full-session tier applies, in which
 // case callers should fall back to the existing 200k-proportional/base rate.
 func fullSessionRate(tiers []fullSessionTier, promptTokens int, pick func(fullSessionTier) float64) (rate float64, ok bool) {
+	tier, ok := fullSessionTierFor(tiers, promptTokens, pick)
+	if !ok {
+		return 0, false
+	}
+	return pick(tier), true
+}
+
+// fullSessionTierFor is fullSessionRate returning the matched tier itself, for
+// callers that need a second rate from the same tier.
+func fullSessionTierFor(tiers []fullSessionTier, promptTokens int, pick func(fullSessionTier) float64) (fullSessionTier, bool) {
 	for _, tier := range tiers {
 		if promptTokens < tier.threshold || (promptTokens == tier.threshold && !tier.inclusive) {
 			continue
 		}
-		if r := pick(tier); r > 0 {
-			return r, true
+		if pick(tier) > 0 {
+			return tier, true
 		}
 	}
-	return 0, false
+	return fullSessionTier{}, false
 }
 
 // CalculateTokenCosts computes costs based on token usage and model pricing
@@ -207,7 +231,7 @@ func CalculateTokenCostsWithResolver(usage *converter.TokenUsage, price *ModelPr
 	rejectedPredictionTokens := converterutil.NonNegativeTokenCount(usage.RejectedPredictionTokens)
 	imageCount := converterutil.NonNegativeTokenCount(usage.ImageCount)
 
-	// Full-session tiers (32k/128k/256k/272k): the highest exceeded threshold
+	// Full-session tiers (32k/100k/128k/256k/272k/512k): the highest exceeded threshold
 	// whose rate is configured wins and applies to the WHOLE request, not
 	// just the excess. Falls back to the 200k proportional tier (unchanged
 	// below) when no full-session tier matches.
@@ -215,7 +239,8 @@ func CalculateTokenCostsWithResolver(usage *converter.TokenUsage, price *ModelPr
 	fullSessionInputRate, fullSessionInputMatched := fullSessionRate(tiers, promptTokens, func(t fullSessionTier) float64 { return t.inputRate })
 	fullSessionOutputRate, fullSessionOutputMatched := fullSessionRate(tiers, promptTokens, func(t fullSessionTier) float64 { return t.outputRate })
 	fullSessionCacheReadRate, fullSessionCacheReadMatched := fullSessionRate(tiers, promptTokens, func(t fullSessionTier) float64 { return t.cacheReadRate })
-	fullSessionCacheCreationRate, fullSessionCacheCreationMatched := fullSessionRate(tiers, promptTokens, func(t fullSessionTier) float64 { return t.cacheCreationRate })
+	fullSessionCacheCreationTier, fullSessionCacheCreationMatched := fullSessionTierFor(tiers, promptTokens, func(t fullSessionTier) float64 { return t.cacheCreationRate })
+	fullSessionCacheCreationRate := fullSessionCacheCreationTier.cacheCreationRate
 
 	inputCostPerToken := price.InputCostPerToken
 	if fullSessionInputMatched {
@@ -402,10 +427,19 @@ func CalculateTokenCostsWithResolver(usage *converter.TokenUsage, price *ModelPr
 	if cacheCreationCost == 0 {
 		cacheCreationCost = inputCostPerToken
 	}
+	// 1-hour writes: a full-session tier bills them at its own 1-hour rate when
+	// it has one (the 100k tier), otherwise at its single write rate.
 	cacheCreation1hCost := cacheCreationCost
-	if !cacheCreationFullSession {
+	if cacheCreationFullSession {
+		if rate := fullSessionCacheCreationTier.cacheCreation1hRate; rate > 0 {
+			cacheCreation1hCost = rate
+		}
+	} else {
 		cacheCreation1hCost = price.CacheCreationInputTokenCostAbove1hr
-		if promptTokens > tokenTiering200kThreshold && price.CacheCreationInputTokenCostAbove1hrAbove200k > 0 {
+		if rate, ok := fullSessionRate(tiers, promptTokens, func(t fullSessionTier) float64 { return t.cacheCreation1hRate }); ok {
+			// A tier priced only for 1-hour writes still applies to them.
+			cacheCreation1hCost = rate
+		} else if promptTokens > tokenTiering200kThreshold && price.CacheCreationInputTokenCostAbove1hrAbove200k > 0 {
 			cacheCreation1hCost = price.CacheCreationInputTokenCostAbove1hrAbove200k
 		}
 		if cacheCreation1hCost == 0 {

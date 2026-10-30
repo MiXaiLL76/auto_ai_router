@@ -103,6 +103,19 @@ func TestChatStreamDropsProviderOnlyChoiceFields(t *testing.T) {
 	assert.Equal(t, "[DONE]", frames[3])
 }
 
+func TestChatStreamKeepsThinkingBlocksChunk(t *testing.T) {
+	source := strings.NewReader(
+		`data: {"id":"c","created":10,"choices":[{"index":0,"delta":{"role":"assistant","content":"hi"}}]}` + "\n\n" +
+			`data: {"id":"c","created":10,"choices":[{"index":0,"delta":{"thinking_blocks":[{"type":"thinking","thinking":"","signature":"sig"}]}}]}` + "\n\n" +
+			`data: {"id":"c","created":10,"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n" +
+			"data: [DONE]\n\n",
+	)
+
+	output, err := io.ReadAll(New().Stream(Context{Endpoint: "/v1/chat/completions"}, source))
+	require.NoError(t, err)
+	assert.Contains(t, string(output), `"thinking_blocks":[{"signature":"sig","thinking":"","type":"thinking"}]`)
+}
+
 func TestChatStreamPreservesUsageWithoutSystemFingerprint(t *testing.T) {
 	source := strings.NewReader(
 		`data: {"id":"gpt-id","created":10,"choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"content_filter_results":{"hate":{"filtered":false}}}]}` + "\n\n" +

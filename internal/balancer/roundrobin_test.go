@@ -1090,7 +1090,11 @@ func TestNextRetryForModelExcluding_UnprioritizedTailContinuesAcrossTypes(t *tes
 	assert.Equal(t, "yandex", cred.Name)
 }
 
-func TestNextRetryForModelExcluding_DefaultsToSameType(t *testing.T) {
+// An unprioritized credential's retry is no longer gated to its own type at all — the
+// cascade is "every other credential of the model", full stop. No hidden same-type-first
+// step: which type answers depends only on weighted selection among everyone still
+// eligible, not on what type the failed credential happened to be.
+func TestNextRetryForModelExcluding_IgnoresTypeEntirely(t *testing.T) {
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()
 
@@ -1105,7 +1109,30 @@ func TestNextRetryForModelExcluding_DefaultsToSameType(t *testing.T) {
 	tried := map[string]bool{"openai-a": true}
 	cred, err := bal.NextRetryForModelExcluding("", &credentials[0], tried, tried)
 	require.NoError(t, err)
-	assert.Equal(t, "openai-b", cred.Name)
+	// Either survivor is a legal answer now — same-type ("openai-b") and cross-type
+	// ("anthropic-a") compete in the same weighted pool, neither is preferred.
+	assert.Contains(t, []string{"anthropic-a", "openai-b"}, cred.Name)
+}
+
+// The case that actually dead-ended before this change: a credential that's the only one
+// of its type for the model used to exhaust same-type retry (ErrNoCredentialsAvailable)
+// and give up, even though a same-model credential of a different type was sitting right
+// there the whole time.
+func TestNextRetryForModelExcluding_SoleTypeStillReachesOtherTypes(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "cheapgpt-gemini", Type: config.ProviderTypeOpenAI, APIKey: "key1", BaseURL: "http://cheapgpt.com", RPM: 100},
+		{Name: "agile-planet", Type: config.ProviderTypeVertexAI, APIKey: "key2", BaseURL: "http://vertex.com", RPM: 100},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	tried := map[string]bool{"cheapgpt-gemini": true}
+	cred, err := bal.NextRetryForModelExcluding("", &credentials[0], tried, tried)
+	require.NoError(t, err)
+	assert.Equal(t, "agile-planet", cred.Name)
 }
 
 func TestNextRetryForModelExcluding_FallbackPrioritySkipsFallbackCredentials(t *testing.T) {

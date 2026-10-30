@@ -21,6 +21,7 @@ type CustomPricingLiteLLMParams struct {
 	InputCostPerToken                 *float64 `json:"input_cost_per_token,omitempty"`
 	OutputCostPerToken                *float64 `json:"output_cost_per_token,omitempty"`
 	OutputCostPerTokenAbove32kTokens  *float64 `json:"output_cost_per_token_above_32k_tokens,omitempty"`
+	OutputCostPerTokenAbove100kTokens *float64 `json:"output_cost_per_token_above_100k_tokens,omitempty"`
 	OutputCostPerTokenAbove128kTokens *float64 `json:"output_cost_per_token_above_128k_tokens,omitempty"`
 	OutputCostPerTokenAbove200kTokens *float64 `json:"output_cost_per_token_above_200k_tokens,omitempty"`
 	OutputCostPerTokenAbove256kTokens *float64 `json:"output_cost_per_token_above_256k_tokens,omitempty"`
@@ -35,6 +36,9 @@ type CustomPricingLiteLLMParams struct {
 	CacheCreationInputTokenCost                        *float64 `json:"cache_creation_input_token_cost,omitempty"`
 	CacheReadInputTokenCostAbove32kTokens              *float64 `json:"cache_read_input_token_cost_above_32k_tokens,omitempty"`
 	CacheCreationInputTokenCostAbove32kTokens          *float64 `json:"cache_creation_input_token_cost_above_32k_tokens,omitempty"`
+	CacheReadInputTokenCostAbove100kTokens             *float64 `json:"cache_read_input_token_cost_above_100k_tokens,omitempty"`
+	CacheCreationInputTokenCostAbove100kTokens         *float64 `json:"cache_creation_input_token_cost_above_100k_tokens,omitempty"`
+	CacheCreationInputTokenCostAbove1hrAbove100kTokens *float64 `json:"cache_creation_input_token_cost_above_1hr_above_100k_tokens,omitempty"`
 	CacheReadInputTokenCostAbove128kTokens             *float64 `json:"cache_read_input_token_cost_above_128k_tokens,omitempty"`
 	CacheCreationInputTokenCostAbove128kTokens         *float64 `json:"cache_creation_input_token_cost_above_128k_tokens,omitempty"`
 	CacheReadInputTokenCostAbove200kTokens             *float64 `json:"cache_read_input_token_cost_above_200k_tokens,omitempty"`
@@ -57,6 +61,7 @@ type CustomPricingLiteLLMParams struct {
 	ExplicitCacheReadInputTokenCostAbove256k *float64 `json:"explicit_cache_read_input_token_cost_above_256k_tokens,omitempty"`
 
 	InputCostPerTokenAbove32kTokens  *float64 `json:"input_cost_per_token_above_32k_tokens,omitempty"`
+	InputCostPerTokenAbove100kTokens *float64 `json:"input_cost_per_token_above_100k_tokens,omitempty"`
 	InputCostPerTokenAbove128kTokens *float64 `json:"input_cost_per_token_above_128k_tokens,omitempty"`
 	InputCostPerTokenAbove200kTokens *float64 `json:"input_cost_per_token_above_200k_tokens,omitempty"`
 	InputCostPerTokenAbove256kTokens *float64 `json:"input_cost_per_token_above_256k_tokens,omitempty"`

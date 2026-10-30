@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -25,6 +26,18 @@ func UpdateJSONField(body []byte, mapping ModelParamsMapping) []byte {
 		return body
 	}
 
+	applyMapping(data, mapping)
+
+	updatedBody, err := json.Marshal(data)
+	if err != nil {
+		return body
+	}
+
+	return updatedBody
+}
+
+// applyMapping renames mapping.KeysToReplace and removes mapping.KeysToRemove in data.
+func applyMapping[V any](data map[string]V, mapping ModelParamsMapping) {
 	// 1. Replace keys (rename parameters)
 	for oldKey, newKey := range mapping.KeysToReplace {
 		if val, ok := data[oldKey]; ok {
@@ -42,14 +55,6 @@ func UpdateJSONField(body []byte, mapping ModelParamsMapping) []byte {
 	for _, key := range mapping.KeysToRemove {
 		delete(data, key)
 	}
-
-	// 3. Marshal back
-	updatedBody, err := json.Marshal(data)
-	if err != nil {
-		return body
-	}
-
-	return updatedBody
 }
 
 // ReplaceModelInBody replaces the "model" field value in a JSON body.
@@ -216,89 +221,32 @@ func clientSetParam(top map[string]json.RawMessage, key string) bool {
 	return false
 }
 
-// --- Model family parameter mappings ---
+// --- OpenAI reasoning model parameter rules ---
 
-// o1Mapping: o1, o1-mini, o1-preview, o1-pro
-// These reasoning models reject temperature, top_p, penalties, and logprobs.
-var o1Mapping = ModelParamsMapping{
-	KeysToReplace: map[string]string{
-		"max_tokens": "max_completion_tokens",
-	},
-	KeysToRemove: []string{
-		"temperature",
-		"top_p",
-		"frequency_penalty",
-		"presence_penalty",
-		"logprobs",
-		"top_logprobs",
-	},
+// reasoningModelFamilies lists the OpenAI reasoning model families. They take
+// max_completion_tokens instead of max_tokens, and accept samplingParams only while
+// reasoning is off (see reasoningOff).
+var reasoningModelFamilies = []string{"o1", "o3", "o4", "gpt-5", "gpt-6"}
+
+// samplingParams are the Chat Completions params OpenAI reasoning models reject with
+// 400 while reasoning is on.
+var samplingParams = []string{
+	"temperature",
+	"top_p",
+	"frequency_penalty",
+	"presence_penalty",
 }
 
-// o3Mapping: o3, o3-mini, o3-pro
-// Reasoning models that support reasoning_effort but reject temperature/top_p/penalties/logprobs.
-var o3Mapping = ModelParamsMapping{ //  — added frequency_penalty, presence_penalty, logprobs, top_logprobs
-	KeysToReplace: map[string]string{
-		"max_tokens": "max_completion_tokens",
-	},
-	KeysToRemove: []string{
-		"temperature",
-		"top_p",
-		"frequency_penalty",
-		"presence_penalty",
-		"logprobs",
-		"top_logprobs",
-	},
-}
+// chatLogprobsParams are dropped from Chat Completions bodies for reasoning models
+// regardless of the reasoning effort.
+var chatLogprobsParams = []string{"logprobs", "top_logprobs"}
 
-// o4Mapping: o4-mini and future o4 models.
-// Reasoning models that reject sampling parameters
-var o4Mapping = ModelParamsMapping{
-	KeysToReplace: map[string]string{
-		"max_tokens": "max_completion_tokens",
-	},
-	KeysToRemove: []string{
-		"temperature",
-		"top_p",
-		"frequency_penalty",
-		"presence_penalty",
-		"logprobs",
-		"top_logprobs",
-	},
-}
+// responsesSamplingParams are the Responses API params reasoning models reject while
+// reasoning is on. The Responses API has no penalties and requests logprobs through
+// include (see responsesLogprobsInclude).
+var responsesSamplingParams = []string{"temperature", "top_p", "top_logprobs"}
 
-// gpt5Mapping: gpt-5, gpt-5-mini, gpt-5-nano, gpt-5.1, gpt-5.2, etc.
-// Reasoning models that reject sampling parameters. //
-var gpt5Mapping = ModelParamsMapping{
-	KeysToReplace: map[string]string{
-		"max_tokens": "max_completion_tokens",
-	},
-	KeysToRemove: []string{
-		"temperature",
-		"top_p",
-		"frequency_penalty",
-		"presence_penalty",
-		"logprobs",
-		"top_logprobs",
-	},
-}
-
-var gpt6Mapping = ModelParamsMapping{
-	KeysToReplace: map[string]string{"max_tokens": "max_completion_tokens"},
-	KeysToRemove:  []string{"temperature", "top_p", "logprobs", "top_logprobs"},
-}
-
-// modelMappings maps model family prefixes to their parameter transformations.
-// Order matters: longer prefixes are checked first via matchModelFamily.
-var modelMappings = []struct {
-	prefix  string
-	mapping ModelParamsMapping
-}{
-	{"o1", o1Mapping},
-	{"o3", o3Mapping},
-	{"o4", o4Mapping},
-	{"gpt-5", gpt5Mapping},
-	{"gpt-6", gpt6Mapping},
-}
+const responsesLogprobsInclude = "message.output_text.logprobs"
 
 // extractBaseModelName strips provider prefixes and known suffixes from a model ID.
 // Examples:
@@ -338,17 +286,10 @@ func matchModelFamily(modelID, family string) bool {
 	return strings.HasPrefix(base, family+"-") || strings.HasPrefix(base, family+".")
 }
 
-// IsReasoningModel reports whether modelID belongs to one of the reasoning-capable
-// families this codebase already special-cases for sampling-parameter stripping (see
-// modelMappings/ReplaceBodyParam above: o1/o3/o4/gpt-5/gpt-6 all reject
-// temperature/top_p and support reasoning_effort). Reusing that exact family list here
-// keeps the two classifications in lockstep -- a model this router already treats as
-// reasoning-capable for one purpose is treated as reasoning-capable for every purpose,
-// rather than risking two independently-maintained lists drifting apart as new model
-// families ship.
+// IsReasoningModel reports whether modelID belongs to one of reasoningModelFamilies.
 func IsReasoningModel(modelID string) bool {
-	for _, m := range modelMappings {
-		if matchModelFamily(modelID, m.prefix) {
+	for _, family := range reasoningModelFamilies {
+		if matchModelFamily(modelID, family) {
 			return true
 		}
 	}
@@ -368,19 +309,96 @@ func SupportsReasoningEffortNone(modelID string) bool {
 	if matchModelFamily(modelID, "gpt-6") {
 		return true
 	}
-	minor, ok := strings.CutPrefix(extractBaseModelName(modelID), "gpt-5.")
-	return ok && minor != "" && minor[0] >= '1' && minor[0] <= '9'
+	minor, ok := gpt5MinorVersion(modelID)
+	return ok && minor >= 1
 }
 
-// ReplaceBodyParam applies model-specific parameter transformations to the request body.
-// This ensures unsupported parameters are removed and renamed before sending to the provider.
-func ReplaceBodyParam(modelID string, body []byte) []byte {
-	for _, m := range modelMappings {
-		if matchModelFamily(modelID, m.prefix) {
-			return UpdateJSONField(body, m.mapping)
-		}
+// gpt5MinorVersion returns N for a GPT-5.N model ID ("gpt-5.4-mini" → 4).
+func gpt5MinorVersion(modelID string) (int, bool) {
+	rest, ok := strings.CutPrefix(extractBaseModelName(modelID), "gpt-5.")
+	if !ok {
+		return 0, false
 	}
-	return body
+	end := 0
+	for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
+		end++
+	}
+	minor, err := strconv.Atoi(rest[:end])
+	return minor, err == nil
+}
+
+// defaultsToEffortNone reports whether modelID runs with reasoning off when the request
+// sets no effort: GPT-5.1 to 5.4 default to "none", later models to "medium" or above.
+func defaultsToEffortNone(modelID string) bool {
+	minor, ok := gpt5MinorVersion(modelID)
+	return ok && minor >= 1 && minor <= 4
+}
+
+// reasoningOff reports whether a request to a reasoning model runs with reasoning off,
+// the only state in which the model accepts sampling params. effort is the request's
+// reasoning effort as decoded from JSON, nil when absent; without one the model's
+// default effort decides.
+func reasoningOff(modelID string, effort any) bool {
+	if !SupportsReasoningEffortNone(modelID) {
+		return false
+	}
+	switch v := effort.(type) {
+	case nil:
+		return defaultsToEffortNone(modelID)
+	case string:
+		if v == "" {
+			return defaultsToEffortNone(modelID)
+		}
+		return v == "none"
+	}
+	return false
+}
+
+// chatReasoningEffort returns the effort a Chat Completions body carries: the
+// top-level reasoning_effort, else the nested reasoning.effort (the same fields
+// MapReasoningEffort rewrites). nil when neither is set.
+func chatReasoningEffort(data map[string]json.RawMessage) any {
+	var effort any
+	if raw, ok := data["reasoning_effort"]; ok {
+		_ = json.Unmarshal(raw, &effort)
+	}
+	if effort != nil {
+		return effort
+	}
+	var reasoning struct {
+		Effort any `json:"effort"`
+	}
+	if raw, ok := data["reasoning"]; ok {
+		_ = json.Unmarshal(raw, &reasoning)
+	}
+	return reasoning.Effort
+}
+
+// ReplaceBodyParam applies the reasoning model rules to a Chat Completions body: it
+// renames max_tokens to max_completion_tokens, drops chatLogprobsParams, and drops
+// samplingParams unless the request runs with reasoning off. Bodies for other models
+// are returned unchanged.
+func ReplaceBodyParam(modelID string, body []byte) []byte {
+	if !IsReasoningModel(modelID) {
+		return body
+	}
+	var data map[string]json.RawMessage
+	if err := json.Unmarshal(body, &data); err != nil {
+		return body
+	}
+	mapping := ModelParamsMapping{
+		KeysToReplace: map[string]string{"max_tokens": "max_completion_tokens"},
+		KeysToRemove:  chatLogprobsParams,
+	}
+	if !reasoningOff(modelID, chatReasoningEffort(data)) {
+		mapping.KeysToRemove = slices.Concat(chatLogprobsParams, samplingParams)
+	}
+	applyMapping(data, mapping)
+	updated, err := json.Marshal(data)
+	if err != nil {
+		return body
+	}
+	return updated
 }
 
 // NormalizeDeveloperRole downgrades a "developer"-role Chat Completions message
@@ -743,16 +761,29 @@ func StripVLLMOnlySamplingParams(body []byte) []byte {
 	})
 }
 
+// ReplaceResponsesBodyParam applies the reasoning model rules to a Responses API body:
+// unless the request runs with reasoning off it drops responsesSamplingParams and the
+// logprobs include value. Bodies for other models, or with nothing to drop, are
+// returned unchanged.
 func ReplaceResponsesBodyParam(modelID string, body []byte) []byte {
-	if !matchModelFamily(modelID, "gpt-6") {
+	if !IsReasoningModel(modelID) {
 		return body
 	}
 	var data map[string]json.RawMessage
 	if json.Unmarshal(body, &data) != nil {
 		return body
 	}
+	var reasoning struct {
+		Effort any `json:"effort"`
+	}
+	if raw, ok := data["reasoning"]; ok {
+		_ = json.Unmarshal(raw, &reasoning) // a non-object reasoning leaves the effort unset
+	}
+	if reasoningOff(modelID, reasoning.Effort) {
+		return body
+	}
 	changed := false
-	for _, key := range []string{"temperature", "top_p", "top_logprobs"} {
+	for _, key := range responsesSamplingParams {
 		if _, exists := data[key]; exists {
 			delete(data, key)
 			changed = true
@@ -762,7 +793,7 @@ func ReplaceResponsesBodyParam(modelID string, body []byte) []byte {
 	if json.Unmarshal(data["include"], &include) == nil {
 		filtered := make([]string, 0, len(include))
 		for _, item := range include {
-			if item != "message.output_text.logprobs" {
+			if item != responsesLogprobsInclude {
 				filtered = append(filtered, item)
 			}
 		}

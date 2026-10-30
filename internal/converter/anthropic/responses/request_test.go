@@ -520,6 +520,25 @@ func TestResponsesRequestToAnthropic_ReasoningEffortNone(t *testing.T) {
 	assert.Nil(t, ar["thinking"])
 }
 
+// Sonnet 5.5 thinks when "thinking" is omitted and rejects "disabled": effort none turns
+// thinking off with between_tools, which takes no effort and no betas.
+func TestResponsesRequestToAnthropic_ReasoningEffortNoneOnSonnet55(t *testing.T) {
+	convert := func(model string) map[string]interface{} {
+		result, err := ResponsesRequestToAnthropic([]byte(`{"model":"m","input":"test","reasoning":{"effort":"none"}}`), model)
+		require.NoError(t, err)
+		var ar map[string]interface{}
+		require.NoError(t, json.Unmarshal(result, &ar))
+		return ar
+	}
+	ar := convert("claude-sonnet-5-5")
+	assert.Equal(t, map[string]interface{}{"type": "between_tools"}, ar["thinking"])
+	assert.NotContains(t, ar, "output_config")
+	assert.NotContains(t, ar, "anthropic_beta")
+	assert.NotContains(t, ar, "temperature")
+
+	assert.NotContains(t, convert("claude-opus-4-7"), "thinking")
+}
+
 func TestResponsesRequestToAnthropic_ConversationHistory(t *testing.T) {
 	body := `{
 		"model": "claude-opus-4-5",

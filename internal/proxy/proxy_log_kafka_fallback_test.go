@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter"
 	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
@@ -209,6 +210,30 @@ func TestLogSpendToLiteLLMDB_UsesClientResponseID(t *testing.T) {
 	assert.Equal(t, "/v1/messages", spendMetadata["request_endpoint"])
 }
 
+func TestLogSpendToLiteLLMDB_PreservesMessagesCallType(t *testing.T) {
+	for _, status := range []string{"success", "failure"} {
+		t.Run(status, func(t *testing.T) {
+			prx := NewTestProxyBuilder().Build()
+			dbStub := &stubLiteLLMManager{}
+			prx.LiteLLMDB = dbStub
+			setTestModelPrice(prx, "gpt-4o-mini", &routermodels.ModelPrice{
+				InputCostPerToken: 0.000001, OutputCostPerToken: 0.000002,
+			})
+			logCtx := testLogCtx(t)
+			logCtx.Request.URL.Path = "/v1/messages"
+			logCtx.Status = status
+
+			require.NoError(t, prx.logSpendToLiteLLMDB(logCtx))
+			require.Len(t, dbStub.loggedEntries, 1)
+			entry := dbStub.loggedEntries[0]
+			assert.Equal(t, "anthropic_messages", entry.CallType)
+			assert.Equal(t, status, entry.Status)
+			assert.Positive(t, entry.Spend)
+			assert.False(t, entry.SkipAccounting)
+		})
+	}
+}
+
 func TestLogSpendToLiteLLMDB_PersistsInternalAIRRequestWithoutKafkaAccounting(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
 	kafkaStub := &stubKafkaManager{enabled: true}
@@ -387,4 +412,51 @@ func TestLogSpendToLiteLLMDB_DoesNotChargeFailedImageRequest(t *testing.T) {
 
 	require.Len(t, dbStub.loggedEntries, 1)
 	assert.Zero(t, dbStub.loggedEntries[0].Spend)
+}
+
+// TestLogSpendToLiteLLMDB_TTFTBackfillGuard verifies the definitional TTFT
+// fill (CompletionStartTime = endTime for never-streamed responses) does not
+// leak into real streaming requests: a stream that errored before its first
+// token, or a keep-alive-only stream whose TTFT detector gave up, must keep
+// its honest null instead of a fake ttft_ms = duration_ms in the same column
+// as real TTFT measurements.
+func TestLogSpendToLiteLLMDB_TTFTBackfillGuard(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	dbStub := &stubLiteLLMManager{}
+	prx.LiteLLMDB = dbStub
+	setTestModelPrice(prx, "gpt-4o-mini", &routermodels.ModelPrice{
+		InputCostPerToken: 0.000001, OutputCostPerToken: 0.000002,
+	})
+
+	// Never streamed (plain non-streaming response): the definitional fill
+	// applies and TTFT = total latency.
+	logCtx := testLogCtx(t)
+	require.NoError(t, prx.logSpendToLiteLLMDB(logCtx))
+	require.Len(t, dbStub.loggedEntries, 1)
+	require.NotNil(t, dbStub.loggedEntries[0].CompletionStartTime)
+	assert.Equal(t, logCtx.CompletionStartTime, *dbStub.loggedEntries[0].CompletionStartTime)
+
+	// Stream that errored before the first content delta: no fill, honest null.
+	logCtx = testLogCtx(t)
+	logCtx.StreamOutcome = "stream_error"
+	require.NoError(t, prx.logSpendToLiteLLMDB(logCtx))
+	require.Len(t, dbStub.loggedEntries, 2)
+	assert.Nil(t, dbStub.loggedEntries[1].CompletionStartTime)
+
+	// Keep-alive-only stream that completed without ever carrying content
+	// (TTFT detector gave up): no fill, honest null.
+	logCtx = testLogCtx(t)
+	logCtx.StreamOutcome = "completed"
+	require.NoError(t, prx.logSpendToLiteLLMDB(logCtx))
+	require.Len(t, dbStub.loggedEntries, 3)
+	assert.Nil(t, dbStub.loggedEntries[2].CompletionStartTime)
+
+	// Real TTFT already stamped by a streaming path: never overwritten.
+	logCtx = testLogCtx(t)
+	logCtx.StreamOutcome = "completed"
+	logCtx.CompletionStartTime = logCtx.StartTime.Add(time.Second)
+	require.NoError(t, prx.logSpendToLiteLLMDB(logCtx))
+	require.Len(t, dbStub.loggedEntries, 4)
+	require.NotNil(t, dbStub.loggedEntries[3].CompletionStartTime)
+	assert.Equal(t, logCtx.CompletionStartTime, *dbStub.loggedEntries[3].CompletionStartTime)
 }

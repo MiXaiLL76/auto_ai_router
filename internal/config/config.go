@@ -27,6 +27,9 @@ const FallbackPriorityGroup = 999
 // DefaultModelPricesSyncInterval is how often model prices are re-fetched from model_prices_link.
 const DefaultModelPricesSyncInterval = 5 * time.Minute
 
+// DefaultShutdownTimeout is how long a stopping server waits for in-flight requests before it cancels them.
+const DefaultShutdownTimeout = 30 * time.Second
+
 var DefaultErrorCodes = []int{429}
 
 // ProviderType represents the type of AI provider
@@ -164,7 +167,8 @@ type ModelRPMConfig struct {
 	// nil (omitted in config) = provider default: true for ProviderTypeAnthropic, and
 	// for a plain ProviderTypeCometAPI credential (neither openai_proto nor
 	// google_proto set); false otherwise.
-	// Explicit true/false overrides the default.
+	// Explicit true/false overrides the default, except that Bedrock, Vertex AI and
+	// Gemini credentials never pass through.
 	PassthroughMessages *bool `yaml:"passthrough_messages,omitempty"`
 
 	// ReasoningEffortMap rewrites the client's reasoning effort (chat
@@ -285,6 +289,7 @@ type Config struct {
 	OTEL           OTELConfig           `yaml:"otel,omitempty"`
 	Kafka          KafkaConfig          `yaml:"kafka,omitempty"`
 	Video          VideoConfig          `yaml:"video,omitempty"`
+	YandexSearch   YandexSearchConfig   `yaml:"yandex_search,omitempty"`
 	VisionFallback VisionFallbackConfig `yaml:"vision_fallback,omitempty"`
 	// ModelTemplates stores x-model-templates entries as raw interface{} so that
 	// both single-model mappings and lists of models can be defined as YAML anchors
@@ -320,6 +325,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		OTEL                 OTELConfig                 `yaml:"otel,omitempty"`
 		Kafka                KafkaConfig                `yaml:"kafka,omitempty"`
 		Video                VideoConfig                `yaml:"video,omitempty"`
+		YandexSearch         YandexSearchConfig         `yaml:"yandex_search,omitempty"`
 		VisionFallback       VisionFallbackConfig       `yaml:"vision_fallback,omitempty"`
 		ModelTemplates       map[string]interface{}     `yaml:"x-model-templates,omitempty"`
 	}
@@ -347,6 +353,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.OTEL = raw.OTEL
 	c.Kafka = raw.Kafka
 	c.Video = raw.Video
+	c.YandexSearch = raw.YandexSearch
 	c.VisionFallback = raw.VisionFallback
 	c.ModelTemplates = raw.ModelTemplates
 
@@ -674,6 +681,7 @@ type ServerConfig struct {
 	IdleConnTimeout            time.Duration         `yaml:"idle_conn_timeout"`
 	HTTP2IdlePingTimeout       time.Duration         `yaml:"http2_idle_ping_timeout"`           // How long a provider HTTP/2 connection may go without any frame before a liveness PING is sent (default: 15s; a negative duration, e.g. -1s, disables the check — either this or http2_ping_timeout alone turns it off)
 	HTTP2PingTimeout           time.Duration         `yaml:"http2_ping_timeout"`                // How long to wait for a liveness PING to be acked before closing the connection (default: 10s; a negative duration, e.g. -1s, disables the check — same as http2_idle_ping_timeout, either field alone turns it off)
+	MaxConnectionLifetime      time.Duration         `yaml:"max_connection_lifetime"`           // How long a provider connection takes new requests; it closes once its last request ends (default: 0, reused for as long as requests come)
 	ReadTimeout                time.Duration         `yaml:"-"`                                 // HTTP server read timeout (equals request_timeout, not configurable via YAML)
 	WriteTimeout               time.Duration         `yaml:"write_timeout"`                     // HTTP server write timeout (default: 60s)
 	IdleTimeout                time.Duration         `yaml:"idle_timeout"`                      // HTTP server idle timeout (default: 2*write_timeout)
@@ -685,7 +693,9 @@ type ServerConfig struct {
 	ModelPricesLink            string                `yaml:"model_prices_link,omitempty"`       // URL or file path to model prices JSON - supports os.environ/VAR_NAME
 	ModelPricesSyncInterval    time.Duration         `yaml:"model_prices_sync_interval"`        // How often model prices are re-fetched from model_prices_link (default: 5m)
 	ShutdownDelay              time.Duration         `yaml:"shutdown_delay"`                    // Delay between readiness=false and server.Shutdown (default: 5s)
+	ShutdownTimeout            time.Duration         `yaml:"shutdown_timeout"`                  // How long server.Shutdown waits for in-flight requests before the rest are cancelled (default: 30s)
 	DrainUpstreamOnAbort       bool                  `yaml:"drain_upstream_on_abort"`           // When true, keep reading upstream after client disconnect to capture real usage chunk (default: false — estimate from delta text)
+	ForceStreamForTTFT         bool                  `yaml:"force_stream_for_ttft"`             // Force `"stream": true` upstream for non-streaming chat-shaped requests and reassemble the response back into non-stream JSON so every request gets a measurable TTFT (default: false)
 	TiktokenEnabled            bool                  `yaml:"tiktoken_enabled"`                  // Enable local tiktoken-based prompt/completion token estimation as a fallback when a provider omits usage (default: true; disable if all configured providers always report usage)
 	StrictAllTeamModelsACL     bool                  `yaml:"strict_all_team_models_acl"`        // Enforce key/team/user model ACLs (default: false)
 	CredentialNameAsTeamID     bool                  `yaml:"credential_name_as_team_id"`        // Use provider credential name as team_id when auth has no team_id (default: false)
@@ -779,6 +789,7 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		IdleConnTimeout            string                `yaml:"idle_conn_timeout"`
 		HTTP2IdlePingTimeout       string                `yaml:"http2_idle_ping_timeout"`
 		HTTP2PingTimeout           string                `yaml:"http2_ping_timeout"`
+		MaxConnectionLifetime      string                `yaml:"max_connection_lifetime"`
 		WriteTimeout               string                `yaml:"write_timeout"`
 		IdleTimeout                string                `yaml:"idle_timeout"`
 		MaxProviderRetries         string                `yaml:"max_provider_retries"`
@@ -789,7 +800,9 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		ModelPricesLink            string                `yaml:"model_prices_link,omitempty"`
 		ModelPricesSyncInterval    string                `yaml:"model_prices_sync_interval"`
 		ShutdownDelay              string                `yaml:"shutdown_delay"`
+		ShutdownTimeout            string                `yaml:"shutdown_timeout"`
 		DrainUpstreamOnAbort       string                `yaml:"drain_upstream_on_abort"`
+		ForceStreamForTTFT         string                `yaml:"force_stream_for_ttft"`
 		TiktokenEnabled            string                `yaml:"tiktoken_enabled"`
 		StrictAllTeamModelsACL     string                `yaml:"strict_all_team_models_acl"`
 		CredentialNameAsTeamID     string                `yaml:"credential_name_as_team_id"`
@@ -842,6 +855,9 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 	if s.HTTP2PingTimeout, err = parseField(temp.HTTP2PingTimeout, 10*time.Second, time.ParseDuration, "http2_ping_timeout"); err != nil {
 		return err
 	}
+	if s.MaxConnectionLifetime, err = parseField(temp.MaxConnectionLifetime, 0, time.ParseDuration, "max_connection_lifetime"); err != nil {
+		return err
+	}
 	if s.WriteTimeout, err = parseField(temp.WriteTimeout, 60*time.Second, time.ParseDuration, "write_timeout"); err != nil {
 		return err
 	}
@@ -873,7 +889,13 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 	if s.ShutdownDelay, err = parseField(temp.ShutdownDelay, 5*time.Second, time.ParseDuration, "shutdown_delay"); err != nil {
 		return err
 	}
+	if s.ShutdownTimeout, err = parseField(temp.ShutdownTimeout, DefaultShutdownTimeout, time.ParseDuration, "shutdown_timeout"); err != nil {
+		return err
+	}
 	if s.DrainUpstreamOnAbort, err = parseField(temp.DrainUpstreamOnAbort, false, strconv.ParseBool, "drain_upstream_on_abort"); err != nil {
+		return err
+	}
+	if s.ForceStreamForTTFT, err = parseField(temp.ForceStreamForTTFT, false, strconv.ParseBool, "force_stream_for_ttft"); err != nil {
 		return err
 	}
 	if s.TiktokenEnabled, err = parseField(temp.TiktokenEnabled, true, strconv.ParseBool, "tiktoken_enabled"); err != nil {
@@ -1201,9 +1223,10 @@ type MonitoringConfig struct {
 type KeyMetricsConfig struct {
 	Enabled bool `yaml:"enabled"` // default: false
 	// InfoLabels selects the owner labels on auto_ai_router_key_info
-	// (key_alias, user_id, user_email, team_id, team_alias, organization_id).
-	// Unset (nil) means monitoring.DefaultKeyInfoLabels (everything but
-	// user_email); an explicit empty list disables owner labels entirely.
+	// (key_alias, user_id, user_email, team_id, team_alias, organization_id,
+	// organization_alias). Unset (nil) means
+	// monitoring.DefaultKeyInfoLabels (everything but user_email); an
+	// explicit empty list disables owner labels entirely.
 	InfoLabels []string `yaml:"info_labels,omitempty"`
 	// MaxKeys caps distinct key label values; keys first seen past the cap
 	// are counted under key="__other__". 0 = unlimited. default: 5000
@@ -1216,7 +1239,7 @@ type KeyMetricsConfig struct {
 // KeyMetricsInfoLabels lists the accepted info_labels values. It mirrors
 // monitoring.KeyInfoLabels (kept in sync by a test) so config does not pull in
 // the metrics package.
-var KeyMetricsInfoLabels = []string{"key_alias", "user_id", "user_email", "team_id", "team_alias", "organization_id"}
+var KeyMetricsInfoLabels = []string{"key_alias", "user_id", "user_email", "team_id", "team_alias", "organization_id", "organization_alias"}
 
 const (
 	defaultKeyMetricsMaxKeys = 5000
@@ -2172,6 +2195,9 @@ func (c *Config) Validate() error {
 	if err := c.Video.Validate(); err != nil {
 		return err
 	}
+	if err := c.YandexSearch.Validate(); err != nil {
+		return err
+	}
 	if err := c.VisionFallback.Validate(); err != nil {
 		return err
 	}
@@ -2218,6 +2244,11 @@ func (c *Config) Validate() error {
 		c.Server.ModelPricesSyncInterval = DefaultModelPricesSyncInterval
 	}
 
+	// A non-positive timeout would cut every in-flight request on stop; fall back to the default.
+	if c.Server.ShutdownTimeout <= 0 {
+		c.Server.ShutdownTimeout = DefaultShutdownTimeout
+	}
+
 	// Validate logging level
 	if c.Server.LoggingLevel != "" {
 		validLevels := map[string]bool{"info": true, "debug": true, "error": true}
@@ -2252,6 +2283,9 @@ func (c *Config) Validate() error {
 	// Validate MaxFallbackAttempts (0 = use default of 5)
 	if c.Server.MaxFallbackAttempts < 0 {
 		return fmt.Errorf("invalid max_fallback_attempts: %d (must be >= 0)", c.Server.MaxFallbackAttempts)
+	}
+	if c.Server.MaxConnectionLifetime < 0 {
+		return fmt.Errorf("invalid max_connection_lifetime: %s (must be >= 0)", c.Server.MaxConnectionLifetime)
 	}
 	if c.Server.SessionStickyTTL < 0 {
 		return fmt.Errorf("invalid session_sticky_ttl_minutes: %d (must be >= 0)", c.Server.SessionStickyTTL)

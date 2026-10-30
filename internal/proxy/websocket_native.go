@@ -114,7 +114,7 @@ func (p *Proxy) handleNativeResponsesWebSocket(client *websocket.Conn, r *http.R
 		s.clientAborted = true
 		clientMessages = nil
 		if drainTimer == nil {
-			drainTimer = time.NewTimer(streamDrainTimeout)
+			drainTimer = time.NewTimer(StreamDrainTimeout)
 			drainDone = drainTimer.C
 		}
 	}
