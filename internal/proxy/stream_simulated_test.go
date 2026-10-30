@@ -1777,3 +1777,48 @@ func TestHandleSimulatedNonStream_SurfacedErrorReportsFailingCredentialURL(t *te
 	assert.Equal(t, wantHost, db.loggedEntries[0].APIBase,
 		"the spend row's api_base must name the credential that actually failed, not the original one")
 }
+
+// TestReassembleChatCompletion_SameIndexDistinctToolCalls is the reassembler's
+// defensive half of the tool-call-index fix (see the Anthropic converter's
+// ToolCallIndexAdvanceWithoutStop test): if a Chat-SSE stream still carries two
+// distinct tool calls under one index, stitching strictly by index would append
+// the second call's name and arguments onto the first, yielding one call named
+// "bashavito_..." with two JSON objects in arguments (the Avito incident). A
+// differing non-empty id under a taken index must open a new call instead.
+func TestReassembleChatCompletion_SameIndexDistinctToolCalls(t *testing.T) {
+	stream := openAIChatSSE(
+		`{"id":"c","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"role":"assistant"}}]}`,
+		`{"id":"c","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"toolu_bash","type":"function","function":{"name":"bash"}}]}}]}`,
+		`{"id":"c","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"command\":\"ls\"}"}}]}}]}`,
+		`{"id":"c","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"toolu_avito","type":"function","function":{"name":"avito_internal_knowledge_search_tool"}}]}}]}`,
+		`{"id":"c","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"query\":\"x\"}"}}]}}]}`,
+		`{"id":"c","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	)
+
+	body := reassembleChatCompletion([]byte(stream))
+	require.NotNil(t, body)
+
+	var out struct {
+		Choices []struct {
+			Message struct {
+				ToolCalls []struct {
+					ID       string `json:"id"`
+					Function struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	require.NoError(t, json.Unmarshal(body, &out))
+	require.Len(t, out.Choices, 1)
+	tcs := out.Choices[0].Message.ToolCalls
+	require.Len(t, tcs, 2, "two distinct ids under one index must stay two calls")
+
+	assert.Equal(t, "bash", tcs[0].Function.Name)
+	assert.Equal(t, `{"command":"ls"}`, tcs[0].Function.Arguments)
+	assert.Equal(t, "avito_internal_knowledge_search_tool", tcs[1].Function.Name)
+	assert.Equal(t, `{"query":"x"}`, tcs[1].Function.Arguments)
+	assert.NotContains(t, tcs[0].Function.Name, "avito", "first call must not absorb the second call's name")
+}

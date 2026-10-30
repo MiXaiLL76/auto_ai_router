@@ -197,6 +197,14 @@ func TransformAnthropicStreamToOpenAI(anthropicStream io.Reader, model string, o
 				if err := writeChunk(output, chunk); err != nil {
 					return err
 				}
+				// Advance the index here, at the tool_use block's OPEN, not at its
+				// content_block_stop: a provider that opens the next tool_use block
+				// without a matching stop for the previous one (observed live with
+				// two parallel calls) would otherwise emit both with the same index,
+				// and a Chat-SSE consumer that stitches tool calls by index — the
+				// force_stream_for_ttft reassembler does — would merge them into a
+				// single call with concatenated name and arguments.
+				toolCallIdx++
 			}
 
 		case "content_block_delta":
@@ -247,10 +255,10 @@ func TransformAnthropicStreamToOpenAI(anthropicStream io.Reader, model string, o
 			}
 
 		case "content_block_stop":
-			// Increment tool_call index when a tool_use block finishes.
-			if current.blockType == "tool_use" {
-				toolCallIdx++
-			}
+			// The tool_use index is advanced at content_block_start (see there),
+			// not here: a provider may open the next tool_use block without a
+			// matching stop for the previous one, and advancing only on stop would
+			// leave both calls on the same index.
 			// The finished thinking block with its signature, as the non-streaming
 			// response's thinking_blocks carry it, one entry per chunk.
 			finished := ContentBlock{Type: current.blockType, Thinking: string(current.thinkingText), Signature: current.signature, Data: current.data}
