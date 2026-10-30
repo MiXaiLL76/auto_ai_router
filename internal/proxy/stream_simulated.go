@@ -36,6 +36,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	promanutils "github.com/mixaill76/auto_ai_router/internal/converter/proman/utils"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
+	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/proxy/modelutils"
 )
 
@@ -388,8 +389,10 @@ func (p *Proxy) handleSimulatedNonStream(
 				errBody, readErr := p.readLimitedResponseBody(httpResp.Body)
 				_ = httpResp.Body.Close()
 				// Mirror the main loop: a failed attempt counts against the
-				// credential (balancer + per-attempt error metric).
-				p.balancer.RecordResponse(cred.Name, modelID, httpResp.StatusCode)
+				// credential (ban signal + per-attempt error metric).
+				p.recordBanSignal(cred, modelID, httpResp.StatusCode)
+				p.reportHealth(string(cred.Type), cred.Name, modelID, httpResp.StatusCode,
+					httputil.RetryAfterSeconds(httpResp.Header.Get("Retry-After")))
 				p.metrics.RecordCredentialAttemptError(cred.Name)
 				if readErr != nil {
 					// Couldn't even read the error body -- treat as a transport
@@ -436,10 +439,12 @@ func (p *Proxy) handleSimulatedNonStream(
 			break
 		}
 		// A mid-stream transport break left this credential's response half-read;
-		// count the failed attempt against it (balancer + per-attempt metric), as
+		// count the failed attempt against it (ban signal + per-attempt metric), as
 		// sendToCredential does for a break before any body arrives, so a credential
 		// that keeps dropping streams is demoted and its error rate reflects it.
-		p.balancer.RecordResponse(cred.Name, modelID, http.StatusBadGateway)
+		// No response here, so no Retry-After: the worker falls back to its cooldown.
+		p.recordBanSignal(cred, modelID, http.StatusBadGateway)
+		p.reportHealth(string(cred.Type), cred.Name, modelID, http.StatusBadGateway, 0)
 		p.metrics.RecordCredentialAttemptError(cred.Name)
 	}
 
