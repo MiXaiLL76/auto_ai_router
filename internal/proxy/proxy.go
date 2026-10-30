@@ -2568,14 +2568,16 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			// Native Responses (Anthropic, Vertex) forced to stream: consume the
 			// provider SSE, fold it back into the single Responses JSON the
 			// client asked for, and record TTFT on the way.
-			p.handleSimulatedNativeNonStream(w, r, resp, prepared, cred, provResponses, modelID, logCtx, saveResponseFn, targetURL)
+			p.handleSimulatedNativeNonStream(w, r, resp, prepared, cred, provResponses, modelID, realModelID, logCtx, saveResponseFn, targetURL, body,
+				streaming, isEmbeddings, isImageEdit, start, triedCreds, attemptedCreds)
 			return
 		}
 		if prepared.forcedPassthroughNonStream && resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
 			// Codex/OpenAI passthrough Responses forced to stream: the upstream
 			// SSE is already Responses-shaped, so the terminal response.completed
 			// event is written back as non-stream JSON, with TTFT recorded.
-			p.handleSimulatedPassthroughNonStream(w, r, resp, prepared, cred, modelID, logCtx, saveResponseFn, targetURL)
+			p.handleSimulatedPassthroughNonStream(w, r, resp, prepared, cred, modelID, realModelID, logCtx, saveResponseFn, targetURL, body,
+				streaming, isEmbeddings, isImageEdit, start, triedCreds, attemptedCreds)
 			return
 		}
 		p.logger.DebugContext(r.Context(), "Response is streaming", "credential", cred.Name)
