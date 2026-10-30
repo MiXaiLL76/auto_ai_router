@@ -155,6 +155,12 @@ type TokenDetails struct {
 	CacheCreationTokens       int                        `json:"cache_creation_tokens,omitempty"`
 	CacheCreationTokenDetails *CacheCreationTokenDetails `json:"cache_creation_token_details,omitempty"`
 	CacheWriteTokens          int                        `json:"cache_write_tokens,omitempty"`
+	// CacheWriteTokensDetails is OpenAI's cache-write TTL breakdown under
+	// prompt_cache_retention:"12h" (a 30-minute default and the 12-hour
+	// retention). Distinct from CacheCreationTokenDetails (Anthropic's 5m/1h):
+	// the TTL names are not interchangeable, and one request may carry both a
+	// 30m and a 12h write at once, each priced at its own rate.
+	CacheWriteTokensDetails *CacheWriteTokensDetails `json:"cache_write_tokens_details,omitempty"`
 	// AlibabaCacheCreation carries Alibaba/Qwen's cache-creation TTL detail,
 	// spelled cache_creation.ephemeral_5m_input_tokens (no _token_details
 	// suffix) — distinct from CacheCreationTokenDetails above.
@@ -205,6 +211,15 @@ func (d *TokenDetails) CacheWrite() (total, fiveMinutes, oneHour int) {
 type CacheCreationTokenDetails struct {
 	Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
 	Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
+}
+
+// CacheWriteTokensDetails is OpenAI's cache-write TTL breakdown for the
+// 30-minute and 12-hour retentions (usage.prompt_tokens_details.
+// cache_write_tokens_details). The 12h tier is priced above the 30m one, so
+// the two are billed at their own rates rather than one rate by top TTL.
+type CacheWriteTokensDetails struct {
+	TTL30mTokens int `json:"ttl_30m_tokens,omitempty"`
+	TTL12hTokens int `json:"ttl_12h_tokens,omitempty"`
 }
 
 type CompletionTokenDetails struct {
