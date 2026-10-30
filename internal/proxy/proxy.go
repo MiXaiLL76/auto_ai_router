@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mixaill76/auto_ai_router/internal/accountevents"
 	"github.com/mixaill76/auto_ai_router/internal/auth"
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
@@ -406,33 +407,38 @@ type Config struct {
 	ModelManager                 *models.Manager
 	Version                      string
 	Commit                       string
-	ServiceName                  string                     // otel.service_name: the deployment's name on every spend event (service_name)
-	LiteLLMDB                    litellmdb.Manager          // LiteLLM database integration (optional)
-	KafkaLog                     kafkalog.Manager           // Kafka spend-log publishing (optional, analytics write-path)
-	RawBodyLog                   kafkalog.RawBodyManager    // Kafka raw-body publishing (optional, separate topic, failure-only)
-	RawBodyStoreRawBody          bool                       // Mirrors KafkaRawBodiesConfig.StoreRawBody
-	RawBodyStoreOnlyErrors       bool                       // Mirrors KafkaRawBodiesConfig.StoreOnlyErrors
-	RawBodyRedactSensitiveFields bool                       // Mirrors KafkaRawBodiesConfig.RedactSensitiveFields
-	HealthChecker                HealthChecker              // Optional: cached DB health status (updated by health monitor)
-	PriceRegistry                *models.ModelPriceRegistry // Model pricing information (optional)
-	OrganizationPolicies         *models.OrganizationPolicyRegistry
-	MaxProviderRetries           int                 // Max same-type credential retries (default: 2)
-	MaxFallbackAttempts          int                 // Max fallback proxy hops per request chain (default: 5)
-	Retry                        config.RetryConfig  // Which upstream errors are replayed on another credential (zero value = built-in policy)
-	ResponseStore                responsestore.Store // Optional: Responses API store (bbolt or Redis)
-	SessionStickyEnabled         bool
-	SessionStickyAutoCacheCtrl   bool // Auto-inject Anthropic cache_control markers when session is active (default: true)
-	SessionStoreTTL              time.Duration
-	SessionStoreRedis            valkey.Client // Optional: share session bindings between replicas (nil = replica-local)
-	SessionStoreKeyPrefix        string        // Redis key prefix for session bindings (the deployment's redis.key_prefix)
-	RouterID                     string        // Human-readable name for this router (shown in /trace); defaults to hostname
-	DrainUpstreamOnAbort         bool          // When true, keep reading upstream after client disconnect to get real usage (default: false)
-	ForceStreamForTTFT           bool          // When true, force stream:true upstream for non-streaming chat requests and reassemble the response back to non-stream JSON (default: false)
-	ResponseCompatibility        string
-	TiktokenEnabled              bool // Local tiktoken-based prompt/completion token fallback estimation (default: true)
-	StrictAllTeamModelsACL       bool
-	ResponseHeaderMode           config.ResponseHeaderMode
-	CredentialNameAsTeamID       bool
+	ServiceName                  string                   // otel.service_name: the deployment's name on every spend event (service_name)
+	LiteLLMDB                    litellmdb.Manager        // LiteLLM database integration (optional)
+	KafkaLog                     kafkalog.Manager         // Kafka spend-log publishing (optional, analytics write-path)
+	RawBodyLog                   kafkalog.RawBodyManager  // Kafka raw-body publishing (optional, separate topic, failure-only)
+	RawBodyStoreRawBody          bool                     // Mirrors KafkaRawBodiesConfig.StoreRawBody
+	RawBodyStoreOnlyErrors       bool                     // Mirrors KafkaRawBodiesConfig.StoreOnlyErrors
+	RawBodyRedactSensitiveFields bool                     // Mirrors KafkaRawBodiesConfig.RedactSensitiveFields
+	HealthChecker                HealthChecker            // Optional: cached DB health status (updated by health monitor)
+	Events                       *accountevents.Publisher // Optional: outcome events -> health worker (kafka)
+	// BanDecisionsExternal gates the local fail2ban counters: true only
+	// when an external ban source (the worker's reader) is actually wired,
+	// so a misconfigured publisher alone never disables local bans.
+	BanDecisionsExternal       bool
+	PriceRegistry              *models.ModelPriceRegistry // Model pricing information (optional)
+	OrganizationPolicies       *models.OrganizationPolicyRegistry
+	MaxProviderRetries         int                 // Max same-type credential retries (default: 2)
+	MaxFallbackAttempts        int                 // Max fallback proxy hops per request chain (default: 5)
+	Retry                      config.RetryConfig  // Which upstream errors are replayed on another credential (zero value = built-in policy)
+	ResponseStore              responsestore.Store // Optional: Responses API store (bbolt or Redis)
+	SessionStickyEnabled       bool
+	SessionStickyAutoCacheCtrl bool // Auto-inject Anthropic cache_control markers when session is active (default: true)
+	SessionStoreTTL            time.Duration
+	SessionStoreRedis          valkey.Client // Optional: share session bindings between replicas (nil = replica-local)
+	SessionStoreKeyPrefix      string        // Redis key prefix for session bindings (the deployment's redis.key_prefix)
+	RouterID                   string        // Human-readable name for this router (shown in /trace); defaults to hostname
+	DrainUpstreamOnAbort       bool          // When true, keep reading upstream after client disconnect to get real usage (default: false)
+	ForceStreamForTTFT         bool          // When true, force stream:true upstream for non-streaming chat requests and reassemble the response back to non-stream JSON (default: false)
+	ResponseCompatibility      string
+	TiktokenEnabled            bool // Local tiktoken-based prompt/completion token fallback estimation (default: true)
+	StrictAllTeamModelsACL     bool
+	ResponseHeaderMode         config.ResponseHeaderMode
+	CredentialNameAsTeamID     bool
 
 	BudgetReserver                   *budget.Reserver      // Atomic Redis budget reservation (nil if Redis disabled — feature is a no-op)
 	KeyRateLimiter                   *ratelimit.RPMLimiter // Key/user/team/org RPM/TPM enforcement (nil if Redis disabled)
@@ -465,6 +471,8 @@ type Proxy struct {
 	rawBodyStoreOnlyErrors           bool                       // Mirrors KafkaRawBodiesConfig.StoreOnlyErrors
 	rawBodyRedactSensitiveFields     bool                       // Mirrors KafkaRawBodiesConfig.RedactSensitiveFields
 	healthChecker                    HealthChecker              // Cached DB health status (optional)
+	events                           *accountevents.Publisher   // Account outcome events publisher (kafka; nil when disabled)
+	banDecisionsExternal             bool                       // external ban source wired (see recordBanSignal)
 	priceRegistry                    *models.ModelPriceRegistry // Model pricing information (optional)
 	organizationPolicies             *models.OrganizationPolicyRegistry
 	maxProviderRetries               int                 // Max same-type credential retries on provider errors
@@ -564,6 +572,8 @@ func New(cfg *Config) *Proxy {
 		rawBodyStoreOnlyErrors:           cfg.RawBodyStoreOnlyErrors,
 		rawBodyRedactSensitiveFields:     cfg.RawBodyRedactSensitiveFields,
 		healthChecker:                    cfg.HealthChecker,
+		events:                           cfg.Events,
+		banDecisionsExternal:             cfg.BanDecisionsExternal,
 		priceRegistry:                    cfg.PriceRegistry,
 		organizationPolicies:             cfg.OrganizationPolicies,
 		maxProviderRetries:               cfg.MaxProviderRetries,
@@ -896,7 +906,8 @@ func (p *Proxy) executeProxyRequest(
 		// Proxy/AIR credentials are dynamic relays — don't record them in fail2ban.
 		// Their 429/5xx reflect downstream capacity, not a permanent credential failure.
 		if !cred.IsProxyLike() {
-			p.balancer.RecordResponse(cred.Name, modelID, statusCode)
+			p.recordBanSignal(cred, modelID, statusCode)
+			p.reportHealth(string(cred.Type), cred.Name, modelID, statusCode, 0)
 		}
 		// Per-attempt failure — tracked separately from the client-facing
 		// RequestsTotal/RequestDuration metrics, which the caller records exactly
@@ -906,7 +917,9 @@ func (p *Proxy) executeProxyRequest(
 	}
 	// Proxy/AIR credentials are dynamic relays — don't record them in fail2ban.
 	if !cred.IsProxyLike() {
-		p.balancer.RecordResponse(cred.Name, modelID, resp.StatusCode)
+		p.recordBanSignal(cred, modelID, resp.StatusCode)
+		p.reportHealth(string(cred.Type), cred.Name, modelID, resp.StatusCode,
+			httputil.RetryAfterSeconds(resp.Header.Get("Retry-After")))
 	}
 	if resp.StatusCode != http.StatusOK {
 		p.metrics.RecordCredentialAttemptError(cred.Name)
@@ -1317,7 +1330,8 @@ func (p *Proxy) sendToCredential(
 				"credential", cred.Name, "provider", string(cred.Type),
 				"model", modelID, "error", tokenErr)
 			// Token error is retryable (different credential may have valid token)
-			p.balancer.RecordResponse(cred.Name, modelID, http.StatusInternalServerError)
+			p.recordBanSignal(cred, modelID, http.StatusInternalServerError)
+			p.reportHealth(string(cred.Type), cred.Name, modelID, http.StatusInternalServerError, 0)
 			// Per-attempt failure only — the client-facing RequestsTotal/RequestDuration
 			// metrics are recorded exactly once at the final outcome below.
 			p.metrics.RecordCredentialAttemptError(cred.Name)
@@ -1477,7 +1491,8 @@ func (p *Proxy) sendToCredential(
 			p.logger.WarnContext(r.Context(), "Upstream request failed, will retry",
 				"credential", cred.Name, "model", modelID, "error", doErr, "url", targetURL)
 		}
-		p.balancer.RecordResponse(cred.Name, modelID, statusCode)
+		p.recordBanSignal(cred, modelID, statusCode)
+		p.reportHealth(string(cred.Type), cred.Name, modelID, statusCode, 0)
 		// Per-attempt failure only — the client-facing RequestsTotal/RequestDuration
 		// metrics are recorded exactly once at the final outcome below.
 		p.metrics.RecordCredentialAttemptError(cred.Name)
@@ -2342,7 +2357,9 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		bodyReadTimer.Stop()
 		if readErr != nil {
 			closeBody()
-			p.balancer.RecordResponse(cred.Name, modelID, resp.StatusCode)
+			p.recordBanSignal(cred, modelID, resp.StatusCode)
+			p.reportHealth(string(cred.Type), cred.Name, modelID, resp.StatusCode,
+				httputil.RetryAfterSeconds(resp.Header.Get("Retry-After")))
 			// This attempt genuinely failed (got a response, then lost the body).
 			// Only record here if the earlier `resp.StatusCode != http.StatusOK`
 			// check didn't already count it — status 200 with a failed body read
@@ -3218,4 +3235,29 @@ func (p *Proxy) HandleGetResponse(w http.ResponseWriter, r *http.Request) {
 	if encErr := json.NewEncoder(w).Encode(resp); encErr != nil {
 		p.logger.ErrorContext(r.Context(), "HandleGetResponse: failed to encode response", "id", responseID, "error", encErr)
 	}
+}
+
+// recordBanSignal forwards the outcome to the ban-decision source. Local
+// fail2ban counters are skipped ONLY when an external ban source is truly
+// wired (banDecisionsExternal, set together with the ban reader): otherwise,
+// even with a kafka publisher running, the router keeps its own bans as a
+// fail-safe — a misconfigured or temporarily unavailable Redis must never
+// leave the balancer without any ban decisions at all.
+func (p *Proxy) recordBanSignal(cred *config.CredentialConfig, modelID string, statusCode int) {
+	if p.banDecisionsExternal {
+		return
+	}
+	p.balancer.RecordResponse(cred.Name, modelID, statusCode)
+}
+
+// reportHealth forwards one outcome observation to the health worker via
+// the kafka events publisher (nil-safe when disabled).
+func (p *Proxy) reportHealth(provider, credential, model string, statusCode int, retryAfterSeconds int) {
+	if p.events == nil {
+		return
+	}
+	if provider == "" {
+		provider = "unknown"
+	}
+	p.events.Report(credential, provider, model, statusCode, retryAfterSeconds, "")
 }
