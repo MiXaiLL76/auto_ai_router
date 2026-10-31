@@ -315,11 +315,13 @@ litellm_db:
   enabled: false  # Set to true to enable LiteLLM DB integration
   is_required: false  # Set to true to fail startup if DB connection fails
   database_url: "os.environ/LITELLM_DATABASE_URL"  # PostgreSQL connection string (supports env variables)
+  load_db_models: false  # Serve deployments from LiteLLM_ProxyModelTable (default: false)
+  db_model_sync_interval: 1m  # How often DB models are reloaded (default: 1m)
   max_conns: 25  # Maximum database connections (default: 25, optimized for ~1000 RPM)
   min_conns: 5  # Minimum database connections (default: 5)
   health_check_interval: 10s  # Health check interval (default: 10s)
   connect_timeout: 5s  # Connection timeout (default: 5s)
-  auth_cache_ttl: 20s  # Auth cache TTL (default: 20s)
+  auth_cache_ttl: 5s  # Auth cache TTL (default: 5s)
   auth_cache_size: 10000  # Auth cache size (default: 10000)
   enforce_budget_reservation: false  # Opt in to Redis-backed atomic budget reservation
   enforce_key_rate_limits: false  # Opt in to Redis-backed key/user/team/org RPM/TPM enforcement
@@ -327,8 +329,7 @@ litellm_db:
   log_batch_size: 100  # Spend log batch size (default: 100)
   log_flush_interval: 5s  # Spend log flush interval (default: 5s)
   log_workers: 4  # Parallel queue-draining writer workers (default: 4)
-  log_retry_attempts: 3  # Spend log retry attempts (default: 3)
-  log_retry_delay: 1s  # Spend log retry delay (default: 1s)
+  disable_spend_logs_write: false  # Skip spend writes to Postgres, e.g. when Kafka is the only spend sink (default: false)
   daily_spend_timezone: "Europe/Moscow"  # Timezone of the daily spend tables (default: UTC)
   enable_cost_margin: false  # Apply metadata.cost_margin_config markup of key/user/team/org (default: false)
 

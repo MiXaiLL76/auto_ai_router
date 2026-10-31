@@ -1312,15 +1312,15 @@ type LiteLLMDBConfig struct {
 	// IsRequired specifies whether LiteLLM DB is mandatory (fail startup on error)
 	// or optional (degrade to NoopManager with warning on error)
 	IsRequired bool `yaml:"is_required"` // default: false
-	// IsRequired specifies whether LiteLLM DB is mandatory (fail startup on error)
-	// or optional (degrade to NoopManager with warning on error)
+	// LoadLitellmDBModels serves deployments from LiteLLM_ProxyModelTable,
+	// reloaded every LitellmDBSyncInterval.
 	LoadLitellmDBModels   bool          `yaml:"load_db_models"`         // default: false
 	LitellmDBSyncInterval time.Duration `yaml:"db_model_sync_interval"` // default: 1m
 
 	// Database connection postgresql://[user[:password]@][netloc][:port][/dbname][?param1=value1&...]
 	DatabaseURL string `yaml:"database_url"` // os.environ/LITELLM_DATABASE_URL
-	MaxConns    int    `yaml:"max_conns"`    // default: 10
-	MinConns    int    `yaml:"min_conns"`    // default: 2
+	MaxConns    int    `yaml:"max_conns"`    // default: 25
+	MinConns    int    `yaml:"min_conns"`    // default: 5
 
 	// Health check
 	HealthCheckInterval time.Duration `yaml:"health_check_interval"` // default: 10s
@@ -1331,7 +1331,7 @@ type LiteLLMDBConfig struct {
 	AuthCacheSize int           `yaml:"auth_cache_size"` // default: 10000
 
 	// Spend logging
-	LogQueueSize     int           `yaml:"log_queue_size"`     // default: 10000
+	LogQueueSize     int           `yaml:"log_queue_size"`     // default: 5000
 	LogBatchSize     int           `yaml:"log_batch_size"`     // default: 100
 	LogFlushInterval time.Duration `yaml:"log_flush_interval"` // default: 5s
 	// LogWorkers is the number of goroutines concurrently draining the spend-log

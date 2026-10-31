@@ -164,7 +164,7 @@ func TestBuildBatchInsertQuery(t *testing.T) {
 		assert.Contains(t, query, "$1")
 		assert.Contains(t, query, "$26")
 		assert.NotContains(t, query, "$27") // 26 params + 3 empty-object constants
-		assert.Contains(t, query, "ON CONFLICT (request_id) DO NOTHING")
+		assert.Contains(t, query, "ON CONFLICT DO NOTHING")
 	})
 
 	t.Run("multiple entries", func(t *testing.T) {
@@ -493,7 +493,7 @@ func TestLogger_SQLInjectionPrevention(t *testing.T) {
 					query := queries.BuildBatchInsertQuery(1)
 					assert.NotEmpty(t, query)
 					assert.Contains(t, query, "INSERT INTO")
-					assert.Contains(t, query, "ON CONFLICT (request_id) DO NOTHING")
+					assert.Contains(t, query, "ON CONFLICT DO NOTHING")
 
 					// Verify batch params work with multiple entries
 					batch := []*models.SpendLogEntry{entry}
