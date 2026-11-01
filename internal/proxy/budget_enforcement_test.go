@@ -3,14 +3,19 @@ package proxy
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
+	"github.com/mixaill76/auto_ai_router/internal/litellmdb/budget"
 	dbmodels "github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	routermodels "github.com/mixaill76/auto_ai_router/internal/models"
+	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -29,6 +34,96 @@ func TestBudgetLevelsFollowLiteLLMHierarchy(t *testing.T) {
 		"token:token-hash", "team:team-1", "org:org-1",
 		"teammember:team-1:user-1", "orgmember:org-1:user-1",
 	}, []string{levels[0].entity, levels[1].entity, levels[2].entity, levels[3].entity, levels[4].entity})
+}
+
+func TestBudgetLevelsNameTheirBudgetLevel(t *testing.T) {
+	levels := budgetLevels(&dbmodels.TokenInfo{
+		Token: "token-hash", UserID: "user-1", TeamID: "team-1", OrganizationID: "org-1",
+	})
+	got := make([]dbmodels.BudgetLevel, 0, len(levels))
+	for _, level := range levels {
+		got = append(got, level.level)
+	}
+	assert.Equal(t, []dbmodels.BudgetLevel{
+		dbmodels.BudgetLevelKey, dbmodels.BudgetLevelTeam, dbmodels.BudgetLevelOrganization,
+		dbmodels.BudgetLevelTeamMember, dbmodels.BudgetLevelOrganizationMember,
+	}, got)
+	personal := budgetLevels(&dbmodels.TokenInfo{Token: "token-hash", UserID: "user-1"})
+	require.Len(t, personal, 2)
+	assert.Equal(t, dbmodels.BudgetLevelUser, personal[1].level)
+}
+
+// TestEnforceBudgetAndRateLimitsReservationRefusalNamesTheKeyLimit covers the
+// pre-request reservation path, which refuses on its own counters before the
+// DB snapshot sees the spend: its 402 must carry the same per-level text as
+// the auth-time check.
+func TestEnforceBudgetAndRateLimitsReservationRefusalNamesTheKeyLimit(t *testing.T) {
+	addr := os.Getenv("VALKEY_ADDR")
+	if addr == "" {
+		t.Skip("VALKEY_ADDR not set, skipping Redis integration test")
+	}
+	client, err := ratelimit.NewValkeyClient(config.RedisConfig{InitAddresses: []string{addr}, ForceSingleClient: true})
+	require.NoError(t, err)
+	t.Cleanup(client.Close)
+
+	tests := []struct {
+		name string
+		info *dbmodels.TokenInfo
+		want string
+	}{
+		{
+			name: "key limit",
+			info: &dbmodels.TokenInfo{Token: "tok-key", MaxBudget: pointerTo(1.0), Spend: 0.99},
+			want: "Key budget exceeded",
+		},
+		{
+			name: "user budget",
+			info: &dbmodels.TokenInfo{Token: "tok-user", UserID: "user-1", UserMaxBudget: pointerTo(1.0), UserSpend: pointerTo(0.99)},
+			want: "Budget exceeded",
+		},
+		{
+			// The key has room and is reserved first; the user level then refuses.
+			name: "user budget after the key is reserved",
+			info: &dbmodels.TokenInfo{
+				Token: "tok-key-then-user", MaxBudget: pointerTo(1000.0),
+				UserID: "user-2", UserMaxBudget: pointerTo(1.0), UserSpend: pointerTo(0.99),
+			},
+			want: "Budget exceeded",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prx := NewTestProxyBuilder().Build()
+			prx.budgetReservationEnabled = true
+			prefix := "test-budget-level-" + strconv.FormatInt(time.Now().UnixNano(), 10) + ":"
+			prx.budgetReserver = budget.New(client, prefix, time.Minute)
+			setTestModelPrice(prx, "model-a", &routermodels.ModelPrice{InputCostPerToken: 1, OutputCostPerToken: 1})
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			logCtx := testLogCtx(t)
+			logCtx.TokenInfo = tt.info
+
+			allowed := prx.enforceBudgetAndRateLimits(
+				recorder, request, logCtx, "model-a", "model-a", []byte(`{"max_tokens":10,"messages":[]}`),
+			)
+
+			require.False(t, allowed)
+			assertAuthErrorShape(t, recorder, http.StatusPaymentRequired)
+			assert.Contains(t, recorder.Body.String(), `"message":"`+tt.want+`"`)
+			assert.Equal(t, http.StatusPaymentRequired, logCtx.HTTPStatus)
+			assert.Empty(t, logCtx.reservedEntities)
+
+			// Whatever was reserved before the refusal is released: the key's
+			// counter is back at its DB spend, so a reservation of the key's
+			// whole remaining budget still fits.
+			if tt.info.MaxBudget != nil {
+				remaining := *tt.info.MaxBudget - tt.info.Spend
+				allowed, err := prx.budgetReserver.TryReserve(request.Context(), "token:"+tt.info.Token, tt.info.Spend, remaining, *tt.info.MaxBudget)
+				require.NoError(t, err)
+				assert.True(t, allowed, "a reservation made before the refusal leaked into the key's counter")
+			}
+		})
+	}
 }
 
 func TestBudgetLevelsUsePersonalUserLimitsWithoutTeam(t *testing.T) {

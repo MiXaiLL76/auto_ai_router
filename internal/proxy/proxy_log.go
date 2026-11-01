@@ -15,6 +15,7 @@ import (
 	promanutils "github.com/mixaill76/auto_ai_router/internal/converter/proman/utils"
 	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
+	dbmodels "github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/spendlog"
 	"github.com/mixaill76/auto_ai_router/internal/logger"
 	"github.com/mixaill76/auto_ai_router/internal/security"
@@ -169,16 +170,20 @@ func (p *Proxy) handleLiteLLMAuthError(ctx context.Context, w http.ResponseWrite
 		if errors.Is(err, errType) {
 			logCtx.HTTPStatus = info.status
 			logCtx.ErrorMsg = "LiteLLM auth validation failed"
-			p.logger.WarnContext(ctx, info.logMsg,
-				"error_code", info.status,
-				"token_prefix", security.MaskAPIKey(token))
+			message := info.message
+			args := []any{"error_code", info.status, "token_prefix", security.MaskAPIKey(token)}
+			if level, ok := dbmodels.BudgetExceededLevel(err); ok {
+				message = budgetExceededMessage(level)
+				args = append(args, "budget_level", string(level))
+			}
+			p.logger.WarnContext(ctx, info.logMsg, args...)
 			switch info.status {
 			case http.StatusForbidden:
-				WriteErrorForbidden(w, info.message)
+				WriteErrorForbidden(w, message)
 			case http.StatusPaymentRequired:
-				WriteErrorPaymentRequired(w, info.message)
+				WriteErrorPaymentRequired(w, message)
 			default:
-				WriteErrorUnauthorized(w, info.message)
+				WriteErrorUnauthorized(w, message)
 			}
 			return
 		}
