@@ -159,6 +159,8 @@ func TestClientAuthenticationBudgetRefusalNamesTheKeyLimit(t *testing.T) {
 		want string
 	}{
 		{key: "key-limit", err: &dbmodels.BudgetExceededError{Level: dbmodels.BudgetLevelKey}, want: "Key budget exceeded"},
+		{key: "key-day-window", err: &dbmodels.BudgetExceededError{Level: dbmodels.BudgetLevelKey, Window: "1d"}, want: "Key 1d budget exceeded"},
+		{key: "key-month-window", err: &dbmodels.BudgetExceededError{Level: dbmodels.BudgetLevelKey, Window: "1mo"}, want: "Key 1mo budget exceeded"},
 		{key: "user-budget", err: &dbmodels.BudgetExceededError{Level: dbmodels.BudgetLevelUser}, want: "Budget exceeded"},
 		{key: "team-budget", err: &dbmodels.BudgetExceededError{Level: dbmodels.BudgetLevelTeam}, want: "Budget exceeded"},
 		{key: "org-member-budget", err: &dbmodels.BudgetExceededError{Level: dbmodels.BudgetLevelOrganizationMember}, want: "Budget exceeded"},
@@ -187,6 +189,24 @@ func TestClientAuthenticationBudgetRefusalNamesTheKeyLimit(t *testing.T) {
 			assert.Equal(t, http.StatusPaymentRequired, logCtx.HTTPStatus)
 		})
 	}
+}
+
+// A key whose budget_limits AIR cannot enforce is refused with 503: no budget
+// is known to be spent (not 402), and the key must not pass unlimited.
+func TestClientAuthenticationUnsupportedBudgetWindowFailsClosed(t *testing.T) {
+	db := &clientAuthTestDB{errors: map[string]error{"hourly-window": litellmdb.ErrBudgetWindowUnsupported}}
+	prx := newClientAuthTestProxy(t, db, "http://example.invalid", config.ProviderTypeOpenAI, "provider-key")
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("Authorization", "Bearer hourly-window")
+	w := httptest.NewRecorder()
+	logCtx := &RequestLogContext{Request: req}
+
+	assert.False(t, prx.authenticateRequest(w, req, logCtx, true))
+	assertAuthErrorShape(t, w, http.StatusServiceUnavailable)
+	var response APIErrorResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
+	assert.Equal(t, "Key budget window not supported", response.Error.Message)
+	assert.Equal(t, http.StatusServiceUnavailable, logCtx.HTTPStatus)
 }
 
 // TestClientAuthenticationDBUnavailableFailsClosedNotSilent guards against the

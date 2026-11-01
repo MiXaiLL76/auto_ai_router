@@ -1181,6 +1181,8 @@ func initializeLiteLLMDB(cfg *config.Config, log *slog.Logger) litellmdb.Manager
 		DisableSpendLogsWrite:       cfg.LiteLLMDB.DisableSpendLogsWrite,
 		IncludeTeamSpendInUserSpend: &cfg.LiteLLMDB.IncludeTeamSpendInUserSpend,
 		DailySpendTimezone:          cfg.LiteLLMDB.DailySpendTimezone,
+		BudgetTimezone:              cfg.LiteLLMDB.BudgetTimezone,
+		BudgetResetTime:             cfg.LiteLLMDB.BudgetResetTime,
 		EnableCostMargin:            cfg.LiteLLMDB.EnableCostMargin,
 		Logger:                      log,
 	}

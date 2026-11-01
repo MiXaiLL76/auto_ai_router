@@ -181,6 +181,9 @@ func (p *Proxy) handleLiteLLMAuthError(ctx context.Context, w http.ResponseWrite
 		litellmdb.ErrTeamBlocked:    {http.StatusForbidden, "Team blocked", "Team blocked"},
 		litellmdb.ErrTokenExpired:   {http.StatusUnauthorized, "Token expired", "Token expired"},
 		litellmdb.ErrBudgetExceeded: {http.StatusPaymentRequired, "Budget exceeded", "Budget exceeded"},
+		litellmdb.ErrBudgetWindowUnsupported: {
+			http.StatusServiceUnavailable, "Key budget window not supported", "Key budget window not supported",
+		},
 	}
 
 	// Check for known auth errors — client-side issues (bad/blocked/expired token,
@@ -191,9 +194,12 @@ func (p *Proxy) handleLiteLLMAuthError(ctx context.Context, w http.ResponseWrite
 			logCtx.ErrorMsg = "LiteLLM auth validation failed: " + info.logMsg
 			message := info.message
 			args := []any{"error_code", info.status, "token_prefix", security.MaskAPIKey(token)}
-			if level, ok := dbmodels.BudgetExceededLevel(err); ok {
-				message = budgetExceededMessage(level)
-				args = append(args, "budget_level", string(level))
+			if refusal, ok := dbmodels.AsBudgetExceeded(err); ok {
+				message = budgetExceededMessage(refusal.Level, refusal.Window)
+				args = append(args, "budget_level", string(refusal.Level))
+				if refusal.Window != "" {
+					args = append(args, "budget_window", refusal.Window)
+				}
 			}
 			p.logger.WarnContext(ctx, info.logMsg, args...)
 			switch info.status {
@@ -201,6 +207,8 @@ func (p *Proxy) handleLiteLLMAuthError(ctx context.Context, w http.ResponseWrite
 				WriteErrorForbidden(w, message)
 			case http.StatusPaymentRequired:
 				WriteErrorPaymentRequired(w, message)
+			case http.StatusServiceUnavailable:
+				WriteErrorServiceUnavailable(w, message)
 			default:
 				WriteErrorUnauthorized(w, message)
 			}

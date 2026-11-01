@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"maps"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -37,6 +38,11 @@ var (
 	// errors.Is(err, ErrBudgetExceeded) keeps matching.
 	ErrBudgetExceeded = errors.New("litellmdb: budget exceeded")
 
+	// ErrBudgetWindowUnsupported is returned when a key carries a
+	// budget_limits entry AIR cannot enforce (see ParseBudgetDuration). The key
+	// is refused rather than left unlimited.
+	ErrBudgetWindowUnsupported = errors.New("litellmdb: budget window not supported")
+
 	// ErrModelNotAllowed is returned when model is not in allowed list
 	ErrModelNotAllowed = errors.New("litellmdb: model not allowed")
 
@@ -63,14 +69,19 @@ const (
 // BudgetExceededError is ErrBudgetExceeded together with the level whose
 // budget refused, so a caller can tell the key's own limit from a limit of
 // the key's holder — LiteLLM likewise raises one BudgetExceededError with a
-// per-level message.
+// per-level message. Window is the budget_duration of the key's budget window
+// that refused, empty for every other limit.
 type BudgetExceededError struct {
-	Level BudgetLevel
+	Level  BudgetLevel
+	Window string
 }
 
 func (e *BudgetExceededError) Error() string {
 	if e == nil || e.Level == "" {
 		return ErrBudgetExceeded.Error()
+	}
+	if e.Window != "" {
+		return ErrBudgetExceeded.Error() + " (" + string(e.Level) + " " + e.Window + ")"
 	}
 	return ErrBudgetExceeded.Error() + " (" + string(e.Level) + ")"
 }
@@ -81,14 +92,14 @@ func (e *BudgetExceededError) Unwrap() error {
 	return ErrBudgetExceeded
 }
 
-// BudgetExceededLevel returns the level carried by a budget refusal, and
-// false when err is not one or names no level.
-func BudgetExceededLevel(err error) (BudgetLevel, bool) {
+// AsBudgetExceeded returns the budget refusal carried by err, and false when
+// err is not one or names no level.
+func AsBudgetExceeded(err error) (*BudgetExceededError, bool) {
 	var budgetErr *BudgetExceededError
 	if errors.As(err, &budgetErr) && budgetErr.Level != "" {
-		return budgetErr.Level, true
+		return budgetErr, true
 	}
-	return "", false
+	return nil, false
 }
 
 // ==================== Config ====================
@@ -126,6 +137,12 @@ type Config struct {
 	// DailySpendTimezone sets the calendar day the Daily* spend tables are
 	// grouped by. Nil means UTC. Stored timestamps are unaffected.
 	DailySpendTimezone *time.Location
+
+	// BudgetTimezone and BudgetResetTime set the calendar the key budget
+	// windows (budget_limits) start and end on: the timezone (nil means UTC)
+	// and the time of day day, week and month windows reset at.
+	BudgetTimezone  *time.Location
+	BudgetResetTime time.Duration
 
 	// EnableCostMargin loads metadata.cost_margin_config into
 	// TokenInfo.CostMarginConfigs. Off by default: no margin is applied.
@@ -198,6 +215,14 @@ func (c *Config) ApplyDefaults() {
 	}
 }
 
+// BudgetCalendar is the calendar of the key budget windows.
+func (c *Config) BudgetCalendar() BudgetCalendar {
+	if c == nil {
+		return BudgetCalendar{}
+	}
+	return BudgetCalendar{Location: c.BudgetTimezone, ResetTime: c.BudgetResetTime}
+}
+
 // TeamSpendUpdatesUserSpend reports the configured user projection policy.
 func (c *Config) TeamSpendUpdatesUserSpend() bool {
 	return c == nil || c.IncludeTeamSpendInUserSpend == nil || *c.IncludeTeamSpendInUserSpend
@@ -238,6 +263,10 @@ type TokenInfo struct {
 	MaxBudget *float64 // Max budget (nil = unlimited)
 	TPMLimit  *int64   // Tokens per minute limit
 	RPMLimit  *int64   // Requests per minute limit
+
+	// Token budget windows (budget_limits), with the spend of the window
+	// current when the token was loaded
+	BudgetWindows []BudgetWindow
 
 	// Expiration
 	Expires *time.Time // Expiration date (nil = no expiration)
@@ -458,6 +487,7 @@ func (t *TokenInfo) Clone() *TokenInfo {
 	clone.TeamModels = append([]string(nil), t.TeamModels...)
 	clone.TeamMemberModels = append([]string(nil), t.TeamMemberModels...)
 	clone.Tags = append([]string(nil), t.Tags...)
+	clone.BudgetWindows = slices.Clone(t.BudgetWindows)
 	if t.Metadata != nil {
 		clone.Metadata = cloneMetadataValue(t.Metadata).(map[string]interface{})
 	}
@@ -686,12 +716,13 @@ func (t *TokenInfo) checkOrganizationMemberBudget() bool {
 // 1. Token blocked/expired
 // 2. Team blocked
 // 3. Token budget
-// 4. Team budget
-// 5. Team member budget
-// 6. Organization budget
-// 7. User budget (personal key only)
-// 8. Organization member budget
-// 9. Model allowed
+// 4. Token budget windows
+// 5. Team budget
+// 6. Team member budget
+// 7. Organization budget
+// 8. User budget (personal key only)
+// 9. Organization member budget
+// 10. Model allowed
 func (t *TokenInfo) Validate(model string) error {
 	// Check basic validity
 	if t.Blocked {
@@ -707,6 +738,9 @@ func (t *TokenInfo) Validate(model string) error {
 	// Check budget hierarchy (embedded first, then external)
 	if t.IsBudgetExceeded() {
 		return &BudgetExceededError{Level: BudgetLevelKey}
+	}
+	if err := t.checkBudgetWindows(); err != nil {
+		return err
 	}
 	if t.checkTeamBudget() {
 		return &BudgetExceededError{Level: BudgetLevelTeam}

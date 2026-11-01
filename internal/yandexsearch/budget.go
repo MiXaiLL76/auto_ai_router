@@ -3,6 +3,7 @@ package yandexsearch
 import (
 	"context"
 	"log/slog"
+	"strconv"
 
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/budget"
 	dbmodels "github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
@@ -13,13 +14,15 @@ import (
 type budgetLevel struct {
 	entity    string
 	level     dbmodels.BudgetLevel
+	window    string
 	maxBudget *float64
 	dbSpend   float64
 }
 
 // budgetLevelsFor mirrors internal/proxy/budget_enforcement.go's
 // budgetLevels() (entity naming and field provenance kept identical:
-// "token:"+Token, "user:"+UserID, "team:"+TeamID, "org:"+OrganizationID,
+// "token:"+Token, "token:"+Token+":window:"+Duration+":"+<window start, unix>,
+// "user:"+UserID, "team:"+TeamID, "org:"+OrganizationID,
 // "teammember:"+TeamID+":"+UserID, "orgmember:"+OrganizationID+":"+UserID)
 // — duplicated rather than imported because internal/yandexsearch is
 // deliberately decoupled from internal/proxy (mirrors internal/video's own
@@ -35,6 +38,18 @@ func budgetLevelsFor(info *dbmodels.TokenInfo) []budgetLevel {
 		maxBudget: info.MaxBudget,
 		dbSpend:   info.Spend,
 	}}
+	for _, window := range info.BudgetWindows {
+		if window.Start.IsZero() {
+			continue
+		}
+		levels = append(levels, budgetLevel{
+			entity:    "token:" + info.Token + ":window:" + window.Duration + ":" + strconv.FormatInt(window.Start.Unix(), 10),
+			level:     dbmodels.BudgetLevelKey,
+			window:    window.Duration,
+			maxBudget: &window.MaxBudget,
+			dbSpend:   window.Spend,
+		})
+	}
 	if info.TeamID == "" && info.UserID != "" {
 		levels = append(levels, budgetLevel{
 			entity:    "user:" + info.UserID,
@@ -124,7 +139,7 @@ func budgetReserve(ctx context.Context, reserver *budget.Reserver, info *dbmodel
 						"entity", done.entity, "error", err)
 				}
 			}
-			return nil, &dbmodels.BudgetExceededError{Level: level.level}
+			return nil, &dbmodels.BudgetExceededError{Level: level.level, Window: level.window}
 		}
 		reserved = append(reserved, level)
 	}
@@ -150,11 +165,16 @@ func (r *reservation) settle(ctx context.Context, reserver *budget.Reserver, act
 }
 
 // budgetExceededMessage is the 402 text of a refused reservation. The key's
-// own limit gets its own wording; every level above the key keeps the
-// long-standing "budget exceeded".
+// own limit gets its own wording, a key budget window names its duration;
+// every level above the key keeps the long-standing "budget exceeded".
 func budgetExceededMessage(err error) string {
-	if level, ok := dbmodels.BudgetExceededLevel(err); ok && level == dbmodels.BudgetLevelKey {
+	refusal, ok := dbmodels.AsBudgetExceeded(err)
+	switch {
+	case ok && refusal.Level == dbmodels.BudgetLevelKey && refusal.Window != "":
+		return "key " + refusal.Window + " budget exceeded"
+	case ok && refusal.Level == dbmodels.BudgetLevelKey:
 		return "key budget exceeded"
+	default:
+		return "budget exceeded"
 	}
-	return "budget exceeded"
 }

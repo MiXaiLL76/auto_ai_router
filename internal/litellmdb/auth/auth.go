@@ -6,15 +6,18 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/connection"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/queries"
 	"github.com/mixaill76/auto_ai_router/internal/security"
+	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
 
 // Authenticator provides token authentication via LiteLLM database
@@ -26,6 +29,9 @@ type Authenticator struct {
 
 	// costMarginEnabled gates loading cost_margin_config (see costMarginConfigs)
 	costMarginEnabled bool
+
+	// budgetCalendar is where the key budget windows start
+	budgetCalendar models.BudgetCalendar
 }
 
 // NewAuthenticator creates a new authenticator
@@ -41,6 +47,13 @@ func NewAuthenticator(pool *connection.ConnectionPool, cache *Cache, logger *slo
 // TokenInfo.CostMarginConfigs stays empty, so no margin is ever added.
 func (a *Authenticator) WithCostMargin(enabled bool) *Authenticator {
 	a.costMarginEnabled = enabled
+	return a
+}
+
+// WithBudgetCalendar sets the calendar the key budget windows start and end
+// on (litellm_db.budget_timezone and budget_reset_time).
+func (a *Authenticator) WithBudgetCalendar(calendar models.BudgetCalendar) *Authenticator {
+	a.budgetCalendar = calendar
 	return a
 }
 
@@ -127,8 +140,9 @@ func (a *Authenticator) ValidateToken(ctx context.Context, rawToken string) (*mo
 	// 1. Hash token
 	hashedToken := HashToken(rawToken)
 
-	// 2. Check cache
-	if info, ok := a.cache.Get(hashedToken); ok {
+	// 2. Check cache. A token loaded in an earlier budget window carries that
+	// window's spend, so it is reloaded instead.
+	if info, ok := a.cache.Get(hashedToken); ok && !info.BudgetWindowsStale(utils.NowUTC(), a.budgetCalendar) {
 		a.logger.Debug("Token found in cache",
 			"token_prefix", security.MaskToken(hashedToken),
 		)
@@ -182,7 +196,7 @@ func (a *Authenticator) ValidateTokenForModel(ctx context.Context, rawToken, mod
 // Single query loads: Token → User → Team → Organization → Memberships
 // All with their budget data (embedded or external via BudgetTable)
 func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string) (*models.TokenInfo, error) {
-	if !a.pool.IsHealthy() {
+	if a.pool == nil || !a.pool.IsHealthy() {
 		return nil, models.ErrConnectionFailed
 	}
 
@@ -194,7 +208,18 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 		return nil, models.ErrConnectionFailed
 	}
 	defer conn.Release()
-	return a.tokenFromRow(conn.QueryRow(ctx, queries.QueryValidateTokenWithHierarchy, hashedToken), hashedToken)
+	info, err := a.tokenFromRow(conn.QueryRow(ctx, queries.QueryValidateTokenWithHierarchy, hashedToken), hashedToken)
+	if err != nil {
+		return nil, err
+	}
+	if err := a.loadBudgetWindowSpend(ctx, conn, info, utils.NowUTC()); err != nil {
+		a.logger.Error("Failed to load key budget window spend",
+			"error", err,
+			"token_prefix", security.MaskToken(hashedToken),
+		)
+		return nil, models.ErrConnectionFailed
+	}
+	return info, nil
 }
 
 // tokenFromRow reads one QueryValidateTokenWithHierarchy row into a TokenInfo.
@@ -209,6 +234,7 @@ func (a *Authenticator) tokenFromRow(row pgx.Row, hashedToken string) (*models.T
 	var blocked *bool
 	var tokenModels []string
 	var tokenMetadata []byte
+	var tokenBudgetLimits []byte
 
 	// ============ User fields ============
 	var userIDCheck, userAlias, userEmail *string
@@ -260,6 +286,7 @@ func (a *Authenticator) tokenFromRow(row pgx.Row, hashedToken string) (*models.T
 		&blocked,
 		&tokenModels,
 		&tokenMetadata,
+		&tokenBudgetLimits,
 
 		// User
 		&userIDCheck,
@@ -353,6 +380,7 @@ func (a *Authenticator) tokenFromRow(row pgx.Row, hashedToken string) (*models.T
 	}
 
 	info.MaxBudget = tokenMaxBudget
+	info.BudgetWindows = a.budgetWindows(tokenBudgetLimits, hashedToken)
 	info.Expires = expires
 	info.TPMLimit = tokenTPMLimit
 	info.RPMLimit = tokenRPMLimit
@@ -416,6 +444,94 @@ func (a *Authenticator) tokenFromRow(row pgx.Row, hashedToken string) (*models.T
 	)
 
 	return &info, nil
+}
+
+// budgetWindows reads the key's budget_limits. A budget_limits AIR cannot
+// read yields one unenforceable window, so Validate refuses the key instead of
+// leaving it unlimited.
+func (a *Authenticator) budgetWindows(raw []byte, hashedToken string) []models.BudgetWindow {
+	limits, err := models.ParseBudgetLimits(raw)
+	if err != nil {
+		a.logger.Warn("budget_limits has unexpected structure, refusing the key",
+			"token_prefix", security.MaskToken(hashedToken),
+			"error", err,
+		)
+		return []models.BudgetWindow{{}}
+	}
+	if len(limits) == 0 {
+		return nil
+	}
+	windows := make([]models.BudgetWindow, len(limits))
+	for i, limit := range limits {
+		windows[i] = models.BudgetWindow{BudgetLimit: limit}
+	}
+	return windows
+}
+
+// budgetWindowQuerier is the part of a pooled connection loadBudgetWindowSpend
+// reads through.
+type budgetWindowQuerier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// loadBudgetWindowSpend sets each window's current start and the key's spend
+// in it: the window row's spend when the row is on that window, else the sum
+// of the key's accounted spend logs since the start (a window nothing has
+// written yet, or a row still on an earlier window). A schema without
+// LiteLLM_BudgetWindowSpend reads every window from the spend logs.
+func (a *Authenticator) loadBudgetWindowSpend(ctx context.Context, conn budgetWindowQuerier, info *models.TokenInfo, now time.Time) error {
+	if len(info.BudgetWindows) == 0 {
+		return nil
+	}
+	type windowRow struct {
+		start time.Time
+		spend float64
+	}
+	stored := map[string]windowRow{}
+	rows, err := conn.Query(ctx, queries.QuerySelectKeyBudgetWindowSpend, info.Token)
+	if err != nil && !isUndefinedTable(err) {
+		return err
+	}
+	if err == nil {
+		for rows.Next() {
+			var duration string
+			var row windowRow
+			if err := rows.Scan(&duration, &row.start, &row.spend); err != nil {
+				rows.Close()
+				return err
+			}
+			stored[duration] = row
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil && !isUndefinedTable(err) {
+			return err
+		}
+	}
+
+	for i := range info.BudgetWindows {
+		window := &info.BudgetWindows[i]
+		duration, ok := models.ParseBudgetDuration(window.Duration)
+		if !ok {
+			continue
+		}
+		start, end := duration.Bounds(now, a.budgetCalendar)
+		window.Start = start
+		if row, ok := stored[window.Duration]; ok && row.start.Equal(start) {
+			window.Spend = row.spend
+			continue
+		}
+		if err := conn.QueryRow(ctx, queries.QuerySumKeyWindowSpendLogs, info.Token, start, end).Scan(&window.Spend); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// isUndefinedTable reports whether err is PostgreSQL's undefined_table (42P01).
+func isUndefinedTable(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "42P01"
 }
 
 // costMarginConfigs collects the cost_margin_config layers in priority order.

@@ -22,6 +22,9 @@ SELECT
   t.blocked as token_blocked,
   t.models as token_models,
   t.metadata as token_metadata,
+  -- Read through the row's JSON so a schema from before LiteLLM added the
+  -- column yields NULL (no budget windows) instead of failing every lookup.
+  to_jsonb(t) -> 'budget_limits' as token_budget_limits,
 
   -- ============ User ============
   u.user_id as user_id_check,

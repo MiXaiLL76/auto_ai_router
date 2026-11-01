@@ -406,6 +406,11 @@ func (tx *atomicTestTx) Exec(_ context.Context, sql string, _ ...any) (pgconn.Co
 }
 
 func (tx *atomicTestTx) Query(_ context.Context, sql string, args ...any) (pgx.Rows, error) {
+	if sql == queries.QuerySelectKeysBudgetWindows {
+		// No key of these batches has budget windows. Kept out of queries,
+		// which these tests read as the spend log insert sequence.
+		return &atomicTestRows{}, nil
+	}
 	tx.queries = append(tx.queries, sql)
 	tx.queryArgs = append(tx.queryArgs, append([]any(nil), args...))
 	switch {

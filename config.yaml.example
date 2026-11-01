@@ -357,6 +357,8 @@ litellm_db:
   log_workers: 4  # Parallel queue-draining writer workers (default: 4)
   disable_spend_logs_write: false  # Skip spend writes to Postgres, e.g. when Kafka is the only spend sink (default: false)
   daily_spend_timezone: "Europe/Moscow"  # Timezone of the daily spend tables (default: UTC)
+  budget_timezone: "Europe/Moscow"  # Calendar of the key budget windows (budget_limits) (default: UTC)
+  budget_reset_time: "00:00"  # Time of day day/week/month key budget windows reset at (default: 00:00)
   enable_cost_margin: false  # Apply metadata.cost_margin_config markup of key/user/team/org (default: false)
 
 # Optional: POST /v1/search/yandex passthrough to Yandex Cloud's Search API
