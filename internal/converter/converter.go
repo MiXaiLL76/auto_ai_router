@@ -637,6 +637,10 @@ type responsesUsageDetails struct {
 			Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
 			Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
 		} `json:"cache_creation_token_details,omitempty"`
+		CacheWriteTokensDetails struct {
+			TTL30mTokens int `json:"ttl_30m_tokens,omitempty"`
+			TTL12hTokens int `json:"ttl_12h_tokens,omitempty"`
+		} `json:"cache_write_tokens_details,omitempty"`
 		ImageTokens         int    `json:"image_tokens,omitempty"`
 		VideoTokens         int    `json:"video_tokens,omitempty"`
 		TextTokens          int    `json:"text_tokens,omitempty"`
@@ -719,10 +723,14 @@ type tokenUsageShapeUsage struct {
 	// from PromptTokens+CompletionTokens rather than derived from them.
 	TotalTokens         int `json:"total_tokens,omitempty"`
 	PromptTokensDetails struct {
-		CachedTokens              int `json:"cached_tokens,omitempty"`
-		CachedAudioTokens         int `json:"cached_audio_tokens,omitempty"`
-		CacheCreationTokens       int `json:"cache_creation_tokens,omitempty"`
-		CacheWriteTokens          int `json:"cache_write_tokens,omitempty"`
+		CachedTokens            int `json:"cached_tokens,omitempty"`
+		CachedAudioTokens       int `json:"cached_audio_tokens,omitempty"`
+		CacheCreationTokens     int `json:"cache_creation_tokens,omitempty"`
+		CacheWriteTokens        int `json:"cache_write_tokens,omitempty"`
+		CacheWriteTokensDetails struct {
+			TTL30mTokens int `json:"ttl_30m_tokens,omitempty"`
+			TTL12hTokens int `json:"ttl_12h_tokens,omitempty"`
+		} `json:"cache_write_tokens_details,omitempty"`
 		CacheCreationTokenDetails struct {
 			Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
 			Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
@@ -902,6 +910,15 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 	cacheCreationTokens := resp.Usage.PromptTokensDetails.CacheCreationTokens
 	cacheCreation5mTokens := resp.Usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens
 	cacheCreation1hTokens := resp.Usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens
+	// OpenAI's 12h cache-retention write (prompt_cache_retention:"12h") is a
+	// separate TTL tier reported under cache_write_tokens_details, and a single
+	// request may also carry a 30m tier alongside it; both are billed, each at
+	// its own rate. The 30m tier is not Anthropic's 5m one, so it fills the 5m
+	// slot only when no 5m/1h split was given.
+	cacheCreation12hTokens := resp.Usage.PromptTokensDetails.CacheWriteTokensDetails.TTL12hTokens
+	if cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
+		cacheCreation5mTokens = resp.Usage.PromptTokensDetails.CacheWriteTokensDetails.TTL30mTokens
+	}
 	// Alibaba spells the TTL detail cache_creation.ephemeral_5m_input_tokens
 	// (nested in prompt_tokens_details, no _token_details suffix).
 	if cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
@@ -912,13 +929,19 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 	if cacheCreationTokens == 0 {
 		cacheCreationTokens = resp.Usage.PromptTokensDetails.CacheWriteTokens
 	}
-	if cacheCreationTokens == 0 && cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
+	if cacheCreationTokens == 0 && cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 && cacheCreation12hTokens == 0 {
 		cacheCreationTokens, cacheCreation5mTokens, cacheCreation1hTokens = resp.Usage.PromptTokensDetails.CachingWrite()
 	}
-	if cacheCreationTokens == 0 && cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
+	if cacheCreationTokens == 0 && cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 && cacheCreation12hTokens == 0 {
 		cacheCreationTokens = resp.Usage.InputTokensDetails.CacheCreationTokens
 		cacheCreation5mTokens = resp.Usage.InputTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens
 		cacheCreation1hTokens = resp.Usage.InputTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens
+		if cacheCreation12hTokens == 0 {
+			cacheCreation12hTokens = resp.Usage.InputTokensDetails.CacheWriteTokensDetails.TTL12hTokens
+			if cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
+				cacheCreation5mTokens = resp.Usage.InputTokensDetails.CacheWriteTokensDetails.TTL30mTokens
+			}
+		}
 	}
 	if cacheCreationTokens == 0 {
 		cacheCreationTokens = resp.Usage.InputTokensDetails.CacheWriteTokens
@@ -1081,6 +1104,7 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 		CacheCreationTokens:      cacheCreationTokens,
 		CacheCreation5mTokens:    cacheCreation5mTokens,
 		CacheCreation1hTokens:    cacheCreation1hTokens,
+		CacheCreation12hTokens:   cacheCreation12hTokens,
 		AudioInputTokens:         audioIn,
 		ImageTokens:              inputImageTokens,
 		VideoInputTokens:         inputVideoTokens,

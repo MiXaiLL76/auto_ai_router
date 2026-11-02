@@ -777,6 +777,11 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 				"ephemeral_1h_input_tokens": usage.CacheCreation1hTokens,
 			}
 		}
+		if usage.CacheCreation12hTokens > 0 {
+			promptTokensDetails["cache_write_tokens_details"] = map[string]interface{}{
+				"ttl_12h_tokens": usage.CacheCreation12hTokens,
+			}
+		}
 		completionTokensDetails["audio_tokens"] = usage.AudioOutputTokens
 		if usage.OutputTextTokens > 0 {
 			completionTokensDetails["text_tokens"] = usage.OutputTextTokens
