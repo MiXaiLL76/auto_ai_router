@@ -365,6 +365,16 @@ type RequestLogContext struct {
 	promptTokensEstimateFn    func() int
 	promptTokensEstimateVal   int
 	promptTokensEstimateReady bool
+
+	// responseCostUSD/responseCostKnown carry the request's final client-billed
+	// cost out of the spend-log path so the response path can surface it as
+	// X-Litellm-Response-Cost (see setResponseCostHeader). Only the paths whose
+	// body is written after that computation can use it (non-streaming and the
+	// reassembled force_stream_for_ttft paths); a truly streaming response has
+	// already sent its headers. The separate known flag distinguishes a priced
+	// $0 request from one that was never priced.
+	responseCostUSD   float64
+	responseCostKnown bool
 }
 
 // promptTokensEstimate returns the memoized local tiktoken-based prompt-token estimate,
@@ -2914,6 +2924,9 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	// Return credential name only to internal proxy clients, not to end users.
 	p.setCredentialResponseHeader(w, logCtx, cred.Name)
+	// Client-billed cost of this request. Only set when it is already known —
+	// for a plain streaming response it is not, and the header is skipped.
+	p.setResponseCostHeader(w, logCtx)
 
 	rc := http.NewResponseController(w)
 

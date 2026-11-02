@@ -331,6 +331,11 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 		logCtx.applyCostMargin(tokenCosts)
 	}
 	cost := tokenCosts.TotalCost
+	// Record the client-billed cost so the response path can surface it as
+	// X-Litellm-Response-Cost (see RequestLogContext.ResponseCostUSD). Set even
+	// for a $0 row: a free or unpriced-but-zero request is still "known".
+	logCtx.responseCostUSD = cost
+	logCtx.responseCostKnown = true
 	p.logger.DebugContext(logSpendCtx, "Calculated cost for model",
 		"model_name", priceModelID,
 		"cost", cost,

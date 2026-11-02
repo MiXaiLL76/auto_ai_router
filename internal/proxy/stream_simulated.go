@@ -633,6 +633,7 @@ func (p *Proxy) finishSimulatedNonStream(
 		p.markAudioUsageExcludesCachedForClient(w, logCtx)
 	}
 	p.setCredentialResponseHeader(w, logCtx, cred.Name)
+	p.setResponseCostHeader(w, logCtx)
 
 	p.writeSimulatedBody(w, r, resp, cred, modelID, finalBody)
 }
@@ -1070,6 +1071,7 @@ func (p *Proxy) finishSimulatedNativeNonStream(
 	w.Header().Del("X-Accel-Buffering")
 	p.markAudioUsageExcludesCachedForClient(w, logCtx)
 	p.setCredentialResponseHeader(w, logCtx, cred.Name)
+	p.setResponseCostHeader(w, logCtx)
 
 	p.writeSimulatedBody(w, r, resp, cred, modelID, finalBody)
 }
@@ -1487,6 +1489,7 @@ func (p *Proxy) finishSimulatedPassthroughNonStream(
 	w.Header().Del("X-Accel-Buffering")
 	p.markAudioUsageExcludesCachedForClient(w, logCtx)
 	p.setCredentialResponseHeader(w, logCtx, cred.Name)
+	p.setResponseCostHeader(w, logCtx)
 
 	p.writeSimulatedBody(w, r, resp, cred, modelID, finalBody)
 }

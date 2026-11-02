@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
@@ -216,6 +217,24 @@ func (p *Proxy) setCredentialResponseHeader(w http.ResponseWriter, logCtx *Reque
 		return
 	}
 	w.Header().Set("X-Credential-Name", credentialName)
+}
+
+// HeaderResponseCost is the response header carrying the request's client-billed
+// cost in USD, the same name LiteLLM's proxy uses. It is set only on the paths
+// whose body is written after the cost is computed (see
+// RequestLogContext.ResponseCostUSD) and only when the cost is known.
+const HeaderResponseCost = "X-Litellm-Response-Cost"
+
+// setResponseCostHeader writes HeaderResponseCost from the computed cost. A
+// streaming response is deliberately not covered: its headers leave before the
+// usage that prices the request has arrived, so there is nothing to write yet.
+// The value uses the plain decimal form LiteLLM emits (strconv, no exponent),
+// so a client parsing it with a decimal type does not choke on 1e-07.
+func (p *Proxy) setResponseCostHeader(w http.ResponseWriter, logCtx *RequestLogContext) {
+	if logCtx == nil || !logCtx.responseCostKnown {
+		return
+	}
+	w.Header().Set(HeaderResponseCost, strconv.FormatFloat(logCtx.responseCostUSD, 'f', -1, 64))
 }
 
 func (p *Proxy) shouldSkipResponseHeaderForClient(key string, cred *config.CredentialConfig) bool {
