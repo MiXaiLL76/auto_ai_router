@@ -56,11 +56,11 @@ func (p *Proxy) simulatedNonStreamSupported(prepared *orchestratedRequest) bool 
 // simulatedNonStreamAttemptResult carries what one attemptSimulatedNonStream
 // call decided about a single upstream response: either enough to finish
 // successfully (finalChatBody and friends) or enough to classify a failure
-// (streamErr, already passed to markStreamFailure). transportFailure is true
-// only for the specific shape handleSimulatedNonStream's retry loop acts on —
-// a genuine transport break (readErrForResolve != nil, excluding io.EOF) —
-// never set for overflow or "no reassemblable content", which stay
-// non-retryable exactly as before retry support existed.
+// (streamErr, already passed to markStreamFailure). The retry loop acts on
+// three failure shapes, none of which has committed anything to the client:
+// a genuine transport break (transportFailure), a content-free 2xx stream
+// (emptyStream), and a terminal error event whose status the retry policy
+// classifies as retryable (retryableStatus). Overflow stays non-retryable.
 type simulatedNonStreamAttemptResult struct {
 	finalChatBody     []byte
 	conv              *converter.ProviderConverter
@@ -71,6 +71,27 @@ type simulatedNonStreamAttemptResult struct {
 
 	streamErr        error
 	transportFailure bool
+
+	// retryableStatus is set when the upstream answered 2xx but the stream
+	// carried a terminal error event whose classified status the retry policy
+	// treats as retryable (a 429 rate limit, a 5xx, ...) — the same status a
+	// non-streaming request would have received as an HTTP error and retried
+	// on. The stream itself committed nothing, so the loop replays it on the
+	// next credential instead of surfacing a generic 502 built from a body-less
+	// stream. retryablePayload is that event's raw JSON, kept so the final
+	// outcome (when no credential is left) can surface the real status and body
+	// rather than a masked 502.
+	retryableStatus  int
+	retryablePayload string
+
+	// emptyStream is true when the upstream answered 2xx and closed the stream
+	// without a single content chunk (EOF, no terminal error event). A live
+	// model response always carries at least a finish chunk, so an entirely
+	// content-free stream is a provider-side failure, not a legitimate empty
+	// answer — the loop replays it on the next credential rather than
+	// surfacing a generic 502. The stream committed nothing to the client, so
+	// the retry is transparent.
+	emptyStream bool
 
 	// httpStatus > 0 means a retried credential answered with an HTTP error
 	// (429/5xx/...), not a stream, and that status is the terminal outcome:
@@ -217,8 +238,22 @@ func (p *Proxy) attemptSimulatedNonStream(
 
 	var streamErr error
 	var reassembledBody []byte
+	// A 2xx stream whose terminal event is a provider error carries that error
+	// only in the body (there is no HTTP status to classify), so the status the
+	// retry policy would have seen for the same failure non-streamed is derived
+	// from the captured event here.
+	var retryableStatus int
+	var retryablePayload string
+	var emptyStream bool
 	if streamErr = resolveCapturedProviderStreamError(logCtx, resp.StatusCode, readErrForResolve, rawProviderStreamError, outputStreamError); streamErr != nil {
 		markStreamFailure(logCtx, streamErr)
+		if payload := logCtx.ErrorBodyRaw; payload != "" {
+			status := statusCodeFromProviderStreamError(payload)
+			if retry, _ := ShouldRetryWithFallback(status, []byte(payload)); retry {
+				retryableStatus = status
+				retryablePayload = payload
+			}
+		}
 	} else if overflow {
 		streamErr = ErrResponseBodyTooLarge
 		markStreamFailure(logCtx, streamErr)
@@ -233,6 +268,9 @@ func (p *Proxy) attemptSimulatedNonStream(
 		if len(reassembledBody) == 0 {
 			streamErr = fmt.Errorf("simulated non-stream response: no reassemblable content in upstream stream")
 			markStreamFailure(logCtx, streamErr)
+			// No transport error and no terminal error event, yet nothing to
+			// reassemble: the provider closed a 2xx stream without content.
+			emptyStream = readErrForResolve == nil
 		}
 	}
 
@@ -244,10 +282,17 @@ func (p *Proxy) attemptSimulatedNonStream(
 		logTokens:         logTokens,
 		lastChunk:         lastChunk,
 		streamErr:         streamErr,
-		// The only retryable shape: a genuine transport break. Overflow and
-		// "no reassemblable content" above both leave readErrForResolve nil,
-		// so they can never mark this true (see package doc, out-of-scope).
+		emptyStream:       emptyStream,
+		// A genuine transport break (readErrForResolve != nil, io.EOF excluded):
+		// the provider dropped the connection mid-stream. Overflow is the one
+		// failure that stays non-retryable (a retry would hit the same size).
 		transportFailure: readErrForResolve != nil,
+		// A terminal error event the retry policy classifies as retryable (429,
+		// 5xx, ...) is replayed on the next credential too: nothing reached the
+		// client, so the retry is transparent, and surfacing a generic 502 for a
+		// provider-side 429/500 would hide the real cause.
+		retryableStatus:  retryableStatus,
+		retryablePayload: retryablePayload,
 	}
 }
 
@@ -258,11 +303,12 @@ func (p *Proxy) attemptSimulatedNonStream(
 // outcome: headers, compression, spend logging and the TTFT metric. The
 // caller must return immediately afterwards.
 //
-// On a genuine transport break mid-stream (connection reset, timeout — never
-// on overflow or "no reassemblable content", see simulatedNonStreamSupported's
-// doc and attemptSimulatedNonStream) it retries on the next credential, up to
-// p.maxProviderRetries, using the same balancer/prepare/send machinery
-// proxyRequest's own retry loop uses (nextRetryCredential, sendToCredential).
+// On a genuine transport break mid-stream (connection reset, timeout), on a
+// content-free 2xx stream, or on a terminal error event whose status the retry
+// policy classifies as retryable (429/5xx/...) it retries on the next
+// credential, up to p.maxProviderRetries, using the same balancer/prepare/send
+// machinery proxyRequest's own retry loop uses (nextRetryCredential,
+// sendToCredential). Overflow stays non-retryable (a retry hits the same size).
 // Nothing is ever written to the client before the outcome is fully decided
 // (confirmed: the only w.WriteHeader calls below are the final success write
 // and writeSimulatedError), so unlike live client-streaming, a retry here is
@@ -435,14 +481,41 @@ func (p *Proxy) handleSimulatedNonStream(
 		}
 
 		result = p.attemptSimulatedNonStream(resp, prepared, cred, modelID, logCtx)
-		if result.streamErr == nil || !result.transportFailure {
+		if result.streamErr == nil {
+			break
+		}
+		// A 2xx stream whose terminal event the retry policy classifies as
+		// retryable (429/5xx/...): nothing reached the client, so replay it on
+		// the next credential. Keep the classified status/body as the terminal
+		// outcome, so when no credential is left the client gets the real
+		// provider error instead of a generic 502 built from a body-less stream.
+		if result.retryableStatus > 0 {
+			status := result.retryableStatus
+			body := []byte(result.retryablePayload)
+			p.recordBanSignal(cred, modelID, status)
+			p.reportHealth(string(cred.Type), cred.Name, modelID, status, 0)
+			p.metrics.RecordCredentialAttemptError(cred.Name)
+			p.logger.WarnContext(r.Context(), "Provider stream carried a retryable error event, will retry",
+				"error_code", status, "credential", cred.Name, "model", modelID,
+				"attempt", attempt+1, "max_attempts", p.maxProviderRetries+1)
+			resp = nil
+			result = simulatedNonStreamAttemptResult{
+				httpStatus:    status,
+				httpBody:      body,
+				providerLabel: result.providerLabel,
+			}
+			continue
+		}
+		if !result.transportFailure && !result.emptyStream {
 			break
 		}
 		// A mid-stream transport break left this credential's response half-read;
 		// count the failed attempt against it (ban signal + per-attempt metric), as
 		// sendToCredential does for a break before any body arrives, so a credential
 		// that keeps dropping streams is demoted and its error rate reflects it.
-		// No response here, so no Retry-After: the worker falls back to its cooldown.
+		// A content-free 2xx stream counts the same way: the credential answered
+		// but delivered nothing. No response here, so no Retry-After: the worker
+		// falls back to its cooldown.
 		p.recordBanSignal(cred, modelID, http.StatusBadGateway)
 		p.reportHealth(string(cred.Type), cred.Name, modelID, http.StatusBadGateway, 0)
 		p.metrics.RecordCredentialAttemptError(cred.Name)
