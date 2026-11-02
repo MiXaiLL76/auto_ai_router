@@ -1991,3 +1991,105 @@ func TestHandleSimulatedPassthroughNonStream_TransportFailureRetriesOnNextCreden
 	require.NotEmpty(t, out.Output[0].Content)
 	assert.Equal(t, "fallback answer", out.Output[0].Content[0].Text)
 }
+
+// TestProxyRequest_ForceStream_RetryableStreamEventRetriesNextCredential: a
+// force_stream_for_ttft request whose upstream answers 2xx with a terminal
+// error event the retry policy classifies as retryable (429) is replayed on the
+// next credential, and the client gets the second credential's reassembled
+// non-stream JSON — not a generic 502 built from the body-less stream.
+func TestProxyRequest_ForceStream_RetryableStreamEventRetriesNextCredential(t *testing.T) {
+	var primaryHits, secondaryHits atomic.Int32
+	primary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		primaryHits.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(openAIChatSSE(
+			`{"error":{"code":"rate_limit_exceeded","message":"Resource exhausted. Please try again later.","type":"rate_limit_error"}}`,
+		)))
+	}))
+	defer primary.Close()
+	secondary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secondaryHits.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(openAIChatSSE(
+			`{"id":"c2","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}`,
+		)))
+	}))
+	defer secondary.Close()
+
+	prx := NewTestProxyBuilder().WithCredentials(
+		config.CredentialConfig{Name: "primary", Type: config.ProviderTypeOpenAI, BaseURL: primary.URL, APIKey: "k1", RPM: 100, TPM: 100000},
+		config.CredentialConfig{Name: "secondary", Type: config.ProviderTypeOpenAI, BaseURL: secondary.URL, APIKey: "k2", Priority: 1, RPM: 100, TPM: 100000},
+	).WithForceStreamForTTFT(true).WithMaxProviderRetries(3).Build()
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"stream":false}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	assert.Equal(t, int32(1), primaryHits.Load())
+	assert.Equal(t, int32(1), secondaryHits.Load(), "a retryable stream error must retry on the next credential")
+	assert.Contains(t, w.Body.String(), "ok")
+}
+
+// TestProxyRequest_ForceStream_EmptyStreamRetriesNextCredential: a 2xx stream
+// that closes without a single content chunk is a provider-side failure, so the
+// request is replayed on the next credential instead of surfacing a generic 502.
+func TestProxyRequest_ForceStream_EmptyStreamRetriesNextCredential(t *testing.T) {
+	var primaryHits, secondaryHits atomic.Int32
+	primary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		primaryHits.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer primary.Close()
+	secondary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secondaryHits.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(openAIChatSSE(
+			`{"id":"c2","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}`,
+		)))
+	}))
+	defer secondary.Close()
+
+	prx := NewTestProxyBuilder().WithCredentials(
+		config.CredentialConfig{Name: "primary", Type: config.ProviderTypeOpenAI, BaseURL: primary.URL, APIKey: "k1", RPM: 100, TPM: 100000},
+		config.CredentialConfig{Name: "secondary", Type: config.ProviderTypeOpenAI, BaseURL: secondary.URL, APIKey: "k2", Priority: 1, RPM: 100, TPM: 100000},
+	).WithForceStreamForTTFT(true).WithMaxProviderRetries(3).Build()
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"stream":false}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	assert.Equal(t, int32(1), primaryHits.Load())
+	assert.Equal(t, int32(1), secondaryHits.Load(), "a content-free 2xx stream must retry on the next credential")
+	assert.Contains(t, w.Body.String(), "ok")
+}
+
+// TestProxyRequest_ForceStream_EmptyStreamAllCredentialsReturnsError: with no
+// credential left, a content-free stream surfaces an error (not a silent empty
+// 200).
+func TestProxyRequest_ForceStream_EmptyStreamAllCredentialsReturnsError(t *testing.T) {
+	var hits atomic.Int32
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer upstream.Close()
+
+	prx := NewTestProxyBuilder().WithSingleCredential("only", config.ProviderTypeOpenAI, upstream.URL, "k").
+		WithForceStreamForTTFT(true).WithMaxProviderRetries(2).Build()
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"stream":false}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	prx.ProxyRequest(w, req)
+
+	assert.GreaterOrEqual(t, w.Code, 500, "a content-free stream must not be a silent 200: %s", w.Body.String())
+}
