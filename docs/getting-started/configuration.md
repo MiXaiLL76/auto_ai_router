@@ -179,6 +179,7 @@ Common fields for all credentials:
 | `tpm`              | int    | Tokens per minute limit (-1 = unlimited)                                                                                         |
 | `is_fallback`      | bool   | Use as fallback when primary credentials are exhausted                                                                           |
 | `reasoning_only`   | bool   | Route only requests that explicitly enable reasoning/thinking                                                                    |
+| `system_one`       | bool   | Serve only the native System One API, `POST /v1/systemone` ([details](#system-one-credentials))                                  |
 | `scopes`           | list   | Optional client scopes allowed to use and see this credential                                                                    |
 | `denied_scopes`    | list   | Optional client scopes that must not use or see this credential                                                                  |
 | `forbidden_scopes` | list   | Alias for `denied_scopes`                                                                                                        |
@@ -329,6 +330,42 @@ The filter recognizes enabled `reasoning_effort`, `reasoning`, `thinking`,
 explicitly disable it skip the credential during initial selection, sticky routing,
 retries, and fallback selection. For DB-loaded credentials, use
 `"air_reasoning_only": true` in `credential_info`.
+
+### System One credentials
+
+Set `system_one: true` on an OpenAI-wire credential (`openai`, `vllm`) whose provider speaks only
+the native System One API (`POST /v1/systemone`):
+
+```yaml
+credentials:
+  - name: system-one-primary
+    type: openai
+    api_key: "os.environ/SYSTEM_ONE_API_KEY"
+    base_url: "https://api.example.com"
+    priority: 1
+    system_one: true
+```
+
+`/v1/systemone` requests go only to `system_one` credentials (and to proxy-like ones, whose peer
+router applies the same rule), and no other endpoint ever selects them. The request body is
+forwarded as sent, with only `model` replaced by the credential's upstream model id; the reply
+comes back unconverted except for `model`, which names the public model. `stream: true` is
+rejected with 400, and so is a model that has no credential for the endpoint it is called on.
+
+Usage is read from `usage.input_tokens` / `usage.output_tokens`: without `total_tokens` their sum
+feeds the credential and model TPM, and a successful reply without usage is billed on the
+request's prompt-token estimate. Spend rows carry the call type `asystemone` (daily endpoint
+`/systemone`).
+
+To pass payload errors (400, 413, 415, 422) to the client instead of failing over, limit the
+credential's retryable status codes:
+
+```yaml
+retry:
+  credential_overrides:
+    system-one-primary:
+      status_codes: ["402", "429", "5xx"]
+```
 
 ## Models
 

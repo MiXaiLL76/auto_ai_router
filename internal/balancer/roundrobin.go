@@ -1068,6 +1068,21 @@ func (r *RoundRobin) GetCredentialsSnapshot() []config.CredentialConfig {
 	return creds
 }
 
+// CredentialNamesMatching returns the names of the credentials match accepts,
+// in configuration order, without copying the configs (GetCredentialsSnapshot
+// does): cheap enough for the per-request routing filters.
+func (r *RoundRobin) CredentialNamesMatching(match func(*config.CredentialConfig) bool) []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var names []string
+	for i := range r.credentials {
+		if match(&r.credentials[i]) {
+			names = append(names, r.credentials[i].Name)
+		}
+	}
+	return names
+}
+
 func (r *RoundRobin) GetAvailableCount() int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

@@ -26,10 +26,12 @@ const maxSSEModelRewriteLineBytes = 64 * 1024 * 1024
 // (OpenAI gpt-image-1, Imagen) byte-identical while still presenting the alias
 // for backends that do echo a model (canonical Gemini image, and any other
 // OpenAI-compatible image provider that returns "model") — matching the alias
-// every other route reports.
+// every other route reports. System One replies get the same treatment: only
+// the model they name changes, every other field keeps its raw value.
 var existingModelOnlyResponseRoutes = map[string]struct{}{
 	"/v1/images/generations": {},
 	"/v1/images/edits":       {},
+	systemOnePath:            {},
 }
 
 // modelBearingResponseRoutes is the product surface whose successful response

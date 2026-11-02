@@ -497,6 +497,7 @@ func (p *Proxy) writeFallbackResponse(
 		// decode, not derived from each other — see
 		// converter.ExtractTotalTokensAndUsageWithOptions's doc comment.
 		tokens, usage := extractOpenAITokensAndUsage(proxyResp.Body, usageOptions)
+		tokens, usage = p.systemOneUsage(r.Context(), logCtx, fallbackCred.Name, proxyResp.StatusCode, nil, modelID, tokens, usage)
 		if logCtx != nil {
 			logCtx.TokenUsage = usage
 			if logCtx.IsImageGeneration && proxyResp.StatusCode < http.StatusBadRequest {

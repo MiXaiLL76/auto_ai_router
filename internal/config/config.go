@@ -970,6 +970,13 @@ type CredentialConfig struct {
 	// Proxy/AIR remote-router specific fields
 	IsFallback bool `yaml:"is_fallback,omitempty"`
 
+	// SystemOne marks a credential that speaks only the native System One API
+	// (POST /v1/systemone). Such a credential serves nothing else, and
+	// /v1/systemone requests go only to credentials with this flag (or to
+	// proxy-like credentials, whose peer router decides). Only OpenAI-wire
+	// credentials (openai, vllm) may set it: they forward the request path as is.
+	SystemOne bool `yaml:"system_one,omitempty"`
+
 	// RequestHeaders are set on every upstream request sent with this direct
 	// provider credential (not air/proxy), replacing whatever the client sent
 	// under the same name; an empty value removes the header instead. Keys are
@@ -1093,6 +1100,7 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 		FallbackPriority string           `yaml:"fallback_priority,omitempty"`
 		Priority         string           `yaml:"priority,omitempty"`
 		ReasoningOnly    string           `yaml:"reasoning_only,omitempty"`
+		SystemOne        string           `yaml:"system_one,omitempty"`
 		Scopes           []string         `yaml:"scopes,omitempty"`
 		DeniedScopes     []string         `yaml:"denied_scopes,omitempty"`
 		ForbiddenScopes  []string         `yaml:"forbidden_scopes,omitempty"`
@@ -1152,6 +1160,9 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if c.ReasoningOnly, err = parseField(temp.ReasoningOnly, false, strconv.ParseBool, "reasoning_only for credential '"+c.Name+"'"); err != nil {
+		return err
+	}
+	if c.SystemOne, err = parseField(temp.SystemOne, false, strconv.ParseBool, "system_one for credential '"+c.Name+"'"); err != nil {
 		return err
 	}
 	if c.OpenAIProtocol, err = parseField(temp.OpenAIProtocol, false, strconv.ParseBool, "openai_proto for credential '"+c.Name+"'"); err != nil {
@@ -2352,6 +2363,9 @@ func (c *Config) Validate() error {
 		}
 		if cred.OpenAIProtocol && cred.GoogleProtocol {
 			return fmt.Errorf("credential %s: openai_proto and google_proto are mutually exclusive", cred.Name)
+		}
+		if cred.SystemOne && cred.EffectiveProviderType() != ProviderTypeOpenAI {
+			return fmt.Errorf("credential %s: system_one needs an OpenAI-wire credential (openai, vllm), got: %s", cred.Name, cred.Type)
 		}
 		if err := validateCredentialRequestHeaders(cred.Name, cred.Type, cred.RequestHeaders); err != nil {
 			return err

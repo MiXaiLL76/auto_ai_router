@@ -120,6 +120,45 @@ reasoning_only: os.environ/TEST_REASONING_ONLY
 	assert.True(t, credential.ReasoningOnly)
 }
 
+func TestCredentialConfigSystemOne(t *testing.T) {
+	var credential CredentialConfig
+	err := yaml.Unmarshal([]byte(`
+name: typesafe
+type: openai
+api_key: key
+base_url: https://api.typesafe.ai
+system_one: true
+`), &credential)
+
+	require.NoError(t, err)
+	assert.True(t, credential.SystemOne)
+}
+
+func TestConfig_Validate_SystemOneOnlyForOpenAIWire(t *testing.T) {
+	newConfig := func(cred CredentialConfig) *Config {
+		return &Config{
+			Server: ServerConfig{
+				Port:           8080,
+				MaxBodySizeMB:  10,
+				MasterKey:      "test-key",
+				RequestTimeout: 30 * time.Second,
+			},
+			Credentials: []CredentialConfig{cred},
+			Fail2Ban:    Fail2BanConfig{MaxAttempts: 3},
+		}
+	}
+	for _, credType := range []ProviderType{ProviderTypeOpenAI, ProviderTypeVLLM} {
+		cfg := newConfig(CredentialConfig{Name: "ok", Type: credType, APIKey: "key", BaseURL: "https://api.typesafe.ai", RPM: 60, SystemOne: true})
+		require.NoError(t, cfg.Validate(), credType)
+	}
+	for _, credType := range []ProviderType{ProviderTypeAnthropic, ProviderTypeProxy, ProviderTypeAIR} {
+		cfg := newConfig(CredentialConfig{Name: "bad", Type: credType, APIKey: "key", BaseURL: "https://example.com", RPM: 60, SystemOne: true})
+		err := cfg.Validate()
+		require.Error(t, err, credType)
+		assert.Contains(t, err.Error(), "system_one needs an OpenAI-wire credential")
+	}
+}
+
 func TestLoad_ResponseHeadersModeFromEnvironment(t *testing.T) {
 	t.Setenv("TEST_RESPONSE_HEADER_MODE", "ALLOWLIST")
 	configPath := filepath.Join(t.TempDir(), "config.yaml")

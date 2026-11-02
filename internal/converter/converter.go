@@ -31,6 +31,11 @@ type RequestMode struct {
 	IsEmbeddings      bool // true for /embeddings requests
 	IsStreaming       bool // true for streaming (stream: true) requests
 	IsResponsesAPI    bool // true when the outbound request uses /v1/responses
+	// IsSystemOne is true for /v1/systemone requests (the native System One
+	// API). The body goes upstream as is (the orchestrator has already put the
+	// provider's model id in it) and the reply comes back unconverted: no
+	// chat/messages/responses conversion and no chat-only field cleanup.
+	IsSystemOne bool
 	// MessagesPassthrough is true when an incoming /v1/messages request is being
 	// forwarded to an Anthropic-wire-compatible provider (Anthropic itself, or CometAPI
 	// in its default Anthropic-protocol mode) without the Messages->Chat->Messages
@@ -216,6 +221,14 @@ func (c *ProviderConverter) shouldStripOpenRouterOnlyFields() bool {
 // RequestFrom converts an OpenAI-format request body to the provider-specific format.
 // Returns the original body unchanged for OpenAI-compatible providers (passthrough).
 func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
+	if c.mode.IsSystemOne {
+		// Only OpenAI-wire destinations take the request path as is; every other
+		// provider type builds its own URL and expects a chat-shaped body.
+		if c.providerType != config.ProviderTypeOpenAI && !c.providerType.IsProxyLike() {
+			return nil, converterutil.NewRequestValidationError("model", "model does not support the System One API")
+		}
+		return body, nil
+	}
 	// Handle embeddings requests
 	if c.mode.IsEmbeddings {
 		switch c.providerType {
@@ -409,6 +422,9 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 // ResponseTo converts a provider-specific response body to OpenAI format.
 // Returns the original body unchanged for OpenAI-compatible providers (passthrough).
 func (c *ProviderConverter) ResponseTo(body []byte) ([]byte, error) {
+	if c.mode.IsSystemOne {
+		return body, nil
+	}
 	// Handle embeddings responses
 	if c.mode.IsEmbeddings {
 		switch c.providerType {

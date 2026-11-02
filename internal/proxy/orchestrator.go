@@ -134,6 +134,7 @@ func (p *Proxy) orchestrateRequest(
 	}
 
 	logCtx.RequestEndpoint = r.URL.Path
+	logCtx.IsSystemOne = isSystemOnePath(r.URL.Path)
 	logCtx.ReasoningRequested, logCtx.ReasoningSource, logCtx.ThinkingMode = requestReasoningDetails(body)
 	var policyDenylist []string
 	if logCtx.OrganizationPolicy != nil {
@@ -151,6 +152,19 @@ func (p *Proxy) orchestrateRequest(
 			routingExclusions = make(map[string]bool)
 		}
 		routingExclusions[credentialName] = true
+	}
+	// The System One API and every other endpoint are served by disjoint
+	// credentials (system_one); a model that has none for this endpoint is
+	// refused here rather than reported as out of credentials.
+	systemOneExcluded := p.systemOneExclusions(logCtx.IsSystemOne)
+	if !p.admitSystemOneRequest(w, logCtx, modelID, streaming, logCtx.IsSystemOne, systemOneExcluded) {
+		return nil, false
+	}
+	for name := range systemOneExcluded {
+		if routingExclusions == nil {
+			routingExclusions = make(map[string]bool)
+		}
+		routingExclusions[name] = true
 	}
 	triedCreds := GetTried(r.Context())
 	for name := range routingExclusions {
@@ -581,6 +595,18 @@ func (p *Proxy) buildCredentialRequestInner(
 			body = openai.ReplaceModelInBody(body, realModelID, credRealName)
 			realModelID = credRealName
 		}
+	}
+	if isSystemOnePath(basePath) {
+		// Native System One: the body goes upstream as the client sent it, with
+		// only the model id swapped above. None of the chat/messages/responses
+		// conversions or chat-only cleanups below apply.
+		return credentialPreparedRequest{
+			body:        body,
+			proxyBody:   proxyBody,
+			proxyPath:   basePath,
+			realModelID: realModelID,
+			path:        basePath,
+		}, nil
 	}
 	requestAPI := anthropicconv.ChatAPI
 	if basePath == "/v1/messages" {
