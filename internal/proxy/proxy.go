@@ -424,6 +424,7 @@ type Config struct {
 	OrganizationPolicies       *models.OrganizationPolicyRegistry
 	MaxProviderRetries         int                 // Max same-type credential retries (default: 2)
 	MaxFallbackAttempts        int                 // Max fallback proxy hops per request chain (default: 5)
+	AnthropicDefaultMaxTokens  int                 // max_tokens sent to a Claude model when the client sends none (default: 32000)
 	Retry                      config.RetryConfig  // Which upstream errors are replayed on another credential (zero value = built-in policy)
 	ResponseStore              responsestore.Store // Optional: Responses API store (bbolt or Redis)
 	SessionStickyEnabled       bool
@@ -478,6 +479,7 @@ type Proxy struct {
 	maxProviderRetries               int                 // Max same-type credential retries on provider errors
 	retryPolicy                      *retryPolicy        // compiled Config.Retry
 	maxFallbackAttempts              int                 // Max fallback proxy hops per request chain
+	anthropicDefaultMaxTokens        int                 // max_tokens sent to a Claude model when the client sends none (0 = config.AnthropicDefaultMaxTokens)
 	responseStore                    responsestore.Store // Optional: Responses API store (bbolt or Redis)
 	sessionStore                     sessionBindingStore // Optional: session-sticky credential routing
 	stickyAutoCacheCtrl              bool                // Auto-inject Anthropic cache_control when session is active
@@ -578,6 +580,7 @@ func New(cfg *Config) *Proxy {
 		organizationPolicies:             cfg.OrganizationPolicies,
 		maxProviderRetries:               cfg.MaxProviderRetries,
 		maxFallbackAttempts:              cfg.MaxFallbackAttempts,
+		anthropicDefaultMaxTokens:        cfg.AnthropicDefaultMaxTokens,
 		retryPolicy:                      newRetryPolicy(cfg.Retry),
 		responseStore:                    cfg.ResponseStore,
 		sessionStore:                     sessionStore,
@@ -1159,6 +1162,8 @@ func (p *Proxy) sendToCredential(
 	attemptedCreds map[string]bool,
 	embedFanOutReplies *embedContentFanOutReplies,
 ) (outcome credentialSendOutcome, done bool, isClientGone bool, shouldRetry bool, retryReason RetryReason, transportErr error) {
+	body = p.applyAnthropicDefaultMaxTokens(cred, prepared, realModelID, body)
+
 	// Create converter and build request body / target URL.
 	// nativeResponses path uses ProviderResponses (Vertex AI, Anthropic) directly.
 	// All other paths use the Chat Completions ProviderConverter.

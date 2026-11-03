@@ -1864,6 +1864,96 @@ monitoring:
 	assert.Equal(t, 5, cfg.Server.MaxProviderRetries, "Custom MaxProviderRetries should be 5")
 }
 
+func TestConfig_Validate_AnthropicDefaultMaxTokens(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   int
+		wantErr bool
+	}{
+		{"default value", AnthropicDefaultMaxTokens, false},
+		{"zero (= use the default)", 0, false},
+		{"custom value", 16000, false},
+		{"negative value", -1, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{
+				Server: ServerConfig{
+					Port:                      8080,
+					MaxBodySizeMB:             10,
+					MasterKey:                 "test-key",
+					RequestTimeout:            30 * time.Second,
+					AnthropicDefaultMaxTokens: tt.value,
+				},
+				Credentials: []CredentialConfig{
+					{Name: "test", Type: "openai", APIKey: "key", BaseURL: "http://test.com", RPM: 10},
+				},
+				Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
+			}
+			err := cfg.Validate()
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), "invalid anthropic_default_max_tokens")
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestLoad_AnthropicDefaultMaxTokens(t *testing.T) {
+	tests := []struct {
+		name    string
+		line    string
+		want    int
+		wantErr string
+	}{
+		{"omitted uses the default", "", AnthropicDefaultMaxTokens, ""},
+		{"custom value", "  anthropic_default_max_tokens: 16000\n", 16000, ""},
+		{"zero is kept, the proxy then uses the default", "  anthropic_default_max_tokens: 0\n", 0, ""},
+		{"negative is rejected", "  anthropic_default_max_tokens: -5\n", 0, "invalid anthropic_default_max_tokens"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			configContent := `
+server:
+  port: 8080
+  max_body_size_mb: 10
+  request_timeout: 30s
+  master_key: "sk-test"
+` + tt.line + `
+fail2ban:
+  max_attempts: 3
+  ban_duration: permanent
+  error_codes: [401]
+
+credentials:
+  - name: "test"
+    type: "openai"
+    api_key: "sk-test"
+    base_url: "https://api.openai.com"
+    rpm: 10
+
+monitoring:
+  prometheus_enabled: false
+`
+			require.NoError(t, os.WriteFile(configPath, []byte(configContent), 0644))
+
+			cfg, err := Load(configPath)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, cfg.Server.AnthropicDefaultMaxTokens)
+		})
+	}
+}
+
 func TestLoad_MaxConnectionLifetime(t *testing.T) {
 	tests := []struct {
 		name    string
