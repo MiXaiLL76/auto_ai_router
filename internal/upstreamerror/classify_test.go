@@ -156,6 +156,24 @@ func TestClassifyBadRequest(t *testing.T) {
 			wantCode:    "content_policy_violation",
 			notContains: []string{"blocked by our"},
 		},
+		{
+			// A bare "blocked by the provider" must NOT match: an account
+			// billing block is not a content refusal, and swallowing it here
+			// would replace the real cause with a misleading content-policy
+			// message (this is a regression guard for that false positive).
+			name:        "account blocked for billing is not content policy",
+			body:        `{"error":{"message":"Your account has been blocked by the provider for suspected billing fraud.","code":"account_blocked"}}`,
+			wantMessage: "Invalid request",
+			wantCode:    "invalid_request",
+			notContains: []string{"billing fraud", "content policy"},
+		},
+		{
+			name:        "geo restriction is not content policy",
+			body:        `{"error":{"message":"This request was blocked by the provider due to an IP/region restriction.","code":"region_restricted"}}`,
+			wantMessage: "Invalid request",
+			wantCode:    "invalid_request",
+			notContains: []string{"content policy", "region restriction"},
+		},
 	}
 
 	for _, tt := range tests {

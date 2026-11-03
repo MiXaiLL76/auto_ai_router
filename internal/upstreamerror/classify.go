@@ -524,14 +524,20 @@ func inferMaxTokensParam(joined string) string {
 func classifyValidationError(joined string, param *string, signals []string) (BadRequest, bool) {
 	result := BadRequest{Param: param}
 	switch {
-	case hasSignal(joined, "content_policy_violation", "content_policy", "content policy", "prohibited_content", "blocked by the provider's content policy", "blocked by the provider", "model_armor"):
+	case hasSignal(joined, "content_policy", "content policy", "prohibited_content", "model_armor"):
 		// A provider-side content refusal is a fault of the request, not of the
 		// credential: surface it as a clear 400 (the retry policy's "content
 		// policy" marker also makes it non-retryable) instead of a generic 502.
 		// Checked before the generic validation branches so the real cause wins.
-		// Signals stay narrowly content-policy-specific: a bare "safety" or
+		//
+		// Signals stay narrowly content-policy-specific. A bare "safety" or
 		// "blocklist" would also match unrelated validation messages (e.g. a
-		// safety_identifier parameter error).
+		// safety_identifier parameter error); a bare "blocked by the provider"
+		// would swallow billing/geo/IP blocks ("Your account has been blocked by
+		// the provider for suspected fraud"), replacing the real cause with a
+		// misleading content-policy message. "content_policy" (underscore)
+		// covers "content_policy_violation"; "content policy" (space) covers the
+		// provider's prose wording.
 		result.Message, result.Code = "The prompt was blocked by the provider's content policy", "content_policy_violation"
 		return result, true
 	case hasSignal(joined, "invalid_image_size", "invalid image size"):

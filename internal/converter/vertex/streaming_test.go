@@ -257,11 +257,24 @@ func TestTransformVertexStreamToOpenAI_PromptBlockEmitsContentPolicyEvent(t *tes
 	assert.Contains(t, got, "[DONE]")
 }
 
-// TestTransformVertexStreamToOpenAI_PromptBlockWithoutReason covers a block
-// whose blockReason is present but unspecified: it must still be reported as a
-// content refusal rather than silently swallowed.
-func TestTransformVertexStreamToOpenAI_PromptBlockWithoutReason(t *testing.T) {
-	stream := "data: " + `{"promptFeedback":{"blockReason":"SAFETY"}}` + "\n\n"
+// TestTransformVertexStreamToOpenAI_PromptBlockUnspecifiedReason covers a block
+// that reports BLOCKED_REASON_UNSPECIFIED. Presence of promptFeedback is the
+// signal (the SDK sends it only on a content violation), so an unspecified
+// reason must still surface as a content refusal -- gating on a specific
+// non-empty reason would silently re-open the 502 this fix closes.
+func TestTransformVertexStreamToOpenAI_PromptBlockUnspecifiedReason(t *testing.T) {
+	stream := "data: " + `{"promptFeedback":{"blockReason":"BLOCKED_REASON_UNSPECIFIED"}}` + "\n\n"
+
+	var out strings.Builder
+	require.NoError(t, TransformVertexStreamToOpenAI(strings.NewReader(stream), "gemini-2.5-pro", &out))
+	assert.Contains(t, out.String(), "content_policy_violation")
+}
+
+// TestTransformVertexStreamToOpenAI_PromptBlockWithoutReasonField covers the
+// shape where promptFeedback is present with no blockReason at all (only, say,
+// safetyRatings): it is still a prompt-level refusal and must be reported.
+func TestTransformVertexStreamToOpenAI_PromptBlockWithoutReasonField(t *testing.T) {
+	stream := "data: " + `{"promptFeedback":{"safetyRatings":[{"category":"HARM_CATEGORY_DANGEROUS_CONTENT","probability":"HIGH"}]}}` + "\n\n"
 
 	var out strings.Builder
 	require.NoError(t, TransformVertexStreamToOpenAI(strings.NewReader(stream), "gemini-2.5-pro", &out))
@@ -277,4 +290,38 @@ func TestTransformVertexStreamToOpenAI_NormalStreamUnaffected(t *testing.T) {
 	require.NoError(t, TransformVertexStreamToOpenAI(strings.NewReader(stream), "gemini-2.5-pro", &out))
 	assert.NotContains(t, out.String(), "content_policy_violation")
 	assert.Contains(t, out.String(), "hello")
+}
+
+// TestTransformVertexStreamToOpenAI_PromptFeedbackAfterContentIgnored pins the
+// guard on the block branch: the SDK contract says promptFeedback arrives only
+// in the first chunk, but if it ever arrived after real content the already
+// streamed partial answer must not be followed by an error event appended onto
+// it. The late promptFeedback is ignored and the stream finishes normally.
+func TestTransformVertexStreamToOpenAI_PromptFeedbackAfterContentIgnored(t *testing.T) {
+	stream := "data: " + `{"candidates":[{"content":{"parts":[{"text":"partial answer"}],"role":"model"}}]}` + "\n\n" +
+		"data: " + `{"promptFeedback":{"blockReason":"PROHIBITED_CONTENT"}}` + "\n\n" +
+		"data: " + `{"candidates":[{"content":{"parts":[{"text":" rest"}],"role":"model"},"finishReason":"STOP"}]}` + "\n\n"
+
+	var out strings.Builder
+	require.NoError(t, TransformVertexStreamToOpenAI(strings.NewReader(stream), "gemini-2.5-pro", &out))
+
+	got := out.String()
+	assert.NotContains(t, got, "content_policy_violation", "a late promptFeedback must not corrupt an already-streamed answer")
+	assert.Contains(t, got, "partial answer")
+	assert.Contains(t, got, " rest")
+}
+
+// TestTransformVertexStreamToOpenAI_FeedbackWithCandidatesKeepsContent covers
+// the same guard from the other side: a chunk carrying both promptFeedback and
+// real candidates (which the contract says does not happen) must keep the
+// content rather than being replaced by an error event.
+func TestTransformVertexStreamToOpenAI_FeedbackWithCandidatesKeepsContent(t *testing.T) {
+	stream := "data: " + `{"promptFeedback":{"blockReason":"PROHIBITED_CONTENT"},"candidates":[{"content":{"parts":[{"text":"real answer"}],"role":"model"},"finishReason":"STOP"}]}` + "\n\n"
+
+	var out strings.Builder
+	require.NoError(t, TransformVertexStreamToOpenAI(strings.NewReader(stream), "gemini-2.5-pro", &out))
+
+	got := out.String()
+	assert.NotContains(t, got, "content_policy_violation")
+	assert.Contains(t, got, "real answer")
 }
