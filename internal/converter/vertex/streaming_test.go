@@ -236,3 +236,45 @@ func TestTransformVertexStreamToOpenAI_ToolCallsFinishInLaterChunk(t *testing.T)
 		`{"index":1,"content":{"role":"model","parts":[{"text":""}]},"finishReason":"STOP"}]}` + "\n\n"
 	assert.Equal(t, []string{"stop", "tool_calls"}, finishReasons(twoCandidates))
 }
+
+// TestTransformVertexStreamToOpenAI_PromptBlockEmitsContentPolicyEvent covers a
+// production incident: Vertex/Gemini refuse a prompt with HTTP 200 and a single
+// chunk carrying only promptFeedback.blockReason and no candidates. Before the
+// fix that chunk produced nothing (the struct had no PromptFeedback field), so
+// the whole stream carried no choices and callers saw a generic 502 after
+// exhausting every credential. The refusal must instead surface as a terminal
+// error event carrying the "content policy" marker.
+func TestTransformVertexStreamToOpenAI_PromptBlockEmitsContentPolicyEvent(t *testing.T) {
+	stream := "data: " + `{"promptFeedback":{"blockReason":"PROHIBITED_CONTENT"},"usageMetadata":{"promptTokenCount":12,"totalTokenCount":12}}` + "\n\n"
+
+	var out strings.Builder
+	require.NoError(t, TransformVertexStreamToOpenAI(strings.NewReader(stream), "gemini-2.5-pro", &out))
+
+	got := out.String()
+	assert.Contains(t, got, "content_policy_violation")
+	assert.Contains(t, got, "content policy")
+	assert.Contains(t, got, "PROHIBITED_CONTENT")
+	assert.Contains(t, got, "[DONE]")
+}
+
+// TestTransformVertexStreamToOpenAI_PromptBlockWithoutReason covers a block
+// whose blockReason is present but unspecified: it must still be reported as a
+// content refusal rather than silently swallowed.
+func TestTransformVertexStreamToOpenAI_PromptBlockWithoutReason(t *testing.T) {
+	stream := "data: " + `{"promptFeedback":{"blockReason":"SAFETY"}}` + "\n\n"
+
+	var out strings.Builder
+	require.NoError(t, TransformVertexStreamToOpenAI(strings.NewReader(stream), "gemini-2.5-pro", &out))
+	assert.Contains(t, out.String(), "content_policy_violation")
+}
+
+// TestTransformVertexStreamToOpenAI_NormalStreamUnaffected guards against the
+// block branch firing on an ordinary chunk that simply has no candidates yet.
+func TestTransformVertexStreamToOpenAI_NormalStreamUnaffected(t *testing.T) {
+	stream := "data: " + `{"candidates":[{"content":{"parts":[{"text":"hello"}],"role":"model"},"finishReason":"STOP"}]}` + "\n\n"
+
+	var out strings.Builder
+	require.NoError(t, TransformVertexStreamToOpenAI(strings.NewReader(stream), "gemini-2.5-pro", &out))
+	assert.NotContains(t, out.String(), "content_policy_violation")
+	assert.Contains(t, out.String(), "hello")
+}

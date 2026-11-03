@@ -139,6 +139,23 @@ func TestClassifyBadRequest(t *testing.T) {
 			wantMessage: "Invalid request",
 			wantCode:    "invalid_request",
 		},
+		{
+			// The router's own prompt-block event (vertex writePromptBlockedEvent):
+			// a content refusal must classify as a content-policy 400, never the
+			// generic default, and must not echo the provider's block reason text.
+			name:        "content policy violation",
+			body:        `{"error":{"type":"invalid_request_error","code":"content_policy_violation","message":"The prompt was blocked by the provider's content policy (reason: PROHIBITED_CONTENT)"}}`,
+			wantMessage: "The prompt was blocked by the provider's content policy",
+			wantCode:    "content_policy_violation",
+			notContains: []string{"PROHIBITED_CONTENT"},
+		},
+		{
+			name:        "provider content policy wording",
+			body:        `{"error":{"message":"The request was blocked by our content policy.","code":"invalid_request"}}`,
+			wantMessage: "The prompt was blocked by the provider's content policy",
+			wantCode:    "content_policy_violation",
+			notContains: []string{"blocked by our"},
+		},
 	}
 
 	for _, tt := range tests {
