@@ -13,6 +13,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter/vertex"
+	"github.com/mixaill76/auto_ai_router/internal/httputil"
 )
 
 // geminiContinuationRetryDelay is the pause before the one retry of a follow-up
@@ -127,7 +128,9 @@ func (c *geminiContinuation) sendOnce(body []byte) (*http.Response, bool, error)
 		}
 		return nil, true, err
 	}
-	c.p.balancer.RecordResponse(c.cred.Name, c.modelID, resp.StatusCode)
+	c.p.recordBanSignal(c.cred, c.modelID, resp.StatusCode)
+	c.p.reportHealth(string(c.cred.Type), c.cred.Name, c.modelID, resp.StatusCode,
+		httputil.RetryAfterSeconds(resp.Header.Get("Retry-After")))
 	if resp.StatusCode == http.StatusOK {
 		return resp, false, nil
 	}

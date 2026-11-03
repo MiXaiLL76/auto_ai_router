@@ -52,6 +52,10 @@ var toolCostAliases = map[string]string{
 // cacheCreation1hRate is the tier's own rate for 1-hour cache writes. A tier
 // without one bills both TTLs at cacheCreationRate, as all tiers did before
 // the 100k tier, whose provider prices the two TTLs differently.
+//
+// cacheCreation12hRate is the tier's own rate for OpenAI's 12-hour
+// cache-retention writes, same shape as cacheCreation1hRate: a tier without
+// one bills the 12h TTL at cacheCreationRate too.
 type fullSessionTier struct {
 	threshold             int
 	inclusive             bool
@@ -60,6 +64,7 @@ type fullSessionTier struct {
 	cacheReadRate         float64
 	cacheCreationRate     float64
 	cacheCreation1hRate   float64
+	cacheCreation12hRate  float64
 	explicitCacheReadRate float64
 }
 
@@ -97,11 +102,12 @@ func fullSessionTiers(price *ModelPrice) []fullSessionTier {
 			cacheCreationRate: price.CacheCreationInputTokenCostAbove512k,
 		},
 		{
-			threshold:         tokenTiering272kThreshold,
-			inputRate:         price.InputCostPerTokenAbove272k,
-			outputRate:        price.OutputCostPerTokenAbove272k,
-			cacheReadRate:     price.CacheReadInputTokenCostAbove272k,
-			cacheCreationRate: price.CacheCreationInputTokenCostAbove272k,
+			threshold:            tokenTiering272kThreshold,
+			inputRate:            price.InputCostPerTokenAbove272k,
+			outputRate:           price.OutputCostPerTokenAbove272k,
+			cacheReadRate:        price.CacheReadInputTokenCostAbove272k,
+			cacheCreationRate:    price.CacheCreationInputTokenCostAbove272k,
+			cacheCreation12hRate: price.CacheCreationInputTokenCost12hAbove272k,
 		},
 		{
 			threshold:             tokenTiering256kThreshold,
@@ -447,6 +453,25 @@ func CalculateTokenCostsWithResolver(usage *converter.TokenUsage, price *ModelPr
 		}
 	}
 
+	// 12-hour cache-retention writes: their own tier, priced apart from the
+	// 30m/1h writes, and resolved from the full-session tier list the same way
+	// cacheCreation1hRate is above, rather than a threshold hardcoded to 272k
+	// — so the right bracket's 12h rate applies (today, only the 272k tier has
+	// one) regardless of which OTHER tier (if any) matches the base
+	// cache-creation rate for the same request, and a model that later needs
+	// its own 512k/256k/128k/100k 12h rate only has to add that price field
+	// and wire it into fullSessionTiers, with no change needed here. Falls
+	// back to the base write rate only when the model prices no 12h tier at
+	// all — a model that does is never silently billed at the cheaper 30m
+	// rate.
+	cacheCreation12hCost := price.CacheCreationInputTokenCost12h
+	if rate, ok := fullSessionRate(tiers, promptTokens, func(t fullSessionTier) float64 { return t.cacheCreation12hRate }); ok {
+		cacheCreation12hCost = rate
+	}
+	if cacheCreation12hCost == 0 {
+		cacheCreation12hCost = cacheCreationCost
+	}
+
 	// The aggregate remains authoritative for compatibility. TTL details split it;
 	// malformed details are capped so they can never bill more than the aggregate.
 	cacheCreation5mTokens := converterutil.NonNegativeTokenCount(usage.CacheCreation5mTokens)
@@ -457,9 +482,14 @@ func CalculateTokenCostsWithResolver(usage *converter.TokenUsage, price *ModelPr
 	if cacheCreation1hTokens > cacheCreationTokens-cacheCreation5mTokens {
 		cacheCreation1hTokens = cacheCreationTokens - cacheCreation5mTokens
 	}
-	unclassifiedCacheCreationTokens := cacheCreationTokens - cacheCreation5mTokens - cacheCreation1hTokens
+	cacheCreation12hTokens := converterutil.NonNegativeTokenCount(usage.CacheCreation12hTokens)
+	if cacheCreation12hTokens > cacheCreationTokens-cacheCreation5mTokens-cacheCreation1hTokens {
+		cacheCreation12hTokens = cacheCreationTokens - cacheCreation5mTokens - cacheCreation1hTokens
+	}
+	unclassifiedCacheCreationTokens := cacheCreationTokens - cacheCreation5mTokens - cacheCreation1hTokens - cacheCreation12hTokens
 	costs.CacheCreationCost = float64(unclassifiedCacheCreationTokens+cacheCreation5mTokens)*cacheCreationCost +
-		float64(cacheCreation1hTokens)*cacheCreation1hCost
+		float64(cacheCreation1hTokens)*cacheCreation1hCost +
+		float64(cacheCreation12hTokens)*cacheCreation12hCost
 
 	cachedOutputCost := price.OutputCostPerCachedToken
 	if cachedOutputCost == 0 {

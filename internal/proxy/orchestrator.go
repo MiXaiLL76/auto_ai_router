@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -132,6 +133,7 @@ func (p *Proxy) orchestrateRequest(
 	if !ok {
 		return nil, false
 	}
+	r = withClientServiceTiers(r, logCtx.clientServiceTiers)
 
 	logCtx.RequestEndpoint = r.URL.Path
 	logCtx.ReasoningRequested, logCtx.ReasoningSource, logCtx.ThinkingMode = requestReasoningDetails(body)
@@ -400,30 +402,35 @@ func (p *Proxy) prepareRequestForCredential(
 // sanitizeClientParams fixes client params that would only earn a 400 from the
 // upstream, on OpenAI-shaped bodies (Chat Completions, and Responses forwarded
 // natively): it drops an empty tools array with its tool_choice and
-// parallel_tool_calls, and rewrites the reasoning effort through the model's
-// reasoning_effort_map. Proxy-like credentials are skipped: the peer router owns
+// parallel_tool_calls, rewrites the reasoning effort through the model's
+// reasoning_effort_map, and then applies the reasoning model param rules
+// (openai.ReplaceBodyParam / ReplaceResponsesBodyParam). Those rules run last
+// because whether sampling params may stay depends on the effort the upstream
+// actually receives. Proxy-like credentials are skipped: the peer router owns
 // that model's config and does the same on its side.
 func (p *Proxy) sanitizeClientParams(r *http.Request, modelID string, cred *config.CredentialConfig, req credentialPreparedRequest) []byte {
+	chatShaped := strings.HasSuffix(req.path, "/chat/completions")
 	if cred.IsProxyLike() ||
-		(!strings.HasSuffix(req.path, "/chat/completions") && !req.passthroughResponses && !req.nativeResponses && !req.convertedToResponses) {
+		(!chatShaped && !req.passthroughResponses && !req.nativeResponses && !req.convertedToResponses) {
 		return req.body
 	}
 	body := openai.DropEmptyTools(req.body)
-	if p.modelManager == nil {
-		return body
-	}
-	effortMap := p.modelManager.GetReasoningEffortMap(modelID, cred.Name)
-	if effortMap == nil {
-		return body
-	}
-	return openai.MapReasoningEffort(body, func(v string) (string, bool) {
-		mapped, changed := effortMap.Resolve(v)
-		if changed {
-			p.logger.DebugContext(r.Context(), "Rewrote reasoning effort via reasoning_effort_map",
-				"model", modelID, "credential", cred.Name, "from", v, "to", mapped)
+	if p.modelManager != nil {
+		if effortMap := p.modelManager.GetReasoningEffortMap(modelID, cred.Name); effortMap != nil {
+			body = openai.MapReasoningEffort(body, func(v string) (string, bool) {
+				mapped, changed := effortMap.Resolve(v)
+				if changed {
+					p.logger.DebugContext(r.Context(), "Rewrote reasoning effort via reasoning_effort_map",
+						"model", modelID, "credential", cred.Name, "from", v, "to", mapped)
+				}
+				return mapped, changed
+			})
 		}
-		return mapped, changed
-	})
+	}
+	if chatShaped {
+		return openai.ReplaceBodyParam(req.realModelID, body)
+	}
+	return openai.ReplaceResponsesBodyParam(req.realModelID, body)
 }
 
 func (p *Proxy) buildCredentialRequest(
@@ -586,6 +593,14 @@ func (p *Proxy) buildCredentialRequestInner(
 	if err := anthropicconv.ValidateToolChoice(body, realModelID, requestAPI); err != nil {
 		return credentialPreparedRequest{}, err
 	}
+	if err := anthropicconv.ValidateThinkingControls(body, realModelID, requestAPI); err != nil {
+		return credentialPreparedRequest{}, err
+	}
+	for _, tier := range clientServiceTiers(r.Context()) {
+		if err := anthropicconv.ValidateServiceTier(tier, realModelID); err != nil {
+			return credentialPreparedRequest{}, err
+		}
+	}
 
 	effectiveType := cred.EffectiveProviderType()
 	if p.stickyAutoCacheCtrl &&
@@ -643,7 +658,7 @@ func (p *Proxy) buildCredentialRequestInner(
 		if err != nil {
 			return req, err
 		}
-		req.body = openai.ReplaceBodyParam(realModelID, chatBody)
+		req.body = chatBody
 		req.path = "/v1/chat/completions"
 		req.convertedMessages = true
 		req.messagesMetadata = metadata
@@ -675,25 +690,13 @@ func (p *Proxy) buildCredentialRequestInner(
 			// body. Proxy-like credentials are excluded: a chained AIR
 			// instance does its own model-specific handling on the request
 			// it actually receives.
-			// ReplaceBodyParam first, on the Chat-shaped body: o1/o3/o4/gpt-5 reject
-			// temperature/top_p/top_logprobs on the Responses API exactly like they do
-			// on Chat Completions, but deleteChatOnlyFields (chat_to_responses.go) only
-			// strips frequency_penalty/presence_penalty/logprobs -- not those three --
-			// so without this they survive into the Responses body and the upstream
-			// 400s. ReplaceBodyParam also renames max_tokens -> max_completion_tokens,
-			// which is safe to do before conversion: ChatRequestToResponses reads
-			// max_completion_tokens first anyway, falling back to max_tokens only when
-			// it's absent. ReplaceResponsesBodyParam still runs after conversion for
-			// gpt-6's include-list filtering (Responses-only field, no Chat equivalent
-			// to strip pre-conversion); its own temperature/top_p/top_logprobs removal
-			// is now redundant for gpt-6 (already gone via ReplaceBodyParam) but kept
-			// since gpt-6 must still work if ever called with a body ReplaceBodyParam
-			// didn't touch.
-			responsesBody, err := responses.ChatRequestToResponses(openai.ReplaceBodyParam(realModelID, body))
+			// The reasoning model sampling rule is applied after conversion, by
+			// sanitizeClientParams, on the effort the Responses body ends up with.
+			responsesBody, err := responses.ChatRequestToResponses(body)
 			if err != nil {
 				return req, err
 			}
-			req.body = openai.ReplaceResponsesBodyParam(realModelID, responsesBody)
+			req.body = responsesBody
 			// req.proxyBody/req.proxyPath are deliberately left at their
 			// defaults (baseProxyBody, the alias-restored *Chat Completions*
 			// body, and basePath, "/v1/chat/completions") rather than the
@@ -745,15 +748,15 @@ func (p *Proxy) buildCredentialRequestInner(
 			normalizedBody = openai.NormalizeDeveloperRole(body)
 			normalizedProxyBody = openai.NormalizeDeveloperRole(proxyBody)
 		}
-		req.body = openai.ReplaceBodyParam(realModelID, normalizedBody)
+		req.body = normalizedBody
 		req.proxyBody = normalizedProxyBody
 		return req, nil
 	}
 
 	switch {
 	case p.modelManager != nil && p.modelManager.IsPassthroughResponsesForProvider(modelID, cred.Type):
-		req.body = openai.ReplaceResponsesBodyParam(realModelID, responses.PrepareCodexPassthrough(body, prevEntryHandled))
-		req.proxyBody = openai.ReplaceResponsesBodyParam(realModelID, responses.PrepareCodexPassthrough(proxyBody, prevEntryHandled))
+		req.body = responses.PrepareCodexPassthrough(body, prevEntryHandled)
+		req.proxyBody = responses.PrepareCodexPassthrough(proxyBody, prevEntryHandled)
 		req.passthroughResponses = true
 		p.logger.DebugContext(r.Context(), "Native Responses API passthrough",
 			"model", modelID, "provider", cred.Type, "streaming", streaming)
@@ -791,8 +794,8 @@ func (p *Proxy) buildCredentialRequestInner(
 		// Without this, previous_response_id survived even when
 		// prevEntryHandled was true, and ttl/metadata leaked to the
 		// provider unstripped.
-		req.body = openai.ReplaceResponsesBodyParam(realModelID, responses.PrepareCodexPassthrough(body, prevEntryHandled))
-		req.proxyBody = openai.ReplaceResponsesBodyParam(realModelID, responses.PrepareCodexPassthrough(proxyBody, prevEntryHandled))
+		req.body = responses.PrepareCodexPassthrough(body, prevEntryHandled)
+		req.proxyBody = responses.PrepareCodexPassthrough(proxyBody, prevEntryHandled)
 		req.passthroughResponses = true
 		p.logger.DebugContext(r.Context(), "Responses API request for responses_only model forwarded as passthrough",
 			"model", modelID, "streaming", streaming)
@@ -812,14 +815,14 @@ func (p *Proxy) buildCredentialRequestInner(
 		if err != nil {
 			return req, err
 		}
-		req.body = openai.ReplaceBodyParam(realModelID, chatBody)
+		req.body = chatBody
 		// proxyBody must stay in sync with body: TryFallbackProxy forwards
 		// proxyBody, not body, to fallback credentials. Left as the original
 		// Responses-API-shaped bytes (still keyed on "input", not "messages"),
 		// a fallback to any Chat-Completions-only backend would reject the
 		// request outright ("specify prompt or messages") instead of the
 		// converted body the primary attempt used.
-		req.proxyBody = openai.ReplaceBodyParam(modelID, chatBody)
+		req.proxyBody = chatBody
 		req.convertedResp = true
 		if streaming {
 			req.body = injectStreamOptions(req.body)
@@ -845,6 +848,24 @@ func markCredentialAsTried(r *http.Request, credentialName string) *http.Request
 	triedCreds[credentialName] = true
 	ctx = SetTried(ctx, triedCreds)
 	return r.WithContext(ctx)
+}
+
+type clientServiceTiersContextKey struct{}
+
+// withClientServiceTiers carries the client's service tiers, which the ingress
+// sanitizer strips from the body, to buildCredentialRequestInner. They are
+// checked there against the model the credential serves: before alias
+// resolution the client's model name says nothing about it.
+func withClientServiceTiers(r *http.Request, tiers []string) *http.Request {
+	if len(tiers) == 0 {
+		return r
+	}
+	return r.WithContext(context.WithValue(r.Context(), clientServiceTiersContextKey{}, tiers))
+}
+
+func clientServiceTiers(ctx context.Context) []string {
+	tiers, _ := ctx.Value(clientServiceTiersContextKey{}).([]string)
+	return tiers
 }
 
 func (p *Proxy) isLiteLLMHealthy() bool {
@@ -1093,6 +1114,7 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		return nil, "", "", false, false
 	}
 	body = sanitized.Body
+	logCtx.clientServiceTiers = sanitized.ServiceTiers
 	if p.rawBodyStoreRawBody {
 		// Opt-in only (kafka.raw_bodies.store_raw_body, default false) --
 		// this is the client's own request body, e.g. the prompt, a

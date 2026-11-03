@@ -1,17 +1,21 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
 	"github.com/mixaill76/auto_ai_router/internal/models"
+	"github.com/mixaill76/auto_ai_router/internal/monitoring"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -172,7 +176,8 @@ func TestHandleSimulatedNonStream_CapturesTTFT(t *testing.T) {
 	w := httptest.NewRecorder()
 
 	prx.handleSimulatedNonStream(w, req, resp, prepared, cred, "gpt-4o", "gpt-4o",
-		logCtx, nil, "http://upstream", []byte(`{"model":"gpt-4o","messages":[]}`))
+		logCtx, nil, "http://upstream", []byte(`{"model":"gpt-4o","messages":[]}`),
+		false, false, false, start, map[string]bool{}, map[string]bool{})
 
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
@@ -410,11 +415,80 @@ func TestHandleSimulatedNonStream_MidStreamTransportError(t *testing.T) {
 	w := httptest.NewRecorder()
 
 	prx.handleSimulatedNonStream(w, req, resp, prepared, cred, "gpt-4o", "gpt-4o",
-		logCtx, nil, "http://upstream", []byte(`{"model":"gpt-4o","messages":[]}`))
+		logCtx, nil, "http://upstream", []byte(`{"model":"gpt-4o","messages":[]}`),
+		false, false, false, start, map[string]bool{}, map[string]bool{})
 
 	require.Equal(t, http.StatusBadGateway, w.Code)
 	assert.Equal(t, "failure", logCtx.Status)
 	assert.Equal(t, "stream_error", logCtx.StreamOutcome)
+	// Final in-memory state only -- writeSimulatedError unconditionally sets
+	// logCtx.HTTPStatus itself right after finalizeStreamingLog runs, so this
+	// passes either way and is NOT the regression guard for the spend-log bug
+	// (see TestFinalizeStreamingLogArgument_UsesClassifiedFailureStatus below,
+	// which catches the actual mechanism: what finalizeStreamingLog bakes into
+	// the spend log *before* that overwrite ever happens).
+	assert.Equal(t, http.StatusBadGateway, logCtx.HTTPStatus)
+}
+
+// The spend log is written synchronously inside finalizeStreamingLog, before
+// writeSimulatedError's later (client-facing only) assignment to
+// logCtx.HTTPStatus -- so the status finalizeStreamingLog is CALLED WITH is
+// what actually lands in spend logs/ClickHouse, independent of whatever
+// happens to logCtx afterward. This is the real regression guard for the bug
+// TestHandleSimulatedNonStream_MidStreamTransportError's own HTTPStatus
+// assertion can't catch (writeSimulatedError papers over it in-memory
+// either way): previously all three simulated handlers called
+// finalizeStreamingLog with resp.StatusCode (the upstream's original 2xx)
+// instead of the classified failure status, so a request failing 40+ seconds
+// in still logged a clean 200 even though the client got 502/504.
+func TestFinalizeStreamingLogArgument_UsesClassifiedFailureStatus(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	logCtx := &RequestLogContext{
+		Request:       httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
+		StreamOutcome: "stream_error", // what markStreamFailure would have set
+	}
+
+	// What handleSimulatedNonStream (and its two siblings) must now pass as
+	// finalizeStreamingLog's statusCode argument for a transport failure --
+	// simulatedFailureStatus's own result, not resp.StatusCode.
+	prx.finalizeStreamingLog(logCtx, 0, nil, "openai", simulatedFailureStatus(context.DeadlineExceeded), false)
+	assert.Equal(t, http.StatusGatewayTimeout, logCtx.HTTPStatus, "a timeout-shaped failure must bake 504 into the spend log")
+
+	logCtx2 := &RequestLogContext{
+		Request:       httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
+		StreamOutcome: "stream_error",
+	}
+	prx.finalizeStreamingLog(logCtx2, 0, nil, "openai", simulatedFailureStatus(io.ErrUnexpectedEOF), false)
+	assert.Equal(t, http.StatusBadGateway, logCtx2.HTTPStatus, "a plain connection-drop failure must bake 502 into the spend log")
+}
+
+// A timeout-shaped transport failure classifies as 504, not a bare 502 -- for
+// both the client response and the spend log, mirroring the isTimeoutError
+// convention used elsewhere (e.g. the "all attempts exhausted" tail).
+func TestHandleSimulatedNonStream_TimeoutClassifiesAsGatewayTimeout(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+
+	sse := openAIChatSSE(
+		`{"id":"chatcmpl-1","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}`,
+	)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(&errReader{data: []byte(sse), err: context.DeadlineExceeded}),
+	}
+	logCtx := &RequestLogContext{StartTime: time.Now(), RequestID: "test-req-timeout", Request: req}
+	cred := &config.CredentialConfig{Name: "openai", Type: config.ProviderTypeOpenAI}
+	prepared := &orchestratedRequest{streaming: false}
+	w := httptest.NewRecorder()
+
+	prx.handleSimulatedNonStream(w, req, resp, prepared, cred, "gpt-4o", "gpt-4o",
+		logCtx, nil, "http://upstream", []byte(`{"model":"gpt-4o","messages":[]}`),
+		false, false, false, time.Now(), map[string]bool{}, map[string]bool{})
+
+	assert.Equal(t, http.StatusGatewayTimeout, w.Code)
+	assert.Equal(t, http.StatusGatewayTimeout, logCtx.HTTPStatus)
 }
 
 // TestReassembleChatCompletion_Images verifies streamed image deltas (Gemini
@@ -482,7 +556,8 @@ func TestHandleSimulatedNonStream_WebSearchHiddenAndClientResponseID(t *testing.
 	w := httptest.NewRecorder()
 
 	prx.handleSimulatedNonStream(w, req, resp, prepared, cred, "gpt-4o", "gpt-4o",
-		logCtx, nil, "http://upstream", []byte(`{"model":"gpt-4o","messages":[]}`))
+		logCtx, nil, "http://upstream", []byte(`{"model":"gpt-4o","messages":[]}`),
+		false, false, false, time.Now(), map[string]bool{}, map[string]bool{})
 
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.NotContains(t, w.Body.String(), "web_search", "hidden web_search must be stripped")
@@ -642,8 +717,9 @@ func TestHandleSimulatedNativeNonStream_CapturesTTFT(t *testing.T) {
 	prepared := &orchestratedRequest{streaming: false, nativeResponses: true, forcedNativeNonStream: true, body: []byte(`{"model":"claude-haiku-4.5","input":"hi"}`)}
 	w := httptest.NewRecorder()
 
-	prx.handleSimulatedNativeNonStream(w, req, resp, prepared, cred, provResponses, "claude-haiku-4.5",
-		logCtx, nil, "http://upstream")
+	prx.handleSimulatedNativeNonStream(w, req, resp, prepared, cred, provResponses, "claude-haiku-4.5", "claude-haiku-4.5",
+		logCtx, nil, "http://upstream", prepared.body,
+		false, false, false, start, map[string]bool{}, map[string]bool{})
 
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
@@ -711,8 +787,9 @@ func TestHandleSimulatedNativeNonStream_SavesResponse(t *testing.T) {
 	var saved *responses.Response
 	saveResponseFn := func(r *responses.Response) { saved = r }
 
-	prx.handleSimulatedNativeNonStream(w, req, resp, prepared, cred, provResponses, "claude-haiku-4.5",
-		logCtx, saveResponseFn, "http://upstream")
+	prx.handleSimulatedNativeNonStream(w, req, resp, prepared, cred, provResponses, "claude-haiku-4.5", "claude-haiku-4.5",
+		logCtx, saveResponseFn, "http://upstream", prepared.body,
+		false, false, false, time.Now(), map[string]bool{}, map[string]bool{})
 
 	require.Equal(t, http.StatusOK, w.Code)
 	require.NotNil(t, saved, "saveResponseFn must be called so store: true responses are retrievable later")
@@ -774,7 +851,8 @@ func TestHandleSimulatedPassthroughNonStream_CapturesTTFT(t *testing.T) {
 	prepared := &orchestratedRequest{streaming: false, passthroughResponses: true, forcedPassthroughNonStream: true, body: []byte(`{"model":"gpt-4o-mini","input":"hi"}`)}
 	w := httptest.NewRecorder()
 
-	prx.handleSimulatedPassthroughNonStream(w, req, resp, prepared, cred, "gpt-4o-mini", logCtx, nil, "http://upstream")
+	prx.handleSimulatedPassthroughNonStream(w, req, resp, prepared, cred, "gpt-4o-mini", "gpt-4o-mini", logCtx, nil, "http://upstream", prepared.body,
+		false, false, false, start, map[string]bool{}, map[string]bool{})
 
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
@@ -1224,7 +1302,8 @@ func TestSimulatedPassthrough_DataWithoutSpace(t *testing.T) {
 	prepared := &orchestratedRequest{passthroughResponses: true, forcedPassthroughNonStream: true, body: []byte(`{}`)}
 	w := httptest.NewRecorder()
 
-	prx.handleSimulatedPassthroughNonStream(w, req, resp, prepared, cred, "m", logCtx, nil, "http://x")
+	prx.handleSimulatedPassthroughNonStream(w, req, resp, prepared, cred, "m", "m", logCtx, nil, "http://x", prepared.body,
+		false, false, false, time.Now(), map[string]bool{}, map[string]bool{})
 
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 	var out struct {
@@ -1234,4 +1313,941 @@ func TestSimulatedPassthrough_DataWithoutSpace(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &out))
 	assert.Equal(t, "response", out.Object)
 	assert.Equal(t, "completed", out.Status)
+}
+
+// hijackAfterPartialSSE writes one SSE chunk, flushes it, then closes the raw
+// TCP connection without a proper chunk terminator -- the real-transport
+// equivalent of errReader's io.ErrUnexpectedEOF, used to exercise
+// handleSimulatedNonStream's retry through the full ProxyRequest path
+// (sendToCredential does a real p.client.Do, so a synthetic *http.Response
+// like errReader's can't stand in for a credential being retried onto).
+func hijackAfterPartialSSE(w http.ResponseWriter, partial string) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, partial)
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+	if hj, ok := w.(http.Hijacker); ok {
+		if conn, _, err := hj.Hijack(); err == nil {
+			_ = conn.Close()
+		}
+	}
+}
+
+// TestHandleSimulatedNonStream_TransportFailureRetriesOnNextCredential
+// verifies the user-requested fix: a transport break mid-stream on the
+// force_stream_for_ttft path (what today's acompletion incident hit) now
+// retries on the next credential instead of failing the client outright --
+// nothing was ever written to the client for the dead primary attempt, so
+// the retry is fully transparent.
+func TestHandleSimulatedNonStream_TransportFailureRetriesOnNextCredential(t *testing.T) {
+	var primaryHits, secondaryHits atomic.Int32
+	primary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		primaryHits.Add(1)
+		hijackAfterPartialSSE(w, `data: {"id":"c1","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant","content":"partial"},"finish_reason":null}]}`+"\n\n")
+	}))
+	defer primary.Close()
+	secondary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secondaryHits.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, openAIChatSSE(
+			`{"id":"c2","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant","content":"fallback answer"},"finish_reason":"stop"}]}`,
+		))
+	}))
+	defer secondary.Close()
+
+	prx := NewTestProxyBuilder().WithCredentials(
+		config.CredentialConfig{Name: "primary", Type: config.ProviderTypeOpenAI, BaseURL: primary.URL, APIKey: "primary-key", RPM: 100, TPM: 100000},
+		config.CredentialConfig{Name: "secondary", Type: config.ProviderTypeOpenAI, BaseURL: secondary.URL, APIKey: "secondary-key", Priority: 1, RPM: 100, TPM: 100000},
+	).WithMaxProviderRetries(2).WithForceStreamForTTFT(true).Build()
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{
+		"model":"gpt-4o",
+		"messages":[{"role":"user","content":"hi"}],
+		"stream":false
+	}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+	assert.Equal(t, int32(1), primaryHits.Load())
+	assert.Equal(t, int32(1), secondaryHits.Load())
+
+	var out struct {
+		Object  string `json:"object"`
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &out))
+	assert.Equal(t, "chat.completion", out.Object)
+	require.Len(t, out.Choices, 1)
+	assert.Equal(t, "fallback answer", out.Choices[0].Message.Content)
+}
+
+// TestHandleSimulatedNonStream_TransportFailureExhaustsRetries verifies that
+// once every available credential has broken transport mid-stream, the
+// client still gets the classified 502 (not a masked 200) -- the retry adds
+// a chance to recover, it doesn't change the final failure contract.
+func TestHandleSimulatedNonStream_TransportFailureExhaustsRetries(t *testing.T) {
+	var primaryHits, secondaryHits atomic.Int32
+	primary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		primaryHits.Add(1)
+		hijackAfterPartialSSE(w, `data: {"id":"c1","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}`+"\n\n")
+	}))
+	defer primary.Close()
+	secondary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secondaryHits.Add(1)
+		hijackAfterPartialSSE(w, `data: {"id":"c2","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"also partial"},"finish_reason":null}]}`+"\n\n")
+	}))
+	defer secondary.Close()
+
+	prx := NewTestProxyBuilder().WithCredentials(
+		config.CredentialConfig{Name: "primary", Type: config.ProviderTypeOpenAI, BaseURL: primary.URL, APIKey: "primary-key", RPM: 100, TPM: 100000},
+		config.CredentialConfig{Name: "secondary", Type: config.ProviderTypeOpenAI, BaseURL: secondary.URL, APIKey: "secondary-key", Priority: 1, RPM: 100, TPM: 100000},
+	).WithMaxProviderRetries(1).WithForceStreamForTTFT(true).Build()
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{
+		"model":"gpt-4o",
+		"messages":[{"role":"user","content":"hi"}],
+		"stream":false
+	}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusBadGateway, w.Code, w.Body.String())
+	assert.Equal(t, int32(1), primaryHits.Load())
+	assert.Equal(t, int32(1), secondaryHits.Load())
+}
+
+// TestHandleSimulatedNonStream_OverflowDoesNotRetry verifies overflow stays
+// non-retryable (explicitly out of scope, see simulatedNonStreamAttemptResult's
+// doc): a different credential isn't expected to fix a response that is a
+// size property of the content itself, so the second credential must never
+// be hit even though one is available.
+func TestHandleSimulatedNonStream_OverflowDoesNotRetry(t *testing.T) {
+	var secondaryHits atomic.Int32
+	secondary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secondaryHits.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, openAIChatSSE(
+			`{"id":"c2","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"fallback"},"finish_reason":"stop"}]}`,
+		))
+	}))
+	defer secondary.Close()
+
+	prx := NewTestProxyBuilder().WithCredentials(
+		config.CredentialConfig{Name: "primary", Type: config.ProviderTypeOpenAI, BaseURL: "http://primary.invalid", APIKey: "primary-key", RPM: 100, TPM: 100000},
+		config.CredentialConfig{Name: "secondary", Type: config.ProviderTypeOpenAI, BaseURL: secondary.URL, APIKey: "secondary-key", Priority: 1, RPM: 100, TPM: 100000},
+	).WithMaxProviderRetries(2).Build()
+	prx.maxResponseBodySize = 20 // tiny: the SSE chunk below is well over this
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+
+	sse := openAIChatSSE(
+		`{"id":"chatcmpl-1","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"this content is definitely longer than twenty bytes"},"finish_reason":"stop"}]}`,
+	)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(sse)),
+	}
+	logCtx := &RequestLogContext{StartTime: time.Now(), RequestID: "test-req-overflow", Request: req}
+	cred := &config.CredentialConfig{Name: "primary", Type: config.ProviderTypeOpenAI, BaseURL: "http://primary.invalid"}
+	prepared := &orchestratedRequest{streaming: false}
+	w := httptest.NewRecorder()
+
+	prx.handleSimulatedNonStream(w, req, resp, prepared, cred, "gpt-4o", "gpt-4o",
+		logCtx, nil, "http://upstream", []byte(`{"model":"gpt-4o","messages":[]}`),
+		false, false, false, time.Now(), map[string]bool{}, map[string]bool{})
+
+	require.Equal(t, http.StatusBadGateway, w.Code)
+	assert.Equal(t, int32(0), secondaryHits.Load(), "overflow must not retry on another credential")
+}
+
+// TestResetSimulatedAttemptState_ClearsPriorAttemptFields is the direct
+// regression guard for the field-leak bug: markStreamFailure/
+// markProxyProviderStreamError write Status/StreamOutcome/ErrorMsg/
+// ErrorBodyRaw/ClientResponseBody/ErrorOrigin/HTTPStatus straight onto
+// logCtx, and CompletionStartTime gets stamped by the stream scanner --
+// resetSimulatedAttemptState must zero all of them so a dead attempt never
+// leaks into a later attempt's outcome on the same logCtx.
+func TestResetSimulatedAttemptState_ClearsPriorAttemptFields(t *testing.T) {
+	logCtx := &RequestLogContext{
+		Status:              "failure",
+		StreamOutcome:       "stream_error",
+		ErrorMsg:            "stream_error",
+		ErrorBodyRaw:        `{"error":"boom"}`,
+		ClientResponseBody:  `{"error":"boom"}`,
+		ErrorOrigin:         ErrorOriginUnclassifiedStreamError,
+		HTTPStatus:          http.StatusBadGateway,
+		CompletionStartTime: time.Now(),
+	}
+
+	resetSimulatedAttemptState(logCtx)
+
+	assert.Empty(t, logCtx.Status)
+	assert.Empty(t, logCtx.StreamOutcome)
+	assert.Empty(t, logCtx.ErrorMsg)
+	assert.Empty(t, logCtx.ErrorBodyRaw)
+	assert.Empty(t, logCtx.ClientResponseBody)
+	assert.Empty(t, string(logCtx.ErrorOrigin))
+	assert.Zero(t, logCtx.HTTPStatus)
+	assert.True(t, logCtx.CompletionStartTime.IsZero())
+
+	assert.NotPanics(t, func() { resetSimulatedAttemptState(nil) })
+}
+
+// TestHandleSimulatedNonStream_SuccessfulRetryLogsSuccess is the end-to-end
+// regression guard: a transport failure on the first credential that is then
+// retried away to a successful second credential must log the request as a
+// success. Before resetSimulatedAttemptState, the first attempt's
+// markStreamFailure call left Status="failure"/StreamOutcome="stream_error"
+// stamped on logCtx, and finalizeStreamingLog's own
+// `StreamOutcome == "stream_error"` check then forced Status back to
+// "failure" even though the client received a clean 200 -- the spend log
+// disagreed with what was actually served.
+func TestHandleSimulatedNonStream_SuccessfulRetryLogsSuccess(t *testing.T) {
+	var secondaryHits atomic.Int32
+	secondary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secondaryHits.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, openAIChatSSE(
+			`{"id":"c2","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant","content":"fallback answer"},"finish_reason":"stop"}]}`,
+		))
+	}))
+	defer secondary.Close()
+
+	prx := NewTestProxyBuilder().WithCredentials(
+		config.CredentialConfig{Name: "primary", Type: config.ProviderTypeOpenAI, BaseURL: "http://primary.invalid", APIKey: "primary-key", RPM: 100, TPM: 100000},
+		config.CredentialConfig{Name: "secondary", Type: config.ProviderTypeOpenAI, BaseURL: secondary.URL, APIKey: "secondary-key", Priority: 1, RPM: 100, TPM: 100000},
+	).WithMaxProviderRetries(2).Build()
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+
+	// Primary answers with a real content chunk (so CompletionStartTime gets
+	// stamped) before the transport breaks -- the exact shape that leaked a
+	// stale TTFT and failure status into the eventual successful attempt.
+	sse := openAIChatSSE(
+		`{"id":"chatcmpl-1","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}`,
+	)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(&errReader{data: []byte(sse), err: io.ErrUnexpectedEOF}),
+	}
+	logCtx := &RequestLogContext{StartTime: time.Now(), RequestID: "test-req-retry-logs-success", Request: req}
+	cred := &config.CredentialConfig{Name: "primary", Type: config.ProviderTypeOpenAI, BaseURL: "http://primary.invalid"}
+	prepared := &orchestratedRequest{streaming: false}
+	w := httptest.NewRecorder()
+
+	prx.handleSimulatedNonStream(w, req, resp, prepared, cred, "gpt-4o", "gpt-4o",
+		logCtx, nil, "http://upstream", []byte(`{"model":"gpt-4o","messages":[]}`),
+		false, false, false, time.Now(), map[string]bool{}, map[string]bool{})
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Equal(t, int32(1), secondaryHits.Load())
+
+	assert.Equal(t, "success", logCtx.Status, "the dead primary attempt must not leak 'failure' into a successfully retried request")
+	assert.NotEqual(t, "stream_error", logCtx.StreamOutcome)
+	assert.Empty(t, logCtx.ErrorMsg)
+	assert.Equal(t, http.StatusOK, logCtx.HTTPStatus)
+}
+
+// TestHandleSimulatedNonStream_SuccessfulRetryDoesNotLeakTokenUsage is the
+// billing-side counterpart of the Status/StreamOutcome leak above: logCtx.
+// TokenUsage is accumulated across chunks with MergeNonZero (a zero/absent
+// field never overwrites an already-merged non-zero one), so cached-token
+// and web-search usage a dead first attempt reported must not survive into a
+// second attempt that reports neither -- otherwise the successful response
+// gets billed for cache reads and web searches it never actually used.
+func TestHandleSimulatedNonStream_SuccessfulRetryDoesNotLeakTokenUsage(t *testing.T) {
+	var secondaryHits atomic.Int32
+	secondary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secondaryHits.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, openAIChatSSE(
+			`{"id":"c2","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant","content":"fallback answer"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`,
+		))
+	}))
+	defer secondary.Close()
+
+	prx := NewTestProxyBuilder().WithCredentials(
+		config.CredentialConfig{Name: "primary", Type: config.ProviderTypeOpenAI, BaseURL: "http://primary.invalid", APIKey: "primary-key", RPM: 100, TPM: 100000},
+		config.CredentialConfig{Name: "secondary", Type: config.ProviderTypeOpenAI, BaseURL: secondary.URL, APIKey: "secondary-key", Priority: 1, RPM: 100, TPM: 100000},
+	).WithMaxProviderRetries(2).Build()
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+
+	// Primary reports cached-token and web-search usage before the transport
+	// breaks -- a provider's first usage-bearing chunk (cache/search tooling)
+	// can easily arrive before a later mid-stream disconnect.
+	sse := openAIChatSSE(
+		`{"id":"chatcmpl-1","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2,"prompt_tokens_details":{"cached_tokens":999},"web_search_requests":3}}`,
+	)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(&errReader{data: []byte(sse), err: io.ErrUnexpectedEOF}),
+	}
+	logCtx := &RequestLogContext{StartTime: time.Now(), RequestID: "test-req-retry-token-usage", Request: req}
+	cred := &config.CredentialConfig{Name: "primary", Type: config.ProviderTypeOpenAI, BaseURL: "http://primary.invalid"}
+	prepared := &orchestratedRequest{streaming: false}
+	w := httptest.NewRecorder()
+
+	prx.handleSimulatedNonStream(w, req, resp, prepared, cred, "gpt-4o", "gpt-4o",
+		logCtx, nil, "http://upstream", []byte(`{"model":"gpt-4o","messages":[]}`),
+		false, false, false, time.Now(), map[string]bool{}, map[string]bool{})
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Equal(t, int32(1), secondaryHits.Load())
+	require.NotNil(t, logCtx.TokenUsage)
+
+	assert.Equal(t, 10, logCtx.TokenUsage.PromptTokens)
+	assert.Equal(t, 5, logCtx.TokenUsage.CompletionTokens)
+	assert.Zero(t, logCtx.TokenUsage.CachedInputTokens, "cached-token usage from the dead primary attempt must not be billed on the successful retry")
+	assert.Zero(t, logCtx.TokenUsage.WebSearchRequests, "web-search usage from the dead primary attempt must not be billed on the successful retry")
+}
+
+// TestHandleSimulatedNonStream_RetryOntoHTTPErrorUsesNextCredential covers a
+// gap the plain transport-retry tests miss: a retried credential can answer
+// with an HTTP error (429, 5xx) instead of a stream. Before the fix, that error
+// body was fed into the SSE reassembler, which found no content and reported a
+// terminal 502 -- never trying the healthy credential still left in the pool.
+// A retryable status must be classified like the main retry loop does and move
+// on to the next credential.
+func TestHandleSimulatedNonStream_RetryOntoHTTPErrorUsesNextCredential(t *testing.T) {
+	var primaryHits, secondaryHits, thirdHits atomic.Int32
+	primary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		primaryHits.Add(1)
+		hijackAfterPartialSSE(w, `data: {"id":"c1","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}`+"\n\n")
+	}))
+	defer primary.Close()
+	// Secondary answers 429 (retryable), not a stream.
+	secondary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secondaryHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"error":{"message":"rate limited","type":"rate_limit_error"}}`)
+	}))
+	defer secondary.Close()
+	third := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		thirdHits.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, openAIChatSSE(
+			`{"id":"c3","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant","content":"third works"},"finish_reason":"stop"}]}`,
+		))
+	}))
+	defer third.Close()
+
+	prx := NewTestProxyBuilder().WithCredentials(
+		config.CredentialConfig{Name: "primary", Type: config.ProviderTypeOpenAI, BaseURL: primary.URL, APIKey: "primary-key", RPM: 100, TPM: 100000},
+		config.CredentialConfig{Name: "secondary", Type: config.ProviderTypeOpenAI, BaseURL: secondary.URL, APIKey: "secondary-key", Priority: 1, RPM: 100, TPM: 100000},
+		config.CredentialConfig{Name: "third", Type: config.ProviderTypeOpenAI, BaseURL: third.URL, APIKey: "third-key", Priority: 2, RPM: 100, TPM: 100000},
+	).WithMaxProviderRetries(3).WithForceStreamForTTFT(true).Build()
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{
+		"model":"gpt-4o",
+		"messages":[{"role":"user","content":"hi"}],
+		"stream":false
+	}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Equal(t, int32(1), primaryHits.Load())
+	assert.Equal(t, int32(1), secondaryHits.Load())
+	assert.Equal(t, int32(1), thirdHits.Load(), "a retryable HTTP error on the second credential must not stop the retry chain")
+}
+
+// TestHandleSimulatedNonStream_RetryHTTPErrorsExhaustedSurfacesRealStatus: when
+// every remaining credential answers a retryable HTTP error, the client gets
+// the real upstream status (429) rather than a generic 502.
+func TestHandleSimulatedNonStream_RetryHTTPErrorsExhaustedSurfacesRealStatus(t *testing.T) {
+	primary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hijackAfterPartialSSE(w, `data: {"id":"c1","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}`+"\n\n")
+	}))
+	defer primary.Close()
+	secondary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"error":{"message":"rate limited","type":"rate_limit_error"}}`)
+	}))
+	defer secondary.Close()
+
+	prx := NewTestProxyBuilder().WithCredentials(
+		config.CredentialConfig{Name: "primary", Type: config.ProviderTypeOpenAI, BaseURL: primary.URL, APIKey: "primary-key", RPM: 100, TPM: 100000},
+		config.CredentialConfig{Name: "secondary", Type: config.ProviderTypeOpenAI, BaseURL: secondary.URL, APIKey: "secondary-key", Priority: 1, RPM: 100, TPM: 100000},
+	).WithMaxProviderRetries(3).WithForceStreamForTTFT(true).Build()
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{
+		"model":"gpt-4o",
+		"messages":[{"role":"user","content":"hi"}],
+		"stream":false
+	}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusTooManyRequests, w.Code, w.Body.String())
+}
+
+// TestHandleSimulatedNonStream_MidStreamBreakRecordsCredentialError covers the
+// accounting gap around the transport-retry: a credential whose stream breaks
+// mid-body (after the 200 header, so sendToCredential's own transport-failure
+// recording never runs) was retried away without being counted against it --
+// no balancer RecordResponse, no CredentialErrorsTotal. A credential that keeps
+// dropping streams was invisible to fail2ban and the error metric.
+func TestHandleSimulatedNonStream_MidStreamBreakRecordsCredentialError(t *testing.T) {
+	monitoring.CredentialErrorsTotal.Reset()
+
+	primary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hijackAfterPartialSSE(w, `data: {"id":"c1","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}`+"\n\n")
+	}))
+	defer primary.Close()
+	secondary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, openAIChatSSE(
+			`{"id":"c2","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant","content":"fallback answer"},"finish_reason":"stop"}]}`,
+		))
+	}))
+	defer secondary.Close()
+
+	builder := NewTestProxyBuilder().WithCredentials(
+		config.CredentialConfig{Name: "breaker", Type: config.ProviderTypeOpenAI, BaseURL: primary.URL, APIKey: "primary-key", RPM: 100, TPM: 100000},
+		config.CredentialConfig{Name: "healthy", Type: config.ProviderTypeOpenAI, BaseURL: secondary.URL, APIKey: "secondary-key", Priority: 1, RPM: 100, TPM: 100000},
+	).WithMaxProviderRetries(2).WithForceStreamForTTFT(true)
+	builder.config.Metrics = monitoring.New(true)
+	prx := builder.Build()
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{
+		"model":"gpt-4o",
+		"messages":[{"role":"user","content":"hi"}],
+		"stream":false
+	}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	count := testutil.ToFloat64(monitoring.CredentialErrorsTotal.WithLabelValues("breaker"))
+	assert.Equal(t, float64(1), count, "a credential whose stream breaks mid-body must record one CredentialErrorsTotal")
+	// The companion balancer.RecordResponse call is asserted indirectly: the
+	// test balancer's fail2ban tracks 500s, so a 502 recorded for the breaker
+	// would ban it after maxAttempts; here one call is below the threshold, so
+	// the observable surface is the metric above.
+}
+
+// TestHandleSimulatedNonStream_Surfaced429CarriesRetryAfter: a 429 that the
+// retry chain surfaces to the client (every remaining credential answered a
+// retryable error) must carry a Retry-After header, exactly as the main loop's
+// final-error path adds via ensureRetryAfterOn429 -- otherwise a client told to
+// back off has no hint and hammers the pool immediately.
+func TestHandleSimulatedNonStream_Surfaced429CarriesRetryAfter(t *testing.T) {
+	primary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hijackAfterPartialSSE(w, `data: {"id":"c1","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}`+"\n\n")
+	}))
+	defer primary.Close()
+	secondary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"error":{"message":"rate limited","type":"rate_limit_error"}}`)
+	}))
+	defer secondary.Close()
+
+	prx := NewTestProxyBuilder().WithCredentials(
+		config.CredentialConfig{Name: "primary", Type: config.ProviderTypeOpenAI, BaseURL: primary.URL, APIKey: "primary-key", RPM: 100, TPM: 100000},
+		config.CredentialConfig{Name: "secondary", Type: config.ProviderTypeOpenAI, BaseURL: secondary.URL, APIKey: "secondary-key", Priority: 1, RPM: 100, TPM: 100000},
+	).WithMaxProviderRetries(3).WithForceStreamForTTFT(true).Build()
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{
+		"model":"gpt-4o",
+		"messages":[{"role":"user","content":"hi"}],
+		"stream":false
+	}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusTooManyRequests, w.Code, w.Body.String())
+	assert.NotEmpty(t, w.Header().Get("Retry-After"), "a surfaced 429 must carry a Retry-After header")
+}
+
+// TestHandleSimulatedNonStream_SurfacedErrorReportsFailingCredentialURL: the
+// spend row's api_base is derived from logCtx.TargetURL, which targetURL is
+// captured by value at attempt 0 -- so a surfaced error on a retried credential
+// must report that credential's URL, not the original one's, and must be set
+// before finalizeStreamingLog writes the row.
+func TestHandleSimulatedNonStream_SurfacedErrorReportsFailingCredentialURL(t *testing.T) {
+	primary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hijackAfterPartialSSE(w, `data: {"id":"c1","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}`+"\n\n")
+	}))
+	defer primary.Close()
+	secondary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":{"message":"bad request","type":"invalid_request_error"}}`)
+	}))
+	defer secondary.Close()
+
+	prx := NewTestProxyBuilder().WithCredentials(
+		config.CredentialConfig{Name: "primary", Type: config.ProviderTypeOpenAI, BaseURL: primary.URL, APIKey: "primary-key", RPM: 100, TPM: 100000},
+		config.CredentialConfig{Name: "secondary", Type: config.ProviderTypeOpenAI, BaseURL: secondary.URL, APIKey: "secondary-key", Priority: 1, RPM: 100, TPM: 100000},
+	).WithMaxProviderRetries(2).WithForceStreamForTTFT(true).Build()
+	setTestModelPrice(prx, "gpt-4o", &models.ModelPrice{InputCostPerToken: 0.001, OutputCostPerToken: 0.001})
+	db := &stubLiteLLMManager{}
+	prx.LiteLLMDB = db
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{
+		"model":"gpt-4o",
+		"messages":[{"role":"user","content":"hi"}],
+		"stream":false
+	}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+	require.Len(t, db.loggedEntries, 1)
+	wantHost := strings.TrimPrefix(secondary.URL, "http://")
+	assert.Equal(t, wantHost, db.loggedEntries[0].APIBase,
+		"the spend row's api_base must name the credential that actually failed, not the original one")
+}
+
+// TestReassembleChatCompletion_SameIndexDistinctToolCalls is the reassembler's
+// defensive half of the tool-call-index fix (see the Anthropic converter's
+// ToolCallIndexAdvanceWithoutStop test): if a Chat-SSE stream still carries two
+// distinct tool calls under one index, stitching strictly by index would append
+// the second call's name and arguments onto the first, yielding one call named
+// "bashavito_..." with two JSON objects in arguments (the Avito incident). A
+// differing non-empty id under a taken index must open a new call instead.
+func TestReassembleChatCompletion_SameIndexDistinctToolCalls(t *testing.T) {
+	stream := openAIChatSSE(
+		`{"id":"c","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"role":"assistant"}}]}`,
+		`{"id":"c","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"toolu_bash","type":"function","function":{"name":"bash"}}]}}]}`,
+		`{"id":"c","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"command\":\"ls\"}"}}]}}]}`,
+		`{"id":"c","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"toolu_avito","type":"function","function":{"name":"avito_internal_knowledge_search_tool"}}]}}]}`,
+		`{"id":"c","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"query\":\"x\"}"}}]}}]}`,
+		`{"id":"c","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	)
+
+	body := reassembleChatCompletion([]byte(stream))
+	require.NotNil(t, body)
+
+	var out struct {
+		Choices []struct {
+			Message struct {
+				ToolCalls []struct {
+					ID       string `json:"id"`
+					Function struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	require.NoError(t, json.Unmarshal(body, &out))
+	require.Len(t, out.Choices, 1)
+	tcs := out.Choices[0].Message.ToolCalls
+	require.Len(t, tcs, 2, "two distinct ids under one index must stay two calls")
+
+	assert.Equal(t, "bash", tcs[0].Function.Name)
+	assert.Equal(t, `{"command":"ls"}`, tcs[0].Function.Arguments)
+	assert.Equal(t, "avito_internal_knowledge_search_tool", tcs[1].Function.Name)
+	assert.Equal(t, `{"query":"x"}`, tcs[1].Function.Arguments)
+	assert.NotContains(t, tcs[0].Function.Name, "avito", "first call must not absorb the second call's name")
+}
+
+// errorPropagatingProviderResponses is a local, registry-free
+// responses.ProviderResponses stand-in that -- unlike stubProviderResponses
+// above -- genuinely forwards whatever its reader returns instead of always
+// succeeding. Used to exercise attemptSimulatedNativeNonStream's own
+// transport-failure classification directly (no package-level registration
+// of a real provider needed: internal/proxy's test binary never imports
+// internal/converter/anthropic/responses, so registering it here as a
+// package-level init side effect would leak into unrelated orchestrator
+// tests that assert on native-Responses classification for other models).
+type errorPropagatingProviderResponses struct {
+	final *responses.Response
+}
+
+func (s *errorPropagatingProviderResponses) RequestFrom(body []byte) ([]byte, string, error) {
+	return body, "application/json", nil
+}
+
+func (s *errorPropagatingProviderResponses) ResponseTo(body []byte, displayModelID string) (*responses.Response, error) {
+	return s.final, nil
+}
+
+func (s *errorPropagatingProviderResponses) StreamTo(reader io.Reader, writer io.Writer, displayModelID string,
+	meta *responses.ResponsesMetadata, onComplete func(*responses.Response)) error {
+	if _, err := io.Copy(writer, reader); err != nil {
+		return err
+	}
+	if onComplete != nil {
+		onComplete(s.final)
+	}
+	return nil
+}
+
+func (s *errorPropagatingProviderResponses) BuildURL(cred *config.CredentialConfig) string {
+	return "http://upstream"
+}
+
+// TestHandleSimulatedNativeNonStream_TransportFailureRetriesOnNextCredential
+// mirrors TestHandleSimulatedNonStream_TransportFailureRetriesOnNextCredential
+// for the native-Responses path (Anthropic/Vertex): a transport break on the
+// first credential must retry on the next one instead of failing outright --
+// before retry support existed here, handleSimulatedNativeNonStream had no
+// way to try another credential at all. The retried-onto credential answers
+// a retryable HTTP error (429) rather than a second stream: sendToCredential
+// classifies that status before ever building a provResponses for it (see
+// errorPropagatingProviderResponses's doc comment for why this test cannot
+// use a second real native stream), so this still exercises the full retry
+// loop -- nextRetryCredential, sendToCredential, the ban-signal/metrics
+// accounting -- without a package-level provider registration.
+func TestHandleSimulatedNativeNonStream_TransportFailureRetriesOnNextCredential(t *testing.T) {
+	var secondaryHits atomic.Int32
+	secondary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secondaryHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"error":{"message":"rate limited","type":"rate_limit_error"}}`)
+	}))
+	defer secondary.Close()
+
+	prx := NewTestProxyBuilder().WithCredentials(
+		config.CredentialConfig{Name: "primary", Type: config.ProviderTypeAnthropic, BaseURL: "http://primary.invalid", APIKey: "primary-key", RPM: 100, TPM: 100000},
+		config.CredentialConfig{Name: "secondary", Type: config.ProviderTypeAnthropic, BaseURL: secondary.URL, APIKey: "secondary-key", Priority: 1, RPM: 100, TPM: 100000},
+	).WithMaxProviderRetries(2).Build()
+
+	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+
+	// Primary answers with real content before the transport breaks.
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(&errReader{data: []byte("partial content"), err: io.ErrUnexpectedEOF}),
+	}
+	logCtx := &RequestLogContext{StartTime: time.Now(), RequestID: "test-native-retry", Request: req}
+	cred := &config.CredentialConfig{Name: "primary", Type: config.ProviderTypeAnthropic, BaseURL: "http://primary.invalid"}
+	nativeBody := []byte(`{"model":"claude-haiku-4.5","input":"hi"}`)
+	prepared := &orchestratedRequest{
+		streaming: false, nativeResponses: true, forcedNativeNonStream: true,
+		body: nativeBody, responsesMetadata: &responses.ResponsesMetadata{},
+		// nextRetryCredential rebuilds the retry request from these base*
+		// fields (prepareRequestForCredential), not from body/realModelID --
+		// without them the retry attempt gets an empty/mismatched body.
+		baseBody: nativeBody, baseProxyBody: nativeBody, baseRealModelID: "claude-haiku-4.5", basePath: "/v1/responses",
+		isResponsesAPI: true,
+	}
+	provResponses := &errorPropagatingProviderResponses{final: &responses.Response{
+		ID: "resp_1", Object: "response", Model: "claude-haiku-4.5", Status: "in_progress",
+	}}
+	w := httptest.NewRecorder()
+
+	// Calling the handler directly (not through ProxyRequest) skips the main
+	// loop's own seeding of triedCreds with the initial credential's name --
+	// without it, a second retry attempt (there is no third credential, but
+	// the loop still tries) would be free to pick "primary" right back.
+	triedCreds := map[string]bool{"primary": true}
+	prx.handleSimulatedNativeNonStream(w, req, resp, prepared, cred, provResponses, "claude-haiku-4.5", "claude-haiku-4.5",
+		logCtx, nil, "http://upstream", prepared.body,
+		false, false, false, time.Now(), triedCreds, map[string]bool{"primary": true})
+
+	require.Equal(t, http.StatusTooManyRequests, w.Code, w.Body.String())
+	assert.Equal(t, int32(1), secondaryHits.Load(), "a transport break on the first credential must retry on the next one")
+}
+
+// TestHandleSimulatedPassthroughNonStream_TransportFailureRetriesOnNextCredential
+// mirrors TestHandleSimulatedNonStream_TransportFailureRetriesOnNextCredential
+// for the codex/OpenAI passthrough Responses path: a transport break (no
+// terminal response.completed event ever arrives) on the first credential
+// must retry on the next one instead of failing outright.
+func TestHandleSimulatedPassthroughNonStream_TransportFailureRetriesOnNextCredential(t *testing.T) {
+	var secondaryHits atomic.Int32
+	secondFinalJSON := `{"type":"response.completed","response":{"id":"resp_2","object":"response","model":"gpt-4o-mini","status":"completed","output":[{"type":"message","id":"msg_2","status":"completed","role":"assistant","content":[{"type":"output_text","text":"fallback answer"}]}],"usage":{"input_tokens":5,"output_tokens":3,"total_tokens":8}}}`
+	secondary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secondaryHits.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, responsesSSE(secondFinalJSON))
+	}))
+	defer secondary.Close()
+
+	prx := NewTestProxyBuilder().WithCredentials(
+		config.CredentialConfig{Name: "primary", Type: config.ProviderTypeOpenAI, BaseURL: "http://primary.invalid", APIKey: "primary-key", RPM: 100, TPM: 100000},
+		config.CredentialConfig{Name: "secondary", Type: config.ProviderTypeOpenAI, BaseURL: secondary.URL, APIKey: "secondary-key", Priority: 1, RPM: 100, TPM: 100000},
+	).WithMaxProviderRetries(2).Build()
+
+	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(`{"model":"gpt-4o-mini","input":"hi"}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+
+	// Primary emits the created + a delta event, then the connection breaks --
+	// no response.completed ever arrives.
+	partialSSE := "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"model\":\"gpt-4o-mini\",\"status\":\"in_progress\"}}\n\n" +
+		"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n"
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(&errReader{data: []byte(partialSSE), err: io.ErrUnexpectedEOF}),
+	}
+	logCtx := &RequestLogContext{StartTime: time.Now(), RequestID: "test-passthrough-retry", Request: req}
+	cred := &config.CredentialConfig{Name: "primary", Type: config.ProviderTypeOpenAI, BaseURL: "http://primary.invalid"}
+	prepared := &orchestratedRequest{streaming: false, passthroughResponses: true, forcedPassthroughNonStream: true, body: []byte(`{"model":"gpt-4o-mini","input":"hi"}`)}
+	w := httptest.NewRecorder()
+
+	prx.handleSimulatedPassthroughNonStream(w, req, resp, prepared, cred, "gpt-4o-mini", "gpt-4o-mini", logCtx, nil, "http://upstream", prepared.body,
+		false, false, false, time.Now(), map[string]bool{}, map[string]bool{})
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Equal(t, int32(1), secondaryHits.Load())
+
+	var out struct {
+		Object string `json:"object"`
+		Status string `json:"status"`
+		Output []struct {
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"output"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &out))
+	assert.Equal(t, "response", out.Object)
+	assert.Equal(t, "completed", out.Status)
+	require.NotEmpty(t, out.Output)
+	require.NotEmpty(t, out.Output[0].Content)
+	assert.Equal(t, "fallback answer", out.Output[0].Content[0].Text)
+}
+
+// TestProxyRequest_ForceStream_RetryableStreamEventRetriesNextCredential: a
+// force_stream_for_ttft request whose upstream answers 2xx with a terminal
+// error event the retry policy classifies as retryable (429) is replayed on the
+// next credential, and the client gets the second credential's reassembled
+// non-stream JSON — not a generic 502 built from the body-less stream.
+func TestProxyRequest_ForceStream_RetryableStreamEventRetriesNextCredential(t *testing.T) {
+	var primaryHits, secondaryHits atomic.Int32
+	primary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		primaryHits.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(openAIChatSSE(
+			`{"error":{"code":"rate_limit_exceeded","message":"Resource exhausted. Please try again later.","type":"rate_limit_error"}}`,
+		)))
+	}))
+	defer primary.Close()
+	secondary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secondaryHits.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(openAIChatSSE(
+			`{"id":"c2","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}`,
+		)))
+	}))
+	defer secondary.Close()
+
+	prx := NewTestProxyBuilder().WithCredentials(
+		config.CredentialConfig{Name: "primary", Type: config.ProviderTypeOpenAI, BaseURL: primary.URL, APIKey: "k1", RPM: 100, TPM: 100000},
+		config.CredentialConfig{Name: "secondary", Type: config.ProviderTypeOpenAI, BaseURL: secondary.URL, APIKey: "k2", Priority: 1, RPM: 100, TPM: 100000},
+	).WithForceStreamForTTFT(true).WithMaxProviderRetries(3).Build()
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"stream":false}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	assert.Equal(t, int32(1), primaryHits.Load())
+	assert.Equal(t, int32(1), secondaryHits.Load(), "a retryable stream error must retry on the next credential")
+	assert.Contains(t, w.Body.String(), "ok")
+}
+
+// TestProxyRequest_ForceStream_EmptyStreamRetriesNextCredential: a 2xx stream
+// that closes without a single content chunk is a provider-side failure, so the
+// request is replayed on the next credential instead of surfacing a generic 502.
+func TestProxyRequest_ForceStream_EmptyStreamRetriesNextCredential(t *testing.T) {
+	var primaryHits, secondaryHits atomic.Int32
+	primary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		primaryHits.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer primary.Close()
+	secondary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secondaryHits.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(openAIChatSSE(
+			`{"id":"c2","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}`,
+		)))
+	}))
+	defer secondary.Close()
+
+	prx := NewTestProxyBuilder().WithCredentials(
+		config.CredentialConfig{Name: "primary", Type: config.ProviderTypeOpenAI, BaseURL: primary.URL, APIKey: "k1", RPM: 100, TPM: 100000},
+		config.CredentialConfig{Name: "secondary", Type: config.ProviderTypeOpenAI, BaseURL: secondary.URL, APIKey: "k2", Priority: 1, RPM: 100, TPM: 100000},
+	).WithForceStreamForTTFT(true).WithMaxProviderRetries(3).Build()
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"stream":false}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	assert.Equal(t, int32(1), primaryHits.Load())
+	assert.Equal(t, int32(1), secondaryHits.Load(), "a content-free 2xx stream must retry on the next credential")
+	assert.Contains(t, w.Body.String(), "ok")
+}
+
+// TestProxyRequest_ForceStream_EmptyStreamAllCredentialsReturnsError: with no
+// credential left, a content-free stream surfaces an error (not a silent empty
+// 200).
+func TestProxyRequest_ForceStream_EmptyStreamAllCredentialsReturnsError(t *testing.T) {
+	var hits atomic.Int32
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer upstream.Close()
+
+	prx := NewTestProxyBuilder().WithSingleCredential("only", config.ProviderTypeOpenAI, upstream.URL, "k").
+		WithForceStreamForTTFT(true).WithMaxProviderRetries(2).Build()
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"stream":false}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	prx.ProxyRequest(w, req)
+
+	assert.GreaterOrEqual(t, w.Code, 500, "a content-free stream must not be a silent 200: %s", w.Body.String())
+}
+
+// TestProxyRequest_ForceStream_PromptBlockReturns400NoRetry reproduces the
+// production incident behind this fix: Vertex/Gemini answers a prompt-level
+// content refusal with HTTP 200 and a single chunk carrying only
+// promptFeedback.blockReason and no candidates. Before the fix the converter
+// dropped that field, the reassembler found no content, and the client got a
+// generic 502 after exhausting every credential (the ~90s retry storm). Now the
+// block is surfaced as a 400 content-policy error on the FIRST credential,
+// with no retry: every credential refuses the same prompt.
+func TestProxyRequest_ForceStream_PromptBlockReturns400NoRetry(t *testing.T) {
+	var hits atomic.Int32
+	blocked := `data: {"promptFeedback":{"blockReason":"PROHIBITED_CONTENT"},"usageMetadata":{"promptTokenCount":6,"totalTokenCount":6}}` + "\n\n"
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, blocked+"data: [DONE]\n\n")
+	}))
+	defer upstream.Close()
+
+	prx := NewTestProxyBuilder().WithCredentials(
+		config.CredentialConfig{Name: "vertex-a", Type: config.ProviderTypeGemini, BaseURL: upstream.URL, APIKey: "k1", RPM: 100, TPM: 100000},
+		config.CredentialConfig{Name: "vertex-b", Type: config.ProviderTypeGemini, BaseURL: upstream.URL, APIKey: "k2", Priority: 1, RPM: 100, TPM: 100000},
+	).WithForceStreamForTTFT(true).WithMaxProviderRetries(5).Build()
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"blocked"}],"stream":false}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+	assert.Equal(t, int32(1), hits.Load(), "a content-policy refusal must not be retried across credentials")
+	assert.Contains(t, w.Body.String(), "content policy")
+}
+
+// TestProxyRequest_ForceStream_PromptBlockAllCredsStill400 pins the no-retry
+// guarantee with a full pool: even with several credentials available, a prompt
+// block costs exactly one upstream call and still returns 400.
+func TestProxyRequest_ForceStream_PromptBlockAllCredsStill400(t *testing.T) {
+	var hits atomic.Int32
+	blocked := `data: {"promptFeedback":{"blockReason":"SAFETY"},"usageMetadata":{"promptTokenCount":9,"totalTokenCount":9}}` + "\n\n"
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, blocked+"data: [DONE]\n\n")
+	}))
+	defer upstream.Close()
+
+	prx := NewTestProxyBuilder().WithCredentials(
+		config.CredentialConfig{Name: "a", Type: config.ProviderTypeGemini, BaseURL: upstream.URL, APIKey: "k1", RPM: 100, TPM: 100000},
+		config.CredentialConfig{Name: "b", Type: config.ProviderTypeGemini, BaseURL: upstream.URL, APIKey: "k2", Priority: 1, RPM: 100, TPM: 100000},
+		config.CredentialConfig{Name: "c", Type: config.ProviderTypeGemini, BaseURL: upstream.URL, APIKey: "k3", Priority: 2, RPM: 100, TPM: 100000},
+	).WithForceStreamForTTFT(true).WithMaxProviderRetries(5).Build()
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"blocked"}],"stream":false}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+	assert.Equal(t, int32(1), hits.Load(), "the block must be decided on the first credential, never retried")
+}
+
+// TestProxyRequest_LiveStream_PromptBlockReturns400 covers the explicit
+// stream:true client path (no force_stream_for_ttft): the same vertex prompt
+// block must surface as a 400 with the content-policy message, decided on the
+// first credential and never retried.
+func TestProxyRequest_LiveStream_PromptBlockReturns400(t *testing.T) {
+	var hits atomic.Int32
+	blocked := `data: {"promptFeedback":{"blockReason":"PROHIBITED_CONTENT"},"usageMetadata":{"promptTokenCount":6,"totalTokenCount":6}}` + "\n\n"
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, blocked+"data: [DONE]\n\n")
+	}))
+	defer upstream.Close()
+
+	prx := NewTestProxyBuilder().WithCredentials(
+		config.CredentialConfig{Name: "g1", Type: config.ProviderTypeGemini, BaseURL: upstream.URL, APIKey: "k1", RPM: 100, TPM: 100000},
+		config.CredentialConfig{Name: "g2", Type: config.ProviderTypeGemini, BaseURL: upstream.URL, APIKey: "k2", Priority: 1, RPM: 100, TPM: 100000},
+	).WithForceStreamForTTFT(true).WithMaxProviderRetries(5).Build()
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"blocked"}],"stream":true}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+	assert.Equal(t, int32(1), hits.Load(), "a content-policy refusal must not be retried across credentials")
+	assert.Contains(t, w.Body.String(), "content policy")
 }

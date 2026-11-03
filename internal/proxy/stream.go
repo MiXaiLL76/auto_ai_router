@@ -131,6 +131,7 @@ type StreamUsageInfo struct {
 	CacheCreationTokens      int // Tokens created for cache (billed at different rate)
 	CacheCreation5mTokens    int
 	CacheCreation1hTokens    int
+	CacheCreation12hTokens   int // OpenAI 12h cache-retention writes (own rate)
 	// CacheType mirrors TokenUsage.CacheType: Alibaba's explicit cache mode
 	// marker ("ephemeral") from prompt_tokens_details.cache_type.
 	CacheType         string
@@ -184,10 +185,14 @@ type chatCompletionStreamUsage struct {
 	PromptTokens        *int `json:"prompt_tokens"`
 	CompletionTokens    *int `json:"completion_tokens"`
 	PromptTokensDetails struct {
-		CachedTokens              int `json:"cached_tokens,omitempty"`
-		CachedAudioTokens         int `json:"cached_audio_tokens,omitempty"`
-		CacheCreationTokens       int `json:"cache_creation_tokens,omitempty"`
-		CacheWriteTokens          int `json:"cache_write_tokens,omitempty"`
+		CachedTokens            int `json:"cached_tokens,omitempty"`
+		CachedAudioTokens       int `json:"cached_audio_tokens,omitempty"`
+		CacheCreationTokens     int `json:"cache_creation_tokens,omitempty"`
+		CacheWriteTokens        int `json:"cache_write_tokens,omitempty"`
+		CacheWriteTokensDetails struct {
+			TTL30mTokens int `json:"ttl_30m_tokens,omitempty"`
+			TTL12hTokens int `json:"ttl_12h_tokens,omitempty"`
+		} `json:"cache_write_tokens_details,omitempty"`
 		CacheCreationTokenDetails struct {
 			Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
 			Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
@@ -245,12 +250,18 @@ func (o *openAIStreamUsageExtractor) chatCompletionUsageInfo(usage *chatCompleti
 	}
 	cacheCreation5mTokens := usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens
 	cacheCreation1hTokens := usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens
+	// OpenAI's 12h cache-retention writes are a separate TTL tier under
+	// cache_write_tokens_details; a request may also carry a 30m tier beside it.
+	cacheCreation12hTokens := usage.PromptTokensDetails.CacheWriteTokensDetails.TTL12hTokens
+	if cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
+		cacheCreation5mTokens = usage.PromptTokensDetails.CacheWriteTokensDetails.TTL30mTokens
+	}
 	if cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
 		cacheCreation5mTokens = usage.PromptTokensDetails.CacheCreation.Ephemeral5mInputTokens
 		cacheCreation1hTokens = usage.PromptTokensDetails.CacheCreation.Ephemeral1hInputTokens
 	}
 	if cacheCreationTokens == 0 {
-		cacheCreationTokens = cacheCreation5mTokens + cacheCreation1hTokens
+		cacheCreationTokens = cacheCreation5mTokens + cacheCreation1hTokens + cacheCreation12hTokens
 	}
 	if cacheCreationTokens == 0 {
 		cacheCreationTokens, cacheCreation5mTokens, cacheCreation1hTokens = usage.PromptTokensDetails.CachingWrite()
@@ -262,14 +273,15 @@ func (o *openAIStreamUsageExtractor) chatCompletionUsageInfo(usage *chatCompleti
 	toolUsage, _ := usage.ServerSideToolUsage()
 
 	return &StreamUsageInfo{
-		PromptTokens:          intValue(usage.PromptTokens),
-		CompletionTokens:      intValue(usage.CompletionTokens),
-		CachedTokens:          cachedTokens,
-		CachedAudioTokens:     cachedAudioTokens,
-		CacheCreationTokens:   cacheCreationTokens,
-		CacheCreation5mTokens: cacheCreation5mTokens,
-		CacheCreation1hTokens: cacheCreation1hTokens,
-		CacheType:             usage.PromptTokensDetails.CacheType,
+		PromptTokens:           intValue(usage.PromptTokens),
+		CompletionTokens:       intValue(usage.CompletionTokens),
+		CachedTokens:           cachedTokens,
+		CachedAudioTokens:      cachedAudioTokens,
+		CacheCreationTokens:    cacheCreationTokens,
+		CacheCreation5mTokens:  cacheCreation5mTokens,
+		CacheCreation1hTokens:  cacheCreation1hTokens,
+		CacheCreation12hTokens: cacheCreation12hTokens,
+		CacheType:              usage.PromptTokensDetails.CacheType,
 		AudioInputTokens: normalizeStreamAudioInput(
 			usage.PromptTokensDetails.AudioTokens,
 			cachedTokens,
@@ -336,9 +348,14 @@ func (o *openAIStreamUsageExtractor) responsesAPIUsageInfo(
 	if cacheCreationTokens == 0 {
 		cacheCreationTokens = usage.InputTokensDetails.CacheWriteTokens
 	}
+	cacheCreation12hTokens := usage.InputTokensDetails.CacheWriteTokensDetails.TTL12hTokens
+	cacheCreation5mTokens := usage.InputTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens
+	cacheCreation1hTokens := usage.InputTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens
+	if cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
+		cacheCreation5mTokens = usage.InputTokensDetails.CacheWriteTokensDetails.TTL30mTokens
+	}
 	if cacheCreationTokens == 0 {
-		cacheCreationTokens = usage.InputTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens +
-			usage.InputTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens
+		cacheCreationTokens = cacheCreation5mTokens + cacheCreation1hTokens + cacheCreation12hTokens
 	}
 	cachedTokens, cachedAudioTokens := converterutil.NormalizeCachedAudioBreakdown(
 		usage.InputTokensDetails.CachedTokens,
@@ -363,14 +380,15 @@ func (o *openAIStreamUsageExtractor) responsesAPIUsageInfo(
 	}
 
 	return &StreamUsageInfo{
-		PromptTokens:          intValue(usage.InputTokens),
-		CompletionTokens:      intValue(usage.OutputTokens),
-		CachedTokens:          cachedTokens,
-		CachedAudioTokens:     cachedAudioTokens,
-		CacheCreationTokens:   cacheCreationTokens,
-		CacheCreation5mTokens: usage.InputTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens,
-		CacheCreation1hTokens: usage.InputTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens,
-		CacheType:             usage.InputTokensDetails.CacheType,
+		PromptTokens:           intValue(usage.InputTokens),
+		CompletionTokens:       intValue(usage.OutputTokens),
+		CachedTokens:           cachedTokens,
+		CachedAudioTokens:      cachedAudioTokens,
+		CacheCreationTokens:    cacheCreationTokens,
+		CacheCreation5mTokens:  cacheCreation5mTokens,
+		CacheCreation1hTokens:  cacheCreation1hTokens,
+		CacheCreation12hTokens: cacheCreation12hTokens,
+		CacheType:              usage.InputTokensDetails.CacheType,
 		AudioInputTokens: normalizeStreamAudioInput(
 			usage.InputTokensDetails.AudioTokens,
 			cachedTokens,
@@ -409,10 +427,14 @@ type responsesAPIUsage struct {
 	InputTokens        *int `json:"input_tokens"`
 	OutputTokens       *int `json:"output_tokens"`
 	InputTokensDetails struct {
-		CachedTokens              int `json:"cached_tokens,omitempty"`
-		CachedAudioTokens         int `json:"cached_audio_tokens,omitempty"`
-		CacheCreationTokens       int `json:"cache_creation_tokens,omitempty"`
-		CacheWriteTokens          int `json:"cache_write_tokens,omitempty"`
+		CachedTokens            int `json:"cached_tokens,omitempty"`
+		CachedAudioTokens       int `json:"cached_audio_tokens,omitempty"`
+		CacheCreationTokens     int `json:"cache_creation_tokens,omitempty"`
+		CacheWriteTokens        int `json:"cache_write_tokens,omitempty"`
+		CacheWriteTokensDetails struct {
+			TTL30mTokens int `json:"ttl_30m_tokens,omitempty"`
+			TTL12hTokens int `json:"ttl_12h_tokens,omitempty"`
+		} `json:"cache_write_tokens_details,omitempty"`
 		CacheCreationTokenDetails struct {
 			Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
 			Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
@@ -1200,6 +1222,9 @@ func (p *Proxy) finalizeStreamingLogParsed(logCtx *RequestLogContext, totalToken
 		if usageInfo.CacheCreation1hTokens > 0 {
 			logCtx.TokenUsage.CacheCreation1hTokens = usageInfo.CacheCreation1hTokens
 		}
+		if usageInfo.CacheCreation12hTokens > 0 {
+			logCtx.TokenUsage.CacheCreation12hTokens = usageInfo.CacheCreation12hTokens
+		}
 		if usageInfo.WebSearchRequests > 0 {
 			logCtx.TokenUsage.WebSearchRequests = usageInfo.WebSearchRequests
 		}
@@ -1642,12 +1667,12 @@ func (p *Proxy) streamToClient(
 		// recomputed here (cheap, pure) just to record exactly what that call
 		// is about to write, rather than trusting the two to stay in sync by
 		// construction.
-		clientSaw := string(maskedUpstreamErrorBody(statusCode, logContextRequestID(logCtx)))
+		clientSaw := string(maskedUpstreamErrorBody(statusCode, logContextRequestID(logCtx), []byte(payload)))
 		markProxyProviderStreamError(logCtx, statusCode, payload, clientSaw)
 		if logCtx != nil {
 			logCtx.StreamOutcome = "stream_error"
 		}
-		writeProviderStreamErrorBeforeCommit(w, statusCode, logContextRequestID(logCtx))
+		writeProviderStreamErrorBeforeCommit(w, statusCode, logContextRequestID(logCtx), payload)
 		if onWriteErr != nil {
 			onWriteErr()
 		}
@@ -2039,6 +2064,12 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 					if details := usage.InputTokensDetails.CacheCreationTokenDetails; details != nil {
 						logCtx.TokenUsage.CacheCreation5mTokens = details.Ephemeral5mInputTokens
 						logCtx.TokenUsage.CacheCreation1hTokens = details.Ephemeral1hInputTokens
+					}
+					if details := usage.InputTokensDetails.CacheWriteTokensDetails; details != nil {
+						logCtx.TokenUsage.CacheCreation12hTokens = details.TTL12hTokens
+						if logCtx.TokenUsage.CacheCreation5mTokens == 0 && logCtx.TokenUsage.CacheCreation1hTokens == 0 {
+							logCtx.TokenUsage.CacheCreation5mTokens = details.TTL30mTokens
+						}
 					}
 					logCtx.TokenUsage.AudioInputTokens = normalizeStreamAudioInput(
 						usage.InputTokensDetails.AudioTokens,

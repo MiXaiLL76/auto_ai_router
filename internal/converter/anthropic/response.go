@@ -227,5 +227,10 @@ func convertAnthropicUsageToOpenAI(usage *AnthropicUsage) *openai.OpenAIUsage {
 			WebSearchRequests: usage.ServerToolUse.WebSearchRequests,
 		}
 	}
+	// Thinking tokens are part of output_tokens, as reasoning_tokens are part of
+	// completion_tokens: a breakdown, not an addition.
+	if reasoningTokens := usage.ReasoningTokens(); reasoningTokens > 0 {
+		result.CompletionTokensDetails = &openai.CompletionTokenDetails{ReasoningTokens: reasoningTokens}
+	}
 	return result
 }

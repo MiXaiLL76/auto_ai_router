@@ -35,6 +35,13 @@ type TokenUsage struct {
 	CacheCreationTokens    int
 	CacheCreation5mTokens  int
 	CacheCreation1hTokens  int
+	// CacheCreation12hTokens is the 12-hour cache-write tier (OpenAI's
+	// prompt_cache_retention:"12h", reported in
+	// usage.prompt_tokens_details.cache_write_tokens_details.ttl_12h_tokens).
+	// It is a separate tier from the 30-minute/5m and 1h writes because it is
+	// priced apart, and a single request may carry both at once — so each tier
+	// is billed at its own rate rather than one rate chosen by the top TTL.
+	CacheCreation12hTokens int
 	// CacheType is the explicit-cache mode marker from
 	// usage.prompt_tokens_details.cache_type (Alibaba/Qwen returns
 	// CacheTypeExplicit when the request ran with an explicit cache marker).
@@ -159,14 +166,20 @@ func (tu *TokenUsage) Normalize() *TokenUsage {
 	tu.CacheCreationTokens = converterutil.NonNegativeTokenCount(tu.CacheCreationTokens)
 	tu.CacheCreation5mTokens = converterutil.NonNegativeTokenCount(tu.CacheCreation5mTokens)
 	tu.CacheCreation1hTokens = converterutil.NonNegativeTokenCount(tu.CacheCreation1hTokens)
+	tu.CacheCreation12hTokens = converterutil.NonNegativeTokenCount(tu.CacheCreation12hTokens)
 	if tu.CacheCreationTokens == 0 {
-		tu.CacheCreationTokens = tu.CacheCreation5mTokens + tu.CacheCreation1hTokens
+		tu.CacheCreationTokens = tu.CacheCreation5mTokens + tu.CacheCreation1hTokens + tu.CacheCreation12hTokens
 	}
+	// Each TTL tier is capped so the three can never together bill more than the
+	// aggregate: 5m first, then 1h, then 12h takes whatever remains.
 	if tu.CacheCreation5mTokens > tu.CacheCreationTokens {
 		tu.CacheCreation5mTokens = tu.CacheCreationTokens
 	}
 	if tu.CacheCreation1hTokens > tu.CacheCreationTokens-tu.CacheCreation5mTokens {
 		tu.CacheCreation1hTokens = tu.CacheCreationTokens - tu.CacheCreation5mTokens
+	}
+	if tu.CacheCreation12hTokens > tu.CacheCreationTokens-tu.CacheCreation5mTokens-tu.CacheCreation1hTokens {
+		tu.CacheCreation12hTokens = tu.CacheCreationTokens - tu.CacheCreation5mTokens - tu.CacheCreation1hTokens
 	}
 	tu.CachedOutputTokens = converterutil.NonNegativeTokenCount(tu.CachedOutputTokens)
 	tu.OutputTextTokens = converterutil.NonNegativeTokenCount(tu.OutputTextTokens)
@@ -259,6 +272,9 @@ func (tu *TokenUsage) MergeNonZero(src *TokenUsage) {
 	}
 	if src.CacheCreation1hTokens != 0 {
 		tu.CacheCreation1hTokens = src.CacheCreation1hTokens
+	}
+	if src.CacheCreation12hTokens != 0 {
+		tu.CacheCreation12hTokens = src.CacheCreation12hTokens
 	}
 	if src.CacheType != "" {
 		tu.CacheType = src.CacheType
