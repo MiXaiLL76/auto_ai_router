@@ -909,7 +909,8 @@ func TestSimulatedPassthrough_TerminalEventWithoutTypedResponse(t *testing.T) {
 			saveFn := func(r *responses.Response) { saved = append(saved, r) }
 			w := httptest.NewRecorder()
 
-			prx.handleSimulatedPassthroughNonStream(w, req, resp, prepared, cred, "m", logCtx, saveFn, "http://x")
+			prx.handleSimulatedPassthroughNonStream(w, req, resp, prepared, cred, "m", "m", logCtx, saveFn, "http://x", prepared.body,
+				false, false, false, time.Now(), map[string]bool{}, map[string]bool{})
 
 			require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 			var out struct {
