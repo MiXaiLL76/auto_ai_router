@@ -234,6 +234,61 @@ func TestProxyRequestLiteLLMStreamingCompatibility(t *testing.T) {
 	assert.Contains(t, recorder.Body.String(), `"finish_reason":"stop"`)
 }
 
+// The compatibility writer snapshots the target headers in its constructor and
+// hands everything else to the LiteLLM transformer as "provider" headers.
+// The cost headers are computed only after the request finishes, so they are not
+// in that snapshot: TransformHeaders used to drop them, and a client served with
+// response_compatibility: litellm never received X-Total-Cost. They must be
+// preserved verbatim, while a provider's own header is still filtered.
+func TestResponseCompatibilityWriterPreservesCostHeaders(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	request, _ = withResponseCompatRequest(request)
+
+	recorder := httptest.NewRecorder()
+	recorder.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
+	writer := newResponseCompatibilityWriter(recorder, compatlitellm.New(), request)
+
+	// Provider headers land in the writer's header map after construction
+	// (copyResponseHeaders writes to Header()).
+	writer.Header().Set("X-Provider-Request-Id", "provider-1")
+	// Cost headers, set after the constructor snapshot.
+	writer.Header().Set(HeaderResponseCost, "0.0002")
+	writer.Header().Set(HeaderCostBreakdown, `{"input_cost":0.0001,"total_cost":0.0002}`)
+	writer.Header().Set("Content-Type", "application/json")
+
+	_, err := writer.Write([]byte(`{"model":"provider-model","choices":[{"message":{"content":"hello"},"finish_reason":"stop"}]}`))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	assert.Equal(t, "0.0002", recorder.Header().Get(HeaderResponseCost))
+	assert.Equal(t, `{"input_cost":0.0001,"total_cost":0.0002}`, recorder.Header().Get(HeaderCostBreakdown))
+	assert.Equal(t, "frame-ancestors 'none'", recorder.Header().Get("Content-Security-Policy"))
+	assert.Empty(t, recorder.Header().Get("X-Provider-Request-Id"),
+		"provider headers must still be filtered in compatibility mode")
+	assert.Empty(t, recorder.Header().Get("llm_provider-x-provider-request-id"))
+}
+
+// The streaming path splits headers too. A plain stream's headers leave before
+// the cost is known, so the cost headers are absent there by design; the test
+// pins that splitHeaders leaves provider headers filtered on this path as well.
+func TestResponseCompatibilityWriterPreservesCostHeadersOnStream(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	request, info := withResponseCompatRequest(request)
+	info.Streaming = true
+
+	recorder := httptest.NewRecorder()
+	writer := newResponseCompatibilityWriter(recorder, compatlitellm.New(), request)
+	writer.Header().Set("X-Provider-Request-Id", "provider-1")
+	writer.Header().Set("Content-Type", "text/event-stream")
+	writer.WriteHeader(http.StatusOK)
+
+	_, err := writer.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":\"stop\"}]}\n\n"))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	assert.Empty(t, recorder.Header().Get("X-Provider-Request-Id"))
+}
+
 type failingStreamReader struct {
 	body []byte
 	err  error
