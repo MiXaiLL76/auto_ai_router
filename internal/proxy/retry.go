@@ -237,6 +237,13 @@ func (p *Proxy) TryFallbackProxy(
 		maxAttempts = defaultMaxFallbackAttempts
 	}
 
+	// System One never streams, so no streaming entry path armed the prompt
+	// estimate that systemOneUsage bills a reply without usage on; in
+	// writeFallbackResponse it has no request body of its own.
+	if logCtx != nil && logCtx.IsSystemOne {
+		p.setPromptTokensEstimate(logCtx, body, modelID)
+	}
+
 	exitReason := "no_fallback_available"
 	var lastProxyResp *ProxyResponse
 	var lastFallbackCred *config.CredentialConfig
@@ -497,6 +504,7 @@ func (p *Proxy) writeFallbackResponse(
 		// decode, not derived from each other — see
 		// converter.ExtractTotalTokensAndUsageWithOptions's doc comment.
 		tokens, usage := extractOpenAITokensAndUsage(proxyResp.Body, usageOptions)
+		tokens, usage = p.systemOneUsage(r.Context(), logCtx, fallbackCred.Name, proxyResp.StatusCode, nil, modelID, tokens, usage)
 		if logCtx != nil {
 			logCtx.TokenUsage = usage
 			if logCtx.IsImageGeneration && proxyResp.StatusCode < http.StatusBadRequest {

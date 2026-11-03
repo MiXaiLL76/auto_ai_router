@@ -310,6 +310,7 @@ type RequestLogContext struct {
 	RequestEndpoint       string
 	Logged                bool   // True if already logged (prevents duplicate logging)
 	IsResponsesAPI        bool   // True if this is a Responses API request (converted to Chat Completions)
+	IsSystemOne           bool   // True for a /v1/systemone request (native System One API, see systemone.go)
 	RequestCompleted      bool   // True only after the response was fully and successfully delivered
 	ActualCredentialName  string // Real credential name from upstream when Credential.Type == ProviderTypeProxy
 	IsProxyRequest        bool   // True when this request came from another auto_ai_router (HeaderAIRProxyClient)
@@ -1023,7 +1024,9 @@ func (p *Proxy) WithResponseCompatibility(
 	r *http.Request,
 	next func(http.ResponseWriter, *http.Request),
 ) {
-	if p.responseCompat == nil || r.URL.Path == "/v1/messages" {
+	// Native Anthropic Messages and System One replies are not OpenAI-shaped:
+	// the LiteLLM layer would rewrite and drop fields of them (nulls included).
+	if p.responseCompat == nil || r.URL.Path == "/v1/messages" || isSystemOnePath(r.URL.Path) {
 		next(w, r)
 		return
 	}
@@ -1249,6 +1252,7 @@ func (p *Proxy) sendToCredential(
 			// custom, ...) and its tool_choice -- tools the Responses API
 			// (unlike Chat Completions) actually supports.
 			IsResponsesAPI:      prepared.passthroughResponses || prepared.convertedToResponses,
+			IsSystemOne:         logCtx.IsSystemOne,
 			MessagesPassthrough: prepared.passthroughMessages,
 			ModelID:             realModelID,
 			DisplayModelID:      modelID,
@@ -2057,6 +2061,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			p.setCredentialResponseHeader(w, logCtx, logCtx.ActualCredentialName)
 			p.writeProxyResponse(w, proxyResp, r, cred, modelID, logCtx, tokenUsageOptions)
 			tokens, usage := extractOpenAITokensAndUsage(proxyResp.Body, tokenUsageOptions)
+			tokens, usage = p.systemOneUsage(r.Context(), logCtx, cred.Name, proxyResp.StatusCode, proxyBody, realModelID, tokens, usage)
 			nonStreamingTokenUsage = usage
 			if tokens > 0 {
 				p.rateLimiter.ConsumeTokens(cred.Name, tokens)
@@ -2620,6 +2625,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 && conv != nil && conv.IsPassthrough() {
+			p.observeSystemOneReplyModel(r.Context(), logCtx, cred.Name, realModelID, finalResponseBody)
 			finalResponseBody = rewriteResponseModelAlias(finalResponseBody, realModelID, modelID)
 			// Before billing picks its body: the stripped searches are billed from usage.
 			finalResponseBody = openai.StripServerToolCalls(finalResponseBody)
@@ -2820,6 +2826,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		// bodyForTokenExtraction is not mutated between here and its next use
 		// below.
 		tokens, directProviderTokenUsage := extractOpenAITokensAndUsage(bodyForTokenExtraction, tokenUsageOptions)
+		tokens, directProviderTokenUsage = p.systemOneUsage(r.Context(), logCtx, cred.Name, resp.StatusCode, body, realModelID, tokens, directProviderTokenUsage)
 		// A fan-out consumed its replies' tokens on the credentials that served
 		// them, call by call.
 		if tokens > 0 && !fannedOut {

@@ -72,6 +72,11 @@ var spendRoutes = []spendRoute{
 	{"aspeech", "/audio/speech", "/audio/speech"},
 	{"amoderation", "/moderations", "/moderations"},
 	{"arerank", "/rerank", "/rerank"},
+	// The native System One API (/v1/systemone) has no LiteLLM counterpart, so
+	// its call_type and endpoint follow LiteLLM's naming rather than mirror a
+	// value LiteLLM writes; without a row here its spend would skip the daily
+	// aggregation (unknown path -> empty call_type).
+	{"asystemone", "/systemone", "/systemone"},
 	{"atext_completion", "/completions", "/completions"},
 }
 
