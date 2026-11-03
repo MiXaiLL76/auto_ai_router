@@ -179,3 +179,39 @@ func TestOrganizationPolicyConfig_DefaultPricing(t *testing.T) {
 		})
 	}
 }
+
+func TestOrganizationPolicyConfig_ResponseCostMode(t *testing.T) {
+	cases := []struct {
+		doc      string
+		wantMode ResponseCostMode
+		wantBool bool
+	}{
+		{"organization_id: o\nresponse_cost_mode: off\n", ResponseCostModeOff, false},
+		{"organization_id: o\nresponse_cost_mode: total\n", ResponseCostModeTotal, true},
+		{"organization_id: o\nresponse_cost_mode: breakdown\n", ResponseCostModeBreakdown, true},
+		{"organization_id: o\n", ResponseCostModeOff, false},
+		// legacy boolean
+		{"organization_id: o\nreturn_response_cost: true\n", ResponseCostModeTotal, true},
+		{"organization_id: o\nreturn_response_cost: false\n", ResponseCostModeOff, false},
+		// mode wins over the legacy boolean
+		{"organization_id: o\nreturn_response_cost: true\nresponse_cost_mode: breakdown\n", ResponseCostModeBreakdown, true},
+	}
+	for _, c := range cases {
+		var p OrganizationPolicyConfig
+		if err := yaml.Unmarshal([]byte(c.doc), &p); err != nil {
+			t.Fatalf("unmarshal %q: %v", c.doc, err)
+		}
+		if p.ResponseCostMode != c.wantMode {
+			t.Fatalf("%q: mode=%q want %q", c.doc, p.ResponseCostMode, c.wantMode)
+		}
+		if p.ReturnResponseCost != c.wantBool {
+			t.Fatalf("%q: bool=%v want %v", c.doc, p.ReturnResponseCost, c.wantBool)
+		}
+	}
+
+	// an unknown mode is rejected
+	var p OrganizationPolicyConfig
+	if err := yaml.Unmarshal([]byte("organization_id: o\nresponse_cost_mode: everything\n"), &p); err == nil {
+		t.Fatalf("unknown response_cost_mode must be rejected")
+	}
+}

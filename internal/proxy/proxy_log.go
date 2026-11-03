@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -331,6 +332,19 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 		logCtx.applyCostMargin(tokenCosts)
 	}
 	cost := tokenCosts.TotalCost
+	// Record the client-billed cost so the response path can surface it as
+	// X-Total-Cost — but only for organizations that opted in (see
+	// setResponseCostHeader, which re-checks the mode). Set even for a $0 row: a
+	// free or unpriced-but-zero request is still "known".
+	logCtx.responseCostUSD = cost
+	logCtx.responseCostKnown = true
+	// The full breakdown is only needed for the breakdown mode; marshal it once,
+	// here, from the same map the spend metadata carries so the two never drift.
+	if logCtx.OrganizationPolicy.ReturnsCostBreakdown() {
+		if encoded, err := json.Marshal(costBreakdownMap(tokenCosts)); err == nil {
+			logCtx.responseCostBreakdown = encoded
+		}
+	}
 	p.logger.DebugContext(logSpendCtx, "Calculated cost for model",
 		"model_name", priceModelID,
 		"cost", cost,

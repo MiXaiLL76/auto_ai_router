@@ -291,6 +291,11 @@ models:
 #       openai/gpt-5.5-pro: gpt-5.5-pro
 #     credential_denylist:
 #       - untrusted-provider-credential
+#     # Optional: return the request's billed cost to the client in response
+#     # headers. off (default): none; total: X-Total-Cost; breakdown: X-Total-Cost
+#     # and X-Cost-Breakdown (per-component JSON). Legacy: return_response_cost:
+#     # true is the same as response_cost_mode: total.
+#     response_cost_mode: total
 
 # Optional: Redis/Valkey backend for distributed rate limiting and response storage.
 # When enabled, all replicas share a single counter namespace — RPM/TPM limits are

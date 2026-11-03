@@ -724,6 +724,41 @@ func (logCtx *RequestLogContext) applyCostMargin(costs *converter.TokenCosts) {
 	costs.TotalCost += costs.MarginTotalAmount
 }
 
+// costBreakdownMap is the per-component cost breakdown, shared by the spend-log
+// metadata's cost_breakdown and the X-Cost-Breakdown response header so the two
+// can never drift. tool_usage_cost sums every built-in tool charge below; each of
+// its parts is already part of total_cost.
+func costBreakdownMap(costs *converter.TokenCosts) map[string]interface{} {
+	if costs == nil {
+		return nil
+	}
+	return map[string]interface{}{
+		"input_cost":                 costs.InputCost,
+		"output_cost":                costs.OutputCost,
+		"reasoning_cost":             costs.ReasoningCost,
+		"cached_input_cost":          costs.CachedInputCost,
+		"explicit_cache_read_cost":   costs.ExplicitCachedInputCost,
+		"cache_creation_cost":        costs.CacheCreationCost,
+		"audio_input_cost":           costs.AudioInputCost,
+		"image_cost":                 costs.ImageCost,
+		"video_input_cost":           costs.VideoInputCost,
+		"total_cost":                 costs.TotalCost,
+		"original_cost":              costs.TotalCost - costs.MarginTotalAmount,
+		"margin_percent":             costs.MarginPercent,
+		"discount_amount":            0.0,
+		"tool_usage_cost":            costs.ToolUsageCost,
+		"web_search_cost":            costs.WebSearchCost,
+		"x_search_cost":              costs.XSearchCost,
+		"code_execution_cost":        costs.CodeExecutionCost,
+		"attachment_search_cost":     costs.AttachmentSearchCost,
+		"collections_search_cost":    costs.CollectionsSearchCost,
+		"image_generation_tool_cost": costs.ImageGenerationToolCost,
+		"discount_percent":           0.0,
+		"margin_fixed_amount":        costs.MarginFixedAmount,
+		"margin_total_amount":        costs.MarginTotalAmount,
+	}
+}
+
 // buildMetadata builds metadata JSON with user/team alias, usage, cost, and optional error info
 func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg string, httpStatus int, usage *converter.TokenUsage, requesterIP string, costs *converter.TokenCosts, modelID string, overheadMs float64, upstreamSendDelayMs float64, kafkaFallbackReason string) string {
 	var userID, teamID, organizationID string
@@ -840,33 +875,7 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 	// Build cost_breakdown
 	var costBreakdown interface{}
 	if costs != nil {
-		costBreakdown = map[string]interface{}{
-			"input_cost":               costs.InputCost,
-			"output_cost":              costs.OutputCost,
-			"reasoning_cost":           costs.ReasoningCost,
-			"cached_input_cost":        costs.CachedInputCost,
-			"explicit_cache_read_cost": costs.ExplicitCachedInputCost,
-			"cache_creation_cost":      costs.CacheCreationCost,
-			"audio_input_cost":         costs.AudioInputCost,
-			"image_cost":               costs.ImageCost,
-			"video_input_cost":         costs.VideoInputCost,
-			"total_cost":               costs.TotalCost,
-			"original_cost":            costs.TotalCost - costs.MarginTotalAmount,
-			"margin_percent":           costs.MarginPercent,
-			"discount_amount":          0.0,
-			// tool_usage_cost sums every built-in tool charge below; it is
-			// already part of total_cost, as each of its parts is.
-			"tool_usage_cost":            costs.ToolUsageCost,
-			"web_search_cost":            costs.WebSearchCost,
-			"x_search_cost":              costs.XSearchCost,
-			"code_execution_cost":        costs.CodeExecutionCost,
-			"attachment_search_cost":     costs.AttachmentSearchCost,
-			"collections_search_cost":    costs.CollectionsSearchCost,
-			"image_generation_tool_cost": costs.ImageGenerationToolCost,
-			"discount_percent":           0.0,
-			"margin_fixed_amount":        costs.MarginFixedAmount,
-			"margin_total_amount":        costs.MarginTotalAmount,
-		}
+		costBreakdown = costBreakdownMap(costs)
 	}
 
 	metadata := map[string]interface{}{
