@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -132,6 +133,7 @@ func (p *Proxy) orchestrateRequest(
 	if !ok {
 		return nil, false
 	}
+	r = withClientServiceTiers(r, logCtx.clientServiceTiers)
 
 	logCtx.RequestEndpoint = r.URL.Path
 	logCtx.ReasoningRequested, logCtx.ReasoningSource, logCtx.ThinkingMode = requestReasoningDetails(body)
@@ -591,6 +593,14 @@ func (p *Proxy) buildCredentialRequestInner(
 	if err := anthropicconv.ValidateToolChoice(body, realModelID, requestAPI); err != nil {
 		return credentialPreparedRequest{}, err
 	}
+	if err := anthropicconv.ValidateThinkingControls(body, realModelID, requestAPI); err != nil {
+		return credentialPreparedRequest{}, err
+	}
+	for _, tier := range clientServiceTiers(r.Context()) {
+		if err := anthropicconv.ValidateServiceTier(tier, realModelID); err != nil {
+			return credentialPreparedRequest{}, err
+		}
+	}
 
 	effectiveType := cred.EffectiveProviderType()
 	if p.stickyAutoCacheCtrl &&
@@ -840,6 +850,24 @@ func markCredentialAsTried(r *http.Request, credentialName string) *http.Request
 	return r.WithContext(ctx)
 }
 
+type clientServiceTiersContextKey struct{}
+
+// withClientServiceTiers carries the client's service tiers, which the ingress
+// sanitizer strips from the body, to buildCredentialRequestInner. They are
+// checked there against the model the credential serves: before alias
+// resolution the client's model name says nothing about it.
+func withClientServiceTiers(r *http.Request, tiers []string) *http.Request {
+	if len(tiers) == 0 {
+		return r
+	}
+	return r.WithContext(context.WithValue(r.Context(), clientServiceTiersContextKey{}, tiers))
+}
+
+func clientServiceTiers(ctx context.Context) []string {
+	tiers, _ := ctx.Value(clientServiceTiersContextKey{}).([]string)
+	return tiers
+}
+
 func (p *Proxy) isLiteLLMHealthy() bool {
 	if p.LiteLLMDB == nil || !p.LiteLLMDB.IsEnabled() {
 		return false
@@ -1086,6 +1114,7 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		return nil, "", "", false, false
 	}
 	body = sanitized.Body
+	logCtx.clientServiceTiers = sanitized.ServiceTiers
 	if p.rawBodyStoreRawBody {
 		// Opt-in only (kafka.raw_bodies.store_raw_body, default false) --
 		// this is the client's own request body, e.g. the prompt, a

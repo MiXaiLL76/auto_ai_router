@@ -1,6 +1,7 @@
 package anthropic
 
 import (
+	"encoding/json"
 	"regexp"
 	"strconv"
 	"strings"
@@ -53,12 +54,108 @@ const (
 	// high or below only (Claude Sonnet 5.5).
 	thinkingOffBetweenTools
 	// thinkingAlwaysOn: thinking can't be turned off, "disabled" is a 400 at any effort
-	// (Claude Opus 5.5, Fable, Mythos).
+	// (Claude Opus 5.5, Fable, Mythos, and the native adaptive models).
 	thinkingAlwaysOn
 )
 
+// IsNativeAdaptiveModel reports whether model is a non-Claude model that takes adaptive
+// thinking controls as they are (MiniMax-M3.1-Flash): thinking.type "adaptive", or no
+// thinking field, which means the same, with output_config.effort "low" to "max" and the
+// model's own default effort when none is sent. It always thinks, has no budget_tokens
+// form, and answers "disabled", effort "none" and a service tier with a 400.
+func IsNativeAdaptiveModel(model string) bool {
+	return strings.Contains(strings.ToLower(model), "minimax-m3.1-flash")
+}
+
+// nativeAdaptiveEfforts are the output_config.effort values a native adaptive model takes.
+var nativeAdaptiveEfforts = map[string]bool{"low": true, "medium": true, "high": true, "xhigh": true, "max": true}
+
+// ValidateThinkingControls rejects the thinking settings a native adaptive model (see
+// IsNativeAdaptiveModel) answers with a 400: thinking off (thinking.type "disabled", or
+// an effort of "none"), any other thinking type than "adaptive", and an effort outside
+// "low" to "max" (Chat and Responses may also send "minimal", converted to "low").
+// Upstream 400 bodies reach the client masked and are retried on other credentials, so
+// the router answers these itself. body is the client request in the api shape.
+func ValidateThinkingControls(body []byte, model string, api RequestAPI) error {
+	if !IsNativeAdaptiveModel(model) {
+		return nil
+	}
+	var request struct {
+		Thinking        interface{}            `json:"thinking"`
+		ReasoningEffort interface{}            `json:"reasoning_effort"`
+		Reasoning       interface{}            `json:"reasoning"`
+		OutputConfig    interface{}            `json:"output_config"`
+		ExtraBody       map[string]interface{} `json:"extra_body"`
+	}
+	if json.Unmarshal(body, &request) != nil {
+		return nil // malformed: fails later with its own error
+	}
+	// Every effort the request carries is checked, whichever of them the converter
+	// ends up using.
+	var thinking interface{}
+	var efforts []string
+	var effortParam string
+	switch api {
+	case MessagesAPI:
+		thinking = request.Thinking
+		efforts, effortParam = []string{reasoningObjectEffort(request.OutputConfig)}, "output_config.effort"
+	case ResponsesAPI:
+		// The Responses converter reads no thinking field.
+		efforts, effortParam = []string{reasoningObjectEffort(request.Reasoning)}, "reasoning.effort"
+	default:
+		// The same sources as OpenAIToAnthropic.
+		thinking = request.ExtraBody["thinking"]
+		if request.Thinking != nil {
+			thinking = request.Thinking
+		}
+		effort, _ := request.ReasoningEffort.(string)
+		efforts = []string{effort, reasoningObjectEffort(request.ExtraBody["reasoning"]), reasoningObjectEffort(request.Reasoning)}
+		effortParam = "reasoning_effort"
+	}
+	if thinkingMap, ok := thinking.(map[string]interface{}); ok {
+		switch thinkingType, _ := thinkingMap["type"].(string); thinkingType {
+		case "", "adaptive":
+		case "disabled", "between_tools":
+			return converterutil.NewRequestValidationError("thinking.type",
+				`this model always thinks and does not support thinking.type "`+thinkingType+`": omit thinking or use "adaptive", and lower the effort to think less`)
+		default:
+			return converterutil.NewRequestValidationError("thinking.type",
+				`this model supports only thinking.type "adaptive" (no budget_tokens): set the depth with the effort, "low", "medium", "high", "xhigh" or "max"`)
+		}
+		effort, _ := thinkingMap["effort"].(string)
+		efforts = append(efforts, effort)
+	}
+	for _, effort := range efforts {
+		switch {
+		case effort == "", nativeAdaptiveEfforts[effort], effort == "minimal" && api != MessagesAPI:
+		case reasoningEffortOff(effort):
+			return converterutil.NewRequestValidationError(effortParam,
+				`this model always thinks and does not support effort "`+effort+`": use "low" for the least thinking`)
+		default:
+			return converterutil.NewRequestValidationError(effortParam,
+				`unsupported effort "`+effort+`": use "low", "medium", "high", "xhigh" or "max"`)
+		}
+	}
+	return nil
+}
+
+// standardServiceTiers are the service_tier values that ask for the standard tier.
+var standardServiceTiers = map[string]bool{"auto": true, "default": true, "standard": true, "standard_only": true}
+
+// ValidateServiceTier rejects a client service_tier that asks a native adaptive model
+// (see IsNativeAdaptiveModel) for another tier than the standard one: it has none, and
+// the router strips client service tiers, so the request would run at the standard
+// tier without a word.
+func ValidateServiceTier(tier, model string) error {
+	if tier == "" || !IsNativeAdaptiveModel(model) || standardServiceTiers[strings.ToLower(tier)] {
+		return nil
+	}
+	return converterutil.NewRequestValidationError("service_tier",
+		`this model has no service tiers: omit service_tier or use "auto"`)
+}
+
 func thinkingOffModeFor(model string) thinkingOffMode {
-	if strings.Contains(strings.ToLower(model), "mythos") {
+	if strings.Contains(strings.ToLower(model), "mythos") || IsNativeAdaptiveModel(model) {
 		return thinkingAlwaysOn
 	}
 	family, major, minor, ok := claudeVersion(model)
@@ -144,8 +241,7 @@ func mapThinkingConfig(thinking interface{}, reasoningEffort string, modelName s
 						if effort == "" {
 							effort = budgetTokensToEffort(int(budgetTokens))
 						}
-						return &AnthropicThinking{Type: "adaptive", Display: "summarized", BlockBinding: blockBinding},
-							&AnthropicOutputConfig{Effort: effort}
+						return derivedAdaptiveThinking(modelName, blockBinding), &AnthropicOutputConfig{Effort: effort}
 					}
 					return &AnthropicThinking{Type: "enabled", BudgetTokens: int(budgetTokens), BlockBinding: blockBinding}, nil
 				}
@@ -191,7 +287,7 @@ func mapThinkingConfig(thinking interface{}, reasoningEffort string, modelName s
 		if adaptive {
 			effort := mapReasoningEffortToEffort(reasoningEffort)
 			if effort != "" {
-				return &AnthropicThinking{Type: "adaptive", Display: "summarized"}, &AnthropicOutputConfig{Effort: effort}
+				return derivedAdaptiveThinking(modelName, nil), &AnthropicOutputConfig{Effort: effort}
 			}
 		} else {
 			budget := mapReasoningEffortToBudget(reasoningEffort)
@@ -204,6 +300,18 @@ func mapThinkingConfig(thinking interface{}, reasoningEffort string, modelName s
 	return nil, nil
 }
 
+// derivedAdaptiveThinking is the adaptive config the router builds from an effort or a
+// budget. Claude gets display "summarized" (Claude 4.7+ omits the thinking text by
+// default); a native adaptive model returns its thinking anyway and gets the documented
+// fields only.
+func derivedAdaptiveThinking(model string, blockBinding interface{}) *AnthropicThinking {
+	thinking := &AnthropicThinking{Type: "adaptive", BlockBinding: blockBinding}
+	if !IsNativeAdaptiveModel(model) {
+		thinking.Display = "summarized"
+	}
+	return thinking
+}
+
 // applyThinkingSideEffects computes the max_tokens/anthropic_beta/temperature updates a
 // resolved thinking config (tc, oc as returned by mapThinkingConfig) requires. Shared by
 // OpenAIToAnthropic (messages.go) and NormalizeMessagesForPassthrough (messages_api.go) —
@@ -212,9 +320,15 @@ func mapThinkingConfig(thinking interface{}, reasoningEffort string, modelName s
 // (a new required beta, a different temperature exception, ...) only needs updating here
 // instead of in two independently-maintained copies. Callers are responsible for writing
 // the returned values into whatever request representation they use (typed struct vs raw
-// JSON map) and for actually setting thinking/output_config themselves.
-func applyThinkingSideEffects(tc *AnthropicThinking, oc *AnthropicOutputConfig, maxTokens int, betas []string) (newMaxTokens int, newBetas []string, temperature float64) {
+// JSON map) and for actually setting thinking/output_config themselves. A nil temperature
+// leaves the client's as sent.
+func applyThinkingSideEffects(tc *AnthropicThinking, oc *AnthropicOutputConfig, model string, maxTokens int, betas []string) (newMaxTokens int, newBetas []string, temperature *float64) {
 	newMaxTokens = EnsureMaxTokensForThinking(maxTokens, tc)
+	if IsNativeAdaptiveModel(model) {
+		// Adaptive thinking is the model's own control, not an Anthropic API feature:
+		// no Anthropic beta, and the client's temperature stands.
+		return newMaxTokens, betas, nil
+	}
 	newBetas = betas
 	if oc != nil {
 		// effort-based adaptive thinking requires the effort beta header
@@ -224,7 +338,8 @@ func applyThinkingSideEffects(tc *AnthropicThinking, oc *AnthropicOutputConfig, 
 		newBetas = appendBetaUnique(newBetas, thinkingBindingBeta)
 	}
 	// Anthropic requires temperature=1.0 when thinking is enabled.
-	return newMaxTokens, newBetas, 1.0
+	thinkingTemperature := 1.0
+	return newMaxTokens, newBetas, &thinkingTemperature
 }
 
 // validateBetweenTools rejects what the API rejects with between_tools: any other
@@ -277,7 +392,7 @@ func EnsureMaxTokensForThinking(maxTokens int, thinking *AnthropicThinking) int 
 
 // isAdaptiveThinkingModel reports whether the model uses adaptive thinking.
 func isAdaptiveThinkingModel(model string) bool {
-	if strings.Contains(strings.ToLower(model), "mythos") {
+	if strings.Contains(strings.ToLower(model), "mythos") || IsNativeAdaptiveModel(model) {
 		return true
 	}
 	_, major, minor, ok := claudeVersion(model)

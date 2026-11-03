@@ -65,6 +65,9 @@ func (u *streamUsage) observeDelta(value *AnthropicStreamUsage) {
 	if value.ServerToolUse != nil {
 		u.value.ServerToolUse = value.ServerToolUse
 	}
+	if value.OutputTokensDetails != nil {
+		u.value.OutputTokensDetails = value.OutputTokensDetails
+	}
 }
 
 // observeServerToolUse records a server_tool_use block opened in the stream. Providers that

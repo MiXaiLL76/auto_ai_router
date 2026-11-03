@@ -197,6 +197,13 @@ type ServerToolUsageDetails struct {
 	WebSearchRequests int `json:"web_search_requests,omitempty"`
 }
 
+// OutputTokensDetails breaks output_tokens down. It is not part of Anthropic's own
+// schema: some Anthropic-compatible providers report the thinking share of the output
+// as thinking_tokens. That share is included in output_tokens, not added to it.
+type OutputTokensDetails struct {
+	ThinkingTokens int `json:"thinking_tokens,omitempty"`
+}
+
 // AnthropicUsage represents token usage reported by the Anthropic API.
 // See: https://platform.claude.com/docs/en/api/messages
 type AnthropicUsage struct {
@@ -206,6 +213,7 @@ type AnthropicUsage struct {
 	CacheReadInputTokens     int                     `json:"cache_read_input_tokens,omitempty"`
 	CacheCreation            *CacheCreationDetails   `json:"cache_creation,omitempty"`
 	ServerToolUse            *ServerToolUsageDetails `json:"server_tool_use,omitempty"`
+	OutputTokensDetails      *OutputTokensDetails    `json:"output_tokens_details,omitempty"`
 	ServiceTier              string                  `json:"service_tier,omitempty"`
 	InferenceGeo             string                  `json:"inference_geo,omitempty"`
 	// CacheType is not part of Anthropic's native schema — it's our own
@@ -221,6 +229,22 @@ type AnthropicUsage struct {
 	// read this field back, not just the Chat Completions -> Messages API
 	// direction that writes it.
 	CacheType string `json:"cache_type,omitempty"`
+}
+
+// ReasoningTokens returns the thinking tokens included in OutputTokens, 0 when the
+// provider does not report them.
+func (u *AnthropicUsage) ReasoningTokens() int {
+	if u == nil {
+		return 0
+	}
+	return u.OutputTokensDetails.reasoningTokens()
+}
+
+func (d *OutputTokensDetails) reasoningTokens() int {
+	if d == nil {
+		return 0
+	}
+	return max(d.ThinkingTokens, 0)
 }
 
 // ---------------------------------------------------------------------------
@@ -293,6 +317,7 @@ type AnthropicStreamUsage struct {
 	CacheCreationInputTokens *int                    `json:"cache_creation_input_tokens,omitempty"`
 	CacheCreation            *CacheCreationDetails   `json:"cache_creation,omitempty"`
 	ServerToolUse            *ServerToolUsageDetails `json:"server_tool_use,omitempty"`
+	OutputTokensDetails      *OutputTokensDetails    `json:"output_tokens_details,omitempty"`
 	// CacheType mirrors AnthropicUsage.CacheType — see its doc comment. A
 	// plain string (not a pointer like the counters above) since an omitted
 	// vs. explicit-empty distinction doesn't apply to it.

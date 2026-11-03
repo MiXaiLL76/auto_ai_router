@@ -316,36 +316,49 @@ func deleteClientControlledBillingParams(object map[string]goccyjson.RawMessage)
 	return changed
 }
 
+// appendServiceTier appends object's service_tier to tiers when it is a
+// non-empty string.
+func appendServiceTier(tiers []string, object map[string]goccyjson.RawMessage) []string {
+	if tier, _ := rawJSONString(object["service_tier"]); tier != "" {
+		return append(tiers, tier)
+	}
+	return tiers
+}
+
 // stripClientControlledBillingParams removes clientControlledBillingParams
 // from the two request locations through which clients may set them: the
 // top level and extra_body. It is intentionally not recursive: the same names
 // in metadata, messages, or tool schemas are user data and must be preserved.
-func stripClientControlledBillingParams(reqBody map[string]goccyjson.RawMessage) (bool, error) {
+// It returns the service tiers it removed, so they can still be checked
+// against the model they reach (see clientServiceTiers).
+func stripClientControlledBillingParams(reqBody map[string]goccyjson.RawMessage) (bool, []string, error) {
+	serviceTiers := appendServiceTier(nil, reqBody)
 	changed := deleteClientControlledBillingParams(reqBody)
 
 	extraBodyRaw, exists := reqBody["extra_body"]
 	if !exists {
-		return changed, nil
+		return changed, serviceTiers, nil
 	}
 	trimmed := bytes.TrimSpace(extraBodyRaw)
 	if len(trimmed) == 0 || trimmed[0] != '{' {
-		return changed, nil
+		return changed, serviceTiers, nil
 	}
 
 	var extraBody map[string]goccyjson.RawMessage
 	if err := goccyjson.Unmarshal(extraBodyRaw, &extraBody); err != nil {
-		return changed, err
+		return changed, serviceTiers, err
 	}
+	serviceTiers = appendServiceTier(serviceTiers, extraBody)
 	if !deleteClientControlledBillingParams(extraBody) {
-		return changed, nil
+		return changed, serviceTiers, nil
 	}
 
 	sanitizedExtraBody, err := goccyjson.Marshal(extraBody)
 	if err != nil {
-		return true, err
+		return true, serviceTiers, err
 	}
 	reqBody["extra_body"] = sanitizedExtraBody
-	return true, nil
+	return true, serviceTiers, nil
 }
 
 type sanitizedRequestBody struct {
@@ -355,6 +368,9 @@ type sanitizedRequestBody struct {
 	SessionID string
 	ClientID  string
 	Changed   bool
+	// ServiceTiers are the client's service_tier values (top level, then
+	// extra_body), removed from Body.
+	ServiceTiers []string
 }
 
 var errInvalidMultipartRequestBody = errors.New("invalid multipart request body")
@@ -417,10 +433,11 @@ func sanitizeJSONRequestBody(body []byte, isMessagesAPI bool) (sanitizedRequestB
 		return result, nil // Existing invalid-body handling reports missing model.
 	}
 
-	changed, err := stripClientControlledBillingParams(reqBody)
+	changed, serviceTiers, err := stripClientControlledBillingParams(reqBody)
 	if err != nil {
 		return sanitizedRequestBody{}, err
 	}
+	result.ServiceTiers = serviceTiers
 
 	model, ok := rawJSONString(reqBody["model"])
 	if !ok {
