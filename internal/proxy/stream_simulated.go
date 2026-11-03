@@ -72,6 +72,13 @@ type simulatedNonStreamAttemptResult struct {
 	streamErr        error
 	transportFailure bool
 
+	// clientAborted is true when the failure was the client disconnecting
+	// (context canceled mid-stream), not the provider. Such a request is a 499,
+	// never a 502: the provider was still answering, and the credential must not
+	// be blamed for the caller's own timeout. Kept separate from streamErr
+	// because simulatedFailureStatus cannot see the request context.
+	clientAborted bool
+
 	// retryableStatus is set when the upstream answered 2xx but the stream
 	// carried a terminal error event whose classified status the retry policy
 	// treats as retryable (a 429 rate limit, a 5xx, ...) — the same status a
@@ -263,8 +270,19 @@ func (p *Proxy) attemptSimulatedNonStream(
 	var terminalStatus int
 	var terminalPayload string
 	var emptyStream bool
+	// clientAborted records that this attempt's failure was the client going
+	// away (its request context canceled mid-stream), not the provider: the
+	// stream error it produces is context.Canceled, which markStreamFailure
+	// already recognizes. It must reach finishSimulatedNonStream so the
+	// client-facing outcome is a 499 and the credential is not blamed.
+	var clientAborted bool
 	if streamErr = resolveCapturedProviderStreamError(logCtx, resp.StatusCode, readErrForResolve, rawProviderStreamError, outputStreamError); streamErr != nil {
 		markStreamFailure(logCtx, streamErr)
+		// Only a *client* cancel counts, not any disconnect-shaped error: the
+		// same predicate the main non-streaming path uses (see
+		// isClientCanceledTransportError). A provider-side ECONNRESET/reset must
+		// stay a retryable transport failure, so it must not match here.
+		clientAborted = isClientCanceledTransportError(logCtx.Request, streamErr)
 		if payload := logCtx.ErrorBodyRaw; payload != "" {
 			status := statusCodeFromProviderStreamError(payload)
 			if retry, _ := ShouldRetryWithFallback(status, []byte(payload)); retry {
@@ -304,6 +322,7 @@ func (p *Proxy) attemptSimulatedNonStream(
 		lastChunk:         lastChunk,
 		streamErr:         streamErr,
 		emptyStream:       emptyStream,
+		clientAborted:     clientAborted,
 		// A genuine transport break (readErrForResolve != nil, io.EOF excluded):
 		// the provider dropped the connection mid-stream. Overflow is the one
 		// failure that stays non-retryable (a retry would hit the same size).
@@ -509,6 +528,14 @@ func (p *Proxy) handleSimulatedNonStream(
 		if result.streamErr == nil {
 			break
 		}
+		// The client went away (its request context canceled mid-stream): the
+		// provider was still answering, so this is not a credential failure and
+		// retrying would only run against a dead context. Stop without blaming
+		// the credential, and let finishSimulatedNonStream surface a 499.
+		// Checked first: a client cancel is never a provider classification.
+		if result.clientAborted {
+			break
+		}
 		// A 2xx stream whose terminal event the retry policy classifies as
 		// NON-retryable (a content-policy refusal): every credential refuses the
 		// same prompt, so replaying it only multiplies the delay. Surface the
@@ -631,6 +658,28 @@ func (p *Proxy) finishSimulatedNonStream(
 		_, _ = w.Write(clientBody)
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = result.httpStatus
+		return
+	}
+
+	if result.clientAborted {
+		// The client disconnected mid-stream (context canceled). The provider was
+		// still answering, so this is not a router/provider failure: surface 499
+		// with the same outcome the main non-streaming path records for a client
+		// cancel, instead of a 502 that would blame the credential and mislead
+		// analytics. logCtx.StreamOutcome is already "client_aborted" (set by
+		// markStreamFailure); ErrorOrigin is set so the health/ban accounting
+		// downstream treats it as a client cancel too.
+		p.logger.DebugContext(respCtx(resp), "Simulated non-stream response aborted: client disconnected",
+			"credential", cred.Name, "provider", providerLabel, "model", modelID,
+			"error", result.streamErr, "request_id", logCtx.RequestID)
+		p.setPromptTokensEstimate(logCtx, requestBody, realModelID)
+		logCtx.ErrorMsg = "Client disconnected before a response was received"
+		logCtx.ErrorOrigin = ErrorOriginClientCanceled
+		logCtx.TargetURL = targetURL
+		p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerLabel, StatusClientClosedRequest, !tokenUsageOptions.AudioInputIncludesCachedAudio)
+		logCtx.Status = "failure"
+		logCtx.HTTPStatus = StatusClientClosedRequest
+		WriteErrorClientClosed(w, logCtx.ErrorMsg)
 		return
 	}
 
@@ -767,6 +816,9 @@ type simulatedNativeNonStreamAttemptResult struct {
 
 	streamErr        error
 	transportFailure bool
+	// clientAborted is true when the failure was the client disconnecting, not
+	// the provider -- see simulatedNonStreamAttemptResult.clientAborted.
+	clientAborted bool
 
 	httpStatus int
 	httpBody   []byte
@@ -888,8 +940,10 @@ func (p *Proxy) attemptSimulatedNativeNonStream(
 	}
 
 	var streamErr error
+	var clientAborted bool
 	if streamErr = resolveCapturedProviderStreamError(logCtx, resp.StatusCode, readErrForResolve, rawProviderStreamError, outputStreamError); streamErr != nil {
 		markStreamFailure(logCtx, streamErr)
+		clientAborted = isClientCanceledTransportError(logCtx.Request, streamErr)
 	} else if overflow {
 		streamErr = ErrResponseBodyTooLarge
 		markStreamFailure(logCtx, streamErr)
@@ -906,6 +960,7 @@ func (p *Proxy) attemptSimulatedNativeNonStream(
 		// The only retryable shape: a genuine transport break, same rule as
 		// attemptSimulatedNonStream (see its doc comment).
 		transportFailure: readErrForResolve != nil,
+		clientAborted:    clientAborted,
 	}
 }
 
@@ -1050,6 +1105,11 @@ func (p *Proxy) handleSimulatedNativeNonStream(
 		}
 
 		result = p.attemptSimulatedNativeNonStream(resp, prepared, cred, provResponses, modelID, logCtx)
+		// Client went away: stop without blaming the credential or retrying
+		// against a dead context; finishSimulatedNativeNonStream surfaces 499.
+		if result.clientAborted {
+			break
+		}
 		if result.streamErr == nil || !result.transportFailure {
 			break
 		}
@@ -1112,6 +1172,22 @@ func (p *Proxy) finishSimulatedNativeNonStream(
 		_, _ = w.Write(clientBody)
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = result.httpStatus
+		return
+	}
+
+	if result.clientAborted {
+		// Client disconnected mid-stream: 499, not a 502 (see finishSimulatedNonStream).
+		p.logger.DebugContext(respCtx(resp), "Simulated native non-stream response aborted: client disconnected",
+			"credential", cred.Name, "provider", providerLabel, "model", modelID,
+			"error", result.streamErr, "request_id", logCtx.RequestID)
+		p.setPromptTokensEstimate(logCtx, requestBody, realModelID)
+		logCtx.ErrorMsg = "Client disconnected before a response was received"
+		logCtx.ErrorOrigin = ErrorOriginClientCanceled
+		logCtx.TargetURL = targetURL
+		p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerLabel, StatusClientClosedRequest, true)
+		logCtx.Status = "failure"
+		logCtx.HTTPStatus = StatusClientClosedRequest
+		WriteErrorClientClosed(w, logCtx.ErrorMsg)
 		return
 	}
 
@@ -1206,6 +1282,9 @@ type simulatedPassthroughNonStreamAttemptResult struct {
 
 	streamErr        error
 	transportFailure bool
+	// clientAborted is true when the failure was the client disconnecting, not
+	// the provider -- see simulatedNonStreamAttemptResult.clientAborted.
+	clientAborted bool
 
 	httpStatus int
 	httpBody   []byte
@@ -1321,8 +1400,10 @@ func (p *Proxy) attemptSimulatedPassthroughNonStream(
 		logTokens = completion.TokenCount()
 	}
 
+	var clientAborted bool
 	if streamErr = resolveCapturedProviderStreamError(logCtx, resp.StatusCode, streamErr, rawProviderStreamError); streamErr != nil {
 		markStreamFailure(logCtx, streamErr)
+		clientAborted = isClientCanceledTransportError(logCtx.Request, streamErr)
 	} else if overflow {
 		streamErr = ErrResponseBodyTooLarge
 		markStreamFailure(logCtx, streamErr)
@@ -1341,6 +1422,7 @@ func (p *Proxy) attemptSimulatedPassthroughNonStream(
 		// only ever set for a non-EOF read error above), same rule as
 		// attemptSimulatedNonStream (see its doc comment).
 		transportFailure: lastReadErr != nil,
+		clientAborted:    clientAborted,
 	}
 }
 
@@ -1477,6 +1559,11 @@ func (p *Proxy) handleSimulatedPassthroughNonStream(
 		}
 
 		result = p.attemptSimulatedPassthroughNonStream(resp, prepared, cred, modelID, logCtx)
+		// Client went away: stop without blaming the credential or retrying
+		// against a dead context; finishSimulatedPassthroughNonStream surfaces 499.
+		if result.clientAborted {
+			break
+		}
 		if result.streamErr == nil || !result.transportFailure {
 			break
 		}
@@ -1537,6 +1624,22 @@ func (p *Proxy) finishSimulatedPassthroughNonStream(
 		_, _ = w.Write(clientBody)
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = result.httpStatus
+		return
+	}
+
+	if result.clientAborted {
+		// Client disconnected mid-stream: 499, not a 502 (see finishSimulatedNonStream).
+		p.logger.DebugContext(respCtx(resp), "Simulated passthrough non-stream response aborted: client disconnected",
+			"credential", cred.Name, "model", modelID,
+			"error", result.streamErr, "request_id", logCtx.RequestID)
+		p.setPromptTokensEstimate(logCtx, requestBody, realModelID)
+		logCtx.ErrorMsg = "Client disconnected before a response was received"
+		logCtx.ErrorOrigin = ErrorOriginClientCanceled
+		logCtx.TargetURL = targetURL
+		p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerLabel, StatusClientClosedRequest, true)
+		logCtx.Status = "failure"
+		logCtx.HTTPStatus = StatusClientClosedRequest
+		WriteErrorClientClosed(w, logCtx.ErrorMsg)
 		return
 	}
 

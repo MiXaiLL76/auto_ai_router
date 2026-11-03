@@ -2189,3 +2189,157 @@ func TestProxyRequest_LiveStream_PromptBlockReturns400(t *testing.T) {
 	assert.Equal(t, int32(1), hits.Load(), "a content-policy refusal must not be retried across credentials")
 	assert.Contains(t, w.Body.String(), "content policy")
 }
+
+// TestProxyRequest_ForceStream_ClientAbortReturns499 covers the production
+// incident behind this fix: a client whose own timeout is shorter than the
+// provider's latency cancels a force_stream_for_ttft non-streaming request
+// mid-stream. The provider was still answering, so this must surface as 499
+// (client closed request), never a 502 that blames the credential and misleads
+// analytics. Reproduced with llama-3.3-70b via OpenRouter: a 10s client timeout
+// produced a 502 with duration ~10s and an SSE body fragment.
+func TestProxyRequest_ForceStream_ClientAbortReturns499(t *testing.T) {
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"partial\"},\"finish_reason\":null}]}\n\n")
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-r.Context().Done() // stall until the canceled upstream request ends
+	}))
+	defer upstream.Close()
+
+	prx := NewTestProxyBuilder().WithCredentials(
+		config.CredentialConfig{Name: "c1", Type: config.ProviderTypeOpenAI, BaseURL: upstream.URL, APIKey: "k", RPM: 100, TPM: 100000},
+	).WithForceStreamForTTFT(true).WithMaxProviderRetries(3).Build()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}],"stream":false}`)).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	go func() { time.Sleep(300 * time.Millisecond); cancel() }()
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, StatusClientClosedRequest, w.Code, "body: %s", w.Body.String())
+	assert.Contains(t, w.Body.String(), "Client disconnected")
+}
+
+// TestProxyRequest_ForceStream_ClientAbortDoesNotBlameCredential pins the second
+// half of the same fix: a client cancel must not count against the credential's
+// error metric (the provider did nothing wrong).
+func TestProxyRequest_ForceStream_ClientAbortDoesNotBlameCredential(t *testing.T) {
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"},\"finish_reason\":null}]}\n\n")
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer upstream.Close()
+
+	prx := NewTestProxyBuilder().WithCredentials(
+		config.CredentialConfig{Name: "abort-cred", Type: config.ProviderTypeOpenAI, BaseURL: upstream.URL, APIKey: "k", RPM: 100, TPM: 100000},
+	).WithForceStreamForTTFT(true).WithMaxProviderRetries(3).Build()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}],"stream":false}`)).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	go func() { time.Sleep(300 * time.Millisecond); cancel() }()
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, StatusClientClosedRequest, w.Code, "body: %s", w.Body.String())
+	// The credential error counter must not have been bumped for this cancel.
+	metric := monitoring.CredentialErrorsTotal.WithLabelValues("abort-cred")
+	assert.Equal(t, float64(0), testutil.ToFloat64(metric), "a client cancel must not count as a credential error")
+}
+
+// canceledBodyReader yields a non-EOF read error once its context is canceled,
+// standing in for an upstream body read interrupted by a client disconnect.
+type canceledBodyReader struct{ ctx context.Context }
+
+func (r canceledBodyReader) Read([]byte) (int, error) { <-r.ctx.Done(); return 0, r.ctx.Err() }
+func (r canceledBodyReader) Close() error             { return nil }
+
+// errPropagatingProviderResponses propagates the upstream read error from
+// StreamTo, as the real provider converter does on a broken stream -- unlike
+// the success-path stub, which swallows it.
+type errPropagatingProviderResponses struct{}
+
+func (s *errPropagatingProviderResponses) RequestFrom(body []byte) ([]byte, string, error) {
+	return body, "application/json", nil
+}
+func (s *errPropagatingProviderResponses) ResponseTo([]byte, string) (*responses.Response, error) {
+	return &responses.Response{Object: "response"}, nil
+}
+func (s *errPropagatingProviderResponses) StreamTo(reader io.Reader, _ io.Writer, _ string, _ *responses.ResponsesMetadata, _ func(*responses.Response)) error {
+	_, err := io.Copy(io.Discard, reader)
+	return err
+}
+func (s *errPropagatingProviderResponses) BuildURL(*config.CredentialConfig) string {
+	return "http://upstream"
+}
+
+// TestHandleSimulatedNativeNonStream_ClientAbortReturns499 is the native
+// Responses sibling of TestProxyRequest_ForceStream_ClientAbortReturns499: a
+// client cancel mid-stream must surface 499, not a 502 that blames the provider.
+func TestHandleSimulatedNativeNonStream_ClientAbortReturns499(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(`{}`)).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer master-key")
+
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       canceledBodyReader{ctx: ctx},
+	}
+	start := time.Now()
+	logCtx := &RequestLogContext{StartTime: start, RequestID: "native-abort", Request: req}
+	cred := &config.CredentialConfig{Name: "c", Type: config.ProviderTypeAnthropic, BaseURL: "http://upstream"}
+	prepared := &orchestratedRequest{streaming: false, nativeResponses: true, forcedNativeNonStream: true, body: []byte(`{}`)}
+	w := httptest.NewRecorder()
+
+	go func() { time.Sleep(200 * time.Millisecond); cancel() }()
+	prx.handleSimulatedNativeNonStream(w, req, resp, prepared, cred, &errPropagatingProviderResponses{}, "m", "m",
+		logCtx, nil, "http://upstream", prepared.body,
+		false, false, false, start, map[string]bool{}, map[string]bool{})
+
+	require.Equal(t, StatusClientClosedRequest, w.Code, "body: %s", w.Body.String())
+	assert.Equal(t, "client_aborted", logCtx.StreamOutcome)
+	assert.Contains(t, w.Body.String(), "Client disconnected")
+}
+
+// TestHandleSimulatedPassthroughNonStream_ClientAbortReturns499 is the
+// passthrough sibling of the same fix.
+func TestHandleSimulatedPassthroughNonStream_ClientAbortReturns499(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(`{}`)).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer master-key")
+
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       canceledBodyReader{ctx: ctx},
+	}
+	start := time.Now()
+	logCtx := &RequestLogContext{StartTime: start, RequestID: "pt-abort", Request: req}
+	cred := &config.CredentialConfig{Name: "c", Type: config.ProviderTypeOpenAI, BaseURL: "http://upstream"}
+	prepared := &orchestratedRequest{streaming: false, passthroughResponses: true, forcedPassthroughNonStream: true, body: []byte(`{}`)}
+	w := httptest.NewRecorder()
+
+	go func() { time.Sleep(200 * time.Millisecond); cancel() }()
+	prx.handleSimulatedPassthroughNonStream(w, req, resp, prepared, cred, "m", "m", logCtx, nil, "http://upstream", prepared.body,
+		false, false, false, start, map[string]bool{}, map[string]bool{})
+
+	require.Equal(t, StatusClientClosedRequest, w.Code, "body: %s", w.Body.String())
+	assert.Equal(t, "client_aborted", logCtx.StreamOutcome)
+	assert.Contains(t, w.Body.String(), "Client disconnected")
+}
