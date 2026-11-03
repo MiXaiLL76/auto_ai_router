@@ -100,6 +100,16 @@ type simulatedNonStreamAttemptResult struct {
 	// provider body used to build that masked response.
 	httpStatus int
 	httpBody   []byte
+
+	// terminalStatus > 0 means the upstream answered 2xx but the stream carried
+	// a terminal error event the retry policy classifies as NON-retryable -- a
+	// content-policy refusal being the case this exists for. Every credential
+	// would refuse the same prompt, so the loop must stop immediately instead of
+	// replaying it (which only multiplies latency), and the client must receive
+	// this real status (e.g. a 400) with a masked body rather than a generic 502
+	// built from a body-less stream. terminalPayload is that event's raw JSON.
+	terminalStatus  int
+	terminalPayload string
 }
 
 // attemptSimulatedNonStream drains and reassembles one upstream SSE response
@@ -244,6 +254,14 @@ func (p *Proxy) attemptSimulatedNonStream(
 	// from the captured event here.
 	var retryableStatus int
 	var retryablePayload string
+	// terminalStatus is the same derivation for a terminal error event the retry
+	// policy classifies as NON-retryable (a content-policy refusal, a
+	// request-fault 400): every credential would answer identically, so the loop
+	// must not replay it, and the client must get that real status (a 400 with a
+	// masked content-policy message) rather than a generic 502 built from a
+	// body-less stream.
+	var terminalStatus int
+	var terminalPayload string
 	var emptyStream bool
 	if streamErr = resolveCapturedProviderStreamError(logCtx, resp.StatusCode, readErrForResolve, rawProviderStreamError, outputStreamError); streamErr != nil {
 		markStreamFailure(logCtx, streamErr)
@@ -252,6 +270,9 @@ func (p *Proxy) attemptSimulatedNonStream(
 			if retry, _ := ShouldRetryWithFallback(status, []byte(payload)); retry {
 				retryableStatus = status
 				retryablePayload = payload
+			} else if status >= http.StatusBadRequest {
+				terminalStatus = status
+				terminalPayload = payload
 			}
 		}
 	} else if overflow {
@@ -293,6 +314,10 @@ func (p *Proxy) attemptSimulatedNonStream(
 		// provider-side 429/500 would hide the real cause.
 		retryableStatus:  retryableStatus,
 		retryablePayload: retryablePayload,
+		// The mirror image: a non-retryable classified event (content policy)
+		// is the terminal outcome, surfaced with its real status instead of a 502.
+		terminalStatus:  terminalStatus,
+		terminalPayload: terminalPayload,
 	}
 }
 
@@ -482,6 +507,26 @@ func (p *Proxy) handleSimulatedNonStream(
 
 		result = p.attemptSimulatedNonStream(resp, prepared, cred, modelID, logCtx)
 		if result.streamErr == nil {
+			break
+		}
+		// A 2xx stream whose terminal event the retry policy classifies as
+		// NON-retryable (a content-policy refusal): every credential refuses the
+		// same prompt, so replaying it only multiplies the delay. Surface the
+		// real classified status (400 for content policy) with a masked body as
+		// the terminal outcome, exactly as the main loop surfaces a
+		// non-retryable upstream error, instead of a generic 502.
+		if result.terminalStatus >= http.StatusBadRequest {
+			status := result.terminalStatus
+			body := []byte(result.terminalPayload)
+			p.logger.WarnContext(r.Context(), "Provider stream carried a non-retryable error event, returning it to the client",
+				"error_code", status, "credential", cred.Name, "model", modelID,
+				"attempt", attempt+1)
+			resp = nil
+			result = simulatedNonStreamAttemptResult{
+				httpStatus:    status,
+				httpBody:      body,
+				providerLabel: result.providerLabel,
+			}
 			break
 		}
 		// A 2xx stream whose terminal event the retry policy classifies as

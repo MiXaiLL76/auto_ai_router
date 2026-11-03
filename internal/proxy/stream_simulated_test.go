@@ -2093,3 +2093,99 @@ func TestProxyRequest_ForceStream_EmptyStreamAllCredentialsReturnsError(t *testi
 
 	assert.GreaterOrEqual(t, w.Code, 500, "a content-free stream must not be a silent 200: %s", w.Body.String())
 }
+
+// TestProxyRequest_ForceStream_PromptBlockReturns400NoRetry reproduces the
+// production incident behind this fix: Vertex/Gemini answers a prompt-level
+// content refusal with HTTP 200 and a single chunk carrying only
+// promptFeedback.blockReason and no candidates. Before the fix the converter
+// dropped that field, the reassembler found no content, and the client got a
+// generic 502 after exhausting every credential (the ~90s retry storm). Now the
+// block is surfaced as a 400 content-policy error on the FIRST credential,
+// with no retry: every credential refuses the same prompt.
+func TestProxyRequest_ForceStream_PromptBlockReturns400NoRetry(t *testing.T) {
+	var hits atomic.Int32
+	blocked := `data: {"promptFeedback":{"blockReason":"PROHIBITED_CONTENT"},"usageMetadata":{"promptTokenCount":6,"totalTokenCount":6}}` + "\n\n"
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, blocked+"data: [DONE]\n\n")
+	}))
+	defer upstream.Close()
+
+	prx := NewTestProxyBuilder().WithCredentials(
+		config.CredentialConfig{Name: "vertex-a", Type: config.ProviderTypeGemini, BaseURL: upstream.URL, APIKey: "k1", RPM: 100, TPM: 100000},
+		config.CredentialConfig{Name: "vertex-b", Type: config.ProviderTypeGemini, BaseURL: upstream.URL, APIKey: "k2", Priority: 1, RPM: 100, TPM: 100000},
+	).WithForceStreamForTTFT(true).WithMaxProviderRetries(5).Build()
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"blocked"}],"stream":false}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+	assert.Equal(t, int32(1), hits.Load(), "a content-policy refusal must not be retried across credentials")
+	assert.Contains(t, w.Body.String(), "content policy")
+}
+
+// TestProxyRequest_ForceStream_PromptBlockAllCredsStill400 pins the no-retry
+// guarantee with a full pool: even with several credentials available, a prompt
+// block costs exactly one upstream call and still returns 400.
+func TestProxyRequest_ForceStream_PromptBlockAllCredsStill400(t *testing.T) {
+	var hits atomic.Int32
+	blocked := `data: {"promptFeedback":{"blockReason":"SAFETY"},"usageMetadata":{"promptTokenCount":9,"totalTokenCount":9}}` + "\n\n"
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, blocked+"data: [DONE]\n\n")
+	}))
+	defer upstream.Close()
+
+	prx := NewTestProxyBuilder().WithCredentials(
+		config.CredentialConfig{Name: "a", Type: config.ProviderTypeGemini, BaseURL: upstream.URL, APIKey: "k1", RPM: 100, TPM: 100000},
+		config.CredentialConfig{Name: "b", Type: config.ProviderTypeGemini, BaseURL: upstream.URL, APIKey: "k2", Priority: 1, RPM: 100, TPM: 100000},
+		config.CredentialConfig{Name: "c", Type: config.ProviderTypeGemini, BaseURL: upstream.URL, APIKey: "k3", Priority: 2, RPM: 100, TPM: 100000},
+	).WithForceStreamForTTFT(true).WithMaxProviderRetries(5).Build()
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"blocked"}],"stream":false}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+	assert.Equal(t, int32(1), hits.Load(), "the block must be decided on the first credential, never retried")
+}
+
+// TestProxyRequest_LiveStream_PromptBlockReturns400 covers the explicit
+// stream:true client path (no force_stream_for_ttft): the same vertex prompt
+// block must surface as a 400 with the content-policy message, decided on the
+// first credential and never retried.
+func TestProxyRequest_LiveStream_PromptBlockReturns400(t *testing.T) {
+	var hits atomic.Int32
+	blocked := `data: {"promptFeedback":{"blockReason":"PROHIBITED_CONTENT"},"usageMetadata":{"promptTokenCount":6,"totalTokenCount":6}}` + "\n\n"
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, blocked+"data: [DONE]\n\n")
+	}))
+	defer upstream.Close()
+
+	prx := NewTestProxyBuilder().WithCredentials(
+		config.CredentialConfig{Name: "g1", Type: config.ProviderTypeGemini, BaseURL: upstream.URL, APIKey: "k1", RPM: 100, TPM: 100000},
+		config.CredentialConfig{Name: "g2", Type: config.ProviderTypeGemini, BaseURL: upstream.URL, APIKey: "k2", Priority: 1, RPM: 100, TPM: 100000},
+	).WithForceStreamForTTFT(true).WithMaxProviderRetries(5).Build()
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"blocked"}],"stream":true}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+	assert.Equal(t, int32(1), hits.Load(), "a content-policy refusal must not be retried across credentials")
+	assert.Contains(t, w.Body.String(), "content policy")
+}

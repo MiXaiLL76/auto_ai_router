@@ -8,8 +8,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
+	"github.com/mixaill76/auto_ai_router/internal/config"
 	compatlitellm "github.com/mixaill76/auto_ai_router/internal/responsecompat/litellm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -244,4 +246,65 @@ func (r *failingStreamReader) Read(target []byte) (int, error) {
 	}
 	r.read = true
 	return copy(target, r.body), r.err
+}
+
+// TestResponseCompatibilityWriterPreservesContentPolicyError pins that a
+// content-policy 400 -- the body the vertex prompt-block fix makes the router
+// produce -- survives litellm-compat mode with both its message and its code
+// intact. Compat mode re-runs ClassifyBadRequest on the router's own body
+// (normalizeError), so this also proves that classification round-trips rather
+// than degrading to the generic "Invalid request"/"invalid_request".
+func TestResponseCompatibilityWriterPreservesContentPolicyError(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	request, info := withResponseCompatRequest(request)
+	info.RequestID = "request-content-policy"
+
+	recorder := httptest.NewRecorder()
+	writer := newResponseCompatibilityWriter(recorder, compatlitellm.New(), request)
+	writer.Header().Set("Content-Type", "application/json")
+	writer.WriteHeader(http.StatusBadRequest)
+	_, err := writer.Write([]byte(`{"error":{"message":"The prompt was blocked by the provider's content policy","type":"invalid_request_error","param":null,"code":"content_policy_violation"},"request_id":"abc123"}`))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	require.Equal(t, http.StatusBadRequest, recorder.Code)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body))
+	errObj := body["error"].(map[string]any)
+	assert.Equal(t, "content_policy_violation", errObj["code"])
+	assert.Equal(t, "The prompt was blocked by the provider's content policy", errObj["message"])
+	assert.Equal(t, "invalid_request_error", errObj["type"])
+}
+
+// TestProxyRequest_CompatMode_PromptBlockReturns400 is the end-to-end guard for
+// the production configuration (response_compatibility: litellm): a vertex
+// prompt block must reach the client as a 400 content-policy error, decided on
+// the first credential, with the compat wrapper in the path.
+func TestProxyRequest_CompatMode_PromptBlockReturns400(t *testing.T) {
+	var hits atomic.Int32
+	blocked := `data: {"promptFeedback":{"blockReason":"PROHIBITED_CONTENT"},"usageMetadata":{"promptTokenCount":6,"totalTokenCount":6}}` + "\n\n"
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, blocked+"data: [DONE]\n\n")
+	}))
+	defer upstream.Close()
+
+	prx := NewTestProxyBuilder().WithCredentials(
+		config.CredentialConfig{Name: "g1", Type: config.ProviderTypeGemini, BaseURL: upstream.URL, APIKey: "k1", RPM: 100, TPM: 100000},
+		config.CredentialConfig{Name: "g2", Type: config.ProviderTypeGemini, BaseURL: upstream.URL, APIKey: "k2", Priority: 1, RPM: 100, TPM: 100000},
+	).WithForceStreamForTTFT(true).WithMaxProviderRetries(5).Build()
+	prx.responseCompat = compatlitellm.New()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"blocked"}],"stream":false}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	prx.WithResponseCompatibility(w, req, prx.proxyRequest)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+	assert.Equal(t, int32(1), hits.Load(), "a content-policy refusal must not be retried across credentials")
+	assert.Contains(t, w.Body.String(), "content_policy_violation")
+	assert.Contains(t, w.Body.String(), "content policy")
 }

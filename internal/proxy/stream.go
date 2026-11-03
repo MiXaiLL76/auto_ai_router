@@ -1620,12 +1620,12 @@ func (p *Proxy) streamToClient(
 		// recomputed here (cheap, pure) just to record exactly what that call
 		// is about to write, rather than trusting the two to stay in sync by
 		// construction.
-		clientSaw := string(maskedUpstreamErrorBody(statusCode, logContextRequestID(logCtx)))
+		clientSaw := string(maskedUpstreamErrorBody(statusCode, logContextRequestID(logCtx), []byte(payload)))
 		markProxyProviderStreamError(logCtx, statusCode, payload, clientSaw)
 		if logCtx != nil {
 			logCtx.StreamOutcome = "stream_error"
 		}
-		writeProviderStreamErrorBeforeCommit(w, statusCode, logContextRequestID(logCtx))
+		writeProviderStreamErrorBeforeCommit(w, statusCode, logContextRequestID(logCtx), payload)
 		if onWriteErr != nil {
 			onWriteErr()
 		}
