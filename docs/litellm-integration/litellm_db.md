@@ -37,7 +37,13 @@ litellm_db:
 | `log_retry_attempts`               | int      | 3       | Retry attempts on log insert failure                                           |
 | `log_retry_delay`                  | duration | 1s      | Delay between retry attempts                                                   |
 | `daily_spend_timezone`             | string   | UTC     | Timezone the daily spend tables are grouped by                                 |
+| `budget_timezone`                  | string   | UTC     | Calendar of the key budget windows (`budget_limits`)                           |
+| `budget_reset_time`                | string   | 00:00   | Time of day the day, week and month key budget windows reset at                |
 | `enable_cost_margin`               | bool     | false   | Apply `metadata.cost_margin_config` markup ([pricing](pricing.md#cost-margin)) |
+
+### Budget window timezone
+
+`budget_timezone` sets where the key budget windows ([`budget_limits`](litellm_auth.md#1a-key-budget-windows-budget_limits)) start and end: with `Europe/Moscow`, a `1d` window runs from 00:00 Moscow time (21:00 UTC), a `7d` window from Monday 00:00 and a `1mo` window from the 1st of the month 00:00. `budget_reset_time` (`"HH:MM"` or `"HH:MM:SS"`) moves those day, week and month boundaries to another time of day; hour and minute windows and `24h`/`daily` keep theirs, as in LiteLLM. Around a daylight saving change a window stretches or shrinks with the clock, as the day does (23 or 25 hours); every instant still falls into exactly one window. They are LiteLLM's `litellm_settings.timezone` and `budget_reset_time` for these windows, independent of `daily_spend_timezone`. Stored timestamps stay UTC.
 
 ### Daily aggregation timezone
 

@@ -81,8 +81,8 @@ func TestBudgetReserveAllowsUnderBudgetAndReconcilesExactMatch(t *testing.T) {
 	ctx := context.Background()
 	info := &dbmodels.TokenInfo{Token: "tok-ok", MaxBudget: float64p(100), Spend: 0}
 
-	res, ok := budgetReserve(ctx, r, info, 0.01, nil)
-	require.True(t, ok)
+	res, err := budgetReserve(ctx, r, info, 0.01, nil)
+	require.NoError(t, err)
 	require.NotNil(t, res)
 
 	// Settling at the same estimate (the common flat-price case) must not error.
@@ -97,9 +97,68 @@ func TestBudgetReserveRejectsOverBudgetAndRollsBack(t *testing.T) {
 	ctx := context.Background()
 	info := &dbmodels.TokenInfo{Token: "tok-reject", MaxBudget: float64p(0.005), Spend: 0.003}
 
-	res, ok := budgetReserve(ctx, r, info, 0.01, nil)
-	assert.False(t, ok)
+	res, err := budgetReserve(ctx, r, info, 0.01, nil)
+	require.ErrorIs(t, err, dbmodels.ErrBudgetExceeded)
+	refusal, ok := dbmodels.AsBudgetExceeded(err)
+	require.True(t, ok)
+	assert.Equal(t, dbmodels.BudgetLevelKey, refusal.Level)
+	assert.Equal(t, "key budget exceeded", budgetExceededMessage(err))
 	assert.Nil(t, res)
+}
+
+// The key's budget windows are reserved against like in the LLM path, on the
+// same counters (internal/proxy budgetWindowLevels names them identically).
+func TestBudgetLevelsForIncludeTheKeyBudgetWindows(t *testing.T) {
+	start := time.Date(2026, 3, 10, 21, 0, 0, 0, time.UTC)
+	levels := budgetLevelsFor(&dbmodels.TokenInfo{
+		Token: "tok",
+		BudgetWindows: []dbmodels.BudgetWindow{
+			{BudgetLimit: dbmodels.BudgetLimit{Duration: "1mo", MaxBudget: 3}, Start: start, Spend: 1},
+			{BudgetLimit: dbmodels.BudgetLimit{Duration: "2d", MaxBudget: 1}},
+		},
+	})
+	require.Len(t, levels, 2)
+	assert.Equal(t, "token:tok:window:1mo:"+strconv.FormatInt(start.Unix(), 10), levels[1].entity)
+	assert.Equal(t, "1mo", levels[1].window)
+	assert.Equal(t, 3.0, *levels[1].maxBudget)
+	assert.Equal(t, 1.0, levels[1].dbSpend)
+}
+
+func TestBudgetReserveRefusesOnAKeyBudgetWindow(t *testing.T) {
+	r := reserverForTest(t, "test:yandexsearch:window:")
+	info := &dbmodels.TokenInfo{Token: "tok-window", BudgetWindows: []dbmodels.BudgetWindow{{
+		BudgetLimit: dbmodels.BudgetLimit{Duration: "1d", MaxBudget: 0.005},
+		Start:       time.Date(2026, 3, 10, 21, 0, 0, 0, time.UTC),
+		Spend:       0.003,
+	}}}
+
+	res, err := budgetReserve(context.Background(), r, info, 0.01, nil)
+	require.ErrorIs(t, err, dbmodels.ErrBudgetExceeded)
+	assert.Equal(t, "key 1d budget exceeded", budgetExceededMessage(err))
+	assert.Nil(t, res)
+}
+
+func TestBudgetReserveRollsBackTheKeyWhenAParentLevelRefuses(t *testing.T) {
+	r := reserverForTest(t, "test:yandexsearch:rollback:")
+	ctx := context.Background()
+	info := &dbmodels.TokenInfo{
+		Token: "tok-rollback", MaxBudget: float64p(0.05), Spend: 0,
+		UserID: "user-rollback", UserMaxBudget: float64p(0.005), UserSpend: float64p(0.003),
+	}
+
+	res, err := budgetReserve(ctx, r, info, 0.01, nil)
+	require.ErrorIs(t, err, dbmodels.ErrBudgetExceeded)
+	refusal, ok := dbmodels.AsBudgetExceeded(err)
+	require.True(t, ok)
+	assert.Equal(t, dbmodels.BudgetLevelUser, refusal.Level)
+	assert.Equal(t, "budget exceeded", budgetExceededMessage(err))
+	assert.Nil(t, res)
+
+	// The key was reserved before the user refused; the rollback returns its
+	// counter to the DB spend, so the key's whole budget still fits.
+	allowed, err := r.TryReserve(ctx, "token:tok-rollback", 0, 0.05, 0.05)
+	require.NoError(t, err)
+	assert.True(t, allowed)
 }
 
 func TestBudgetReserveSkipsUnlimitedLevels(t *testing.T) {
@@ -109,8 +168,8 @@ func TestBudgetReserveSkipsUnlimitedLevels(t *testing.T) {
 	// reservation must trivially succeed with zero reserved entities.
 	info := &dbmodels.TokenInfo{Token: "tok-unlimited"}
 
-	res, ok := budgetReserve(ctx, r, info, 0.01, nil)
-	require.True(t, ok)
+	res, err := budgetReserve(ctx, r, info, 0.01, nil)
+	require.NoError(t, err)
 	require.NotNil(t, res)
 	assert.Empty(t, res.entities)
 }
@@ -121,8 +180,8 @@ func TestBudgetReserveNilReserverAlwaysAllows(t *testing.T) {
 
 	// A nil *budget.Reserver degrades to always-allow/no-op settle, per
 	// budget.Reserver's own nil-receiver safety (TestNilReserver_NoOp).
-	res, ok := budgetReserve(ctx, nil, info, 0.01, nil)
-	require.True(t, ok)
+	res, err := budgetReserve(ctx, nil, info, 0.01, nil)
+	require.NoError(t, err)
 	require.NotNil(t, res)
 	res.settle(ctx, nil, 0.01, nil)
 }
@@ -130,4 +189,18 @@ func TestBudgetReserveNilReserverAlwaysAllows(t *testing.T) {
 func TestReservationSettleNilReceiverIsNoop(t *testing.T) {
 	var res *reservation
 	res.settle(context.Background(), nil, 1, nil) // must not panic
+}
+
+func TestBudgetExceededMessageNamesOnlyTheKeyLimit(t *testing.T) {
+	assert.Equal(t, "key budget exceeded",
+		budgetExceededMessage(&dbmodels.BudgetExceededError{Level: dbmodels.BudgetLevelKey}))
+	assert.Equal(t, "key 1d budget exceeded",
+		budgetExceededMessage(&dbmodels.BudgetExceededError{Level: dbmodels.BudgetLevelKey, Window: "1d"}))
+	for _, level := range []dbmodels.BudgetLevel{
+		dbmodels.BudgetLevelUser, dbmodels.BudgetLevelTeam, dbmodels.BudgetLevelTeamMember,
+		dbmodels.BudgetLevelOrganization, dbmodels.BudgetLevelOrganizationMember,
+	} {
+		assert.Equal(t, "budget exceeded", budgetExceededMessage(&dbmodels.BudgetExceededError{Level: level}))
+	}
+	assert.Equal(t, "budget exceeded", budgetExceededMessage(dbmodels.ErrBudgetExceeded))
 }

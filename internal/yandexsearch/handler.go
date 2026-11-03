@@ -241,9 +241,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sendTime := time.Now()
 	estimateUSD, period := h.pricing.CostForTime(sendTime)
 
-	res, allowed := budgetReserve(r.Context(), h.budget, tokenInfo, estimateUSD, h.logger)
-	if !allowed {
-		writeError(w, http.StatusPaymentRequired, "budget exceeded")
+	res, err := budgetReserve(r.Context(), h.budget, tokenInfo, estimateUSD, h.logger)
+	if err != nil {
+		writeError(w, http.StatusPaymentRequired, budgetExceededMessage(err))
 		return
 	}
 	// Safety net: whatever happens below (early return, panic recovered

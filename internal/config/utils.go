@@ -66,6 +66,19 @@ func parseField[T any](tempValue string, defaultValue T, parser parseFunc[T], fi
 	return parsed, nil
 }
 
+// parseTimeOfDay parses a 24-hour "HH:MM" or "HH:MM:SS" time of day into
+// the time since midnight, the formats LiteLLM's parse_budget_reset_time
+// accepts.
+func parseTimeOfDay(value string) (time.Duration, error) {
+	for _, layout := range []string{"15:04", "15:04:05"} {
+		if t, err := time.Parse(layout, value); err == nil {
+			return time.Duration(t.Hour())*time.Hour + time.Duration(t.Minute())*time.Minute +
+				time.Duration(t.Second())*time.Second, nil
+		}
+	}
+	return 0, fmt.Errorf("expected a 24-hour HH:MM or HH:MM:SS time of day, got %q", value)
+}
+
 // validateBaseURL validates that a URL is properly formed with http/https scheme
 func validateBaseURL(credentialName, baseURL string) error {
 	parsedURL, err := url.Parse(baseURL)

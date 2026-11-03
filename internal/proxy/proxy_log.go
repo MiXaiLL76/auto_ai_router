@@ -16,6 +16,7 @@ import (
 	promanutils "github.com/mixaill76/auto_ai_router/internal/converter/proman/utils"
 	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
+	dbmodels "github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/spendlog"
 	"github.com/mixaill76/auto_ai_router/internal/logger"
 	"github.com/mixaill76/auto_ai_router/internal/security"
@@ -162,6 +163,9 @@ func (p *Proxy) handleLiteLLMAuthError(ctx context.Context, w http.ResponseWrite
 		litellmdb.ErrTeamBlocked:    {http.StatusForbidden, "Team blocked", "Team blocked"},
 		litellmdb.ErrTokenExpired:   {http.StatusUnauthorized, "Token expired", "Token expired"},
 		litellmdb.ErrBudgetExceeded: {http.StatusPaymentRequired, "Budget exceeded", "Budget exceeded"},
+		litellmdb.ErrBudgetWindowUnsupported: {
+			http.StatusServiceUnavailable, "Key budget window not supported", "Key budget window not supported",
+		},
 	}
 
 	// Check for known auth errors — client-side issues (bad/blocked/expired token,
@@ -170,16 +174,25 @@ func (p *Proxy) handleLiteLLMAuthError(ctx context.Context, w http.ResponseWrite
 		if errors.Is(err, errType) {
 			logCtx.HTTPStatus = info.status
 			logCtx.ErrorMsg = "LiteLLM auth validation failed"
-			p.logger.WarnContext(ctx, info.logMsg,
-				"error_code", info.status,
-				"token_prefix", security.MaskAPIKey(token))
+			message := info.message
+			args := []any{"error_code", info.status, "token_prefix", security.MaskAPIKey(token)}
+			if refusal, ok := dbmodels.AsBudgetExceeded(err); ok {
+				message = budgetExceededMessage(refusal.Level, refusal.Window)
+				args = append(args, "budget_level", string(refusal.Level))
+				if refusal.Window != "" {
+					args = append(args, "budget_window", refusal.Window)
+				}
+			}
+			p.logger.WarnContext(ctx, info.logMsg, args...)
 			switch info.status {
 			case http.StatusForbidden:
-				WriteErrorForbidden(w, info.message)
+				WriteErrorForbidden(w, message)
 			case http.StatusPaymentRequired:
-				WriteErrorPaymentRequired(w, info.message)
+				WriteErrorPaymentRequired(w, message)
+			case http.StatusServiceUnavailable:
+				WriteErrorServiceUnavailable(w, message)
 			default:
-				WriteErrorUnauthorized(w, info.message)
+				WriteErrorUnauthorized(w, message)
 			}
 			return
 		}

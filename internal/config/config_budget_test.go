@@ -54,3 +54,29 @@ func TestLiteLLMDBEnableCostMarginParsesExplicitSetting(t *testing.T) {
 	require.NoError(t, yaml.Unmarshal([]byte("enable_cost_margin: true\n"), &cfg))
 	assert.True(t, cfg.EnableCostMargin)
 }
+
+func TestLiteLLMDBBudgetTimezoneParsesExplicitSetting(t *testing.T) {
+	var cfg LiteLLMDBConfig
+	require.NoError(t, yaml.Unmarshal([]byte("enabled: false\n"), &cfg))
+	assert.Equal(t, time.UTC, cfg.BudgetTimezone)
+
+	require.NoError(t, yaml.Unmarshal([]byte("budget_timezone: Europe/Moscow\n"), &cfg))
+	assert.Equal(t, "Europe/Moscow", cfg.BudgetTimezone.String())
+
+	assert.Error(t, yaml.Unmarshal([]byte("budget_timezone: Mars/Olympus\n"), &cfg))
+}
+
+func TestLiteLLMDBBudgetResetTimeParsesLiteLLMFormats(t *testing.T) {
+	var cfg LiteLLMDBConfig
+	require.NoError(t, yaml.Unmarshal([]byte("enabled: false\n"), &cfg))
+	assert.Zero(t, cfg.BudgetResetTime)
+
+	require.NoError(t, yaml.Unmarshal([]byte(`budget_reset_time: "12:30"`), &cfg))
+	assert.Equal(t, 12*time.Hour+30*time.Minute, cfg.BudgetResetTime)
+	require.NoError(t, yaml.Unmarshal([]byte(`budget_reset_time: "07:00:15"`), &cfg))
+	assert.Equal(t, 7*time.Hour+15*time.Second, cfg.BudgetResetTime)
+
+	for _, value := range []string{`"24:00"`, `"noon"`, `"12"`} {
+		assert.Error(t, yaml.Unmarshal([]byte("budget_reset_time: "+value), &cfg), value)
+	}
+}
