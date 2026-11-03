@@ -260,7 +260,9 @@ func convertVertexUsageMetadata(meta *genai.GenerateContentResponseUsageMetadata
 			switch genai.MediaModality(detail.Modality) {
 			case genai.MediaModalityAudio:
 				usage.PromptTokensDetails.AudioTokens += int(detail.TokenCount)
-			case genai.MediaModalityImage:
+			case genai.MediaModalityImage, genai.MediaModalityDocument:
+				// Google bills DOCUMENT (PDF pages are rendered and counted as
+				// images) at the image rate, as the embeddings route does.
 				usage.PromptTokensDetails.ImageTokens += int(detail.TokenCount)
 			case genai.MediaModalityVideo:
 				// Reported apart from images: the two can carry different prices
@@ -281,7 +283,7 @@ func convertVertexUsageMetadata(meta *genai.GenerateContentResponseUsageMetadata
 			switch genai.MediaModality(detail.Modality) {
 			case genai.MediaModalityAudio:
 				usage.PromptTokensDetails.AudioTokens += int(detail.TokenCount)
-			case genai.MediaModalityImage:
+			case genai.MediaModalityImage, genai.MediaModalityDocument:
 				usage.PromptTokensDetails.ImageTokens += int(detail.TokenCount)
 			case genai.MediaModalityVideo:
 				// Reported apart from images: the two can carry different prices
@@ -305,7 +307,7 @@ func convertVertexUsageMetadata(meta *genai.GenerateContentResponseUsageMetadata
 				if usage.PromptTokensDetails.AudioTokens < 0 {
 					usage.PromptTokensDetails.AudioTokens = 0
 				}
-			case genai.MediaModalityImage:
+			case genai.MediaModalityImage, genai.MediaModalityDocument:
 				usage.PromptTokensDetails.ImageTokens -= int(detail.TokenCount)
 				if usage.PromptTokensDetails.ImageTokens < 0 {
 					usage.PromptTokensDetails.ImageTokens = 0
