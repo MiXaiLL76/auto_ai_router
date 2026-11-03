@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -17,6 +18,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/converter"
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	compatlitellm "github.com/mixaill76/auto_ai_router/internal/responsecompat/litellm"
+	"github.com/mixaill76/auto_ai_router/internal/scope"
 )
 
 const systemOneTestBody = `{
@@ -294,6 +296,14 @@ func TestSystemOneUsage(t *testing.T) {
 	assert.Equal(t, usage.PromptTokens, tokens)
 	assert.Equal(t, "estimated", systemOne.UsageSource)
 
+	armed := &RequestLogContext{IsSystemOne: true}
+	prx.setPromptTokensEstimate(armed, []byte(systemOneTestBody), "m")
+	tokens, usage = prx.systemOneUsage(t.Context(), armed, "c", http.StatusOK, nil, "m", 0, nil)
+	require.NotNil(t, usage, "without a body the armed estimate is billed")
+	assert.Equal(t, estimatePromptTokensForModel([]byte(systemOneTestBody), "m"), usage.PromptTokens)
+	assert.Equal(t, usage.PromptTokens, tokens)
+	assert.Equal(t, "estimated", armed.UsageSource)
+
 	chat := &RequestLogContext{}
 	tokens, usage = prx.systemOneUsage(t.Context(), chat, "c", http.StatusOK, []byte(systemOneTestBody), "m", 0, nil)
 	assert.Zero(t, tokens)
@@ -302,6 +312,29 @@ func TestSystemOneUsage(t *testing.T) {
 	tokens, usage = prx.systemOneUsage(t.Context(), &RequestLogContext{IsSystemOne: true}, "c", http.StatusBadGateway, []byte(systemOneTestBody), "m", 0, nil)
 	assert.Zero(t, tokens)
 	assert.Nil(t, usage, "errors are not billed")
+}
+
+// TestSystemOne_ProxyFallbackWithoutUsageBillsEstimate: a reply relayed by a
+// proxy-like fallback without any usage is billed on the prompt estimate, not
+// as a free call. writeFallbackResponse has no request body at hand, so it
+// relies on the estimate TryFallbackProxy arms.
+func TestSystemOne_ProxyFallbackWithoutUsageBillsEstimate(t *testing.T) {
+	fallback := newSystemOneUpstream(t, http.StatusOK, `{"id":"so_1","model":"jev-1.14.0","answers":[{"id":"q1","type":"noul","answer":"yes"}]}`)
+	prx := NewTestProxyBuilder().WithPrimaryAndFallback("http://primary.local", fallback.server.URL).Build()
+	logCtx := &RequestLogContext{RequestID: "so-fallback", IsSystemOne: true, Scope: scope.PublicContext(), Logged: true}
+	w := httptest.NewRecorder()
+
+	success, reason := prx.TryFallbackProxy(w, systemOneRequest("/v1/systemone", systemOneTestBody), "typesafe/jev-1.14", "primary",
+		http.StatusServiceUnavailable, RetryReasonServerErr, []byte(systemOneTestBody), time.Now().UTC(), logCtx)
+
+	require.True(t, success, reason)
+	require.Equal(t, int32(1), fallback.calls.Load())
+	want := estimatePromptTokensForModel([]byte(systemOneTestBody), "typesafe/jev-1.14")
+	require.Positive(t, want)
+	require.NotNil(t, logCtx.TokenUsage, "a reply without usage is not a free call")
+	assert.Equal(t, want, logCtx.TokenUsage.PromptTokens)
+	assert.Equal(t, "estimated", logCtx.UsageSource)
+	assert.Equal(t, want, prx.rateLimiter.GetCurrentTPM("fallback"))
 }
 
 func TestEstimatePromptTokens_SystemOneGrowsWithInputAndQuestions(t *testing.T) {

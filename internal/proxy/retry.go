@@ -237,6 +237,13 @@ func (p *Proxy) TryFallbackProxy(
 		maxAttempts = defaultMaxFallbackAttempts
 	}
 
+	// System One never streams, so no streaming entry path armed the prompt
+	// estimate that systemOneUsage bills a reply without usage on; in
+	// writeFallbackResponse it has no request body of its own.
+	if logCtx != nil && logCtx.IsSystemOne {
+		p.setPromptTokensEstimate(logCtx, body, modelID)
+	}
+
 	exitReason := "no_fallback_available"
 	var lastProxyResp *ProxyResponse
 	var lastFallbackCred *config.CredentialConfig
