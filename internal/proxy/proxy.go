@@ -366,15 +366,20 @@ type RequestLogContext struct {
 	promptTokensEstimateVal   int
 	promptTokensEstimateReady bool
 
-	// responseCostUSD/responseCostKnown carry the request's final client-billed
-	// cost out of the spend-log path so the response path can surface it as
-	// X-Litellm-Response-Cost (see setResponseCostHeader). Only the paths whose
-	// body is written after that computation can use it (non-streaming and the
-	// reassembled force_stream_for_ttft paths); a truly streaming response has
-	// already sent its headers. The separate known flag distinguishes a priced
-	// $0 request from one that was never priced.
+	// responseCostUSD/responseCostKnown carry the request's final billed cost out
+	// of the spend-log path so the response path can surface it as X-Total-Cost —
+	// but only for organizations that opted in via response_cost_mode (see
+	// setResponseCostHeader). Only the paths whose body is written after that
+	// computation can use it (non-streaming and the reassembled
+	// force_stream_for_ttft paths); a truly streaming response has already sent
+	// its headers. The separate known flag distinguishes a priced $0 request from
+	// one that was never priced.
 	responseCostUSD   float64
 	responseCostKnown bool
+	// responseCostBreakdown is the per-component cost breakdown (JSON), recorded
+	// alongside the total and emitted as X-Cost-Breakdown for organizations whose
+	// response_cost_mode is breakdown. Nil until the cost is computed.
+	responseCostBreakdown []byte
 }
 
 // promptTokensEstimate returns the memoized local tiktoken-based prompt-token estimate,
