@@ -796,7 +796,47 @@ func (r *RoundRobin) nextPriorityRetry(modelID string, minPriority int, exclude 
 	if found {
 		return cred, nil
 	}
-	return r.selectUnprioritizedRetryCandidateLocked(modelID, unprioritizedCandidates, priorityRateLimitHit)
+	cred, err := r.selectUnprioritizedRetryCandidateLocked(modelID, unprioritizedCandidates, priorityRateLimitHit)
+	if err == nil {
+		return cred, nil
+	}
+	// The search came up empty. Before reporting "no credentials available",
+	// check the credentials this chain already tried: a credential that was
+	// used and is now over its rate limit explains the dead end far better
+	// than "there is nothing here" -- and the two mean different things to
+	// the caller (a 429 with a Retry-After vs a 503). The credential just
+	// used is excluded from the search above precisely because it was already
+	// tried, so without this check a model served by a single
+	// momentarily-over-its-limit credential always reports the latter.
+	if errors.Is(err, ErrNoCredentialsAvailable) && r.triedCredentialRateLimitedLocked(modelID, exclude, visibility) {
+		return nil, ErrRateLimitExceeded
+	}
+	return nil, err
+}
+
+// triedCredentialRateLimitedLocked reports whether any credential this chain
+// has already tried is now over its rate limit for modelID. It runs only after
+// the normal search found nothing, so it never diverts a request that could
+// have been served by another credential. The caller holds r.mu.
+func (r *RoundRobin) triedCredentialRateLimitedLocked(modelID string, exclude map[string]bool, visibility scope.Context) bool {
+	for i := range r.credentials {
+		cred := &r.credentials[i]
+		if len(exclude) > 0 && !exclude[cred.Name] {
+			continue
+		}
+		if !cred.VisibleTo(visibility) {
+			continue
+		}
+		if modelID != "" && r.modelChecker != nil && r.modelChecker.IsEnabled() {
+			if !r.hasModel(cred.Name, modelID, visibility) {
+				continue
+			}
+		}
+		if r.credentialRateLimited(cred.Name, modelID) {
+			return true
+		}
+	}
+	return false
 }
 
 // nextUnprioritizedRetry searches only the unprioritized pool (no credential with an
@@ -964,6 +1004,27 @@ func (r *RoundRobin) selectUnprioritizedRetryCandidateLocked(modelID string, can
 	key := r.schedKeyFor(modelID, false, false, "", true, candidateCycleKey(candidates))
 	key.priority = -1
 	return r.selectWeightedLiveCandidate(modelID, live, key, rateLimitHit)
+}
+
+// credentialRateLimited reports whether the credential is currently over its
+// own RPM/TPM limit for modelID (or for the credential as a whole when the
+// model has no separate limit). It is the same check liveCandidates performs,
+// but for one named credential rather than a candidate list -- used to tell
+// "this credential cannot take another request right now" apart from "this
+// credential does not serve the model" for a credential that was already tried
+// and therefore no longer part of the search.
+func (r *RoundRobin) credentialRateLimited(credentialName, modelID string) bool {
+	if r.rateLimiter == nil {
+		return false
+	}
+	if !r.rateLimiter.CanAllow(credentialName) || !r.rateLimiter.AllowTokens(credentialName) {
+		return true
+	}
+	if modelID == "" {
+		return false
+	}
+	return !r.rateLimiter.CanAllowModel(credentialName, modelID) ||
+		!r.rateLimiter.AllowModelTokens(credentialName, modelID)
 }
 
 // hasTriedPriorityCredential reports whether this retry chain has already dispatched to
