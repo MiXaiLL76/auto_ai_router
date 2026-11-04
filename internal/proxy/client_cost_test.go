@@ -114,6 +114,52 @@ func TestInjectCostIntoJSONUsage(t *testing.T) {
 		assert.InDelta(t, 0.00123, decoded.Usage.Cost, 1e-12)
 	})
 
+	// Regression (Bug 1): a sibling object with byte-identical content to
+	// the real top-level "usage" used to confuse a content-based search --
+	// the cost would land in metadata.usage (the earlier, coincidental
+	// match) instead of the real usage object the client actually reads.
+	t.Run("targets the real top-level usage, not an identical-looking nested one", func(t *testing.T) {
+		body := []byte(`{"metadata":{"usage":{"prompt_tokens":10}},"usage":{"prompt_tokens":10}}`)
+		out, ok := injectCostIntoJSONUsage(body, 0.0042)
+		require.True(t, ok)
+
+		var decoded struct {
+			Metadata struct {
+				Usage struct {
+					Cost *float64 `json:"cost"`
+				} `json:"usage"`
+			} `json:"metadata"`
+			Usage struct {
+				Cost *float64 `json:"cost"`
+			} `json:"usage"`
+		}
+		require.NoError(t, json.Unmarshal(out, &decoded))
+		assert.Nil(t, decoded.Metadata.Usage.Cost, "metadata.usage must stay untouched")
+		require.NotNil(t, decoded.Usage.Cost, "the real top-level usage must get the cost")
+		assert.InDelta(t, 0.0042, *decoded.Usage.Cost, 1e-12)
+	})
+
+	// Regression (Bug 2): a provider-reported usage.cost (non-compat mode,
+	// where only the LiteLLM transform strips it) used to end up duplicated
+	// as a second "cost" key -- invalid JSON, and ambiguous for any parser
+	// that doesn't happen to take "last key wins".
+	t.Run("replaces an existing provider-reported cost in place, no duplicate key", func(t *testing.T) {
+		body := []byte(`{"id":"resp1","usage":{"prompt_tokens":10,"cost":9.99}}`)
+		out, ok := injectCostIntoJSONUsage(body, 0.0042)
+		require.True(t, ok)
+		assert.Equal(t, 1, strings.Count(string(out), `"cost"`), "must not write a second cost key")
+
+		var decoded struct {
+			Usage struct {
+				PromptTokens int     `json:"prompt_tokens"`
+				Cost         float64 `json:"cost"`
+			} `json:"usage"`
+		}
+		require.NoError(t, json.Unmarshal(out, &decoded))
+		assert.Equal(t, 10, decoded.Usage.PromptTokens)
+		assert.InDelta(t, 0.0042, decoded.Usage.Cost, 1e-12)
+	})
+
 	t.Run("leaves body untouched when there is no usage key", func(t *testing.T) {
 		body := []byte(`{"id":"resp1"}`)
 		out, ok := injectCostIntoJSONUsage(body, 1.0)
@@ -270,13 +316,59 @@ func TestAppendCostField(t *testing.T) {
 	})
 }
 
-func TestSpliceBytes(t *testing.T) {
-	out, ok := spliceBytes([]byte("abc-DEF-ghi"), []byte("DEF"), []byte("xyzw"))
+func TestSpliceBytesFrom(t *testing.T) {
+	out, ok := spliceBytesFrom([]byte("abc-DEF-ghi"), 0, []byte("DEF"), []byte("xyzw"))
 	require.True(t, ok)
 	assert.Equal(t, "abc-xyzw-ghi", string(out))
 
-	_, ok = spliceBytes([]byte("abc"), []byte("not-there"), []byte("x"))
+	_, ok = spliceBytesFrom([]byte("abc"), 0, []byte("not-there"), []byte("x"))
 	assert.False(t, ok)
+
+	// Regression (Bug 1): searching from byte 0 of a document that repeats
+	// the exact same byte sequence earlier would patch the wrong
+	// occurrence. Searching from a tracked offset instead finds the right
+	// one even though "DEF" appears twice.
+	t.Run("searches only from the given offset, ignoring an earlier identical match", func(t *testing.T) {
+		frame := []byte("DEF-abc-DEF-ghi")
+		out, ok := spliceBytesFrom(frame, 8, []byte("DEF"), []byte("xyzw"))
+		require.True(t, ok)
+		assert.Equal(t, "DEF-abc-xyzw-ghi", string(out))
+	})
+
+	t.Run("from out of range is rejected", func(t *testing.T) {
+		_, ok := spliceBytesFrom([]byte("abc"), 10, []byte("a"), []byte("b"))
+		assert.False(t, ok)
+		_, ok = spliceBytesFrom([]byte("abc"), -1, []byte("a"), []byte("b"))
+		assert.False(t, ok)
+	})
+}
+
+func TestTopLevelEntries(t *testing.T) {
+	t.Run("only top-level keys, not ones nested deeper under the same name", func(t *testing.T) {
+		entries, ok := topLevelEntries([]byte(`{"metadata":{"usage":{"prompt_tokens":10}},"usage":{"prompt_tokens":20}}`))
+		require.True(t, ok)
+		usage, has := entries["usage"]
+		require.True(t, has)
+		assert.JSONEq(t, `{"prompt_tokens":20}`, string(usage.value))
+		// searchFrom must point at (or after) this top-level "usage"'s own
+		// value, not the one nested under "metadata" earlier in the bytes.
+		assert.GreaterOrEqual(t, usage.searchFrom, 45)
+	})
+
+	t.Run("a repeated key resolves to the last occurrence, matching a standard decoder", func(t *testing.T) {
+		entries, ok := topLevelEntries([]byte(`{"cost":1,"cost":2}`))
+		require.True(t, ok)
+		cost, has := entries["cost"]
+		require.True(t, has)
+		assert.Equal(t, "2", string(bytes.TrimSpace(cost.value)))
+	})
+
+	t.Run("rejects non-object input", func(t *testing.T) {
+		_, ok := topLevelEntries([]byte(`[1,2,3]`))
+		assert.False(t, ok)
+		_, ok = topLevelEntries([]byte(`not json`))
+		assert.False(t, ok)
+	})
 }
 
 // Regression: a prior implementation decode+remarshaled the whole body via
@@ -480,6 +572,55 @@ func TestCostInjectingSSEReader(t *testing.T) {
 		// The cost itself must still have reached the client.
 		assert.Equal(t, 1, strings.Count(string(mustReadAll(t, newCostInjectingSSEReader(strings.NewReader(stream), p, testLogCtxWithFlatPrice(), converter.TokenUsageExtractionOptions{}))), `"cost"`))
 	})
+
+	// A genuine provider-reported cost (an aggregator-style upstream, in
+	// non-compat mode where only the LiteLLM transform would otherwise
+	// strip it) must not be lost just because the guard also has to
+	// prevent AIR's own injected figure from being mistaken for it. The
+	// wire still shows AIR's own billed cost (the client is billed by the
+	// router, not by whatever the upstream charged AIR) but
+	// ProviderCostUSD -- internal-only, used for provider_reported_cost in
+	// spend metadata and the Kafka event -- must end up holding the real
+	// 9.99, not 0 and not AIR's own figure.
+	t.Run("preserves a genuine provider-reported cost in ProviderCostUSD", func(t *testing.T) {
+		p := &Proxy{}
+		logCtx := testLogCtxWithFlatPrice()
+		withProviderCost := "data: {\"id\":\"1\",\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":50,\"total_tokens\":150,\"cost\":9.99}}\n\n"
+		r := newCostInjectingSSEReader(strings.NewReader(withProviderCost), p, logCtx, converter.TokenUsageExtractionOptions{})
+
+		var usageLines streamUsageLines
+		var payloadBuf [][]byte
+		onLine := func(line []byte) {
+			payloadBuf = splitSSEPayloads(line, payloadBuf)
+			if usage := extractTokenUsageFromPayloads(payloadBuf, converter.TokenUsageExtractionOptions{}); usage != nil {
+				if logCtx.TokenUsage == nil {
+					logCtx.TokenUsage = &converter.TokenUsage{}
+				}
+				logCtx.TokenUsage.MergeNonZero(usage)
+			}
+		}
+
+		buf := make([]byte, 7)
+		var forwarded []byte
+		for {
+			n, err := r.Read(buf)
+			if n > 0 {
+				forwarded = append(forwarded, buf[:n]...)
+				usageLines.Observe(buf[:n], onLine)
+			}
+			if err != nil {
+				require.ErrorIs(t, err, io.EOF)
+				usageLines.Finalize(onLine)
+				break
+			}
+		}
+
+		require.NotNil(t, logCtx.TokenUsage)
+		assert.InDelta(t, 9.99, logCtx.TokenUsage.ProviderCostUSD, 1e-12,
+			"the genuine provider-reported cost must survive for internal reconciliation")
+		assert.NotContains(t, string(forwarded), "9.99",
+			"the wire value is still AIR's own billed cost, not the provider's")
+	})
 }
 
 func mustReadAll(t *testing.T, r io.Reader) []byte {
@@ -657,6 +798,64 @@ func TestResponsesAPICostInjectingReader(t *testing.T) {
 		require.NotNil(t, logCtx.TokenUsage)
 		assert.Zero(t, logCtx.TokenUsage.ProviderCostUSD,
 			"AIR's own injected response.usage.cost must never be mistaken for a provider-reported cost")
+	})
+
+	// Same genuine-provider-cost-preservation regression as
+	// costInjectingSSEReader's own test, for the nested response.usage shape.
+	t.Run("preserves a genuine provider-reported cost in ProviderCostUSD", func(t *testing.T) {
+		p := &Proxy{}
+		logCtx := testLogCtxWithFlatPrice()
+		withProviderCost := "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"usage\":{" +
+			"\"input_tokens\":100,\"output_tokens\":50,\"total_tokens\":150," +
+			"\"input_tokens_details\":{\"cached_tokens\":0}," +
+			"\"output_tokens_details\":{\"reasoning_tokens\":0}," +
+			"\"cost\":9.99" +
+			"}}}\n\n"
+		r := newResponsesAPICostInjectingReader(strings.NewReader(withProviderCost), p, logCtx, opts, true)
+
+		lines := newResponsesStreamLines()
+		onLine := func(line []byte) {
+			jsonData := responsesStreamDataPayload(line)
+			if jsonData == nil {
+				return
+			}
+			event, ok := parseResponsesTerminalEvent(jsonData)
+			if !ok {
+				return
+			}
+			usage := event.typedUsage()
+			if usage == nil {
+				return
+			}
+			payload := bytes.Clone(jsonData)
+			if logCtx.TokenUsage == nil {
+				logCtx.TokenUsage = &converter.TokenUsage{}
+			}
+			logCtx.TokenUsage.PromptTokens = usage.InputTokens
+			logCtx.TokenUsage.CompletionTokens = usage.OutputTokens
+			logCtx.TokenUsage.MergeUsageExtensions(converter.ExtractTokenUsageWithOptions(payload, converter.TokenUsageExtractionOptions{}))
+		}
+
+		buf := make([]byte, 7)
+		var forwarded []byte
+		for {
+			n, err := r.Read(buf)
+			if n > 0 {
+				forwarded = append(forwarded, buf[:n]...)
+				lines.Observe(buf[:n], onLine)
+			}
+			if err != nil {
+				require.ErrorIs(t, err, io.EOF)
+				lines.Finalize(onLine)
+				break
+			}
+		}
+
+		require.NotNil(t, logCtx.TokenUsage)
+		assert.InDelta(t, 9.99, logCtx.TokenUsage.ProviderCostUSD, 1e-12,
+			"the genuine provider-reported cost must survive for internal reconciliation")
+		assert.NotContains(t, string(forwarded), "9.99",
+			"the wire value is still AIR's own billed cost, not the provider's")
 	})
 }
 

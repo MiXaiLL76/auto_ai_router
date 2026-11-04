@@ -83,49 +83,113 @@ func (p *Proxy) clientFacingCost(logCtx *RequestLogContext, usage *converter.Tok
 	return costs.TotalCost, true
 }
 
-// appendCostField inserts `"cost":<value>` into a JSON object's raw bytes
-// just before its closing brace, touching no other byte: no remarshal, no
-// key reordering, no re-escaping. objectRaw must already be known to decode
-// as a JSON object (callers check this via a map[string]json.RawMessage
-// decode first); garbage that merely starts with '{' and ends with '}' is
-// still rejected by the decode this does for safety.
+// topLevelEntry is one key's value from topLevelEntries, plus where to start
+// searching for its exact byte occurrence (see topLevelEntries).
+type topLevelEntry struct {
+	value      json.RawMessage
+	searchFrom int
+}
+
+// topLevelEntries decodes a JSON object's own top-level key/value pairs
+// (never descending into a value to look for the same key again), recording
+// for each not just its raw bytes but the byte offset to search from to
+// find that exact occurrence back in objectRaw.
+//
+// Searching from that offset (via spliceBytesFrom), instead of from the
+// start of objectRaw (bytes.Index(objectRaw, value)), is what makes the
+// splice land on the right occurrence: a map[string]json.RawMessage decode
+// only gives the value's bytes, and a content-based search for those bytes
+// can match an earlier, byte-identical span instead -- a sibling object
+// with the same content (e.g. {"metadata":{"usage":{"prompt_tokens":10}},
+// "usage":{"prompt_tokens":10}}) or a duplicate key (the last one, which is
+// also what a standards-conforming decoder returns, since dec.Token()/
+// dec.Decode() walk keys in document order and a later entry overwrites an
+// earlier one here the same way). searchFrom is exactly where this decoder
+// started reading this key's value, so an identical span anywhere before it
+// can never be mistaken for it.
+//
+// ok=false if objectRaw isn't a well-formed JSON object.
+func topLevelEntries(objectRaw []byte) (map[string]topLevelEntry, bool) {
+	dec := json.NewDecoder(bytes.NewReader(objectRaw))
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, false
+	}
+	if delim, isDelim := tok.(json.Delim); !isDelim || delim != '{' {
+		return nil, false
+	}
+	entries := make(map[string]topLevelEntry)
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return nil, false
+		}
+		key, isString := keyTok.(string)
+		if !isString {
+			return nil, false
+		}
+		searchFrom := int(dec.InputOffset())
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return nil, false
+		}
+		entries[key] = topLevelEntry{value: raw, searchFrom: searchFrom}
+	}
+	if _, err := dec.Token(); err != nil { // closing '}'
+		return nil, false
+	}
+	return entries, true
+}
+
+// spliceBytesFrom replaces the first occurrence of old found at or after
+// byte offset from within frame, with replacement. Reports ok=false when
+// old cannot be found there (from out of range, or old genuinely absent
+// from frame[from:]).
+func spliceBytesFrom(frame []byte, from int, old, replacement []byte) ([]byte, bool) {
+	if from < 0 || from > len(frame) {
+		return nil, false
+	}
+	offset := bytes.Index(frame[from:], old)
+	if offset < 0 {
+		return nil, false
+	}
+	offset += from
+	result := make([]byte, 0, len(frame)+len(replacement)-len(old))
+	result = append(result, frame[:offset]...)
+	result = append(result, replacement...)
+	result = append(result, frame[offset+len(old):]...)
+	return result, true
+}
+
+// appendCostField sets "cost" on a JSON object's raw bytes to the given
+// value: replaced in place via topLevelEntries+spliceBytesFrom if the key
+// already exists (a provider-reported cost survives in non-compat mode --
+// only the LiteLLM compatibility transform strips it, see dropProviderCost
+// -- and an aggregator-style provider can send one), appended just before
+// the closing brace otherwise. Never writes a second, duplicate "cost" key,
+// which would be invalid JSON. Touches no other byte either way: no
+// remarshal, no key reordering, no re-escaping.
 func appendCostField(objectRaw []byte, cost float64) ([]byte, bool) {
 	trimmed := bytes.TrimSpace(objectRaw)
-	if len(trimmed) < 2 || trimmed[0] != '{' || trimmed[len(trimmed)-1] != '}' {
+	entries, ok := topLevelEntries(trimmed)
+	if !ok {
 		return nil, false
 	}
-	var probe map[string]json.RawMessage
-	if err := json.Unmarshal(trimmed, &probe); err != nil {
-		return nil, false
+	costField := []byte(strconv.FormatFloat(cost, 'f', -1, 64))
+	if existing, has := entries["cost"]; has {
+		return spliceBytesFrom(trimmed, existing.searchFrom, existing.value, costField)
 	}
-	costField := []byte(`"cost":` + strconv.FormatFloat(cost, 'f', -1, 64))
 	inner := bytes.TrimSpace(trimmed[1 : len(trimmed)-1])
-	result := make([]byte, 0, len(trimmed)+len(costField)+1)
+	result := make([]byte, 0, len(trimmed)+len(costField)+8)
 	if len(inner) == 0 {
 		result = append(result, trimmed[0])
 	} else {
 		result = append(result, trimmed[:len(trimmed)-1]...)
 		result = append(result, ',')
 	}
+	result = append(result, `"cost":`...)
 	result = append(result, costField...)
 	result = append(result, '}')
-	return result, true
-}
-
-// spliceBytes replaces the first occurrence of old within frame with
-// replacement, or reports ok=false when old cannot be found verbatim in
-// frame (it always can in practice here: every caller derives old as an
-// actual sub-slice of frame, e.g. via encoding/json.RawMessage or
-// splitSSEPayloads, never a value reconstructed independently).
-func spliceBytes(frame, old, replacement []byte) ([]byte, bool) {
-	offset := bytes.Index(frame, old)
-	if offset < 0 {
-		return nil, false
-	}
-	result := make([]byte, 0, len(frame)+len(replacement)-len(old))
-	result = append(result, frame[:offset]...)
-	result = append(result, replacement...)
-	result = append(result, frame[offset+len(old):]...)
 	return result, true
 }
 
@@ -136,19 +200,19 @@ func spliceBytes(frame, old, replacement []byte) ([]byte, bool) {
 // error bodies, binary/audio responses that never reach here as JSON), a
 // null usage, or malformed JSON.
 func injectCostIntoJSONUsage(body []byte, cost float64) ([]byte, bool) {
-	var doc map[string]json.RawMessage
-	if err := json.Unmarshal(body, &doc); err != nil {
-		return body, false
-	}
-	usageRaw, ok := doc["usage"]
-	if !ok || bytes.Equal(bytes.TrimSpace(usageRaw), []byte("null")) {
-		return body, false
-	}
-	newUsage, ok := appendCostField(usageRaw, cost)
+	entries, ok := topLevelEntries(body)
 	if !ok {
 		return body, false
 	}
-	return spliceBytes(body, usageRaw, newUsage)
+	usage, ok := entries["usage"]
+	if !ok || bytes.Equal(bytes.TrimSpace(usage.value), []byte("null")) {
+		return body, false
+	}
+	newUsage, ok := appendCostField(usage.value, cost)
+	if !ok {
+		return body, false
+	}
+	return spliceBytesFrom(body, usage.searchFrom, usage.value, newUsage)
 }
 
 // injectCostIntoNestedResponseUsage adds "cost" to response.usage for a
@@ -161,19 +225,19 @@ func injectCostIntoJSONUsage(body []byte, cost float64) ([]byte, bool) {
 // object's own field order/escaping are untouched either way. Bails out
 // (ok=false) for anything it doesn't recognize.
 func injectCostIntoNestedResponseUsage(payload []byte, cost float64) ([]byte, bool) {
-	var doc map[string]json.RawMessage
-	if err := json.Unmarshal(payload, &doc); err != nil {
-		return payload, false
-	}
-	responseRaw, ok := doc["response"]
-	if !ok || bytes.Equal(bytes.TrimSpace(responseRaw), []byte("null")) {
-		return payload, false
-	}
-	newResponse, ok := injectCostIntoJSONUsage(responseRaw, cost)
+	entries, ok := topLevelEntries(payload)
 	if !ok {
 		return payload, false
 	}
-	return spliceBytes(payload, responseRaw, newResponse)
+	response, ok := entries["response"]
+	if !ok || bytes.Equal(bytes.TrimSpace(response.value), []byte("null")) {
+		return payload, false
+	}
+	newResponse, ok := injectCostIntoJSONUsage(response.value, cost)
+	if !ok {
+		return payload, false
+	}
+	return spliceBytesFrom(payload, response.searchFrom, response.value, newResponse)
 }
 
 // injectCostIntoSSEUsageChunk adds "cost" to the usage object carried by the
@@ -189,7 +253,12 @@ func injectCostIntoNestedResponseUsage(payload []byte, cost float64) ([]byte, bo
 // sentinel, blank-line framing. Only the unambiguous single-payload case is
 // handled; anything else (several payloads batched together, no "usage"
 // key found either shape, malformed JSON) leaves frame untouched
-// (ok=false).
+// (ok=false). Searching for payloads[0] from byte 0 of frame (rather than a
+// tracked offset, unlike the two functions above) is safe here specifically
+// because len(payloads)==1 is already required: there is exactly one
+// "data:" line in frame, so no other span of frame can coincidentally equal
+// payloads[0] -- a bundled "event: ..." line is a short type label, never a
+// JSON object.
 func injectCostIntoSSEUsageChunk(frame []byte, payloads [][]byte, cost float64) ([]byte, bool) {
 	if len(payloads) != 1 {
 		return nil, false
@@ -201,7 +270,15 @@ func injectCostIntoSSEUsageChunk(frame []byte, payloads [][]byte, cost float64) 
 	if !ok {
 		return nil, false
 	}
-	return spliceBytes(frame, payloads[0], newPayload)
+	offset := bytes.Index(frame, payloads[0])
+	if offset < 0 {
+		return nil, false
+	}
+	result := make([]byte, 0, len(frame)+len(newPayload)-len(payloads[0]))
+	result = append(result, frame[:offset]...)
+	result = append(result, newPayload...)
+	result = append(result, frame[offset+len(payloads[0]):]...)
+	return result, true
 }
 
 // ==================== Provider-cost snapshot/restore ====================
@@ -226,11 +303,19 @@ func injectCostIntoSSEUsageChunk(frame []byte, payloads [][]byte, cost float64) 
 // Read() cycle later as the provider's reported cost, polluting both the
 // spend log metadata and the Kafka event with the client's own bill.
 //
-// providerCostUSDGuard fixes this without touching streamToClient: snapshot
-// logCtx.TokenUsage.ProviderCostUSD immediately before injecting (i.e.
-// before the observer has had any chance to run on this line), then restore
-// it once the observer has actually had its one chance to run. Embedded by
-// value in both readers.
+// providerCostUSDGuard fixes this without touching streamToClient: the
+// caller computes, from this line's own pre-injection usage extraction (the
+// same one it used to compute the cost being injected), the value
+// ProviderCostUSD should hold once this line is fully processed --
+// this line's own genuine provider-reported figure if it sent one (the same
+// "last non-zero wins" precedence MergeNonZero/MergeUsageExtensions already
+// use), otherwise whatever was accumulated from earlier lines. arm()
+// records that target; once the observer has actually had its one chance to
+// run on the forwarded (injected) bytes, restoreIfDue() overwrites whatever
+// it just wrote with that target -- not simply "undoes the injection", which
+// would also discard a genuine provider-reported cost this exact line
+// carried, the same bug class as never fixing this at all, just in the
+// other direction. Embedded by value in both readers.
 //
 // The injected line is often returned to the caller across several small
 // Read() calls (dst smaller than the rewritten line) before it is fully
@@ -241,19 +326,19 @@ func injectCostIntoSSEUsageChunk(frame []byte, payloads [][]byte, cost float64) 
 // naive "restore on the very next Read()" fires too early while that line
 // is still being drained, before the observer has run on it at all --
 // drained() marks that the last byte has gone out, and restoreIfDue(),
-// checked at the top of every subsequent Read(), only then reverts the
-// corruption, on the first call after that.
+// checked at the top of every subsequent Read(), only then applies the
+// target, on the first call after that.
 type providerCostUSDGuard struct {
 	state  providerCostUSDGuardState
-	before float64
+	target float64
 }
 
 type providerCostUSDGuardState int
 
 const (
 	providerCostUSDGuardIdle providerCostUSDGuardState = iota
-	// providerCostUSDGuardInjected: the rewritten line has been snapshotted
-	// but not yet fully handed to the caller.
+	// providerCostUSDGuardInjected: the rewritten line has been armed but
+	// not yet fully handed to the caller.
 	providerCostUSDGuardInjected
 	// providerCostUSDGuardDrained: the rewritten line's last byte has been
 	// returned -- the caller's observer will run on it before the next
@@ -261,27 +346,23 @@ const (
 	providerCostUSDGuardDrained
 )
 
-// snapshot records the pre-injection ProviderCostUSD so restoreIfDue can
-// revert whatever the caller's observer is about to (mis)write once this
-// line has been fully returned.
-func (g *providerCostUSDGuard) snapshot(usage *converter.TokenUsage) {
+// arm records the correct post-processing ProviderCostUSD (see the type's
+// own doc comment for how the caller must compute it) so restoreIfDue can
+// apply it once this line has been fully returned and the observer has run.
+func (g *providerCostUSDGuard) arm(target float64) {
 	g.state = providerCostUSDGuardInjected
-	if usage != nil {
-		g.before = usage.ProviderCostUSD
-	} else {
-		g.before = 0
-	}
+	g.target = target
 }
 
 // drained marks that the injected line's last byte has just been returned
-// to the caller -- a no-op unless snapshot armed the guard for this line.
+// to the caller -- a no-op unless arm set a target for this line.
 func (g *providerCostUSDGuard) drained() {
 	if g.state == providerCostUSDGuardInjected {
 		g.state = providerCostUSDGuardDrained
 	}
 }
 
-// restoreIfDue undoes the previous line's corruption, but only once the
+// restoreIfDue applies the previous line's armed target, but only once the
 // caller's observer has already had its one chance to run on it (state ==
 // drained); a no-op otherwise, including while that line is still being
 // handed out across several small Read() calls.
@@ -291,7 +372,7 @@ func (g *providerCostUSDGuard) restoreIfDue(usage *converter.TokenUsage) {
 	}
 	g.state = providerCostUSDGuardIdle
 	if usage != nil {
-		usage.ProviderCostUSD = g.before
+		usage.ProviderCostUSD = g.target
 	}
 }
 
@@ -426,6 +507,16 @@ func (r *costInjectingSSEReader) injectCostIntoLine(line []byte) []byte {
 	if r.logCtx.TokenUsage != nil {
 		merged = *r.logCtx.TokenUsage
 	}
+	// The correct ProviderCostUSD once this line is processed: this line's
+	// own genuine provider-reported figure (OpenRouter/Requesty-style
+	// usage.cost, xAI's cost_in_usd_ticks, ...) wins over whatever was
+	// accumulated before, the same precedence MergeNonZero itself uses --
+	// never the value AIR's own injection is about to overwrite it with on
+	// the wire.
+	correctProviderCost := merged.ProviderCostUSD
+	if usage.ProviderCostUSD != 0 {
+		correctProviderCost = usage.ProviderCostUSD
+	}
 	merged.MergeNonZero(usage)
 	cost, ok := r.proxy.clientFacingCost(r.logCtx, &merged)
 	if !ok {
@@ -435,7 +526,7 @@ func (r *costInjectingSSEReader) injectCostIntoLine(line []byte) []byte {
 	if !injected {
 		return line
 	}
-	r.providerCost.snapshot(r.logCtx.TokenUsage)
+	r.providerCost.arm(correctProviderCost)
 	r.done = true
 	return withCost
 }
@@ -589,11 +680,32 @@ func (r *responsesAPICostInjectingReader) injectCostIntoLine(line []byte) []byte
 	if !injected {
 		return line
 	}
-	withCost, spliced := spliceBytes(line, payload, newPayload)
-	if !spliced {
+	// line has exactly one data: line (mayBeTerminalResponsesEvent/
+	// responsesStreamDataPayload already established that), so -- same
+	// reasoning as injectCostIntoSSEUsageChunk -- a plain content search
+	// for payload within line cannot land on the wrong span.
+	offset := bytes.Index(line, payload)
+	if offset < 0 {
 		return line
 	}
-	r.providerCost.snapshot(r.logCtx.TokenUsage)
+	withCost := make([]byte, 0, len(line)+len(newPayload)-len(payload))
+	withCost = append(withCost, line[:offset]...)
+	withCost = append(withCost, newPayload...)
+	withCost = append(withCost, line[offset+len(payload):]...)
+
+	// The correct ProviderCostUSD once this line is processed: this line's
+	// own genuine provider-reported figure (e.g. an xAI cost_in_usd_ticks
+	// under response.usage) wins over whatever was accumulated before, the
+	// same precedence MergeUsageExtensions itself uses -- never the value
+	// AIR's own injection is about to overwrite it with on the wire.
+	correctProviderCost := float64(0)
+	if r.logCtx.TokenUsage != nil {
+		correctProviderCost = r.logCtx.TokenUsage.ProviderCostUSD
+	}
+	if usage.ProviderCostUSD != 0 {
+		correctProviderCost = usage.ProviderCostUSD
+	}
+	r.providerCost.arm(correctProviderCost)
 	r.done = true
 	return withCost
 }
