@@ -215,3 +215,26 @@ func TestOrganizationPolicyConfig_ResponseCostMode(t *testing.T) {
 		t.Fatalf("unknown response_cost_mode must be rejected")
 	}
 }
+
+func TestOrganizationPolicyConfig_ResponseCostInBody(t *testing.T) {
+	cases := []struct {
+		doc  string
+		want bool
+	}{
+		{"organization_id: o\nresponse_cost_in_body: true\n", true},
+		{"organization_id: o\nresponse_cost_in_body: false\n", false},
+		{"organization_id: o\n", false},
+		// independent of response_cost_mode: both can be set together, or
+		// the body form alone with no header mode at all.
+		{"organization_id: o\nresponse_cost_mode: total\nresponse_cost_in_body: true\n", true},
+	}
+	for _, c := range cases {
+		var p OrganizationPolicyConfig
+		if err := yaml.Unmarshal([]byte(c.doc), &p); err != nil {
+			t.Fatalf("unmarshal %q: %v", c.doc, err)
+		}
+		if p.ReturnResponseCostInBody != c.want {
+			t.Fatalf("%q: ReturnResponseCostInBody=%v want %v", c.doc, p.ReturnResponseCostInBody, c.want)
+		}
+	}
+}

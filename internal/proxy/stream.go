@@ -767,9 +767,22 @@ type tokenCapturingWriter struct {
 	// the chunk. Optional; used to capture the last chunk for usage
 	// extraction.
 	onChunk func(chunk []byte, payloads [][]byte, hasUsage bool)
+	// proxy and logCtx, when both set, let Write add the final per-request
+	// cost to the client-visible usage chunk for organizations that opted
+	// into usage.cost (see client_cost.go). nil/nil for any stream whose
+	// organization didn't opt in — Write then skips the check entirely.
+	proxy  *Proxy
+	logCtx *RequestLogContext
 }
 
 func (tcw *tokenCapturingWriter) Write(p []byte) (n int, err error) {
+	// inputLen is what callers must see as "fully written" on success,
+	// regardless of the cost injection below possibly substituting a
+	// differently-sized buffer for the actual write — satisfies the
+	// io.Writer contract from the caller's point of view (it handed us
+	// inputLen bytes of p, not whatever injectCostIntoSSEUsageChunk rebuilt).
+	inputLen := len(p)
+
 	// One parse per chunk: split once, reuse the sub-slices for the token
 	// count below, the completion accumulator, and onChunk.
 	tcw.payloadBuf = splitSSEPayloads(p, tcw.payloadBuf)
@@ -796,12 +809,26 @@ func (tcw *tokenCapturingWriter) Write(p []byte) (n int, err error) {
 		tcw.completion.AddPayloads(tcw.payloadBuf)
 	}
 
-	// Invoke callback if provided (used to capture last chunk for usage extraction)
+	// Invoke callback if provided (used to capture last chunk for usage
+	// extraction). This runs before the cost injection below so
+	// logCtx.TokenUsage already reflects this chunk (onChunk merges it in)
+	// by the time clientFacingCost reads it.
 	if tcw.onChunk != nil {
 		tcw.onChunk(p, tcw.payloadBuf, hasUsage)
 	}
 
-	return tcw.writer.Write(p)
+	if hasUsage && tcw.proxy != nil && shouldExposeCostToClient(tcw.logCtx) {
+		if cost, ok := tcw.proxy.clientFacingCost(tcw.logCtx, tcw.logCtx.TokenUsage); ok {
+			if withCost, injected := injectCostIntoSSEUsageChunk(p, tcw.payloadBuf, cost); injected {
+				p = withCost
+			}
+		}
+	}
+
+	if _, writeErr := tcw.writer.Write(p); writeErr != nil {
+		return 0, writeErr
+	}
+	return inputLen, nil
 }
 
 // rememberLastStreamDataChunk stores each chunk, keeping only the last one
@@ -877,6 +904,8 @@ func (p *Proxy) handleTransformedStreaming(
 			tokens:     &totalTokens,
 			completion: completion,
 			logger:     p.logger,
+			proxy:      p,
+			logCtx:     logCtx,
 			onChunk: func(chunk []byte, payloads [][]byte, hasUsage bool) {
 				chunkCount++
 
@@ -1054,6 +1083,15 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 		logCtx,
 		modelID,
 	)
+	if shouldExposeCostToClient(logCtx) {
+		// This is the raw OpenAI-compatible passthrough path (no format
+		// conversion) -- the chunks streamToClient reads below are socket-read
+		// boundaries, not SSE-line boundaries, so cost can't be spliced in at
+		// the single Write() this package uses for providers that do get
+		// converted (see tokenCapturingWriter.Write). Only requests whose
+		// organization opted in pay for this extra line-buffering reader.
+		clientReader = newCostInjectingSSEReader(clientReader, p, logCtx, tokenUsageOpts)
+	}
 	if err := p.streamToClient(respCtx(resp), w, clientReader, credName, metricModelID(modelID, logCtx), endpointFromLogContext(logCtx), resp.StatusCode, onChunk, nil, logCtx); err != nil {
 		p.logStreamHandlerError(respCtx(resp), "streamToClient error in handleStreamingWithTokens", err,
 			"credential", credName, "model", modelID, "chunks_received", chunkCount)
@@ -2106,6 +2144,14 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 		logCtx,
 		modelID,
 	)
+	if shouldExposeCostToClient(logCtx) {
+		// Same raw-passthrough situation as handleStreamingWithTokens (see its
+		// own wrap), but the Responses API nests usage at response.usage on
+		// the terminal response.completed/response.incomplete event instead
+		// of a flat top-level "usage" key -- see
+		// newResponsesAPICostInjectingReader's doc comment.
+		clientReader = newResponsesAPICostInjectingReader(clientReader, p, logCtx, tokenUsageOptions, audioInputAlreadyExcludesCachedAudio)
+	}
 	if err := p.streamToClient(respCtx(resp), w, clientReader, credName, metricModelID(modelID, logCtx), endpointFromLogContext(logCtx), resp.StatusCode, onChunk, nil, logCtx); err != nil {
 		p.logStreamHandlerError(respCtx(resp), "streamToClient error in handlePassthroughResponsesStreaming", err,
 			"credential", credName, "model", modelID, "chunks_received", chunkCount)

@@ -823,7 +823,7 @@ func (p *Proxy) finishSimulatedNonStream(
 	p.setCredentialResponseHeader(w, logCtx, cred.Name)
 	p.setResponseCostHeader(w, logCtx)
 
-	p.writeSimulatedBody(w, r, resp, cred, modelID, finalBody)
+	p.writeSimulatedBody(w, r, resp, cred, modelID, logCtx, finalBody)
 }
 
 // simulatedNativeNonStreamAttemptResult is attemptSimulatedNativeNonStream's
@@ -1306,7 +1306,7 @@ func (p *Proxy) finishSimulatedNativeNonStream(
 	p.setCredentialResponseHeader(w, logCtx, cred.Name)
 	p.setResponseCostHeader(w, logCtx)
 
-	p.writeSimulatedBody(w, r, resp, cred, modelID, finalBody)
+	p.writeSimulatedBody(w, r, resp, cred, modelID, logCtx, finalBody)
 }
 
 // simulatedPassthroughNonStreamAttemptResult is
@@ -1767,20 +1767,34 @@ func (p *Proxy) finishSimulatedPassthroughNonStream(
 	p.setCredentialResponseHeader(w, logCtx, cred.Name)
 	p.setResponseCostHeader(w, logCtx)
 
-	p.writeSimulatedBody(w, r, resp, cred, modelID, finalBody)
+	p.writeSimulatedBody(w, r, resp, cred, modelID, logCtx, finalBody)
 }
 
 // writeSimulatedBody writes a buffered non-stream body to the client, mirroring
 // the plain non-stream write path (compression negotiation, Content-Length,
-// deadlines, aborted-request accounting).
+// deadlines, aborted-request accounting). All three simulated non-stream
+// callers (chat-shaped, native Responses, passthrough Responses) already
+// called setResponseCostHeader just before this, meaning logCtx.
+// responseCostUSD/responseCostKnown are already set by the same
+// logSpendToLiteLLMDB/finalizeStreamingLog* call that computed the header --
+// so, same as the plain non-streaming path in proxy.go, this is also the
+// right (and only) place to add usage.cost to the body for organizations
+// that opted into response_cost_in_body, independent of response_cost_mode.
 func (p *Proxy) writeSimulatedBody(
 	w http.ResponseWriter,
 	r *http.Request,
 	resp *http.Response,
 	cred *config.CredentialConfig,
 	modelID string,
+	logCtx *RequestLogContext,
 	body []byte,
 ) {
+	if logCtx.responseCostKnown && shouldExposeCostToClient(logCtx) {
+		if withCost, ok := injectCostIntoJSONUsage(body, logCtx.responseCostUSD); ok {
+			body = withCost
+		}
+	}
+
 	acceptEncoding := r.Header.Get("Accept-Encoding")
 	acceptedEncodings := ParseAcceptEncoding(acceptEncoding)
 	targetEncoding := SelectBestEncoding(acceptedEncodings)
