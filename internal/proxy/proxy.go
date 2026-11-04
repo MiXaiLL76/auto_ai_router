@@ -2922,6 +2922,16 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		logCtx.Logged = true
+		// logSpendToLiteLLMDB above just computed logCtx.responseCostUSD --
+		// add it to the client's own usage object before it goes out, for
+		// organizations that opted into response_cost_in_body (see
+		// client_cost.go). Independent of setResponseCostHeader below, which
+		// gates the header form on response_cost_mode instead.
+		if logCtx.responseCostKnown && shouldExposeCostToClient(logCtx) {
+			if withCost, ok := injectCostIntoJSONUsage(finalResponseBody, logCtx.responseCostUSD); ok {
+				finalResponseBody = withCost
+			}
+		}
 	}
 	if isStreamingResp {
 		outgoingAudioUsageContract = directStreamingAudioUsageContract(prepared, cred, resp.StatusCode)
