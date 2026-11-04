@@ -238,6 +238,15 @@ const (
 	// every credential it could use before all of its inputs were sent.
 	// Answered with 429; no credential failed, so nothing reached fail2ban.
 	ErrorOriginFanOutRateLimited ErrorOrigin = "fan_out_rate_limited"
+	// ErrorOriginAllCredentialsRateLimited: the credential cascade ran out
+	// because every candidate was over its rate limit (RPM/TPM saturated) and
+	// no attempt produced a response to relay. Distinct from
+	// ErrorOriginAllAttemptsExhausted: that one means the credentials failed
+	// (transport errors, bans), while this one means they were all simply
+	// momentarily over their limit. Carries 429 with a Retry-After, not 502 —
+	// the model answers normally once the window rolls over, so reporting it
+	// as an outage misstates the cause and leaves the client retrying blindly.
+	ErrorOriginAllCredentialsRateLimited ErrorOrigin = "all_credentials_rate_limited"
 	// ErrorOriginClientCanceled: the client disconnected (closed the
 	// connection, or its own request timeout fired) before any credential
 	// attempt produced a response — see isClientContextCanceled. Distinct

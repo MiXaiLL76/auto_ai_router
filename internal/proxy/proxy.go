@@ -1064,6 +1064,16 @@ func (p *Proxy) WithResponseCompatibility(
 // proxyRequest's own loop and handleSimulatedNonStream's retry
 // (stream_simulated.go) -- the only reason this exists as its own method
 // rather than staying inlined.
+//
+// rateLimited reports that the balancer refused because every candidate was
+// rate-limited (RPM/TPM saturated or a full tier), as opposed to there being
+// no candidate at all. The two are different failures for the client: the
+// first is a 429 with a Retry-After ("come back later"), the second a 503
+// ("this model has no capacity right now"). The balancer already
+// distinguishes them (ErrRateLimitExceeded vs ErrNoCredentialsAvailable);
+// without this flag that distinction dies here, and a request whose only
+// credential was momentarily over its limit surfaces as a generic 502
+// ("All provider attempts failed") instead.
 func (p *Proxy) nextRetryCredential(
 	r *http.Request,
 	logCtx *RequestLogContext,
@@ -1073,13 +1083,13 @@ func (p *Proxy) nextRetryCredential(
 	streaming bool,
 	attempt int,
 	triedCreds, attemptedCreds map[string]bool,
-) (nextCred *config.CredentialConfig, nextReq credentialPreparedRequest, ready bool) {
+) (nextCred *config.CredentialConfig, nextReq credentialPreparedRequest, ready bool, rateLimited bool) {
 	for {
 		candidate, err := p.balancer.NextRetryForModelExcludingScoped(modelID, cred, triedCreds, attemptedCreds, logCtx.Scope)
 		if err != nil {
 			p.logger.DebugContext(r.Context(), "No more retry credentials available",
 				"model", modelID, "attempt", attempt, "error", err)
-			return nil, credentialPreparedRequest{}, false
+			return nil, credentialPreparedRequest{}, false, errors.Is(err, balancer.ErrRateLimitExceeded)
 		}
 		preparedRetry, prepErr := p.prepareRequestForCredential(
 			r,
@@ -1116,7 +1126,7 @@ func (p *Proxy) nextRetryCredential(
 			logCtx.billingPriceResolved = true
 			logCtx.billingPriceModelID = retryPriceModelID
 			logCtx.billingPrice = retryPrice
-			return candidate, preparedRetry, true
+			return candidate, preparedRetry, true, false
 		}
 		triedCreds[candidate.Name] = true
 		p.logger.WarnContext(r.Context(), "Failed to prepare retry request for credential",
@@ -2170,6 +2180,12 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		shouldRetry     bool
 		retryReason     RetryReason
 		transportErr    error
+		// rateLimitExhausted: the credential cascade ran out because every
+		// candidate was rate-limited (RPM/TPM saturated), not because there
+		// was no candidate. It only matters when no response was obtained at
+		// all: then the outcome is a 429 with a Retry-After (the model is
+		// momentarily over its limit), not a 502 that blames the provider.
+		rateLimitExhausted bool
 		// Replies of a fanned-out embeddings request kept across attempts, so
 		// a retry only re-sends the inputs that did not get one.
 		embedFanOutReplies embedContentFanOutReplies
@@ -2191,10 +2207,20 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			// Check for next credential BEFORE resetting resp/responseBody.
 			// If no credential is available, break while preserving the last HTTP response
 			// (e.g. a 429 from the provider) so the caller returns it instead of 502.
-			nextCred, nextReq, retryReady := p.nextRetryCredential(
+			nextCred, nextReq, retryReady, retryRateLimited := p.nextRetryCredential(
 				r, logCtx, modelID, cred, prepared, streaming, attempt, triedCreds, attemptedCreds,
 			)
 			if !retryReady {
+				// The cascade ran out because every candidate was rate-limited
+				// (RPM/TPM saturated), not because there is no candidate at all.
+				// Remember it: with no response to relay, the outcome below would
+				// otherwise be a generic 502 ("All provider attempts failed")
+				// for what is really a 429 -- a rate-limited model, not a broken
+				// one. The client gets a 429 with a Retry-After and backs off
+				// instead of hammering the pool.
+				if retryRateLimited {
+					rateLimitExhausted = true
+				}
 				break
 			}
 
@@ -2483,6 +2509,14 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		errorMsg := "All provider attempts failed"
 		clientCanceled := isClientCanceledTransportError(r, transportErr)
 		rateLimited := errors.Is(transportErr, errEmbedFanOutRateLimited)
+		// The credential cascade ran out because every candidate was over its
+		// rate limit, and no attempt produced a response to relay. That is a
+		// 429 ("this model is momentarily over its limit -- try again in N
+		// seconds"), not a 502 that blames the provider for being broken: the
+		// same model answers normally once the window rolls over. Answering 502
+		// here both misreports the cause and leaves the client without the
+		// Retry-After it needs to back off instead of hammering the pool.
+		cascadeRateLimited := rateLimitExhausted
 		switch {
 		case clientCanceled:
 			// The client left before any credential attempt produced a
@@ -2498,6 +2532,11 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			statusMessage = "Rate limit exceeded"
 			errorMsg = "Credential rate limits ran out before every embeddings input was sent"
 			errorOrigin = ErrorOriginFanOutRateLimited
+		case cascadeRateLimited:
+			statusCode = http.StatusTooManyRequests
+			statusMessage = "Rate limit exceeded"
+			errorMsg = "All credentials for this model are currently rate limited"
+			errorOrigin = ErrorOriginAllCredentialsRateLimited
 		case transportErr != nil && isTimeoutError(transportErr):
 			statusCode = http.StatusRequestTimeout
 			statusMessage = "Request Timeout"
@@ -2514,6 +2553,10 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			p.logger.ErrorContext(r.Context(), "Embeddings request ran out of credential rate limits before every input was sent",
 				"error_code", statusCode, "credential", cred.Name, "provider", string(cred.Type), "model", modelID,
 				"error", transportErr,
+				"request_id", logCtx.RequestID)
+		case cascadeRateLimited:
+			p.logger.WarnContext(r.Context(), "All credentials for this model are rate limited",
+				"error_code", statusCode, "credential", cred.Name, "provider", string(cred.Type), "model", modelID,
 				"request_id", logCtx.RequestID)
 		default:
 			p.logUpstreamError(r.Context(), "All provider attempts failed: no upstream response", statusCode, cred, modelID, nil,
@@ -2535,6 +2578,10 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		case StatusClientClosedRequest:
 			WriteErrorClientClosed(w, statusMessage)
 		case http.StatusTooManyRequests:
+			// A 429 must always carry a Retry-After: the client is told to
+			// back off instead of retrying immediately. For the cascade case
+			// (every credential rate limited) there is no upstream header to
+			// relay, so derive the wait from the credential's own limit window.
 			p.setRetryAfterFromBan(w, modelID, nil, logCtx.Scope)
 			WriteErrorRateLimit(w, statusMessage)
 		default:

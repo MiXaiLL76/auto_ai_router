@@ -373,6 +373,10 @@ func (p *Proxy) handleSimulatedNonStream(
 	triedCreds, attemptedCreds map[string]bool,
 ) {
 	var embedFanOutReplies embedContentFanOutReplies
+	// rateLimitExhausted: the credential cascade ran out because every
+	// candidate was rate limited, not because there was no candidate --
+	// the outcome is a 429 with a Retry-After, not a 502.
+	var rateLimitExhausted bool
 	var result simulatedNonStreamAttemptResult
 
 	for attempt := 0; attempt <= p.maxProviderRetries; attempt++ {
@@ -389,10 +393,16 @@ func (p *Proxy) handleSimulatedNonStream(
 		resetSimulatedAttemptState(logCtx)
 
 		if attempt > 0 {
-			nextCred, nextReq, ready := p.nextRetryCredential(
+			nextCred, nextReq, ready, rateLimited := p.nextRetryCredential(
 				r, logCtx, modelID, cred, prepared, streaming, attempt, triedCreds, attemptedCreds,
 			)
 			if !ready {
+				// Every candidate was rate limited (not "no candidate at
+				// all"): remember it so the outcome is a 429 with a
+				// Retry-After instead of a 502 that blames the provider.
+				if rateLimited {
+					rateLimitExhausted = true
+				}
 				break
 			}
 
@@ -593,7 +603,7 @@ func (p *Proxy) handleSimulatedNonStream(
 		p.metrics.RecordCredentialAttemptError(cred.Name)
 	}
 
-	p.finishSimulatedNonStream(w, r, resp, prepared, cred, modelID, realModelID, logCtx, saveResponseFn, targetURL, requestBody, result)
+	p.finishSimulatedNonStream(w, r, resp, prepared, cred, modelID, realModelID, logCtx, saveResponseFn, targetURL, requestBody, result, rateLimitExhausted)
 }
 
 // finishSimulatedNonStream writes the client-facing outcome of a (possibly
@@ -613,6 +623,7 @@ func (p *Proxy) finishSimulatedNonStream(
 	targetURL string,
 	requestBody []byte,
 	result simulatedNonStreamAttemptResult,
+	rateLimitExhausted bool,
 ) {
 	if resp != nil {
 		defer func() {
@@ -627,6 +638,16 @@ func (p *Proxy) finishSimulatedNonStream(
 	providerLabel := result.providerLabel
 	logTokens := result.logTokens
 	lastChunk := result.lastChunk
+
+	// The credential cascade ran out because every candidate was over its rate
+	// limit, and no attempt produced a response to relay: that is a 429 with a
+	// Retry-After, not a 502 ("All provider attempts failed") that blames the
+	// provider for being broken. The same model answers normally once the
+	// limit window rolls over.
+	if rateLimitExhausted {
+		p.writeSimulatedRateLimited(w, r, logCtx, cred, modelID, providerLabel, targetURL, logTokens, lastChunk, !tokenUsageOptions.AudioInputIncludesCachedAudio)
+		return
+	}
 
 	// A retried credential answered with a non-retryable HTTP error (429/5xx
 	// with no more credentials left, or a permanently non-retryable status):
@@ -999,16 +1020,26 @@ func (p *Proxy) handleSimulatedNativeNonStream(
 	triedCreds, attemptedCreds map[string]bool,
 ) {
 	var embedFanOutReplies embedContentFanOutReplies
+	// rateLimitExhausted: the credential cascade ran out because every
+	// candidate was rate limited, not because there was no candidate --
+	// the outcome is a 429 with a Retry-After, not a 502.
+	var rateLimitExhausted bool
 	var result simulatedNativeNonStreamAttemptResult
 
 	for attempt := 0; attempt <= p.maxProviderRetries; attempt++ {
 		resetSimulatedAttemptState(logCtx)
 
 		if attempt > 0 {
-			nextCred, nextReq, ready := p.nextRetryCredential(
+			nextCred, nextReq, ready, rateLimited := p.nextRetryCredential(
 				r, logCtx, modelID, cred, prepared, streaming, attempt, triedCreds, attemptedCreds,
 			)
 			if !ready {
+				// Every candidate was rate limited (not "no candidate at
+				// all"): remember it so the outcome is a 429 with a
+				// Retry-After instead of a 502 that blames the provider.
+				if rateLimited {
+					rateLimitExhausted = true
+				}
 				break
 			}
 
@@ -1119,7 +1150,7 @@ func (p *Proxy) handleSimulatedNativeNonStream(
 		p.metrics.RecordCredentialAttemptError(cred.Name)
 	}
 
-	p.finishSimulatedNativeNonStream(w, r, resp, prepared, cred, modelID, realModelID, logCtx, saveResponseFn, targetURL, requestBody, result)
+	p.finishSimulatedNativeNonStream(w, r, resp, prepared, cred, modelID, realModelID, logCtx, saveResponseFn, targetURL, requestBody, result, rateLimitExhausted)
 }
 
 // finishSimulatedNativeNonStream writes the client-facing outcome of a
@@ -1139,6 +1170,7 @@ func (p *Proxy) finishSimulatedNativeNonStream(
 	targetURL string,
 	requestBody []byte,
 	result simulatedNativeNonStreamAttemptResult,
+	rateLimitExhausted bool,
 ) {
 	if resp != nil {
 		defer func() {
@@ -1151,6 +1183,13 @@ func (p *Proxy) finishSimulatedNativeNonStream(
 	const providerLabel = "native_responses"
 	logTokens := result.logTokens
 	lastChunk := result.lastChunk
+
+	// Every candidate was rate limited: 429 with a Retry-After, not a 502
+	// (see finishSimulatedNonStream).
+	if rateLimitExhausted {
+		p.writeSimulatedRateLimited(w, r, logCtx, cred, modelID, providerLabel, targetURL, logTokens, lastChunk, true)
+		return
+	}
 
 	// A retried credential answered with an HTTP error, not a stream -- same
 	// contract as finishSimulatedNonStream's httpStatus branch (see its doc
@@ -1450,16 +1489,26 @@ func (p *Proxy) handleSimulatedPassthroughNonStream(
 	triedCreds, attemptedCreds map[string]bool,
 ) {
 	var embedFanOutReplies embedContentFanOutReplies
+	// rateLimitExhausted: the credential cascade ran out because every
+	// candidate was rate limited, not because there was no candidate --
+	// the outcome is a 429 with a Retry-After, not a 502.
+	var rateLimitExhausted bool
 	var result simulatedPassthroughNonStreamAttemptResult
 
 	for attempt := 0; attempt <= p.maxProviderRetries; attempt++ {
 		resetSimulatedAttemptState(logCtx)
 
 		if attempt > 0 {
-			nextCred, nextReq, ready := p.nextRetryCredential(
+			nextCred, nextReq, ready, rateLimited := p.nextRetryCredential(
 				r, logCtx, modelID, cred, prepared, streaming, attempt, triedCreds, attemptedCreds,
 			)
 			if !ready {
+				// Every candidate was rate limited (not "no candidate at
+				// all"): remember it so the outcome is a 429 with a
+				// Retry-After instead of a 502 that blames the provider.
+				if rateLimited {
+					rateLimitExhausted = true
+				}
 				break
 			}
 
@@ -1569,7 +1618,7 @@ func (p *Proxy) handleSimulatedPassthroughNonStream(
 		p.metrics.RecordCredentialAttemptError(cred.Name)
 	}
 
-	p.finishSimulatedPassthroughNonStream(w, r, resp, prepared, cred, modelID, realModelID, logCtx, saveResponseFn, targetURL, requestBody, result)
+	p.finishSimulatedPassthroughNonStream(w, r, resp, prepared, cred, modelID, realModelID, logCtx, saveResponseFn, targetURL, requestBody, result, rateLimitExhausted)
 }
 
 // finishSimulatedPassthroughNonStream writes the client-facing outcome of a
@@ -1590,6 +1639,7 @@ func (p *Proxy) finishSimulatedPassthroughNonStream(
 	targetURL string,
 	requestBody []byte,
 	result simulatedPassthroughNonStreamAttemptResult,
+	rateLimitExhausted bool,
 ) {
 	if resp != nil {
 		defer func() {
@@ -1602,6 +1652,13 @@ func (p *Proxy) finishSimulatedPassthroughNonStream(
 	const providerLabel = "openai"
 	logTokens := result.logTokens
 	lastChunk := result.lastChunk
+
+	// Every candidate was rate limited: 429 with a Retry-After, not a 502
+	// (see finishSimulatedNonStream).
+	if rateLimitExhausted {
+		p.writeSimulatedRateLimited(w, r, logCtx, cred, modelID, providerLabel, targetURL, logTokens, lastChunk, true)
+		return
+	}
 
 	if result.httpStatus >= http.StatusBadRequest {
 		p.logger.ErrorContext(respCtx(resp), "Simulated passthrough non-stream retry ended on an upstream error",
@@ -1812,6 +1869,42 @@ func (p *Proxy) writeSimulatedError(w http.ResponseWriter, logCtx *RequestLogCon
 	logCtx.Status = "failure"
 	logCtx.HTTPStatus = statusCode
 	logCtx.TargetURL = targetURL
+}
+
+// writeSimulatedRateLimited writes the client-facing outcome of a simulated
+// non-stream request whose credential cascade ran out because every candidate
+// was over its rate limit (RPM/TPM saturated) and no attempt produced a
+// response to relay.
+//
+// This is a 429 with a Retry-After, not a 502: the model is momentarily over
+// its limit and answers normally once the window rolls over, so reporting it as
+// an outage both misstates the cause and leaves the client retrying blindly
+// (which is exactly how a rate-limited model turns into a request storm).
+// It mirrors the outcome the direct path already produces for the same
+// condition (selectCredentialForModel's "Rate limit exceeded" branch).
+func (p *Proxy) writeSimulatedRateLimited(
+	w http.ResponseWriter,
+	r *http.Request,
+	logCtx *RequestLogContext,
+	cred *config.CredentialConfig,
+	modelID, providerLabel, targetURL string,
+	logTokens int,
+	lastChunk []byte,
+	audioInputAlreadyExcludesCachedAudio bool,
+) {
+	p.logger.WarnContext(r.Context(), "All credentials for this model are rate limited",
+		"credential", cred.Name, "provider", providerLabel, "model", modelID,
+		"request_id", logCtx.RequestID)
+	logCtx.ErrorMsg = "All credentials for this model are currently rate limited"
+	logCtx.ErrorOrigin = ErrorOriginAllCredentialsRateLimited
+	logCtx.TargetURL = targetURL
+	p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerLabel, http.StatusTooManyRequests, audioInputAlreadyExcludesCachedAudio)
+	logCtx.Status = "failure"
+	logCtx.HTTPStatus = http.StatusTooManyRequests
+	// Always tell the client when to come back: without a Retry-After it has
+	// nothing to pace its own retries with.
+	p.setRetryAfterFromBan(w, modelID, nil, logCtx.Scope)
+	WriteErrorRateLimit(w, logCtx.ErrorMsg)
 }
 
 // streamingProviderLabel names the provider for finalizeStreamingLog's usage
