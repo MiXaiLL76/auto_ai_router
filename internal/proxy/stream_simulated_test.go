@@ -262,6 +262,64 @@ func TestProxyRequest_ForceStreamForTTFT_E2E(t *testing.T) {
 	assert.Equal(t, "E2E answer", out.Choices[0].Message.Content)
 }
 
+// writeSimulatedBody is the one write path all three simulated non-stream
+// handlers (chat-shaped, native Responses, passthrough Responses) share,
+// called right after setResponseCostHeader -- so logCtx.responseCostUSD/
+// responseCostKnown are already set by the same logSpendToLiteLLMDB/
+// finalizeStreamingLog* call the header reads, the same way they are for
+// the plain (non-simulated) non-streaming path. This was the one path left
+// uncovered when response_cost_in_body first shipped: the header appeared,
+// the body didn't.
+func TestWriteSimulatedBody_InjectsCostForOptedInOrganization(t *testing.T) {
+	p := NewTestProxyBuilder().
+		WithSingleCredential("openai", config.ProviderTypeOpenAI, "http://unused.invalid", "upstream-key").
+		Build()
+	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	resp := &http.Response{StatusCode: http.StatusOK}
+	cred := &config.CredentialConfig{Name: "openai"}
+	logCtx := &RequestLogContext{
+		OrganizationPolicy: &models.OrganizationPolicy{ReturnResponseCostInBody: true},
+		responseCostKnown:  true,
+		responseCostUSD:    0.0042,
+	}
+	body := []byte(`{"id":"chatcmpl-1","object":"chat.completion","choices":[{"message":{"content":"hi"}}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`)
+
+	w := httptest.NewRecorder()
+	p.writeSimulatedBody(w, r, resp, cred, "gpt-4o", logCtx, body)
+
+	var decoded struct {
+		Usage struct {
+			PromptTokens int     `json:"prompt_tokens"`
+			Cost         float64 `json:"cost"`
+		} `json:"usage"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &decoded))
+	assert.Equal(t, 10, decoded.Usage.PromptTokens)
+	assert.InDelta(t, 0.0042, decoded.Usage.Cost, 1e-12)
+}
+
+// Organizations that didn't opt in (the overwhelming majority) must see the
+// body byte-for-byte unchanged -- this is the same additive-only contract
+// as every other injection point.
+func TestWriteSimulatedBody_LeavesBodyUntouchedWithoutOptIn(t *testing.T) {
+	p := NewTestProxyBuilder().
+		WithSingleCredential("openai", config.ProviderTypeOpenAI, "http://unused.invalid", "upstream-key").
+		Build()
+	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	resp := &http.Response{StatusCode: http.StatusOK}
+	cred := &config.CredentialConfig{Name: "openai"}
+	logCtx := &RequestLogContext{
+		responseCostKnown: true,
+		responseCostUSD:   0.0042,
+	}
+	body := []byte(`{"id":"chatcmpl-1","object":"chat.completion","choices":[{"message":{"content":"hi"}}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`)
+
+	w := httptest.NewRecorder()
+	p.writeSimulatedBody(w, r, resp, cred, "gpt-4o", logCtx, body)
+
+	assert.Equal(t, body, w.Body.Bytes())
+}
+
 // TestProxyRequest_ForceStreamForTTFT_ToggleOff verifies the toggle leaves
 // existing behavior untouched: with it off, a non-streaming request is
 // forwarded as-is and an SSE upstream response is streamed to the client.
