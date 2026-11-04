@@ -784,10 +784,10 @@ func (r *RoundRobin) NextRetryForModelExcludingScoped(modelID string, current *c
 	if current.EffectivePriority() <= 0 && r.hasTriedPriorityCredential(attempted) {
 		return r.nextUnprioritizedRetry(modelID, exclude, visibility)
 	}
-	return r.nextPriorityRetry(modelID, current.EffectivePriority(), exclude, visibility)
+	return r.nextPriorityRetry(modelID, current.EffectivePriority(), exclude, attempted, visibility)
 }
 
-func (r *RoundRobin) nextPriorityRetry(modelID string, minPriority int, exclude map[string]bool, visibility scope.Context) (*config.CredentialConfig, error) {
+func (r *RoundRobin) nextPriorityRetry(modelID string, minPriority int, exclude, attempted map[string]bool, visibility scope.Context) (*config.CredentialConfig, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -801,27 +801,39 @@ func (r *RoundRobin) nextPriorityRetry(modelID string, minPriority int, exclude 
 		return cred, nil
 	}
 	// The search came up empty. Before reporting "no credentials available",
-	// check the credentials this chain already tried: a credential that was
+	// check the credentials this chain actually dispatched to: one that was
 	// used and is now over its rate limit explains the dead end far better
 	// than "there is nothing here" -- and the two mean different things to
-	// the caller (a 429 with a Retry-After vs a 503). The credential just
-	// used is excluded from the search above precisely because it was already
+	// the caller (a 429 with a Retry-After vs a 503). The credential just used
+	// is excluded from the search above precisely because it was already
 	// tried, so without this check a model served by a single
 	// momentarily-over-its-limit credential always reports the latter.
-	if errors.Is(err, ErrNoCredentialsAvailable) && r.triedCredentialRateLimitedLocked(modelID, exclude, visibility) {
+	//
+	// The scan looks at attempted (credentials a request was actually sent
+	// to), NOT at exclude: exclude also carries credentials that were never
+	// dispatched to at all -- a reasoning_only credential on a request without
+	// reasoning, an organization-policy denylist entry, a system_one split.
+	// One of those being over its limit from unrelated traffic says nothing
+	// about why this request failed, and letting it decide turns a genuine
+	// transport failure into a false "all credentials rate limited".
+	if errors.Is(err, ErrNoCredentialsAvailable) && r.attemptedCredentialRateLimitedLocked(modelID, attempted, visibility) {
 		return nil, ErrRateLimitExceeded
 	}
 	return nil, err
 }
 
-// triedCredentialRateLimitedLocked reports whether any credential this chain
-// has already tried is now over its rate limit for modelID. It runs only after
-// the normal search found nothing, so it never diverts a request that could
-// have been served by another credential. The caller holds r.mu.
-func (r *RoundRobin) triedCredentialRateLimitedLocked(modelID string, exclude map[string]bool, visibility scope.Context) bool {
+// attemptedCredentialRateLimitedLocked reports whether any credential this
+// chain actually dispatched a request to is now over its rate limit for
+// modelID. It runs only after the normal search found nothing, so it never
+// diverts a request that could have been served by another credential. The
+// caller holds r.mu.
+func (r *RoundRobin) attemptedCredentialRateLimitedLocked(modelID string, attempted map[string]bool, visibility scope.Context) bool {
+	if len(attempted) == 0 {
+		return false
+	}
 	for i := range r.credentials {
 		cred := &r.credentials[i]
-		if len(exclude) > 0 && !exclude[cred.Name] {
+		if !attempted[cred.Name] {
 			continue
 		}
 		if !cred.VisibleTo(visibility) {

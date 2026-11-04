@@ -104,3 +104,50 @@ func TestProxyRequest_ForceStream_CascadeAllCredentialsRateLimited_Returns429(t 
 		"the simulated path must answer 429 for a rate-limited cascade: body: %s", rec.Body.String())
 	assert.NotEmpty(t, rec.Header().Get("Retry-After"))
 }
+
+// TestProxyRequest_StructurallyExcludedCredentialRateLimited_Stays502 is the
+// counterweight to the 429 fix: a credential that was never dispatched to must
+// not turn a genuine transport failure into a false "all credentials rate
+// limited".
+//
+// The exclusion set the balancer scans is not only "credentials this chain
+// tried" -- it also carries credentials that were ruled out structurally
+// before the first attempt (a reasoning_only credential on a request without
+// reasoning, an organization-policy denylist entry, a system_one split). One of
+// those being over its rate limit because of unrelated traffic says nothing
+// about why this request failed. Scanning them would report 429 for a request
+// that actually failed on the transport -- exactly the confusion the new
+// error origin was introduced to prevent.
+func TestProxyRequest_StructurallyExcludedCredentialRateLimited_Stays502(t *testing.T) {
+	var realHits atomic.Int32
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		realHits.Add(1)
+		// Transport-level failure on the only credential that was actually used.
+		hijackAndClose(w)
+	}))
+	defer upstream.Close()
+
+	prx := NewTestProxyBuilder().WithCredentials(
+		config.CredentialConfig{
+			Name: "reasoning-cred", Type: config.ProviderTypeOpenAI, BaseURL: upstream.URL,
+			APIKey: "k1", RPM: 1, TPM: 100000, ReasoningOnly: true,
+		},
+		config.CredentialConfig{
+			Name: "real-cred", Type: config.ProviderTypeOpenAI, BaseURL: upstream.URL,
+			APIKey: "k2", RPM: 5, TPM: 100000,
+		},
+	).WithMaxProviderRetries(2).Build()
+
+	// Exhaust the reasoning-only credential's only RPM slot before the request.
+	prx.rateLimiter.TryAllowAll("reasoning-cred", "m")
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	prx.ProxyRequest(rec, req)
+
+	assert.Equal(t, int32(1), realHits.Load(), "only the real credential is a candidate")
+	assert.Equal(t, http.StatusBadGateway, rec.Code,
+		"a structurally excluded credential's rate limit must not mask a transport failure: body: %s", rec.Body.String())
+}
