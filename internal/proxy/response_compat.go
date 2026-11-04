@@ -85,6 +85,15 @@ type responseCompatibilityWriter struct {
 	streamErr      error
 	closeOnce      sync.Once
 	closeErr       error
+	// costInjector and streamCostInjector, when set, let the router re-add
+	// its own final cost to the body/stream after the LiteLLM transform has
+	// already stripped any provider-reported cost from "usage" -- see
+	// wireCostInjectionForCompatWriter in client_cost.go. Set from
+	// proxyRequest, once logCtx exists -- which is after this writer is
+	// already constructed in WithResponseCompatibility, hence the late,
+	// mutable fields rather than constructor parameters.
+	costInjector       func([]byte) []byte
+	streamCostInjector func(io.Reader) io.Reader
 }
 
 func newResponseCompatibilityWriter(
@@ -182,6 +191,13 @@ func (w *responseCompatibilityWriter) Close() error {
 			Headers:    providerHeaders,
 			Body:       w.body.Bytes(),
 		})
+		// Re-add the router's own cost after the transform: Transform already
+		// stripped any provider-reported one from "usage", and cannot tell
+		// AIR's own injected figure apart from that (see
+		// wireCostInjectionForCompatWriter).
+		if w.costInjector != nil {
+			result.Body = w.costInjector(result.Body)
+		}
 		mergeHeaders(result.Headers, preservedHeaders)
 		copyHeaders(w.target.Header(), result.Headers)
 		w.target.Header().Set("Content-Length", itoa(len(result.Body)))
@@ -207,6 +223,12 @@ func (w *responseCompatibilityWriter) startStream() {
 	w.streamDone = make(chan error, 1)
 	go func() {
 		stream := w.transformer.Stream(w.compatContext(), reader)
+		// Same re-add-after-transform as Close(), for the streaming case:
+		// Stream already strips any provider-reported cost from every
+		// event's usage the same way Transform does for the whole body.
+		if w.streamCostInjector != nil {
+			stream = w.streamCostInjector(stream)
+		}
 		_, err := io.Copy(flushingWriter{target: w.target}, stream)
 		_ = reader.CloseWithError(err)
 		w.streamDone <- err

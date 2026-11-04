@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"io"
 	"strconv"
@@ -68,6 +69,28 @@ func TestClientFacingCost(t *testing.T) {
 		require.True(t, ok)
 		assert.InDelta(t, 0.0033, cost, 1e-9)
 	})
+
+	// Mirrors logSpendToLiteLLMDB's own rule ("LiteLLM bills a fixed margin
+	// only on priced responses"): a fixed-amount margin must not turn a
+	// genuinely free ($0 base cost) request into a non-zero one here, or
+	// the client-visible cost would disagree with what's actually billed.
+	t.Run("a fixed margin never applies to a zero base cost", func(t *testing.T) {
+		logCtx := &RequestLogContext{
+			ModelPrice: &models.ModelPrice{
+				InputCostPerToken:  0,
+				OutputCostPerToken: 0,
+			},
+			TokenInfo: &litellmmodels.TokenInfo{
+				CostMarginConfigs: []litellmmodels.CostMarginConfig{
+					{"global": litellmmodels.CostMargin{FixedAmount: 0.01}},
+				},
+			},
+		}
+		usage := &converter.TokenUsage{PromptTokens: 1000, CompletionTokens: 1000}
+		cost, ok := p.clientFacingCost(logCtx, usage)
+		require.True(t, ok)
+		assert.Zero(t, cost)
+	})
 }
 
 func TestInjectCostIntoJSONUsage(t *testing.T) {
@@ -116,11 +139,11 @@ func TestInjectCostIntoJSONUsage(t *testing.T) {
 func TestInjectCostIntoSSEUsageChunk(t *testing.T) {
 	t.Run("rebuilds a single-payload usage chunk with cost added", func(t *testing.T) {
 		payload := []byte(`{"id":"chatcmpl-1","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`)
-		chunk, ok := injectCostIntoSSEUsageChunk([][]byte{payload}, 0.0042)
+		chunk := []byte("data: " + string(payload) + "\n\n")
+		out, ok := injectCostIntoSSEUsageChunk(chunk, [][]byte{payload}, 0.0042)
 		require.True(t, ok)
-		assert.True(t, len(chunk) > 0)
 
-		s := string(chunk)
+		s := string(out)
 		require.Contains(t, s, "data: ")
 		require.Contains(t, s, "\n\n")
 
@@ -137,19 +160,139 @@ func TestInjectCostIntoSSEUsageChunk(t *testing.T) {
 	})
 
 	t.Run("bails out on zero or multiple payloads", func(t *testing.T) {
-		_, ok := injectCostIntoSSEUsageChunk(nil, 1.0)
+		_, ok := injectCostIntoSSEUsageChunk([]byte("data: {}\n\n"), nil, 1.0)
 		assert.False(t, ok)
 
 		payload := []byte(`{"usage":{"total_tokens":1}}`)
-		_, ok = injectCostIntoSSEUsageChunk([][]byte{payload, payload}, 1.0)
+		chunk := []byte("data: " + string(payload) + "\ndata: " + string(payload) + "\n\n")
+		_, ok = injectCostIntoSSEUsageChunk(chunk, [][]byte{payload, payload}, 1.0)
 		assert.False(t, ok)
 	})
 
-	t.Run("bails out when the single payload has no usage key", func(t *testing.T) {
+	t.Run("bails out when the single payload has no usage key, either shape", func(t *testing.T) {
 		payload := []byte(`{"id":"chatcmpl-1","choices":[]}`)
-		_, ok := injectCostIntoSSEUsageChunk([][]byte{payload}, 1.0)
+		chunk := []byte("data: " + string(payload) + "\n\n")
+		_, ok := injectCostIntoSSEUsageChunk(chunk, [][]byte{payload}, 1.0)
 		assert.False(t, ok)
 	})
+
+	// Regression: an Anthropic Messages API chunk is written as a single
+	// fmt.Fprintf("event: %s\ndata: %s\n\n", ...) call -- the whole thing
+	// reaches tokenCapturingWriter.Write as one []byte. The old
+	// implementation rebuilt the chunk from only the "data:" payload,
+	// silently dropping the preceding "event:" line a Messages API client
+	// needs to know what kind of event this is.
+	t.Run("preserves a bundled event: line (Anthropic Messages API shape)", func(t *testing.T) {
+		payload := []byte(`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}`)
+		chunk := []byte("event: message_delta\ndata: " + string(payload) + "\n\n")
+		out, ok := injectCostIntoSSEUsageChunk(chunk, [][]byte{payload}, 0.0007)
+		require.True(t, ok)
+
+		s := string(out)
+		assert.True(t, strings.HasPrefix(s, "event: message_delta\ndata: "), "event: line must survive: %q", s)
+		assert.True(t, strings.HasSuffix(s, "\n\n"))
+		var decoded struct {
+			Type  string `json:"type"`
+			Delta struct {
+				StopReason string `json:"stop_reason"`
+			} `json:"delta"`
+			Usage struct {
+				OutputTokens int     `json:"output_tokens"`
+				Cost         float64 `json:"cost"`
+			} `json:"usage"`
+		}
+		jsonPart := strings.TrimSuffix(strings.TrimPrefix(s, "event: message_delta\ndata: "), "\n\n")
+		require.NoError(t, json.Unmarshal([]byte(jsonPart), &decoded))
+		assert.Equal(t, "message_delta", decoded.Type)
+		assert.Equal(t, "end_turn", decoded.Delta.StopReason)
+		assert.Equal(t, 5, decoded.Usage.OutputTokens)
+		assert.InDelta(t, 0.0007, decoded.Usage.Cost, 1e-12)
+	})
+
+	// Regression: handleNativeResponsesStreaming/handleResponsesAPIStreaming
+	// go through handleTransformedStreaming/tokenCapturingWriter too, but
+	// their wire shape nests usage at response.usage, not top-level "usage".
+	// The old implementation only ever tried the top-level key, so native
+	// Responses API streaming never got a cost at all.
+	t.Run("falls back to nested response.usage for Responses-API-shaped chunks", func(t *testing.T) {
+		payload := []byte(`{"type":"response.completed","response":{"id":"r1","usage":{"input_tokens":10,"output_tokens":5}}}`)
+		chunk := []byte("data: " + string(payload) + "\n\n")
+		out, ok := injectCostIntoSSEUsageChunk(chunk, [][]byte{payload}, 0.0042)
+		require.True(t, ok)
+
+		var decoded struct {
+			Response struct {
+				Usage struct {
+					Cost float64 `json:"cost"`
+				} `json:"usage"`
+			} `json:"response"`
+		}
+		jsonPart := strings.TrimSuffix(strings.TrimPrefix(string(out), "data: "), "\n\n")
+		require.NoError(t, json.Unmarshal([]byte(jsonPart), &decoded))
+		assert.InDelta(t, 0.0042, decoded.Response.Usage.Cost, 1e-12)
+	})
+}
+
+func TestAppendCostField(t *testing.T) {
+	t.Run("inserts before the closing brace with a leading comma", func(t *testing.T) {
+		out, ok := appendCostField([]byte(`{"a":1,"b":2}`), 0.5)
+		require.True(t, ok)
+		assert.JSONEq(t, `{"a":1,"b":2,"cost":0.5}`, string(out))
+	})
+
+	t.Run("an empty object gets no leading comma", func(t *testing.T) {
+		out, ok := appendCostField([]byte(`{}`), 0.5)
+		require.True(t, ok)
+		assert.JSONEq(t, `{"cost":0.5}`, string(out))
+	})
+
+	t.Run("formats like X-Total-Cost's strconv.FormatFloat, no exponent, no float64 noise", func(t *testing.T) {
+		// 1000*0.000001 + 1000*0.000002 computed as float64 addition --
+		// exactly the kind of value that json.Marshal(float64) could print
+		// with 17 significant digits (binary floating-point artifacts);
+		// strconv.FormatFloat(_, 'f', -1, 64) prints the shortest decimal
+		// that round-trips instead.
+		cost := 1000*0.000001 + 1000*0.000002
+		out, ok := appendCostField([]byte(`{}`), cost)
+		require.True(t, ok)
+		assert.Contains(t, string(out), `"cost":0.003}`)
+
+		small, ok := appendCostField([]byte(`{}`), 0.0000001)
+		require.True(t, ok)
+		assert.NotContains(t, string(small), "e-", "must not use exponent notation")
+	})
+
+	t.Run("rejects non-object or garbage bytes", func(t *testing.T) {
+		_, ok := appendCostField([]byte(`[1,2]`), 1.0)
+		assert.False(t, ok)
+		_, ok = appendCostField([]byte(`{not json}`), 1.0)
+		assert.False(t, ok)
+	})
+}
+
+func TestSpliceBytes(t *testing.T) {
+	out, ok := spliceBytes([]byte("abc-DEF-ghi"), []byte("DEF"), []byte("xyzw"))
+	require.True(t, ok)
+	assert.Equal(t, "abc-xyzw-ghi", string(out))
+
+	_, ok = spliceBytes([]byte("abc"), []byte("not-there"), []byte("x"))
+	assert.False(t, ok)
+}
+
+// Regression: a prior implementation decode+remarshaled the whole body via
+// encoding/json, which re-sorts map keys and HTML-escapes "<"/">"/"&"
+// anywhere in the document (Marshal's default) -- not just inside "usage".
+// A message containing those characters, or a body whose fields weren't
+// already alphabetical, would come back byte-different for reasons that
+// have nothing to do with cost.
+func TestInjectCostIntoJSONUsage_PreservesUnrelatedBytes(t *testing.T) {
+	body := []byte(`{"id":"resp1","choices":[{"message":{"content":"if (a < b && b > c) { ok(); }"}}],"usage":{"prompt_tokens":10}}`)
+	out, ok := injectCostIntoJSONUsage(body, 0.0001)
+	require.True(t, ok)
+	assert.Contains(t, string(out), `"content":"if (a < b && b > c) { ok(); }"`,
+		"content containing <, >, & must survive unescaped")
+	assert.True(t, strings.HasPrefix(string(out), `{"id":"resp1","choices":`),
+		"field order before usage must be untouched: %q", out)
 }
 
 func testLogCtxWithFlatPrice() *RequestLogContext {
@@ -291,6 +434,59 @@ func TestCostInjectingSSEReader(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, 1, strings.Count(string(out), `"cost"`))
 	})
+
+	// Regression: extractTokenUsageFromPayloads reads a usage object's own
+	// "cost" key as the provider's reported price (ProviderCostUSD). This
+	// reader's Read() returns the already-cost-injected line, and
+	// streamToClient's onChunk/onLine observer (simulated below, faithfully
+	// mirroring handleStreamingWithTokens's own closure) extracts from
+	// exactly what Read() returned -- so without the
+	// snapshot-before/restore-on-next-Read correction, AIR's own injected
+	// usage.cost would end up misreported as what the *provider* charged,
+	// in spend metadata and the Kafka event.
+	t.Run("never pollutes ProviderCostUSD even though the observer reads the injected bytes", func(t *testing.T) {
+		p := &Proxy{}
+		logCtx := testLogCtxWithFlatPrice()
+		r := newCostInjectingSSEReader(strings.NewReader(stream), p, logCtx, converter.TokenUsageExtractionOptions{})
+
+		var usageLines streamUsageLines
+		var payloadBuf [][]byte
+		onLine := func(line []byte) {
+			payloadBuf = splitSSEPayloads(line, payloadBuf)
+			if usage := extractTokenUsageFromPayloads(payloadBuf, converter.TokenUsageExtractionOptions{}); usage != nil {
+				if logCtx.TokenUsage == nil {
+					logCtx.TokenUsage = &converter.TokenUsage{}
+				}
+				logCtx.TokenUsage.MergeNonZero(usage)
+			}
+		}
+
+		buf := make([]byte, 7) // deliberately small and line-misaligned
+		for {
+			n, err := r.Read(buf)
+			if n > 0 {
+				usageLines.Observe(buf[:n], onLine)
+			}
+			if err != nil {
+				require.ErrorIs(t, err, io.EOF)
+				usageLines.Finalize(onLine)
+				break
+			}
+		}
+
+		require.NotNil(t, logCtx.TokenUsage)
+		assert.Zero(t, logCtx.TokenUsage.ProviderCostUSD,
+			"AIR's own injected usage.cost must never be mistaken for a provider-reported cost")
+		// The cost itself must still have reached the client.
+		assert.Equal(t, 1, strings.Count(string(mustReadAll(t, newCostInjectingSSEReader(strings.NewReader(stream), p, testLogCtxWithFlatPrice(), converter.TokenUsageExtractionOptions{}))), `"cost"`))
+	})
+}
+
+func mustReadAll(t *testing.T, r io.Reader) []byte {
+	t.Helper()
+	out, err := io.ReadAll(r)
+	require.NoError(t, err)
+	return out
 }
 
 // responsesAPICompletedEventLine builds a minimal "response.completed" SSE
@@ -410,6 +606,57 @@ func TestResponsesAPICostInjectingReader(t *testing.T) {
 		out, err := io.ReadAll(r)
 		require.NoError(t, err)
 		assert.Equal(t, big, string(out))
+	})
+
+	// Same regression as costInjectingSSEReader's own ProviderCostUSD test,
+	// for the nested response.usage shape: handlePassthroughResponsesStreaming's
+	// own onChunk closure calls MergeUsageExtensions(ExtractTokenUsageWithOptions(
+	// payload, ...)) on exactly the bytes Read() returned, which is where
+	// ProviderCostUSD gets read from response.usage.cost when present.
+	t.Run("never pollutes ProviderCostUSD even though the observer reads the injected bytes", func(t *testing.T) {
+		p := &Proxy{}
+		logCtx := testLogCtxWithFlatPrice()
+		r := newResponsesAPICostInjectingReader(strings.NewReader(stream), p, logCtx, opts, true)
+
+		lines := newResponsesStreamLines()
+		onLine := func(line []byte) {
+			jsonData := responsesStreamDataPayload(line)
+			if jsonData == nil {
+				return
+			}
+			event, ok := parseResponsesTerminalEvent(jsonData)
+			if !ok {
+				return
+			}
+			usage := event.typedUsage()
+			if usage == nil {
+				return
+			}
+			payload := bytes.Clone(jsonData)
+			if logCtx.TokenUsage == nil {
+				logCtx.TokenUsage = &converter.TokenUsage{}
+			}
+			logCtx.TokenUsage.PromptTokens = usage.InputTokens
+			logCtx.TokenUsage.CompletionTokens = usage.OutputTokens
+			logCtx.TokenUsage.MergeUsageExtensions(converter.ExtractTokenUsageWithOptions(payload, converter.TokenUsageExtractionOptions{}))
+		}
+
+		buf := make([]byte, 7)
+		for {
+			n, err := r.Read(buf)
+			if n > 0 {
+				lines.Observe(buf[:n], onLine)
+			}
+			if err != nil {
+				require.ErrorIs(t, err, io.EOF)
+				lines.Finalize(onLine)
+				break
+			}
+		}
+
+		require.NotNil(t, logCtx.TokenUsage)
+		assert.Zero(t, logCtx.TokenUsage.ProviderCostUSD,
+			"AIR's own injected response.usage.cost must never be mistaken for a provider-reported cost")
 	})
 }
 

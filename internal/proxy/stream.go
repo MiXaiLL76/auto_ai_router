@@ -819,7 +819,7 @@ func (tcw *tokenCapturingWriter) Write(p []byte) (n int, err error) {
 
 	if hasUsage && tcw.proxy != nil && shouldExposeCostToClient(tcw.logCtx) {
 		if cost, ok := tcw.proxy.clientFacingCost(tcw.logCtx, tcw.logCtx.TokenUsage); ok {
-			if withCost, injected := injectCostIntoSSEUsageChunk(tcw.payloadBuf, cost); injected {
+			if withCost, injected := injectCostIntoSSEUsageChunk(p, tcw.payloadBuf, cost); injected {
 				p = withCost
 			}
 		}

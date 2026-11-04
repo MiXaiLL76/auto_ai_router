@@ -1573,6 +1573,12 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		Status:         "unknown",
 		IsProxyRequest: false,
 	}
+	// Arms w, if it is the LiteLLM response-compatibility writer, to re-add
+	// the router's own cost after that writer's transform has already run --
+	// see wireCostInjectionForCompatWriter. Safe to call unconditionally and
+	// this early: whether to actually act is re-checked lazily against
+	// logCtx.OrganizationPolicy, which isn't resolved yet at this point.
+	wireCostInjectionForCompatWriter(w, p, logCtx)
 
 	// Ensure request is logged at the end regardless of which path is taken
 	defer func() {
