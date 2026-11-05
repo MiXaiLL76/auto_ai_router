@@ -11,6 +11,7 @@ nav = [
     { "Installation" = "getting-started/installation.md" },
     { "Configuration" = "getting-started/configuration.md" },
     { "API Usage" = "getting-started/api.md" },
+    { "Response Cost" = "getting-started/response-cost.md" },
   ]},
   { "Providers" = [
     { "Overview" = "providers/index.md" },
