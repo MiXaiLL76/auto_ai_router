@@ -328,3 +328,31 @@ func TestThinkingOff(t *testing.T) {
 		})
 	}
 }
+
+func TestIsKnownClaudeModel(t *testing.T) {
+	for _, model := range []string{
+		"claude-opus-5-5",
+		"claude-sonnet-5-5",
+		"claude-haiku-4-5",
+		"claude-fable-5-1",
+		"claude-opus-4-5-20251101",
+		"claude-sonnet-4-20250514",
+		"us.anthropic.claude-opus-4-7-v1:0",
+		"anthropic.claude-sonnet-4-6",
+		"claude-mythos-preview",
+		"Claude-Opus-5.5",
+	} {
+		assert.True(t, IsKnownClaudeModel(model), model)
+	}
+	for _, model := range []string{
+		"gemini-3.5-flash",
+		"gpt-5",
+		"qwen3.8-max",
+		"claude-3-haiku-20240307",
+		"claude-3-5-sonnet-20241022",
+		"claude",
+		"",
+	} {
+		assert.False(t, IsKnownClaudeModel(model), model)
+	}
+}

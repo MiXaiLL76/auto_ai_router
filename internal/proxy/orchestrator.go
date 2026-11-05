@@ -447,6 +447,33 @@ func (p *Proxy) sanitizeClientParams(r *http.Request, modelID string, cred *conf
 	return openai.ReplaceResponsesBodyParam(req.realModelID, body)
 }
 
+// applyAnthropicDefaultMaxTokens gives a Claude request the default max_tokens when the
+// client sent no limit (null counts as none): the converter's 4096 is spent on thinking
+// and leaves no answer. It runs after the key budget check, which keeps its own
+// estimate. Only Claude models on Anthropic-wire providers; /v1/messages bodies and
+// requests relayed to another router are left as they are.
+func (p *Proxy) applyAnthropicDefaultMaxTokens(cred *config.CredentialConfig, prepared *orchestratedRequest, realModelID string, body []byte) []byte {
+	if prepared.passthroughMessages || prepared.passthroughResponses || prepared.convertedToResponses ||
+		prepared.completionsPath || !anthropicconv.IsKnownClaudeModel(realModelID) {
+		return body
+	}
+	switch cred.EffectiveProviderType() {
+	case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI, config.ProviderTypeProMan, config.ProviderTypeBedrock:
+	default:
+		return body
+	}
+	maxTokens := p.anthropicDefaultMaxTokens
+	if maxTokens <= 0 {
+		maxTokens = config.AnthropicDefaultMaxTokens
+	}
+	defaults := map[string]any{"max_tokens": maxTokens}
+	if prepared.nativeResponses {
+		defaults = openai.ResponsesDefaultParams(defaults)
+	}
+	body = openai.DropNullParams(body, "max_tokens", "max_completion_tokens", "max_output_tokens")
+	return openai.ApplyDefaultParams(body, defaults)
+}
+
 func (p *Proxy) buildCredentialRequest(
 	r *http.Request,
 	baseBody []byte,

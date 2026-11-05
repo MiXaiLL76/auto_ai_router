@@ -38,6 +38,17 @@ func claudeVersion(model string) (family string, major, minor int, ok bool) {
 	return match[1], major, minor, true
 }
 
+// IsKnownClaudeModel reports whether model is a versioned opus / sonnet / haiku / fable
+// ID under any provider spelling, or Mythos (its IDs carry no version). Older IDs that
+// put the version first (claude-3-haiku) are not matched.
+func IsKnownClaudeModel(model string) bool {
+	if strings.Contains(strings.ToLower(model), "mythos") {
+		return true
+	}
+	_, _, _, ok := claudeVersion(model)
+	return ok
+}
+
 // thinkingOffMode is how a model runs without extended thinking.
 type thinkingOffMode int
 

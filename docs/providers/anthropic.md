@@ -96,7 +96,7 @@ The router accepts requests in **OpenAI Chat Completion format** and automatical
 | ----------------------- | ------------------------ | --------------------------------------------------- |
 | `temperature`           | `temperature`            | Set to 1.0 automatically when thinking is enabled   |
 | `top_p`                 | `top_p`                  |                                                     |
-| `max_tokens`            | `max_tokens`             | Defaults to 4096 if not set                         |
+| `max_tokens`            | `max_tokens`             | Defaults to 32000 for Claude, 4096 for others       |
 | `max_completion_tokens` | `max_tokens`             | Fallback if `max_tokens` is empty                   |
 | `stop`                  | `stop_sequences`         | Accepts string or array                             |
 | `stream`                | `stream`                 |                                                     |

@@ -666,6 +666,11 @@ func (r *RedisConfig) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
+// AnthropicDefaultMaxTokens is the max_tokens sent to a Claude model when the client
+// sends no limit. A small limit is spent on thinking before the answer starts; 32000
+// fits the output limit of every Claude the router serves (Opus 4 / 4.1: 32000).
+const AnthropicDefaultMaxTokens = 32000
+
 type ServerConfig struct {
 	Port                       int                   `yaml:"port"`
 	MaxBodySizeMB              int                   `yaml:"max_body_size_mb"`
@@ -687,6 +692,7 @@ type ServerConfig struct {
 	IdleTimeout                time.Duration         `yaml:"idle_timeout"`                      // HTTP server idle timeout (default: 2*write_timeout)
 	MaxProviderRetries         int                   `yaml:"max_provider_retries"`              // Max same-type credential retries on provider errors (default: 2, meaning 3 total attempts)
 	MaxFallbackAttempts        int                   `yaml:"max_fallback_attempts"`             // Max fallback proxy hops per request chain (default: 5)
+	AnthropicDefaultMaxTokens  int                   `yaml:"anthropic_default_max_tokens"`      // max_tokens sent to a Claude model when the client sends none (default: 32000, 0 = default)
 	SessionStickyEnabled       bool                  `yaml:"session_sticky_enabled"`            // Enable session-sticky credential routing (default: true)
 	SessionStickyTTL           int                   `yaml:"session_sticky_ttl_minutes"`        // Session binding TTL in minutes (0 = default 6)
 	SessionStickyAutoCacheCtrl bool                  `yaml:"session_sticky_auto_cache_control"` // Auto-inject Anthropic cache_control when session is active (default: true)
@@ -794,6 +800,7 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		IdleTimeout                string                `yaml:"idle_timeout"`
 		MaxProviderRetries         string                `yaml:"max_provider_retries"`
 		MaxFallbackAttempts        string                `yaml:"max_fallback_attempts"`
+		AnthropicDefaultMaxTokens  string                `yaml:"anthropic_default_max_tokens"`
 		SessionStickyEnabled       string                `yaml:"session_sticky_enabled"`
 		SessionStickyTTL           string                `yaml:"session_sticky_ttl_minutes"`
 		SessionStickyAutoCacheCtrl string                `yaml:"session_sticky_auto_cache_control"`
@@ -871,6 +878,10 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 	}
 	// Max fallback proxy hops per request chain (default: 5)
 	if s.MaxFallbackAttempts, err = parseField(temp.MaxFallbackAttempts, 5, strconv.Atoi, "max_fallback_attempts"); err != nil {
+		return err
+	}
+	// max_tokens for a Claude model when the client sends none (default: 32000)
+	if s.AnthropicDefaultMaxTokens, err = parseField(temp.AnthropicDefaultMaxTokens, AnthropicDefaultMaxTokens, strconv.Atoi, "anthropic_default_max_tokens"); err != nil {
 		return err
 	}
 	if s.SessionStickyEnabled, err = parseField(temp.SessionStickyEnabled, true, strconv.ParseBool, "session_sticky_enabled"); err != nil {
@@ -2285,6 +2296,11 @@ func (c *Config) Validate() error {
 
 	// ReadTimeout equals RequestTimeout (not configurable via YAML)
 	c.Server.ReadTimeout = c.Server.RequestTimeout
+
+	// Validate AnthropicDefaultMaxTokens (0 = use default of 32000)
+	if c.Server.AnthropicDefaultMaxTokens < 0 {
+		return fmt.Errorf("invalid anthropic_default_max_tokens: %d (must be >= 0)", c.Server.AnthropicDefaultMaxTokens)
+	}
 
 	// Validate MaxProviderRetries
 	if c.Server.MaxProviderRetries < 0 {
