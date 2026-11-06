@@ -461,12 +461,12 @@ func TestDeepSeekFetchIsBilled(t *testing.T) {
 			fake.mu.Unlock()
 			w.Header().Set("Content-Type", "application/json")
 			if call == 1 {
-				_, _ = w.Write([]byte(fmt.Sprintf(`{
+				_, _ = fmt.Fprintf(w, `{
 					"id":"chatcmpl-1","object":"chat.completion","model":"deepseek-flash",
 					"choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":"",
 						"tool_calls":[{"id":"call_f","type":"function","function":{"name":%q,"arguments":"{\"url\":\"https://example.com/a\"}"}}]}}],
 					"usage":{"prompt_tokens":50,"completion_tokens":5,"total_tokens":55}
-				}`, deepseektools.FetchToolName)))
+				}`, deepseektools.FetchToolName)
 				return
 			}
 			_, _ = w.Write([]byte(`{

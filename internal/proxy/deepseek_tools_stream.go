@@ -123,7 +123,10 @@ func replayDeepSeekStream(w http.ResponseWriter, resp *http.Response, raw []byte
 	header.Set("Connection", "keep-alive")
 	header.Del("Content-Length")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(raw)
+	// The provider's own SSE, relayed byte for byte: the client asked for a
+	// stream and expects exactly what the provider sent. It is not content the
+	// router composes, so it is not an XSS sink here.
+	_, _ = w.Write(raw) //nolint:gosec // G705: the provider's stream, relayed verbatim
 }
 
 // deepSeekStreamCycleResult is what the streaming loop produced.
@@ -207,7 +210,7 @@ func (p *Proxy) runDeepSeekStreamToolLoop(
 	current := raw
 
 	for step := 1; step < p.deepSeekToolsMaxSteps; step++ {
-		next, err := cycle.nextBodyFromToolCalls(current, calls)
+		next, err := cycle.nextBodyFromToolCalls(calls)
 		if err != nil {
 			return nil, err
 		}
@@ -312,7 +315,7 @@ func usageFromStreamUsage(usage *openai.OpenAIUsage) *deepSeekToolUsage {
 
 // nextBodyFromToolCalls builds the next request body from a streamed tool
 // call, the streaming counterpart of the cycle's nextBody.
-func (cycle *deepSeekToolCycle) nextBodyFromToolCalls(raw []byte, calls []deepSeekStreamToolCall) ([]byte, error) {
+func (cycle *deepSeekToolCycle) nextBodyFromToolCalls(calls []deepSeekStreamToolCall) ([]byte, error) {
 	assistant := map[string]any{"role": "assistant"}
 	toolCalls := make([]map[string]any, 0, len(calls))
 	results := make([]map[string]any, 0, len(calls))

@@ -178,7 +178,7 @@ func RewriteRequest(body []byte) ([]byte, *ToolPlan, error) {
 
 // searchFunctionTool builds the function tool that replaces the built-in
 // search tool.
-func searchFunctionTool(original chatTool) chatTool {
+func searchFunctionTool(_ chatTool) chatTool {
 	return chatTool{
 		Type: "function",
 		Function: &chatFunction{
@@ -215,7 +215,7 @@ func searchFunctionTool(original chatTool) chatTool {
 
 // fetchFunctionTool builds the function tool that replaces the built-in
 // fetch tool.
-func fetchFunctionTool(original chatTool) chatTool {
+func fetchFunctionTool(_ chatTool) chatTool {
 	return chatTool{
 		Type: "function",
 		Function: &chatFunction{

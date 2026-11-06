@@ -458,7 +458,7 @@ func (p *Proxy) sanitizeClientParams(r *http.Request, modelID string, cred *conf
 	// This runs after the conversion above, so the body is Chat-shaped for
 	// both client shapes (/v1/chat/completions and a /v1/responses request
 	// converted to Chat), which is the shape the model actually answers in.
-	return p.applyDeepSeekToolTools(r, modelID, cred, body, chatShaped)
+	return p.applyDeepSeekToolTools(r, modelID, cred, body)
 }
 
 // applyDeepSeekToolTools replaces the built-in search/fetch tools with the
@@ -467,7 +467,7 @@ func (p *Proxy) sanitizeClientParams(r *http.Request, modelID string, cred *conf
 // It returns the body unchanged for every other request: a model that can
 // run the tools itself, a request without them, or a credential that is not
 // DeepSeek's.
-func (p *Proxy) applyDeepSeekToolTools(r *http.Request, modelID string, cred *config.CredentialConfig, body []byte, chatShaped bool) []byte {
+func (p *Proxy) applyDeepSeekToolTools(r *http.Request, modelID string, cred *config.CredentialConfig, body []byte) []byte {
 	if !deepSeekToolsEnabledFor(modelID, cred) {
 		return body
 	}
@@ -916,8 +916,9 @@ func (p *Proxy) buildCredentialRequestInner(
 				p.logger.WarnContext(r.Context(), "Could not rewrite the built-in search tools for the router-run adapter",
 					"model", modelID, "credential", cred.Name, "error", rewriteErr)
 			case plan != nil:
+				// Only the request body changes: the proxy body is rebuilt from
+				// it right below, so assigning it here would be overwritten.
 				body = rewritten
-				proxyBody = rewritten
 				p.logger.DebugContext(r.Context(), "Router will run the built-in search/fetch tools itself",
 					"model", modelID, "credential", cred.Name, "plan", describeToolPlan(plan))
 			}

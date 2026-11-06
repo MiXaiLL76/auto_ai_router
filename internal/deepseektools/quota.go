@@ -173,7 +173,9 @@ func (q *Quota) allowLocal(key string, limit int) bool {
 		window = &localWindow{}
 		q.local[key] = window
 	}
-	kept := window.stamps[:0]
+	// The stamps inside the window are kept in their own slice, so the
+	// filter does not write into the slice it reads.
+	kept := make([]int64, 0, len(window.stamps)+1)
 	for _, stamp := range window.stamps {
 		if stamp > cutoff {
 			kept = append(kept, stamp)
@@ -183,6 +185,7 @@ func (q *Quota) allowLocal(key string, limit int) bool {
 		window.stamps = kept
 		return false
 	}
-	window.stamps = append(kept, now)
+	kept = append(kept, now)
+	window.stamps = kept
 	return true
 }

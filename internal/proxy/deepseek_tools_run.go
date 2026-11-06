@@ -1,14 +1,12 @@
 package proxy
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
-	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	"github.com/mixaill76/auto_ai_router/internal/deepseektools"
 )
 
@@ -168,21 +166,4 @@ func (u *deepSeekToolUsage) toTokenUsage() *converter.TokenUsage {
 		WebFetchRequests:     u.webFetchRequests,
 		WebSearchContextSize: u.webSearchContextSize,
 	}
-}
-
-// openAIToolCallNames lists the tool names of a response's tool calls, for a
-// log line.
-func openAIToolCallNames(responseBody []byte) []string {
-	var response openai.OpenAIResponse
-	if err := json.Unmarshal(responseBody, &response); err != nil {
-		return nil
-	}
-	if len(response.Choices) == 0 {
-		return nil
-	}
-	names := make([]string, 0, len(response.Choices[0].Message.ToolCalls))
-	for _, call := range response.Choices[0].Message.ToolCalls {
-		names = append(names, call.Function.Name)
-	}
-	return names
 }

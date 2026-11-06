@@ -77,13 +77,7 @@ func (runner *deepSeekToolRunner) runSearch(ctx context.Context, arguments strin
 		return message
 	}
 	runner.state.searchCalls++
-	status, result, raw, err := runner.client.Search(ctx, deepseektools.SearchRequest{
-		Query:        args.Query,
-		Count:        args.Count,
-		OriQuestion:  args.OriQuestion,
-		Localization: args.Localization,
-		NeedContent:  args.NeedContent,
-	})
+	status, result, raw, err := runner.client.Search(ctx, deepseektools.SearchRequest(args))
 	if err != nil {
 		return string(deepseektools.EncodeToolError(err.Error()))
 	}
@@ -114,7 +108,7 @@ func (runner *deepSeekToolRunner) runFetch(ctx context.Context, arguments string
 		return message
 	}
 	runner.state.fetchCalls++
-	status, result, raw, err := runner.client.Fetch(ctx, deepseektools.FetchRequest{URL: args.URL})
+	status, result, raw, err := runner.client.Fetch(ctx, deepseektools.FetchRequest(args))
 	if err != nil {
 		return string(deepseektools.EncodeToolError(err.Error()))
 	}
@@ -307,15 +301,6 @@ func deepSeekToolsEnabledFor(modelID string, cred *config.CredentialConfig) bool
 		return false
 	}
 	return isDeepSeekModel(modelID)
-}
-
-// deepSeekToolPlanFor returns the adapter's plan for a request body, or nil
-// when the adapter is not involved.
-func deepSeekToolPlanFor(body []byte, modelID string, cred *config.CredentialConfig) *deepseektools.ToolPlan {
-	if !deepSeekToolsEnabledFor(modelID, cred) {
-		return nil
-	}
-	return deepseektools.PlanTools(body)
 }
 
 // describeToolPlan renders the plan for a log line.

@@ -5,10 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
-	"time"
 
-	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	"github.com/mixaill76/auto_ai_router/internal/deepseektools"
 )
@@ -26,8 +23,6 @@ type deepSeekToolCycle struct {
 	body []byte
 	// messages is the conversation so far.
 	messages []map[string]any
-	// steps counts the upstream requests made.
-	steps int
 }
 
 // newDeepSeekToolCycle prepares a cycle for a request body.
@@ -45,12 +40,6 @@ func newDeepSeekToolCycle(body []byte, runner *deepSeekToolRunner) (*deepSeekToo
 		return nil, fmt.Errorf("deepseektools: parsing messages: %w", err)
 	}
 	return &deepSeekToolCycle{runner: runner, body: body, messages: messages}, nil
-}
-
-// needsAnotherStep reports whether the model asked for one of the adapter's
-// tools.
-func (cycle *deepSeekToolCycle) needsAnotherStep(responseBody []byte) bool {
-	return len(deepSeekToolCallsFromResponse(responseBody)) > 0
 }
 
 // nextBody builds the body for the next upstream call: the conversation with
@@ -107,15 +96,6 @@ func (cycle *deepSeekToolCycle) runToolByName(name, arguments string) string {
 	default:
 		return string(deepseektools.EncodeToolError(fmt.Sprintf("unknown tool %q", name)))
 	}
-}
-
-// deepSeekToolCycleResult is what the cycle produced: the final response body
-// and the tool usage the steps accumulated.
-type deepSeekToolCycleResult struct {
-	// body is the model's final answer (the last step's response).
-	body []byte
-	// usage is the summed usage of every step.
-	usage *deepSeekToolUsage
 }
 
 // deepSeekToolUsage is the usage the cycle accumulated over its steps.
@@ -180,69 +160,8 @@ func usageFromResponse(body []byte) *deepSeekToolUsage {
 	return usage
 }
 
-// deepSeekToolCycleConfig is what the cycle needs to run one step.
-type deepSeekToolCycleConfig struct {
-	// cred is the credential the model call goes to.
-	cred *config.CredentialConfig
-	// prepared is the orchestrated request, used to rebuild the upstream body.
-	prepared *orchestratedRequest
-	// modelID and realModelID name the model.
-	modelID, realModelID string
-	// streaming tells whether the client asked for a stream.
-	streaming bool
-}
-
 // errDeepSeekToolCycleAborted ends the cycle when the client went away.
 var errDeepSeekToolCycleAborted = errors.New("deepseektools: client disconnected")
-
-// runStep sends one upstream request and returns the response body.
-//
-// It reuses the router's own send path (sendToCredential), so the upstream
-// request is built, authenticated and proxied exactly as the first attempt
-// of a normal request would be.
-func (p *Proxy) runStep(
-	r *http.Request,
-	w http.ResponseWriter,
-	logCtx *RequestLogContext,
-	cfg deepSeekToolCycleConfig,
-	body []byte,
-	attempt int,
-	start time.Time,
-	attemptedCreds map[string]bool,
-) ([]byte, error) {
-	embedFanOutReplies := &embedContentFanOutReplies{}
-	outcome, done, isClientGone, shouldRetry, _, transportErr := p.sendToCredential(
-		r, w, logCtx, cfg.cred, cfg.prepared, cfg.modelID, cfg.realModelID, body,
-		cfg.streaming, false, false, attempt, start, attemptedCreds, embedFanOutReplies,
-	)
-	if done {
-		// sendToCredential already wrote the client response (a fatal error).
-		return nil, errDeepSeekToolCycleAborted
-	}
-	if isClientGone {
-		return nil, errDeepSeekToolCycleAborted
-	}
-	if shouldRetry {
-		return nil, fmt.Errorf("deepseektools: upstream attempt failed: %w", transportErr)
-	}
-	if outcome.resp == nil {
-		return nil, fmt.Errorf("deepseektools: upstream returned no response")
-	}
-	if outcome.resp.StatusCode < 200 || outcome.resp.StatusCode >= 300 {
-		// The upstream refused the request: relay its own body, so the client
-		// sees the provider's error, not the router's.
-		responseBody, err := readAndCloseResponseBody(outcome.resp)
-		if err != nil {
-			return nil, fmt.Errorf("deepseektools: reading upstream response: %w", err)
-		}
-		return nil, &upstreamStatusError{status: outcome.resp.StatusCode, body: responseBody}
-	}
-	responseBody, err := readAndCloseResponseBody(outcome.resp)
-	if err != nil {
-		return nil, fmt.Errorf("deepseektools: reading upstream response: %w", err)
-	}
-	return responseBody, nil
-}
 
 // upstreamStatusError is an upstream answer the router relays as it is.
 type upstreamStatusError struct {
