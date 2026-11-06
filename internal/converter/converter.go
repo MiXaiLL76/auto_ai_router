@@ -663,6 +663,13 @@ type responsesUsageDetails struct {
 		AudioTokens         int    `json:"audio_tokens,omitempty"`
 		CacheType           string `json:"cache_type,omitempty"`
 		InitialPromptTokens int    `json:"initial_prompt_tokens,omitempty"`
+		// WebFetchRequests is the router's own count of the billable web
+		// fetches it executed (the field the router writes into the body it
+		// returns), so the billing path sees it like any other counter.
+		WebFetchRequests int `json:"web_fetch_requests,omitempty"`
+		// WebSearchRequests is the count of the billable searches, in the same
+		// place the router writes it.
+		WebSearchRequests int `json:"web_search_requests,omitempty"`
 	} `json:"input_tokens_details,omitempty"`
 	OutputTokensDetails struct {
 		AudioTokens     int `json:"audio_tokens,omitempty"`
@@ -678,6 +685,9 @@ type responsesUsageDetails struct {
 		WebSearchRequests int `json:"web_search_requests,omitempty"`
 	} `json:"server_tool_use,omitempty"`
 	WebSearchRequests int `json:"web_search_requests,omitempty"`
+	// WebFetchRequests is the router's own count of the billable web fetches
+	// it executed.
+	WebFetchRequests int `json:"web_fetch_requests,omitempty"`
 	converterutil.ToolUsageExtensions
 	// Provider-side cost of the request, read for reconciliation only (see
 	// TokenUsage.ProviderCostUSD). Raw so an unexpected shape cannot fail the
@@ -764,6 +774,12 @@ type tokenUsageShapeUsage struct {
 		TextTokens  int `json:"text_tokens,omitempty"`
 		ImageTokens int `json:"image_tokens,omitempty"`
 		VideoTokens int `json:"video_tokens,omitempty"`
+		// WebFetchRequests is the router's own count of the billable web
+		// fetches it executed.
+		WebFetchRequests int `json:"web_fetch_requests,omitempty"`
+		// WebSearchRequests is the router's own count of the billable
+		// searches it executed.
+		WebSearchRequests int `json:"web_search_requests,omitempty"`
 		// CacheType is Alibaba's explicit cache mode marker:
 		// "ephemeral" when the request used an explicit cache marker, absent
 		// otherwise (implicit cache). Explicit and implicit cache are mutually
@@ -893,6 +909,37 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 		resp.Choices, resp.Output, resp.Response.Output, resp.WebSearch,
 	)
 	imageToolGenerations, imageToolEdits := imageGenerationToolImages(resp.Output, resp.Response.Output, toolUsage)
+
+	// The searches the router itself executed: it wrote the count into the
+	// body it returns, so the billing path reads it back like any other
+	// counter. It is added to the provider-reported count rather than
+	// replacing it: the two are different things (the provider's own
+	// server-side search, and the search the router ran for the model).
+	routerWebSearchRequests := resp.Usage.PromptTokensDetails.WebSearchRequests
+	if routerWebSearchRequests == 0 {
+		routerWebSearchRequests = resp.Usage.InputTokensDetails.WebSearchRequests
+	}
+	if routerWebSearchRequests == 0 && resp.Response.Usage != nil {
+		routerWebSearchRequests = resp.Response.Usage.InputTokensDetails.WebSearchRequests
+	}
+
+	// The web fetches the router itself executed: it wrote the count into the
+	// body it returns, so the billing path reads it back like any other
+	// counter. Only a positive count counts -- a fetch that failed or returned
+	// nothing was never billed.
+	webFetchRequests := resp.Usage.WebFetchRequests
+	if webFetchRequests == 0 {
+		webFetchRequests = resp.Usage.PromptTokensDetails.WebFetchRequests
+	}
+	if webFetchRequests == 0 {
+		webFetchRequests = resp.Usage.InputTokensDetails.WebFetchRequests
+	}
+	if webFetchRequests == 0 && resp.Response.Usage != nil {
+		webFetchRequests = resp.Response.Usage.WebFetchRequests
+		if webFetchRequests == 0 {
+			webFetchRequests = resp.Response.Usage.InputTokensDetails.WebFetchRequests
+		}
+	}
 
 	if promptTokens == 0 && completionTokens == 0 && webSearchRequests == 0 &&
 		!toolUsageReported && imageToolGenerations == 0 && imageToolEdits == 0 {
@@ -1127,6 +1174,7 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 		CacheCreation5mTokens:    cacheCreation5mTokens,
 		CacheCreation1hTokens:    cacheCreation1hTokens,
 		CacheCreation12hTokens:   cacheCreation12hTokens,
+		WebFetchRequests:         webFetchRequests,
 		AudioInputTokens:         audioIn,
 		ImageTokens:              inputImageTokens,
 		VideoInputTokens:         inputVideoTokens,
@@ -1135,7 +1183,7 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 		RejectedPredictionTokens: resp.Usage.CompletionTokensDetails.RejectedPredictionTokens,
 		AudioOutputTokens:        audioOut,
 		ReasoningTokens:          reasoning,
-		WebSearchRequests:        webSearchRequests,
+		WebSearchRequests:        webSearchRequests + routerWebSearchRequests,
 		ServerToolUsageReported:  toolUsageReported,
 		XSearchCalls:             toolUsage.XSearchCalls,
 		XSearchPosts:             toolUsage.XPostsFetched,

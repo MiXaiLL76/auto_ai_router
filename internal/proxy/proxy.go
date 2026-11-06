@@ -29,6 +29,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	promanutils "github.com/mixaill76/auto_ai_router/internal/converter/proman/utils"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
+	"github.com/mixaill76/auto_ai_router/internal/deepseektools"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
@@ -266,14 +267,20 @@ func (logCtx *RequestLogContext) spendModelGroup() string {
 // RequestLogContext holds all data needed for logging a request to LiteLLM DB
 // Filled throughout request processing and logged at the end via defer
 type RequestLogContext struct {
-	RequestID             string                   // Internal request UUID; may be adopted from a trusted inbound traceparent (see requestid.Middleware), so two distinct requests can share this value
-	EventID               string                   // Always server-minted, never client-influenced; used as AirEventID so spend-log collision resolution stays meaningful even when RequestID collides
-	ClientResponseID      string                   // ID returned to the client
-	StartTime             time.Time                // Request start time
-	CompletionStartTime   time.Time                // Timestamp of the first real content/tool/reasoning delta (TTFT), not just the first byte/chunk; zero if not streamed or never reached
-	UpstreamSendTime      time.Time                // Timestamp of the first request handed to an upstream provider (first attempt only; retries do not overwrite). Zero when the request never reached a provider (e.g. all credentials exhausted before send). Together with StartTime this breaks duration_ms into router processing time and upstream time.
-	Request               *http.Request            // HTTP request
-	Token                 string                   // Auth token (raw, will be hashed)
+	RequestID           string        // Internal request UUID; may be adopted from a trusted inbound traceparent (see requestid.Middleware), so two distinct requests can share this value
+	EventID             string        // Always server-minted, never client-influenced; used as AirEventID so spend-log collision resolution stays meaningful even when RequestID collides
+	ClientResponseID    string        // ID returned to the client
+	StartTime           time.Time     // Request start time
+	CompletionStartTime time.Time     // Timestamp of the first real content/tool/reasoning delta (TTFT), not just the first byte/chunk; zero if not streamed or never reached
+	UpstreamSendTime    time.Time     // Timestamp of the first request handed to an upstream provider (first attempt only; retries do not overwrite). Zero when the request never reached a provider (e.g. all credentials exhausted before send). Together with StartTime this breaks duration_ms into router processing time and upstream time.
+	Request             *http.Request // HTTP request
+	Token               string        // Auth token (raw, will be hashed)
+	// DeepSeekToolUsage is the router-run search/fetch loop's own usage: the
+	// summed tokens of its steps and its tool counters. It is applied to the
+	// request's usage after the streaming log has written its figures, so the
+	// loop's steps are billed (the log reads the last chunk's usage, which
+	// carries only the last step's).
+	DeepSeekToolUsage     *converter.TokenUsage
 	PublicModelID         string                   // Client-facing model before alias resolution
 	CanonicalModelID      string                   // Organization canonical public model after scoped admission
 	ModelID               string                   // Model alias name (what client requested)
@@ -436,12 +443,19 @@ type Config struct {
 	// BanDecisionsExternal gates the local fail2ban counters: true only
 	// when an external ban source (the worker's reader) is actually wired,
 	// so a misconfigured publisher alone never disables local bans.
-	BanDecisionsExternal       bool
-	PriceRegistry              *models.ModelPriceRegistry // Model pricing information (optional)
-	OrganizationPolicies       *models.OrganizationPolicyRegistry
-	MaxProviderRetries         int                 // Max same-type credential retries (default: 2)
-	MaxFallbackAttempts        int                 // Max fallback proxy hops per request chain (default: 5)
-	AnthropicDefaultMaxTokens  int                 // max_tokens sent to a Claude model when the client sends none (default: 32000)
+	BanDecisionsExternal      bool
+	PriceRegistry             *models.ModelPriceRegistry // Model pricing information (optional)
+	OrganizationPolicies      *models.OrganizationPolicyRegistry
+	MaxProviderRetries        int                        // Max same-type credential retries (default: 2)
+	MaxFallbackAttempts       int                        // Max fallback proxy hops per request chain (default: 5)
+	AnthropicDefaultMaxTokens int                        // max_tokens sent to a Claude model when the client sends none (default: 32000)
+	DeepSeekTools             config.DeepSeekToolsConfig // The router-run DeepSeek Search/Fetch adapter's settings
+	// DeepSeekToolsRedisClient, when set, backs the adapter's per-account QPS
+	// pools so the limit is shared by the router's replicas and platforms. A
+	// nil client keeps the pools in-process.
+	DeepSeekToolsRedisClient valkey.Client
+	// DeepSeekToolsKeyPrefix namespaces the adapter's Redis keys.
+	DeepSeekToolsKeyPrefix     string
 	Retry                      config.RetryConfig  // Which upstream errors are replayed on another credential (zero value = built-in policy)
 	ResponseStore              responsestore.Store // Optional: Responses API store (bbolt or Redis)
 	SessionStickyEnabled       bool
@@ -493,16 +507,21 @@ type Proxy struct {
 	banDecisionsExternal             bool                       // external ban source wired (see recordBanSignal)
 	priceRegistry                    *models.ModelPriceRegistry // Model pricing information (optional)
 	organizationPolicies             *models.OrganizationPolicyRegistry
-	maxProviderRetries               int                 // Max same-type credential retries on provider errors
-	retryPolicy                      *retryPolicy        // compiled Config.Retry
-	maxFallbackAttempts              int                 // Max fallback proxy hops per request chain
-	anthropicDefaultMaxTokens        int                 // max_tokens sent to a Claude model when the client sends none (0 = config.AnthropicDefaultMaxTokens)
-	responseStore                    responsestore.Store // Optional: Responses API store (bbolt or Redis)
-	sessionStore                     sessionBindingStore // Optional: session-sticky credential routing
-	stickyAutoCacheCtrl              bool                // Auto-inject Anthropic cache_control when session is active
-	drainUpstreamOnAbort             bool                // Keep reading upstream after client disconnect to get real usage chunk
-	forceStreamForTTFT               bool                // Force stream:true upstream for non-streaming chat requests and reassemble the response back to non-stream JSON (TTFT on every request)
-	tiktokenEnabled                  bool                // Local tiktoken-based prompt/completion token fallback estimation
+	maxProviderRetries               int                  // Max same-type credential retries on provider errors
+	retryPolicy                      *retryPolicy         // compiled Config.Retry
+	maxFallbackAttempts              int                  // Max fallback proxy hops per request chain
+	anthropicDefaultMaxTokens        int                  // max_tokens sent to a Claude model when the client sends none (0 = config.AnthropicDefaultMaxTokens)
+	deepSeekToolsEnabled             bool                 // the router runs DeepSeek's own Search/Fetch tools for models that cannot
+	deepSeekToolsTimeout             time.Duration        // timeout of one Search/Fetch call
+	deepSeekToolsMaxSteps            int                  // bound of the router-run tool loop
+	deepSeekToolsMaxRetries          int                  // retries of a Search/Fetch call after a 429 or 5xx
+	deepSeekToolsQuota               *deepseektools.Quota // per-account QPS pools for Search and Fetch
+	responseStore                    responsestore.Store  // Optional: Responses API store (bbolt or Redis)
+	sessionStore                     sessionBindingStore  // Optional: session-sticky credential routing
+	stickyAutoCacheCtrl              bool                 // Auto-inject Anthropic cache_control when session is active
+	drainUpstreamOnAbort             bool                 // Keep reading upstream after client disconnect to get real usage chunk
+	forceStreamForTTFT               bool                 // Force stream:true upstream for non-streaming chat requests and reassemble the response back to non-stream JSON (TTFT on every request)
+	tiktokenEnabled                  bool                 // Local tiktoken-based prompt/completion token fallback estimation
 	strictAllTeamModelsACL           bool
 	responseHeaderMode               config.ResponseHeaderMode
 	credentialNameAsTeamID           bool
@@ -572,7 +591,7 @@ func New(cfg *Config) *Proxy {
 		responseCompat = compatlitellm.New()
 	}
 
-	return &Proxy{
+	p := &Proxy{
 		routerID:                         routerID,
 		balancer:                         cfg.Balancer,
 		logger:                           cfg.Logger,
@@ -598,6 +617,10 @@ func New(cfg *Config) *Proxy {
 		maxProviderRetries:               cfg.MaxProviderRetries,
 		maxFallbackAttempts:              cfg.MaxFallbackAttempts,
 		anthropicDefaultMaxTokens:        cfg.AnthropicDefaultMaxTokens,
+		deepSeekToolsEnabled:             cfg.DeepSeekTools.Enabled,
+		deepSeekToolsTimeout:             cfg.DeepSeekTools.RequestTimeout,
+		deepSeekToolsMaxSteps:            cfg.DeepSeekTools.MaxSteps,
+		deepSeekToolsMaxRetries:          cfg.DeepSeekTools.MaxRetries,
 		retryPolicy:                      newRetryPolicy(cfg.Retry),
 		responseStore:                    cfg.ResponseStore,
 		sessionStore:                     sessionStore,
@@ -623,6 +646,32 @@ func New(cfg *Config) *Proxy {
 		commit:                           cfg.Commit,
 		serviceName:                      cfg.ServiceName,
 	}
+	// The adapter's own settings fall back to their defaults, so an absent
+	// section still gives a working adapter with the provider's own limits.
+	// The adapter is on unless the configuration turns it off: it only ever
+	// engages for a credential that asked for it (the deepseek_tools opt-in)
+	// and a request that asked for one of the built-in tools, so leaving it
+	// on by default costs nothing on every other request.
+	p.deepSeekToolsEnabled = true
+	if p.deepSeekToolsTimeout <= 0 {
+		p.deepSeekToolsTimeout = config.DefaultDeepSeekToolsRequestTimeout
+	}
+	if p.deepSeekToolsMaxSteps <= 0 {
+		p.deepSeekToolsMaxSteps = config.DefaultDeepSeekToolsMaxSteps
+	}
+	if p.deepSeekToolsMaxRetries < 0 {
+		p.deepSeekToolsMaxRetries = config.DefaultDeepSeekToolsMaxRetries
+	}
+	// The QPS pools are per DeepSeek account, so they have to be shared by
+	// the router's replicas: a Redis-backed pool does that, an in-process one
+	// does not (it is the fallback when Redis is unavailable).
+	p.deepSeekToolsQuota = deepseektools.NewQuota(
+		cfg.DeepSeekToolsRedisClient,
+		cfg.DeepSeekToolsKeyPrefix,
+		cfg.DeepSeekTools.SearchQPS,
+		cfg.DeepSeekTools.FetchQPS,
+	)
+	return p
 }
 
 // Start launches background workers owned by Proxy.
@@ -2672,6 +2721,38 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		// Decode the response body for logging (handles gzip, etc.)
 		contentEncoding := resp.Header.Get("Content-Encoding")
 		decodedBody := decodeResponseBody(responseBody, contentEncoding)
+		// deepSeekToolUsage carries the tool counters of the router-run
+		// search/fetch loop. They are applied to the request's own usage
+		// below, where the billing path reads it -- not through the body,
+		// because a body that is converted between the API shapes (a
+		// Responses request answered in Chat, or the other way round) loses
+		// the counters on the way.
+		var deepSeekToolUsage *converter.TokenUsage
+
+		// The router-run DeepSeek Search/Fetch loop: the model asked for one of
+		// the tools the router owns, so the router runs it and asks the model
+		// again. The loop's steps are separate upstream requests, so their
+		// usage is summed and carried into the final body -- otherwise the
+		// client would be billed for the last step only.
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			toolRun, toolErr := p.runDeepSeekToolLoop(r, w, logCtx, prepared, cred, modelID, realModelID,
+				body, []byte(decodedBody), start, attemptedCreds)
+			switch {
+			case toolErr != nil:
+				if errors.Is(toolErr, errDeepSeekToolCycleAborted) {
+					return
+				}
+				p.logger.WarnContext(r.Context(), "The router-run search/fetch loop failed",
+					"model", modelID, "credential", cred.Name, "error", toolErr,
+					"request_id", logCtx.RequestID)
+			case toolRun != nil:
+				decodedBody = string(toolRun.body)
+				deepSeekToolUsage = toolRun.usage
+				p.logger.DebugContext(r.Context(), "The router ran the model's search/fetch tools",
+					"model", modelID, "credential", cred.Name,
+					"search_calls", toolRun.searchCalls, "fetch_calls", toolRun.fetchCalls)
+			}
+		}
 
 		// Transform response to OpenAI format (only for successful responses).
 		// For error responses (4xx/5xx) pass the provider body through unchanged.
@@ -2936,6 +3017,16 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		// Log to LiteLLM DB (non-streaming)
 		logCtx.TokenUsage = directProviderTokenUsage
+		// The router-run tool loop's own counters (the billable searches and
+		// fetches) and its summed token counts ride alongside the provider's
+		// usage: the loop made several upstream requests, and the client is
+		// charged for all of them.
+		// The loop's usage is applied to the request's own usage here: the
+		// spend log (written in the deferred call) reads it from there.
+		if logCtx.TokenUsage == nil {
+			logCtx.TokenUsage = &converter.TokenUsage{}
+		}
+		applyDeepSeekToolUsageTo(logCtx.TokenUsage, deepSeekToolUsage)
 		logCtx.Status = "success"
 		logCtx.HTTPStatus = resp.StatusCode
 		logCtx.TargetURL = targetURL
@@ -3169,12 +3260,54 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		} else {
-			err := p.handleProviderStreaming(w, resp, cred, realModelID, modelID, logCtx)
-			if err != nil {
-				p.logStreamHandlerError(r.Context(), "Failed to handle provider streaming response", err,
-					"credential", cred.Name, "provider", cred.Type, "model", modelID, "request_id", logCtx.RequestID)
-			} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-				streamCompleted = true
+			// The router-run DeepSeek Search/Fetch loop, streaming variant: the
+			// model may ask for one of the router's tools mid-stream, and the
+			// client cannot be shown a tool call for a tool it never declared.
+			// The stream is buffered, the tool run, and the model asked again.
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 &&
+				p.deepSeekToolsEnabled && deepSeekToolsEnabledFor(modelID, cred) {
+				streamRun, streamErr := p.runDeepSeekStreamToolLoop(r, w, logCtx, prepared, cred,
+					modelID, realModelID, body, resp, start, attemptedCreds)
+				switch {
+				case errors.Is(streamErr, errDeepSeekToolCycleAborted):
+					return
+				case streamErr != nil:
+					p.logger.WarnContext(r.Context(), "The router-run search/fetch loop failed",
+						"model", modelID, "credential", cred.Name, "error", streamErr,
+						"request_id", logCtx.RequestID)
+					err := p.handleProviderStreaming(w, resp, cred, realModelID, modelID, logCtx)
+					if err != nil {
+						p.logStreamHandlerError(r.Context(), "Failed to handle provider streaming response", err,
+							"credential", cred.Name, "provider", cred.Type, "model", modelID, "request_id", logCtx.RequestID)
+					} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+						streamCompleted = true
+					}
+				default:
+					if streamRun != nil {
+						// The loop buffered the stream itself, so the usual
+						// streaming handler never ran: it neither counted the
+						// tokens nor wrote the spend row. The loop does both
+						// here -- and the streaming log reads its figures from
+						// the last chunk, so the chunk carries the loop's
+						// summed usage rather than the last step's.
+						if logCtx.TokenUsage == nil {
+							logCtx.TokenUsage = &converter.TokenUsage{}
+						}
+						applyDeepSeekToolUsageTo(logCtx.TokenUsage, streamRun.usage)
+						p.finalizeStreamingLog(logCtx, streamRun.totalTokens,
+							withDeepSeekToolUsage(streamRun.lastChunk, streamRun.usage),
+							"openai", resp.StatusCode, false)
+					}
+					streamCompleted = true
+				}
+			} else {
+				err := p.handleProviderStreaming(w, resp, cred, realModelID, modelID, logCtx)
+				if err != nil {
+					p.logStreamHandlerError(r.Context(), "Failed to handle provider streaming response", err,
+						"credential", cred.Name, "provider", cred.Type, "model", modelID, "request_id", logCtx.RequestID)
+				} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+					streamCompleted = true
+				}
 			}
 		}
 		if streamCompleted {

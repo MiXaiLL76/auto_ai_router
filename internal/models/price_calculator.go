@@ -35,12 +35,18 @@ const (
 	ToolCodeExecution     = "code_execution"
 	ToolAttachmentSearch  = "attachment_search"
 	ToolCollectionsSearch = "collections_search"
+	// ToolWebFetch is the built-in web fetch tool: a page fetch the router
+	// executed, billed per successful call (one that returned page content).
+	ToolWebFetch = "web_fetch"
 )
 
 var toolCostAliases = map[string]string{
 	"code_interpreter": ToolCodeExecution,
 	"document_search":  ToolAttachmentSearch,
 	"file_search":      ToolCollectionsSearch,
+	// "fetch" is the name DeepSeek's own price lists use for the web fetch
+	// tool; "web_fetch" is the tool's type name in a request.
+	"fetch": ToolWebFetch,
 }
 
 // fullSessionTier describes one "Alibaba Cloud style" pricing bracket: once
@@ -568,8 +574,14 @@ func CalculateTokenCostsWithResolver(usage *converter.TokenUsage, price *ModelPr
 		price.toolCostPerCall(ToolAttachmentSearch)
 	costs.CollectionsSearchCost = float64(converterutil.NonNegativeTokenCount(usage.CollectionsSearchCalls)) *
 		price.toolCostPerCall(ToolCollectionsSearch)
+	// The built-in web fetch the router executed: billed per successful call
+	// (one that returned page content), never by tokens. A failed or empty
+	// fetch is never counted in usage.WebFetchRequests, so it costs nothing.
+	costs.WebFetchCost = float64(converterutil.NonNegativeTokenCount(usage.WebFetchRequests)) *
+		price.toolCostPerCall(ToolWebFetch)
 	costs.ImageGenerationToolCost = price.imageGenerationToolCost(usage, resolve)
 	costs.ToolUsageCost = costs.WebSearchCost +
+		costs.WebFetchCost +
 		costs.XSearchCost +
 		costs.CodeExecutionCost +
 		costs.AttachmentSearchCost +

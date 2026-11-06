@@ -639,7 +639,8 @@ func validateStrictToolAndModePricing(price *ModelPrice) error {
 		if !isAlias {
 			canonical = tool
 		}
-		if canonical != ToolCodeExecution && canonical != ToolAttachmentSearch && canonical != ToolCollectionsSearch {
+		if canonical != ToolCodeExecution && canonical != ToolAttachmentSearch &&
+			canonical != ToolCollectionsSearch && canonical != ToolWebFetch {
 			return fmt.Errorf("tool_cost_per_call: unknown tool %q", tool)
 		}
 		if cost < 0 {

@@ -283,6 +283,11 @@ func main() {
 	keyMetrics := initializeKeyMetrics(cfg, log)
 
 	// ==================== Create Proxy ====================
+	var deepSeekToolsRedis valkey.Client
+	if redisBackend != nil {
+		deepSeekToolsRedis = redisBackend.Client()
+	}
+
 	prx := proxy.New(&proxy.Config{
 		Balancer:                     bal,
 		Logger:                       log,
@@ -318,6 +323,9 @@ func main() {
 		Retry:                        cfg.Retry,
 		MaxFallbackAttempts:          cfg.Server.MaxFallbackAttempts,
 		AnthropicDefaultMaxTokens:    cfg.Server.AnthropicDefaultMaxTokens,
+		DeepSeekTools:                cfg.Server.DeepSeekTools,
+		DeepSeekToolsKeyPrefix:       cfg.Redis.KeyPrefix + "deepseektools:",
+		DeepSeekToolsRedisClient:     deepSeekToolsRedis,
 		ResponseStore:                respStore,
 		SessionStickyEnabled:         cfg.Server.SessionStickyEnabled,
 		SessionStickyAutoCacheCtrl:   cfg.Server.SessionStickyAutoCacheCtrl,

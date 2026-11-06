@@ -23,6 +23,16 @@ server:
   tiktoken_enabled: true  # Local fallback token estimation when a provider omits usage (default: true)
   # anthropic_default_max_tokens: 32000  # max_tokens sent to a Claude model when the client sends none (default: 32000, 0 = default)
   # force_stream_for_ttft: false  # Force "stream": true upstream for chat-shaped non-streaming requests (/v1/chat/completions, /v1/messages, converted /v1/responses) and reassemble the response back into non-stream JSON, so every request gets a measurable TTFT. Native/passthrough Responses API and responses_only requests are exempt. (default: false)
+  # The router-run Search/Fetch adapter: for a model whose provider runs its own
+  # search and fetch tools (DeepSeek's /v1/tools/search and /v1/tools/fetch),
+  # the router calls them with the credential's key and bills the calls apart
+  # from the model's tokens. A credential opts in with `deepseek_tools: true`.
+  # deepseek_tools:
+  #   request_timeout: 30s  # Timeout of one Search or Fetch call (default: 30s)
+  #   search_qps: 100  # Per-account Search limit (default: 100, the provider's own limit)
+  #   fetch_qps: 25  # Per-account Fetch limit (default: 25, the provider's own limit)
+  #   max_steps: 8  # Bound of the router-run tool loop (default: 8)
+  #   max_retries: 2  # Retries of a Search or Fetch call after a 429 or 5xx (default: 2)
   model_prices_link: ""  # Optional: URL or file path to model prices JSON (supports os.environ/VAR_NAME)
   model_prices_sync_interval: 5m  # How often model prices are re-fetched from model_prices_link (default: 5m)
   response_headers:
