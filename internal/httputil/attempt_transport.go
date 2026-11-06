@@ -37,7 +37,7 @@ const (
 
 // instrument wraps a transport with otelhttp's client span and attemptTransport.
 func instrument(base http.RoundTripper) http.RoundTripper {
-	return otelhttp.NewTransport(&attemptTransport{base: base})
+	return otelhttp.NewTransport(&attemptTransport{base: base}, otelhttp.WithSpanNameFormatter(spanName))
 }
 
 // attemptTransport sits between otelhttp and the transport. It describes the
@@ -116,6 +116,9 @@ func (t *attemptTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	attempts.observed(number, way, reused, connWait, ttfb)
 	if recording {
 		span.SetAttributes(describe()...)
+		if resp != nil {
+			answered(span, resp)
+		}
 	}
 	if rt.timed {
 		rt.write(rt.stepsAtReturn(end, err))
