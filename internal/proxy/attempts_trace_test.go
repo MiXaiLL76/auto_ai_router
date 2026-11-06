@@ -96,8 +96,8 @@ func TestProxyRequest_AttemptsOnTheTrace_Fallback(t *testing.T) {
 	require.Len(t, attempts, 2)
 	assert.Equal(t, map[string]any{
 		"aar.credential": "primary", "aar.attempt.number": int64(1), "aar.attempt.kind": httputil.AttemptFirst,
-		"aar.connection.reused": false,
-	}, attempts[0])
+		"aar.connection.reused": false, "aar.error.message": "failed",
+	}, attempts[0], "the refused attempt, with what the provider said")
 	assert.Equal(t, map[string]any{
 		"aar.credential": "fallback", "aar.attempt.number": int64(2), "aar.attempt.kind": httputil.AttemptFallback,
 		"aar.attempt.reason": string(RetryReasonRateLimit), "aar.connection.reused": false,

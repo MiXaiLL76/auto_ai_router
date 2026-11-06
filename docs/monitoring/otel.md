@@ -70,7 +70,7 @@ OTEL is observability, not core functionality. If the SDK fails to initialize (b
 When `traces_enabled` is true, the router instruments inbound and outbound HTTP automatically:
 
 - **Server spans** are created for every API request. Health checks (`health_check_path`), readiness probes (`/health/readiness`), and metric scrapes (`/metrics`) are excluded to avoid trace noise. Spans are named `METHOD /path` (e.g. `POST /v1/chat/completions`).
-- **Client spans** are created for every outbound request to a provider or chained router, and the `traceparent` header is injected so the trace continues across hops.
+- **Client spans** are created for every outbound request to a provider or chained router, and the `traceparent` header is injected so the trace continues across hops. An attempt of a client's request is named by the credential it is sent to (`POST openai_eu`), so a trace reads as the credentials the request tried; the router's other requests are named `HTTP GET`, `HTTP POST`.
 - **Tunnels through a proxy**: for a credential with a `proxy_url`, the `CONNECT` that opens a tunnel carries the `traceparent` of the client span it is opened for (W3C trace context only, never baggage), so a proxy that traces can add a span of its own to the request's trace. A pooled tunnel is opened once: the requests that reuse it send no `CONNECT`.
 
 Each server span says what the request was, whose it was, what served it and how it ended, under the names a spend event uses:
@@ -108,18 +108,22 @@ After `admitted` the request is built and sent: the first client span begins. A 
 
 A request the router makes inside another has a span of its own beneath the outer one's, named like a server span and carrying these attributes, with its upstream requests beneath it: the describe call of the vision fallback, and each turn of a WebSocket session, whose server span lasts as long as the connection.
 
-Each client span is one upstream request, and says which attempt of the client's request it is and how it left:
+Each client span is one upstream request, and says which attempt of the client's request it is, how it left and what the provider answered:
 
-| Attribute               | Example      | Description                                                                                                                                                          |
-| ----------------------- | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `aar.credential`        | `openai_eu`  | Credential the request was sent to                                                                                                                                   |
-| `aar.attempt.number`    | `2`          | Which attempt of the client's request this is, from 1                                                                                                                |
-| `aar.attempt.kind`      | `retry`      | `first`, `retry` (the next credential after one failed) or `fallback` (a fallback credential)                                                                        |
-| `aar.attempt.reason`    | `rate_limit` | Why the attempt before it failed: `rate_limit`, `server_error`, `auth_error`, `network_error` or `payment_error`. Absent on the first                                |
-| `aar.connection.reused` | `true`       | Whether the request was sent on a pooled connection. Absent when it never got one                                                                                    |
-| `aar.exit`              | `de-ber-01`  | Exit the connection leaves through: the name the farthest proxy gave itself in the `Via` of its reply to `CONNECT`. Absent without a proxy, or when it names nothing |
-| `aar.exit_rtt_ms`       | `52`         | Round trip to that exit when the connection was opened, in milliseconds: the `CONNECT` written to its reply, less `aar.exit_connect_ms`                              |
-| `aar.exit_connect_ms`   | `98`         | The exit's connect to the provider when the connection was opened, as its reply to `CONNECT` says it in `Server-Timing`. Both absent without that header             |
+| Attribute                 | Example               | Description                                                                                                                                                           |
+| ------------------------- | --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `aar.credential`          | `openai_eu`           | Credential the request was sent to                                                                                                                                    |
+| `aar.attempt.number`      | `2`                   | Which attempt of the client's request this is, from 1                                                                                                                 |
+| `aar.attempt.kind`        | `retry`               | `first`, `retry` (the next credential after one failed) or `fallback` (a fallback credential)                                                                         |
+| `aar.attempt.reason`      | `rate_limit`          | Why the attempt before it failed: `rate_limit`, `server_error`, `auth_error`, `network_error` or `payment_error`. Absent on the first                                 |
+| `aar.connection.reused`   | `true`                | Whether the request was sent on a pooled connection. Absent when it never got one                                                                                     |
+| `aar.exit`                | `de-ber-01`           | Exit the connection leaves through: the name the farthest proxy gave itself in the `Via` of its reply to `CONNECT`. Absent without a proxy, or when it names nothing  |
+| `aar.exit_rtt_ms`         | `52`                  | Round trip to that exit when the connection was opened, in milliseconds: the `CONNECT` written to its reply, less `aar.exit_connect_ms`                               |
+| `aar.exit_connect_ms`     | `98`                  | The exit's connect to the provider when the connection was opened, as its reply to `CONNECT` says it in `Server-Timing`. Both absent without that header              |
+| `aar.upstream_request_id` | `req_8f3a`            | The id the provider gave the request, the one its support asks for: the response's `x-request-id`, `request-id`, `apim-request-id` or `x-amzn-requestid`              |
+| `aar.error.message`       | `Rate limit reached`  | What the provider said of a failure (a status of 400 or more): the message of its error body, or the body's beginning when it is of no known shape. At most 512 bytes |
+| `aar.error.type`          | `rate_limit_error`    | The error's type, when the body gives one (`error.type`, or Google's `error.status`)                                                                                  |
+| `aar.error.code`          | `rate_limit_exceeded` | The error's code, when the body gives one                                                                                                                             |
 
 Beneath a client span, each step of the attempt that took time is a span of its own, with the same attributes:
 
