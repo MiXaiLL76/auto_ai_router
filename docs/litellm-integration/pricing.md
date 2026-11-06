@@ -460,10 +460,10 @@ The takeover happens before the Responses-to-Chat conversion, because the conver
 
 ### What is billed
 
-| Call | Billed when | Price |
-| --- | --- | --- |
+| Call   | Billed when                              | Price                                                                    |
+| ------ | ---------------------------------------- | ------------------------------------------------------------------------ |
 | Search | HTTP 200 and a non-empty `results` array | `search_context_cost_per_query` (the context size the request asked for) |
-| Fetch | HTTP 200 and a non-empty `content` | `tool_cost_per_call.fetch` |
+| Fetch  | HTTP 200 and a non-empty `content`       | `tool_cost_per_call.fetch`                                               |
 
 A failed call, a timeout and an empty result cost nothing. `need_content: true` inside a search does **not** create a Fetch charge — a Fetch is billed only for its own successful REST call, so a Search followed by a Fetch costs both. The price is per call, independent of `count` and of the number of pages found. A search's peak/off-peak schedule does not change the tool price.
 
