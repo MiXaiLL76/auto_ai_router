@@ -558,6 +558,14 @@ type Proxy struct {
 	version                          string
 	commit                           string
 	serviceName                      string // Config.ServiceName
+
+	// responseHeaderTimeoutEnabled is true when a dedicated short
+	// ResponseHeaderTimeout budget is configured (server.response_header_timeout
+	// > 0). With it unset the transport falls back to the general
+	// request_timeout, and a timeout then means "the provider needed longer
+	// than request_timeout", not "the provider never answered" -- so the
+	// attempt_timeout ban must not fire.
+	responseHeaderTimeoutEnabled bool
 }
 
 func New(cfg *Config) *Proxy {
@@ -688,6 +696,7 @@ func New(cfg *Config) *Proxy {
 		responseCompat:                   responseCompat,
 		client:                           httputil.NewHTTPClient(httpClientCfg),
 		streamingClient:                  httputil.NewHTTPClient(&streamingClientCfg),
+		responseHeaderTimeoutEnabled:     cfg.ResponseHeaderTimeout > 0,
 		version:                          cfg.Version,
 		commit:                           cfg.Commit,
 		serviceName:                      cfg.ServiceName,
@@ -1644,7 +1653,13 @@ func (p *Proxy) sendToCredential(
 			// classifies as a timeout for the 408/502 split but which means a
 			// pooled connection went silent and got pinged out, not that this
 			// credential is currently unresponsive.
-			if useFastHeaderClient && isAttemptTimeoutError(doErr) {
+			//
+			// p.responseHeaderTimeoutEnabled: the feature is opt-in. With
+			// response_header_timeout unset the transport falls back to
+			// request_timeout, so a timeout then means "the provider needed
+			// longer than that" -- a healthy-but-slow credential, which must
+			// not be banned.
+			if p.responseHeaderTimeoutEnabled && useFastHeaderClient && isAttemptTimeoutError(doErr) {
 				// Never got a response at all within ResponseHeaderTimeout on an
 				// attempt we expected fast headers from (we sent stream:true) --
 				// likely dead/unreachable right now.
