@@ -1621,6 +1621,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		if !logCtx.RequestCompleted && shouldClearSessionBindingOnFailure(r.Context(), logCtx) {
 			p.clearSessionBinding(p.stickySessionKey(logCtx), logCtx.ModelID)
 		}
+		annotateRequestSpan(logCtx)
 	}()
 
 	prepared, ok := p.orchestrateRequest(w, r, logCtx)

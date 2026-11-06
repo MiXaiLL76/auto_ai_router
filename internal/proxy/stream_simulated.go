@@ -227,7 +227,7 @@ func (p *Proxy) attemptSimulatedNonStream(
 			streamBuf.Write(chunk)
 			if ttftPending {
 				if ttftScan.observe(chunk) {
-					logCtx.CompletionStartTime = time.Now()
+					logCtx.markFirstToken()
 					ttftPending = false
 				}
 			}
@@ -939,7 +939,7 @@ func (p *Proxy) attemptSimulatedNativeNonStream(
 			streamBuf.Write(chunk)
 			if ttftPending {
 				if ttftScan.observe(chunk) {
-					logCtx.CompletionStartTime = time.Now()
+					logCtx.markFirstToken()
 					ttftPending = false
 				}
 			}
@@ -1395,7 +1395,7 @@ func (p *Proxy) attemptSimulatedPassthroughNonStream(
 			rememberLastStreamDataChunk(&lastChunk, chunk)
 			if ttftPending {
 				if ttftScan.observe(chunk) {
-					logCtx.CompletionStartTime = time.Now()
+					logCtx.markFirstToken()
 					ttftPending = false
 				}
 			}

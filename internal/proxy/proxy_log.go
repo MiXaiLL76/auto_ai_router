@@ -286,14 +286,7 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	}
 
 	// Determine final status if not explicitly set
-	status := logCtx.Status
-	if status == "" {
-		if logCtx.HTTPStatus >= 400 {
-			status = "failure"
-		} else {
-			status = "success"
-		}
-	}
+	status := logCtx.finalStatus()
 
 	// Ensure TokenUsage is not nil to prevent nil pointer dereference
 	if logCtx.TokenUsage == nil {

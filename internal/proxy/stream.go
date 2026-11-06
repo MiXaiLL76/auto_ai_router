@@ -1724,7 +1724,7 @@ func (p *Proxy) streamToClient(
 			responseIDScanner.observe(logCtx, chunk)
 			if ttftPending {
 				if ttftScan.observe(chunk) {
-					logCtx.CompletionStartTime = time.Now()
+					logCtx.markFirstToken()
 					ttftPending = false
 				} else if ttftScan.total > streamTTFTDetectionLimit {
 					ttftPending = false
