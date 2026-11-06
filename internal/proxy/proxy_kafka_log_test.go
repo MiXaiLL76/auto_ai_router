@@ -10,6 +10,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
+	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	pricingmodels "github.com/mixaill76/auto_ai_router/internal/models"
@@ -175,6 +176,43 @@ func TestBuildKafkaSpendEvent_TraceID(t *testing.T) {
 	logCtx.Request = logCtx.Request.WithContext(trace.ContextWithSpanContext(logCtx.Request.Context(), sc))
 	assert.Equal(t, "4bf92f3577b34da6a3ce929d0e0e4736", build().TraceID,
 		"the request's span names the trace, sampled or not")
+}
+
+func TestBuildKafkaSpendEvent_UpstreamAttemptsAndExit(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	logCtx := testLogCtx(t)
+	endTime := logCtx.StartTime.Add(time.Second)
+	build := func() *kafkalog.SpendEvent {
+		return prx.buildKafkaSpendEvent(logCtx, "openai_primary", "openai_primary:gpt-4o-mini", "hashed-token",
+			"", "", "", "", "api.openai.com", "success", 0, nil, 0, endTime)
+	}
+
+	event := build()
+	assert.Zero(t, event.UpstreamAttempts, "a request that was never sent upstream")
+	assert.Empty(t, event.Exit)
+	payload, err := json.Marshal(event)
+	require.NoError(t, err)
+	assert.Contains(t, string(payload), `"upstream_attempts":0`)
+	assert.NotContains(t, string(payload), `"exit"`)
+	for _, stage := range []string{"retry_ms", "conn_wait_ms", "ttfb_ms"} {
+		assert.NotContains(t, string(payload), stage, "no attempt, no stages")
+	}
+
+	logCtx.Request = logCtx.Request.WithContext(httputil.WithAttempts(logCtx.Request.Context()))
+	attempts := httputil.AttemptsFrom(logCtx.Request.Context())
+	attempts.Begin("azure_first")
+	time.Sleep(15 * time.Millisecond)
+	attempts.Next(httputil.AttemptRetry, string(RetryReasonRateLimit))
+	attempts.Begin("openai_primary")
+	event = build()
+	assert.Equal(t, 2, event.UpstreamAttempts)
+	assert.Empty(t, event.Exit, "the serving credential's attempt named no exit")
+	require.NotNil(t, event.RetryMs)
+	assert.GreaterOrEqual(t, *event.RetryMs, int64(15), "what the attempt before the serving one cost")
+	assert.Nil(t, event.ConnWaitMs, "no round trip measured a wait")
+	assert.Nil(t, event.ConnReused)
+	assert.Nil(t, event.TTFBMs)
+	assert.Nil(t, event.ExitRTTMs)
 }
 
 func TestBuildKafkaSpendEvent_NilTokenUsage(t *testing.T) {
