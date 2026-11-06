@@ -131,6 +131,12 @@ type deepSeekStreamCycleResult struct {
 	body []byte
 	// usage is the summed usage of every step.
 	usage *converter.TokenUsage
+	// totalTokens is the steps' token count, the streaming handler's own
+	// accounting figure.
+	totalTokens int
+	// lastChunk is the last chunk of the final stream, which the streaming
+	// log reads its figures from.
+	lastChunk []byte
 }
 
 // runDeepSeekStreamToolLoop drives the router-run tool loop for a streaming
@@ -165,7 +171,13 @@ func (p *Proxy) runDeepSeekStreamToolLoop(
 	if len(calls) == 0 {
 		// No tool call: the client gets the provider's stream as it is.
 		replayDeepSeekStream(w, resp, raw)
-		return &deepSeekStreamCycleResult{body: raw, usage: usageFromStreamUsage(usage).toTokenUsage()}, nil
+		streamUsage := usageFromStreamUsage(usage)
+		return &deepSeekStreamCycleResult{
+			body:        raw,
+			usage:       streamUsage.toTokenUsage(),
+			totalTokens: streamUsage.totalTokens,
+			lastChunk:   lastChunkOf(raw),
+		}, nil
 	}
 
 	runner := &deepSeekToolRunner{
@@ -177,7 +189,13 @@ func (p *Proxy) runDeepSeekStreamToolLoop(
 	if runner.client == nil {
 		// No key: the tool cannot be run, so the stream is relayed as it is.
 		replayDeepSeekStream(w, resp, raw)
-		return &deepSeekStreamCycleResult{body: raw, usage: usageFromStreamUsage(usage).toTokenUsage()}, nil
+		streamUsage := usageFromStreamUsage(usage)
+		return &deepSeekStreamCycleResult{
+			body:        raw,
+			usage:       streamUsage.toTokenUsage(),
+			totalTokens: streamUsage.totalTokens,
+			lastChunk:   lastChunkOf(raw),
+		}, nil
 	}
 
 	cycle, err := newDeepSeekToolCycle(body, runner)
@@ -212,7 +230,12 @@ func (p *Proxy) runDeepSeekStreamToolLoop(
 	replayDeepSeekStream(w, resp, current)
 	total.webSearchRequests = runner.state.billableSearch
 	total.webFetchRequests = runner.state.billableFetch
-	return &deepSeekStreamCycleResult{body: current, usage: total.toTokenUsage()}, nil
+	return &deepSeekStreamCycleResult{
+		body:        current,
+		usage:       total.toTokenUsage(),
+		totalTokens: total.totalTokens,
+		lastChunk:   lastChunkOf(current),
+	}, nil
 }
 
 // runDeepSeekStreamToolStep sends one upstream request of the streaming loop
@@ -353,4 +376,14 @@ func (cycle *deepSeekToolCycle) nextBodyFromToolCalls(raw []byte, calls []deepSe
 	}
 	cycle.body = next
 	return next, nil
+}
+
+// lastChunkOf returns the last SSE payload of a buffered stream, which the
+// streaming log reads its figures from.
+func lastChunkOf(raw []byte) []byte {
+	payloads := splitSSEPayloads(raw, nil)
+	if len(payloads) == 0 {
+		return nil
+	}
+	return payloads[len(payloads)-1]
 }

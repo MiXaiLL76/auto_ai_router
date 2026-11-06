@@ -115,3 +115,44 @@ func setJSONInt(fields map[string]json.RawMessage, name string, value int) {
 	}
 	fields[name] = encoded
 }
+
+// withDeepSeekToolUsage writes the loop's summed usage into the last chunk of
+// a streamed response.
+//
+// The streaming log reads its figures from the last chunk, so a chunk that
+// carries only the last step's usage would bill the loop's last step alone.
+// Putting the loop's totals there bills every step, as the client was
+// charged for all of them.
+//
+// A chunk that cannot be parsed is returned as it is: the log then falls back
+// to the request's own usage, which the caller has already filled.
+func withDeepSeekToolUsage(chunk []byte, usage *converter.TokenUsage) []byte {
+	if len(chunk) == 0 || usage == nil {
+		return chunk
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(chunk, &fields); err != nil {
+		return chunk
+	}
+	rawUsage, ok := fields["usage"]
+	if !ok {
+		return chunk
+	}
+	var usageFields map[string]json.RawMessage
+	if err := json.Unmarshal(rawUsage, &usageFields); err != nil {
+		return chunk
+	}
+	setJSONInt(usageFields, "prompt_tokens", usage.PromptTokens)
+	setJSONInt(usageFields, "completion_tokens", usage.CompletionTokens)
+	setJSONInt(usageFields, "total_tokens", usage.PromptTokens+usage.CompletionTokens)
+	encodedUsage, err := json.Marshal(usageFields)
+	if err != nil {
+		return chunk
+	}
+	fields["usage"] = encodedUsage
+	encoded, err := json.Marshal(fields)
+	if err != nil {
+		return chunk
+	}
+	return encoded
+}

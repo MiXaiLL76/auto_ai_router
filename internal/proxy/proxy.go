@@ -3274,12 +3274,18 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				default:
 					if streamRun != nil {
 						// The loop buffered the stream itself, so the usual
-						// streaming handler never filled the request's usage:
-						// the loop's own figures are it.
+						// streaming handler never ran: it neither counted the
+						// tokens nor wrote the spend row. The loop does both
+						// here -- and the streaming log reads its figures from
+						// the last chunk, so the chunk carries the loop's
+						// summed usage rather than the last step's.
 						if logCtx.TokenUsage == nil {
 							logCtx.TokenUsage = &converter.TokenUsage{}
 						}
 						applyDeepSeekToolUsageTo(logCtx.TokenUsage, streamRun.usage)
+						p.finalizeStreamingLog(logCtx, streamRun.totalTokens,
+							withDeepSeekToolUsage(streamRun.lastChunk, streamRun.usage),
+							"openai", resp.StatusCode, false)
 					}
 					streamCompleted = true
 				}
