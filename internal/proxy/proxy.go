@@ -1708,6 +1708,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 	if !p.enforceBudgetAndRateLimits(w, r, logCtx, modelID, realModelID, body) {
 		return
 	}
+	logCtx.mark(markAdmitted)
 
 	// Handle proxy/AIR credential types with exact same-type retry + fallback.
 	if cred.IsProxyLike() {

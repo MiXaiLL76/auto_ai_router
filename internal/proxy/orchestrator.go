@@ -107,6 +107,7 @@ func (p *Proxy) orchestrateRequest(
 	if !p.authenticateRequest(w, r, logCtx, isLiteLLMHealthy) {
 		return nil, false
 	}
+	logCtx.mark(markAuthenticated)
 	markerPresent := credentialDenylistState(r.Context()).markerPresent
 	masterKeyAuthenticated := p.isMasterKey(logCtx.Token)
 	logCtx.IsProxyRequest = markerPresent && masterKeyAuthenticated
@@ -275,6 +276,7 @@ func (p *Proxy) orchestrateRequest(
 	if !ok {
 		return nil, false
 	}
+	logCtx.mark(markRouted)
 
 	p.logger.DebugContext(r.Context(), "Responses API detection",
 		"is_responses_api", isResponsesAPI,
@@ -329,6 +331,7 @@ func (p *Proxy) orchestrateRequest(
 	body = credentialReq.body
 	realModelID = credentialReq.realModelID
 	r.URL.Path = credentialReq.path
+	logCtx.mark(markRequestPrepared)
 
 	logCtx.Credential = cred
 	r = markCredentialAsTried(r, cred.Name)
@@ -1135,6 +1138,7 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		WriteErrorBadRequest(w, "Failed to read request body")
 		return nil, "", "", false, false
 	}
+	logCtx.mark(markBodyRead)
 	if closeErr := r.Body.Close(); closeErr != nil {
 		p.logger.WarnContext(r.Context(), "Failed to close request body", "error", closeErr)
 	}

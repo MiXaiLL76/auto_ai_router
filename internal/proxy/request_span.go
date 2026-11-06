@@ -29,12 +29,30 @@ func innerRequestSpan(r *http.Request) (*http.Request, func(status int)) {
 	}
 }
 
+// The moments of a request before its first upstream send, as span events.
+const (
+	markAuthenticated   = "authenticated"       // the key looked up and checked
+	markBodyRead        = "body_read"           // the client has sent the request's body
+	markRouted          = "credential_selected" // the body parsed, the model resolved, a credential chosen
+	markRequestPrepared = "request_prepared"    // the body converted for the credential's provider
+	markAdmitted        = "admitted"            // the budget and the rate limits checked
+	markFirstTokenEvent = "first_token"
+)
+
+// mark names a moment of the request on its span.
+func (logCtx *RequestLogContext) mark(name string) {
+	if logCtx == nil {
+		return
+	}
+	if span := trace.SpanFromContext(logCtx.Context()); span.IsRecording() {
+		span.AddEvent(name)
+	}
+}
+
 // markFirstToken stamps the first token's arrival and marks it on the span.
 func (logCtx *RequestLogContext) markFirstToken() {
 	logCtx.CompletionStartTime = time.Now()
-	if span := trace.SpanFromContext(logCtx.Context()); span.IsRecording() {
-		span.AddEvent("first_token")
-	}
+	logCtx.mark(markFirstTokenEvent)
 }
 
 // finalStatus is how the request ended: the handlers' status, else the
