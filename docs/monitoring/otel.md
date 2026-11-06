@@ -75,23 +75,30 @@ When `traces_enabled` is true, the router instruments inbound and outbound HTTP 
 
 Each server span says what the request was, whose it was, what served it and how it ended, under the names a spend event uses:
 
-| Attribute                                       | Example             | Description                                                                                       |
-| ----------------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------- |
-| `gen_ai.request.model`                          | `gpt-4o`            | Model requested by the client                                                                     |
-| `aar.streaming`                                 | `true`              | Whether the response is streamed                                                                  |
-| `aar.request_id`                                | `req_abc123`        | Internal request identifier                                                                       |
-| `aar.api_key_hash`                              | `9f86d0…`           | SHA-256 of the API key, as in the spend event. Absent when the request was refused before its key |
-| `aar.key_alias`, `aar.user_id`                  | `billing-bot`       | The key's alias and its owner, when it has them                                                   |
-| `aar.team_id`, `aar.team_alias`                 | `Billing`           | The key's team                                                                                    |
-| `aar.organization_id`, `aar.organization_alias` | `Acme`              | The key's organization                                                                            |
-| `aar.upstream_attempts`                         | `2`                 | Times the request was sent upstream, as in the spend event. 0: it was refused before any send     |
-| `aar.credential`                                | `openai_main`       | Credential that answered, or the one chosen for a request never sent. Absent when none could be   |
-| `aar.provider`                                  | `openai`            | That credential's provider type                                                                   |
-| `aar.real_model`                                | `gpt-4o-2024-08-06` | Resolved underlying model                                                                         |
-| `aar.status`                                    | `success`           | `success` or `failure`, as in the spend event                                                     |
-| `error.type`                                    | `RateLimitError`    | The failure's class (the spend event's `error_class`). Absent on success                          |
+| Attribute                                       | Example                   | Description                                                                                                        |
+| ----------------------------------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `gen_ai.request.model`                          | `gpt-4o`                  | Model requested by the client                                                                                      |
+| `aar.streaming`                                 | `true`                    | Whether the response is streamed                                                                                   |
+| `aar.request_id`                                | `req_abc123`              | Internal request identifier                                                                                        |
+| `aar.api_key_hash`                              | `9f86d0…`                 | SHA-256 of the API key, as in the spend event. Absent when the request was refused before its key                  |
+| `aar.key_alias`, `aar.user_id`                  | `billing-bot`             | The key's alias and its owner, when it has them                                                                    |
+| `aar.team_id`, `aar.team_alias`                 | `Billing`                 | The key's team                                                                                                     |
+| `aar.organization_id`, `aar.organization_alias` | `Acme`                    | The key's organization                                                                                             |
+| `aar.upstream_attempts`                         | `2`                       | Times the request was sent upstream, as in the spend event. 0: it was refused before any send                      |
+| `aar.credential`                                | `openai_main`             | Credential that answered, or the one chosen for a request never sent. Absent when none could be                    |
+| `aar.provider`                                  | `openai`                  | That credential's provider type                                                                                    |
+| `aar.real_model`                                | `gpt-4o-2024-08-06`       | Resolved underlying model                                                                                          |
+| `aar.status`                                    | `success`                 | `success` or `failure`, as in the spend event                                                                      |
+| `error.type`                                    | `RateLimitError`          | The failure's class (the spend event's `error_class`). Absent on success                                           |
+| `aar.error.origin`                              | `all_attempts_exhausted`  | Which of the router's code paths produced the failure, when it has a name (the spend event's `error_origin`)       |
+| `aar.error.message`                             | `budget exceeded (key:…)` | Why the router refused the request or gave it up, at most 512 bytes. What a provider said is on the attempt's span |
+| `aar.stream_outcome`                            | `client_aborted`          | How a stream ended: `completed`, `client_aborted` or `stream_error`                                                |
+| `gen_ai.response.id`                            | `chatcmpl-9f3a`           | The id of the answer, as the client got it                                                                         |
+| `gen_ai.usage.input_tokens`                     | `1200`                    | Prompt tokens of the answer                                                                                        |
+| `gen_ai.usage.output_tokens`                    | `350`                     | Completion tokens of the answer. The breakdown and the cost are on the spend event                                 |
+| `aar.usage_source`                              | `provider`                | Where the usage came from: `provider`, `estimated`, `request_parameters` or `missing`                              |
 
-The attributes of what served the request and how it ended are set when the request is over.
+The attributes of what served the request and how it ended are set when the request is over. A request refused before it was sent anywhere (a bad key, a budget, a rate limit, no credential for the model) has `aar.upstream_attempts` 0 and the reason in `aar.error.message`.
 
 The server span also has the moments of the request as span events, in the order the router passes them. The time between two of them is one phase:
 

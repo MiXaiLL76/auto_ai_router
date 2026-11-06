@@ -1098,6 +1098,9 @@ func (p *Proxy) authenticateCaller(
 		p.logger.WarnContext(r.Context(), "Invalid master key",
 			"error_code", http.StatusUnauthorized,
 			"provided_key_prefix", security.MaskAPIKey(token))
+		logCtx.Status = "failure"
+		logCtx.HTTPStatus = http.StatusUnauthorized
+		logCtx.ErrorMsg = "Invalid master key"
 		WriteErrorUnauthorized(w, "Invalid master key")
 		return false
 	}

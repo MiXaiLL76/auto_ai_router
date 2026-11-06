@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
@@ -11,7 +12,10 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-const tracerName = "github.com/mixaill76/auto_ai_router/internal/proxy"
+const (
+	tracerName     = "github.com/mixaill76/auto_ai_router/internal/proxy"
+	maxSpanMessage = 512 // bounds an error message on a span
+)
 
 // innerRequestSpan gives a request made inside another (a vision describe, a
 // WebSocket turn) a span of its own. The function returned ends it.
@@ -74,7 +78,7 @@ func annotateRequestSpan(logCtx *RequestLogContext) {
 	if !span.IsRecording() {
 		return
 	}
-	attrs := make([]attribute.KeyValue, 0, 13)
+	attrs := make([]attribute.KeyValue, 0, 20)
 	add := func(key, value string) {
 		if value != "" {
 			attrs = append(attrs, attribute.String(key, value))
@@ -109,6 +113,21 @@ func annotateRequestSpan(logCtx *RequestLogContext) {
 	case "failure":
 		add("aar.status", status)
 		add("error.type", mapHTTPStatusToErrorClass(logCtx.HTTPStatus))
+		add("aar.error.origin", string(logCtx.ErrorOrigin))
+		message := logCtx.ErrorMsg
+		if len(message) > maxSpanMessage {
+			message = message[:maxSpanMessage]
+		}
+		add("aar.error.message", strings.ToValidUTF8(message, ""))
+	}
+	add("aar.stream_outcome", logCtx.StreamOutcome)
+	add("aar.usage_source", logCtx.UsageSource)
+	add("gen_ai.response.id", logCtx.ClientResponseID)
+	if usage := logCtx.TokenUsage; usage != nil {
+		attrs = append(attrs,
+			attribute.Int("gen_ai.usage.input_tokens", usage.PromptTokens),
+			attribute.Int("gen_ai.usage.output_tokens", usage.CompletionTokens),
+		)
 	}
 	span.SetAttributes(attrs...)
 }
