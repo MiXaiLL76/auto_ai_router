@@ -397,7 +397,6 @@ func TestProxyRequest_VertexGeminiEmbedding2FansOutAndBills(t *testing.T) {
 		WithMasterKey("master-key").
 		Build()
 	prx.client = &http.Client{Transport: rewriteHostTransport{target: target}}
-	prx.streamingClient = prx.client
 	prx.LiteLLMDB = dbStub
 	setTestModelPrice(prx, "gemini-embedding-2", geminiEmbedding2TestPrice())
 
@@ -606,7 +605,6 @@ func newRateLimitedVertexEmbeddingProxy(t *testing.T, upstreamURL string, rpm in
 	dbStub := &stubLiteLLMManager{}
 	prx := NewTestProxyBuilder().WithCredentials(creds...).WithMasterKey("master-key").Build()
 	prx.client = &http.Client{Transport: rewriteHostTransport{target: target}}
-	prx.streamingClient = prx.client
 	prx.maxProviderRetries = 4
 	prx.LiteLLMDB = dbStub
 	setTestModelPrice(prx, "gemini-embedding-2", geminiEmbedding2TestPrice())

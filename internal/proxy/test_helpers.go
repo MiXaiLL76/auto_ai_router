@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"log/slog"
+	"net/http"
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/auth"
@@ -345,21 +346,25 @@ func (b *TestProxyBuilder) Build() *Proxy {
 		OrganizationPolicies:   b.config.OrganizationPolicies,
 		VisionFallback:         b.config.VisionFallback,
 	})
-	// Tests overwhelmingly mock prx.client.Transport and have no reason to
-	// care about the ResponseHeaderTimeout distinction between client and
-	// streamingClient — collapse them to the same object so an existing
-	// test's mock transport is picked up regardless of which one a given
-	// attempt happens to use. A test that specifically wants to exercise the
-	// two-client split should reassign prx.streamingClient itself afterward.
-	//
-	// Only when the feature is off: with response_header_timeout configured
-	// the two clients carry different budgets, and collapsing them would make
-	// the short header timeout untestable (a streaming attempt would run on
-	// the long-budget client instead).
-	if b.config.ResponseHeaderTimeout <= 0 {
-		prx.streamingClient = prx.client
-	}
+	// No streamingClient collapse needed here (unlike before streamingClients
+	// became a lazily-built per-timeout map): attemptClient already returns
+	// prx.client itself whenever the effective ResponseHeaderTimeout is <= 0,
+	// which is every credential's default with nothing configured -- exactly
+	// the case most tests mock prx.client.Transport for. A test that wants to
+	// exercise the short-timeout path uses streamingClientForTest below.
 	return prx
+}
+
+// streamingClientForTest returns (building it on first use, exactly like a
+// real request would via attemptClient) the *http.Client a streaming attempt
+// for cred would use. Pass nil for cred to get the client a credential with
+// no override of its own resolves to (the server-level default). Tests use
+// this to install a mock Transport on the client an attempt will actually
+// run on, now that it is not a fixed field but one entry in a lazily-built
+// map keyed by the effective timeout.
+func (p *Proxy) streamingClientForTest(cred *config.CredentialConfig) *http.Client {
+	client, _ := p.attemptClient(cred, true)
+	return client
 }
 
 // ============================================================================

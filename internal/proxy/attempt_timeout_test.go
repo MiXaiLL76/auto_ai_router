@@ -79,7 +79,7 @@ func TestAttemptTimeout_HeaderTimeout_Bans(t *testing.T) {
 		WithResponseHeaderTimeout(4 * time.Second).
 		Build()
 	prx.client.Transport = erroringTransport{err: headerTimeoutError()}
-	prx.streamingClient.Transport = erroringTransport{err: headerTimeoutError()}
+	prx.streamingClientForTest(nil).Transport = erroringTransport{err: headerTimeoutError()}
 
 	w := httptest.NewRecorder()
 	prx.ProxyRequest(w, streamingChatRequest("gpt-4"))
@@ -102,7 +102,7 @@ func TestAttemptTimeout_FeatureDisabled_NoBan(t *testing.T) {
 		Build()
 	// No WithResponseHeaderTimeout: the feature is off, as it is by default.
 	prx.client.Transport = erroringTransport{err: headerTimeoutError()}
-	prx.streamingClient.Transport = erroringTransport{err: headerTimeoutError()}
+	prx.streamingClientForTest(nil).Transport = erroringTransport{err: headerTimeoutError()}
 
 	w := httptest.NewRecorder()
 	prx.ProxyRequest(w, streamingChatRequest("gpt-4"))
@@ -125,7 +125,7 @@ func TestAttemptTimeout_HTTP2ConnectionLost_DoesNotBan(t *testing.T) {
 		WithResponseHeaderTimeout(4 * time.Second).
 		Build()
 	prx.client.Transport = erroringTransport{err: http2LostError()}
-	prx.streamingClient.Transport = erroringTransport{err: http2LostError()}
+	prx.streamingClientForTest(nil).Transport = erroringTransport{err: http2LostError()}
 
 	w := httptest.NewRecorder()
 	prx.ProxyRequest(w, streamingChatRequest("gpt-4"))
@@ -150,7 +150,7 @@ func TestAttemptTimeout_DialTimeout_DoesNotBan(t *testing.T) {
 		Err: &netTimeoutError{msg: "dial tcp 10.255.255.1:443: i/o timeout"},
 	}
 	prx.client.Transport = erroringTransport{err: dialErr}
-	prx.streamingClient.Transport = erroringTransport{err: dialErr}
+	prx.streamingClientForTest(nil).Transport = erroringTransport{err: dialErr}
 
 	w := httptest.NewRecorder()
 	prx.ProxyRequest(w, streamingChatRequest("gpt-4"))
@@ -171,7 +171,7 @@ func TestAttemptTimeout_NonStreaming_HeaderTimeout_DoesNotBan(t *testing.T) {
 		WithResponseHeaderTimeout(4 * time.Second).
 		Build()
 	prx.client.Transport = erroringTransport{err: headerTimeoutError()}
-	prx.streamingClient.Transport = erroringTransport{err: headerTimeoutError()}
+	prx.streamingClientForTest(nil).Transport = erroringTransport{err: headerTimeoutError()}
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations",
 		strings.NewReader(`{"model":"gpt-image-1","prompt":"a cat","n":1}`))
@@ -219,30 +219,36 @@ func TestAttemptTimeout_RealSlowProvider_Bans(t *testing.T) {
 		"a provider that never sends headers must be banned for this model")
 }
 
-// TestNew_StreamingClientSharesClientWhenDisabled is the regression test for
-// the 2026-11-06 gpt-6-luna incident: with response_header_timeout disabled
-// (the default), client and streamingClient were still built as two
-// completely separate *http.Client (two separate Transports, two separate
-// idle-connection pools), each handed only half of MaxIdleConns/
-// MaxIdleConnsPerHost. force_stream_for_ttft routes nearly all chat traffic
-// through streamingClient, so that halving cut real idle-connection capacity
-// for busy models fleet-wide the moment this feature merged -- entirely
-// independent of whether ResponseHeaderTimeout ever actually fired. With the
-// feature off there is no reason for a second pool at all: both clients fall
-// back to the identical Timeout for ResponseHeaderTimeout, so streamingClient
-// must be the literal same *http.Client as client, not a look-alike copy.
-func TestNew_StreamingClientSharesClientWhenDisabled(t *testing.T) {
+// TestAttemptClient_SharesClientWhenDisabled is the regression test for the
+// 2026-11-06 gpt-6-luna incident: client and the per-timeout streaming
+// clients were built as two (then: N) completely separate *http.Client (two
+// separate Transports, two separate idle-connection pools), one handed only
+// half of MaxIdleConns/MaxIdleConnsPerHost. force_stream_for_ttft routes
+// nearly all chat traffic through the streaming path, so splitting its pool
+// cut real idle-connection capacity for busy models fleet-wide the moment
+// this feature merged -- entirely independent of whether
+// ResponseHeaderTimeout ever actually fired anywhere. With no budget
+// configured for a credential (its own override, and the server-level
+// default, both unset) there is no reason for a second pool at all:
+// attemptClient must hand back the literal same *http.Client as p.client,
+// not a look-alike copy.
+func TestAttemptClient_SharesClientWhenDisabled(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
-	assert.Same(t, prx.client, prx.streamingClient,
-		"with response_header_timeout disabled, streamingClient must be the exact same *http.Client as client -- a separate pool here silently halves real idle-connection capacity for no benefit")
+	client, enabled := prx.attemptClient(nil, true)
+	assert.Same(t, prx.client, client,
+		"with no response_header_timeout configured, attemptClient must return the exact same *http.Client as p.client -- a separate pool here silently cuts real idle-connection capacity for no benefit")
+	assert.False(t, enabled, "the attempt-timeout ban must not be enabled when no budget is configured")
 }
 
-// TestNew_StreamingClientDistinctWhenEnabled is the flip side: once the
-// feature is actually opted into, the two clients must carry different
-// ResponseHeaderTimeout budgets, which Go only allows via separate
-// Transports -- so they must NOT be collapsed to the same object here.
-func TestNew_StreamingClientDistinctWhenEnabled(t *testing.T) {
+// TestAttemptClient_DistinctWhenEnabled is the flip side: once a budget is
+// actually configured (the server-level default here), attemptClient must
+// hand back a distinct client with its own ResponseHeaderTimeout -- Go only
+// allows a different budget via a separate Transport, so it must NOT be
+// collapsed to the same object as p.client.
+func TestAttemptClient_DistinctWhenEnabled(t *testing.T) {
 	prx := NewTestProxyBuilder().WithResponseHeaderTimeout(4 * time.Second).Build()
-	assert.NotSame(t, prx.client, prx.streamingClient,
-		"with response_header_timeout enabled, streamingClient needs its own Transport to carry a different ResponseHeaderTimeout")
+	client, enabled := prx.attemptClient(nil, true)
+	assert.NotSame(t, prx.client, client,
+		"with a response_header_timeout configured, attemptClient needs a distinct Transport to carry it")
+	assert.True(t, enabled, "the attempt-timeout ban must be enabled once a budget is configured")
 }
