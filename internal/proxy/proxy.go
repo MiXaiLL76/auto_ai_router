@@ -524,6 +524,14 @@ type Proxy struct {
 	// pool, and handing those out more liberally than "one per distinct
 	// value actually configured" is exactly what caused the 2026-11-06
 	// gpt-6-luna incident.
+	//
+	// The map's size is bounded today only by how many distinct values an
+	// operator actually writes into static config -- DB-sourced credentials
+	// (balancer.UpdateDBCredentials) never carry their own
+	// ResponseHeaderTimeout, so they always resolve to the one server-level
+	// default. If that ever changes, a distinct value per DB-sourced
+	// credential would need capping or deduplicating before it reaches here,
+	// since each one still buys a full connection pool (MaxIdleConns).
 	streamingClients sync.Map
 	// streamingClientBaseCfg is httpClientCfg's settings minus
 	// ResponseHeaderTimeout -- the template attemptClient clones and sets
@@ -744,10 +752,13 @@ func New(cfg *Config) *Proxy {
 
 // effectiveResponseHeaderTimeout resolves the ResponseHeaderTimeout budget
 // that applies to cred: its own override (config.CredentialConfig.
-// ResponseHeaderTimeout) if set, otherwise the server-level default
-// (server.response_header_timeout). <= 0 means the feature is off for this
-// credential -- the zero value (unset) and an explicit negative (opt-out)
-// are deliberately indistinguishable here.
+// ResponseHeaderTimeout), if that is anything other than zero, otherwise the
+// server-level default (server.response_header_timeout). The two zero-ish
+// inputs are never conflated: a cred left unset (0) always inherits the
+// server default, including a positive one, while a cred explicitly set
+// negative always disables the budget for itself, including when the server
+// default is positive. See attemptClient for the one place this distinction
+// stops mattering.
 func (p *Proxy) effectiveResponseHeaderTimeout(cred *config.CredentialConfig) time.Duration {
 	if cred != nil && cred.ResponseHeaderTimeout != 0 {
 		return cred.ResponseHeaderTimeout
@@ -768,6 +779,12 @@ func (p *Proxy) attemptClient(cred *config.CredentialConfig, useFastHeaderClient
 	}
 	timeout := p.effectiveResponseHeaderTimeout(cred)
 	if timeout <= 0 {
+		// <= 0 collapses two different sources back into one outcome: cred
+		// never had a budget to begin with (its own override and the server
+		// default both zero), or cred explicitly opted out of a positive
+		// server default (a negative override). effectiveResponseHeaderTimeout
+		// tells those apart; past this point there is nothing left to tell
+		// apart -- neither case has a budget to enforce or a ban to apply.
 		return p.client, false
 	}
 	if v, ok := p.streamingClients.Load(timeout); ok {
