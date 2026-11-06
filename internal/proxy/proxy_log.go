@@ -169,7 +169,7 @@ func (p *Proxy) handleLiteLLMAuthError(ctx context.Context, w http.ResponseWrite
 	for errType, info := range errorMap {
 		if errors.Is(err, errType) {
 			logCtx.HTTPStatus = info.status
-			logCtx.ErrorMsg = "LiteLLM auth validation failed"
+			logCtx.ErrorMsg = "LiteLLM auth validation failed: " + info.logMsg
 			p.logger.WarnContext(ctx, info.logMsg,
 				"error_code", info.status,
 				"token_prefix", security.MaskAPIKey(token))

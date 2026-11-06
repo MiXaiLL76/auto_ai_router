@@ -7,8 +7,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/converter"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
@@ -38,7 +40,7 @@ func recordRequestSpan(t *testing.T) (context.Context, func() (map[string]any, [
 			}
 			attrs := map[string]any{}
 			for _, kv := range span.Attributes() {
-				if key := string(kv.Key); strings.HasPrefix(key, "aar.") || key == "error.type" {
+				if key := string(kv.Key); strings.HasPrefix(key, "aar.") || strings.HasPrefix(key, "gen_ai.") || key == "error.type" {
 					attrs[key] = kv.Value.AsInterface()
 				}
 			}
@@ -113,6 +115,57 @@ func TestAnnotateRequestSpan_OnlyWhatTheRequestGotTo(t *testing.T) {
 	attrs, _ := said()
 	assert.Equal(t, map[string]any{"aar.upstream_attempts": int64(0)}, attrs,
 		"no key was read, no credential reached, and no handler said how it ended")
+}
+
+// How it ended: the router's word for a failure, a stream's outcome, and
+// what the answer was and used.
+func TestAnnotateRequestSpan_HowItEnded(t *testing.T) {
+	ctx, said := recordRequestSpan(t)
+	logCtx := spannedLogCtx(ctx, "openai_primary", "openai_fallback")
+	logCtx.Credential = &config.CredentialConfig{Name: "openai_fallback", Type: config.ProviderTypeOpenAI}
+	logCtx.Status = "failure"
+	logCtx.HTTPStatus = http.StatusBadGateway
+	logCtx.ErrorOrigin = ErrorOriginAllAttemptsExhausted
+	logCtx.ErrorMsg = "every credential failed: " + strings.Repeat("é", maxSpanMessage)
+	logCtx.StreamOutcome = "stream_error"
+	logCtx.UsageSource = "estimated"
+	logCtx.ClientResponseID = "chatcmpl-123"
+	logCtx.TokenUsage = &converter.TokenUsage{PromptTokens: 1200, CompletionTokens: 7}
+
+	annotateRequestSpan(logCtx)
+
+	attrs, _ := said()
+	message, _ := attrs["aar.error.message"].(string)
+	assert.True(t, strings.HasPrefix(message, "every credential failed: é"))
+	assert.LessOrEqual(t, len(message), maxSpanMessage)
+	assert.True(t, utf8.ValidString(message), "cut on a character's boundary")
+	delete(attrs, "aar.error.message")
+	assert.Equal(t, map[string]any{
+		"aar.credential": "openai_fallback", "aar.provider": string(config.ProviderTypeOpenAI),
+		"aar.upstream_attempts": int64(2), "aar.status": "failure", "error.type": "APIConnectionError",
+		"aar.error.origin": string(ErrorOriginAllAttemptsExhausted), "aar.stream_outcome": "stream_error",
+		"aar.usage_source": "estimated", "gen_ai.response.id": "chatcmpl-123",
+		"gen_ai.usage.input_tokens": int64(1200), "gen_ai.usage.output_tokens": int64(7),
+	}, attrs)
+}
+
+// An answer says nothing of the failures on the way to it: those are on
+// their attempts' spans.
+func TestAnnotateRequestSpan_ASuccessHasNoError(t *testing.T) {
+	ctx, said := recordRequestSpan(t)
+	logCtx := spannedLogCtx(ctx, "openai_primary", "openai_fallback")
+	logCtx.Status = "success"
+	logCtx.HTTPStatus = http.StatusOK
+	logCtx.ErrorMsg = "the first credential's failure"
+	logCtx.ErrorOrigin = ErrorOriginProxyForwardError
+	logCtx.StreamOutcome = "completed"
+
+	annotateRequestSpan(logCtx)
+
+	attrs, _ := said()
+	assert.Equal(t, map[string]any{
+		"aar.upstream_attempts": int64(2), "aar.status": "success", "aar.stream_outcome": "completed",
+	}, attrs)
 }
 
 // A request that no credential could take: its spend row names a stand-in,
@@ -235,8 +288,12 @@ func TestProxyRequest_RequestSpanMarksStopWhereTheRequestDid(t *testing.T) {
 	prx.ProxyRequest(w, req)
 
 	require.Equal(t, http.StatusUnauthorized, w.Code, w.Body.String())
-	_, events := said()
+	attrs, events := said()
 	assert.Empty(t, events)
+	assert.Equal(t, map[string]any{
+		"aar.api_key_hash": litellmdb.HashToken("not-the-key"), "aar.upstream_attempts": int64(0),
+		"aar.status": "failure", "error.type": "AuthenticationError", "aar.error.message": "Invalid master key",
+	}, attrs, "and says why it was refused")
 }
 
 func TestMark_WithoutASpan(t *testing.T) {
@@ -274,6 +331,10 @@ func TestProxyRequest_RequestSpanNamesWhatServed(t *testing.T) {
 	assert.Equal(t, int64(2), attrs["aar.upstream_attempts"])
 	assert.Equal(t, "success", attrs["aar.status"])
 	assert.NotContains(t, attrs, "error.type")
+	assert.NotContains(t, attrs, "aar.error.message", "the fallback answered: the first credential's failure is on its attempt")
+	assert.Equal(t, "chatcmpl-123", attrs["gen_ai.response.id"])
+	assert.Contains(t, attrs, "gen_ai.usage.input_tokens")
+	assert.Contains(t, attrs, "gen_ai.usage.output_tokens")
 	assert.Equal(t, litellmdb.HashToken("master-key"), attrs["aar.api_key_hash"])
 }
 
