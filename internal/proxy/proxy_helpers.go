@@ -65,6 +65,40 @@ func isTimeoutError(err error) bool {
 	return false
 }
 
+// responseHeaderTimeoutSubstring matches the error Go's Transport produces
+// when ResponseHeaderTimeout fires: the request was written, the provider
+// never answered with headers, and the transport gave up waiting for them.
+// It is the ONLY timeout kind that means "this credential did not answer at
+// all" -- a dial timeout, a TLS handshake timeout or the client's own
+// deadline all say something else (the connection was never established, or
+// the peer never even started the handshake).
+const responseHeaderTimeoutSubstring = "timeout awaiting response headers"
+
+// isAttemptTimeoutError reports whether err means this specific attempt never
+// got a response within its own header deadline (ResponseHeaderTimeout) --
+// narrower than isTimeoutError, which also classifies Go's HTTP/2 idle-ping
+// teardown (http2ConnectionLostSubstring) as a timeout so the 408/502 split
+// stays stable. That teardown means a *pooled* connection went silent and
+// got pinged out -- a pool-hygiene event, not evidence this credential is
+// currently unresponsive -- so it must not feed a ban keyed on "never
+// responded at all".
+//
+// The check is deliberately narrow: only the transport's own
+// ResponseHeaderTimeout error text qualifies. The other timeout kinds all
+// implement net.Error with Timeout()==true too (a dial timeout reads
+// "dial tcp ...: i/o timeout", the client's own deadline reads "context
+// deadline exceeded"), so a net.Error-based check would ban a credential for
+// failures that say nothing about its health.
+func isAttemptTimeoutError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// The header timeout is a transport error, not a context deadline: the
+	// request's context stays live, only the transport's wait for headers
+	// expired. So this is a text match, deliberately.
+	return strings.Contains(err.Error(), responseHeaderTimeoutSubstring)
+}
+
 // isClientContextCanceled reports whether r's own context is already
 // canceled — i.e. the client itself gave up (closed the connection, hit its
 // own request timeout) before AIR finished talking to any upstream. Checked

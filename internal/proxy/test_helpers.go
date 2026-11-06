@@ -99,6 +99,7 @@ type TestProxyConfig struct {
 	MaxBodySizeMB          int
 	ResponseBodyMultiplier int
 	RequestTimeout         time.Duration
+	ResponseHeaderTimeout  time.Duration
 	Version                string
 	Commit                 string
 	ServiceName            string
@@ -225,6 +226,15 @@ func (b *TestProxyBuilder) WithRequestTimeout(timeout time.Duration) *TestProxyB
 	return b
 }
 
+// WithResponseHeaderTimeout sets the per-attempt response-header budget. A
+// value > 0 also enables the attempt_timeout ban (the feature is opt-in: with
+// it unset the transport falls back to request_timeout, and a timeout then
+// means "the provider needed longer", not "the provider never answered").
+func (b *TestProxyBuilder) WithResponseHeaderTimeout(timeout time.Duration) *TestProxyBuilder {
+	b.config.ResponseHeaderTimeout = timeout
+	return b
+}
+
 // WithSessionSticky enables session-sticky credential routing with the given TTL.
 func (b *TestProxyBuilder) WithSessionSticky(ttl time.Duration) *TestProxyBuilder {
 	b.config.SessionStickyEnabled = true
@@ -307,12 +317,13 @@ func (b *TestProxyBuilder) Build() *Proxy {
 		f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 		b.config.Balancer = balancer.New(b.config.Credentials, f2b, b.config.RateLimiter)
 	}
-	return New(&Config{
+	prx := New(&Config{
 		Balancer:               b.config.Balancer,
 		Logger:                 b.config.Logger,
 		MaxBodySizeMB:          b.config.MaxBodySizeMB,
 		ResponseBodyMultiplier: b.config.ResponseBodyMultiplier,
 		RequestTimeout:         b.config.RequestTimeout,
+		ResponseHeaderTimeout:  b.config.ResponseHeaderTimeout,
 		Metrics:                b.config.Metrics,
 		MasterKey:              b.config.MasterKey,
 		RateLimiter:            b.config.RateLimiter,
@@ -334,6 +345,21 @@ func (b *TestProxyBuilder) Build() *Proxy {
 		OrganizationPolicies:   b.config.OrganizationPolicies,
 		VisionFallback:         b.config.VisionFallback,
 	})
+	// Tests overwhelmingly mock prx.client.Transport and have no reason to
+	// care about the ResponseHeaderTimeout distinction between client and
+	// streamingClient — collapse them to the same object so an existing
+	// test's mock transport is picked up regardless of which one a given
+	// attempt happens to use. A test that specifically wants to exercise the
+	// two-client split should reassign prx.streamingClient itself afterward.
+	//
+	// Only when the feature is off: with response_header_timeout configured
+	// the two clients carry different budgets, and collapsing them would make
+	// the short header timeout untestable (a streaming attempt would run on
+	// the long-budget client instead).
+	if b.config.ResponseHeaderTimeout <= 0 {
+		prx.streamingClient = prx.client
+	}
+	return prx
 }
 
 // ============================================================================

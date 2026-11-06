@@ -55,6 +55,30 @@ import (
 // Can be overridden via Config.ResponseBodyMultiplier.
 const DefaultResponseBodyMultiplier = 10
 
+// timeoutAttemptBanDuration is how long a credential is banned (for the model
+// that just missed ResponseHeaderTimeout on a real streaming attempt) after
+// one attempt never got a response at all. Short on purpose: this steers the
+// *next* few requests away from a credential that's currently dead/
+// unreachable, not a punishment on the scale of a real provider error
+// (429/5xx) — see fail2ban's own thresholds for those.
+//
+// Also used as the retryAfterSeconds hint sent to the health worker via
+// reportHealth — when ban decisions are external (banDecisionsExternal),
+// this is the only place the ban actually gets decided; this replica picks
+// it back up through the normal Redis/banreader round trip like every other
+// ban reason. The health worker's own error_code_rules must recognize this
+// status code (currently reported as 408) with max_attempts small enough to
+// act on a single occurrence, or the ban effectively never happens anywhere.
+const timeoutAttemptBanDuration = 30 * time.Second
+
+// attemptTimeoutReason is the marker the router puts in an outcome event's
+// "error" field when the failure was an attempt timeout -- an upstream that
+// never sent response headers within the per-attempt budget. The health
+// worker reads it to tell this 408 apart from the other ones (a provider
+// that was merely slow, and which must keep counting towards the
+// soft-failure threshold instead of being banned on the first occurrence).
+const attemptTimeoutReason = "attempt_timeout"
+
 // respCtx returns the context of the request that produced this upstream
 // response (it carries the OTEL span for log/trace correlation), or
 // context.Background() when unavailable (e.g. in unit tests).
@@ -421,6 +445,7 @@ type Config struct {
 	MaxIdleConns                 int
 	MaxIdleConnsPerHost          int
 	IdleConnTimeout              time.Duration
+	ResponseHeaderTimeout        time.Duration // Per-attempt budget for connect+response-headers only; only applied when an attempt is sent upstream with "stream": true (default: 4s)
 	HTTP2IdlePingTimeout         time.Duration // See httputil.HTTPClientConfig.HTTP2IdlePingTimeout (default: 15s)
 	HTTP2PingTimeout             time.Duration // See httputil.HTTPClientConfig.HTTP2PingTimeout (default: 10s)
 	MaxConnectionLifetime        time.Duration // See httputil.HTTPClientConfig.MaxConnectionLifetime (default: 0, connections are kept while reused)
@@ -486,6 +511,7 @@ type Config struct {
 type Proxy struct {
 	balancer                         *balancer.RoundRobin
 	client                           *http.Client
+	streamingClient                  *http.Client // same as client, but with a short ResponseHeaderTimeout — only for attempts sent upstream with "stream": true
 	logger                           *slog.Logger
 	maxBodySizeMB                    int
 	maxResponseBodySize              int64 // Pre-computed max response body size in bytes
@@ -540,6 +566,14 @@ type Proxy struct {
 	version                          string
 	commit                           string
 	serviceName                      string // Config.ServiceName
+
+	// responseHeaderTimeoutEnabled is true when a dedicated short
+	// ResponseHeaderTimeout budget is configured (server.response_header_timeout
+	// > 0). With it unset the transport falls back to the general
+	// request_timeout, and a timeout then means "the provider needed longer
+	// than request_timeout", not "the provider never answered" -- so the
+	// attempt_timeout ban must not fire.
+	responseHeaderTimeoutEnabled bool
 }
 
 func New(cfg *Config) *Proxy {
@@ -548,6 +582,12 @@ func New(cfg *Config) *Proxy {
 	}
 
 	// Create HTTP client using centralized factory with request-specific timeout
+	// Deliberately NOT setting ResponseHeaderTimeout here: this is the client used
+	// for any attempt that isn't known to be a real streaming call upstream (image
+	// generation, embeddings, non-streaming Responses API, etc.) — those providers
+	// hold back headers until the whole answer is ready, so a short header timeout
+	// would time out the entire generation, not just a dead connection. See
+	// streamingClientCfg below for the short-timeout path.
 	httpClientCfg := httputil.DefaultHTTPClientConfig()
 	httpClientCfg.Timeout = cfg.RequestTimeout
 	httpClientCfg.MaxIdleConns = cfg.MaxIdleConns
@@ -556,6 +596,27 @@ func New(cfg *Config) *Proxy {
 	httpClientCfg.HTTP2IdlePingTimeout = cfg.HTTP2IdlePingTimeout
 	httpClientCfg.HTTP2PingTimeout = cfg.HTTP2PingTimeout
 	httpClientCfg.MaxConnectionLifetime = cfg.MaxConnectionLifetime
+
+	// streamingClientCfg is identical except for ResponseHeaderTimeout: used only
+	// for attempts whose outbound body actually carries "stream": true (the
+	// client asked for it, or force_stream_for_ttft injected it) — there, a
+	// healthy provider sends headers almost immediately regardless of how long
+	// the generation itself takes, so a short wait here only catches a
+	// credential that never responds at all, never a legitimately slow-but-live
+	// stream.
+	//
+	// It gets its own idle-connection pool (http.Transport.Clone can't help:
+	// ResponseHeaderTimeout is enforced per-Transport, and the idle pool is
+	// owned by the Transport, so two different timeouts mean two different
+	// pools, unavoidably) — split the configured budget between the two
+	// rather than handing each the full amount, so adding this client doesn't
+	// silently double total idle connections kept open per replica.
+	streamingClientCfg := *httpClientCfg
+	streamingClientCfg.ResponseHeaderTimeout = cfg.ResponseHeaderTimeout
+	streamingClientCfg.MaxIdleConns = httpClientCfg.MaxIdleConns / 2
+	streamingClientCfg.MaxIdleConnsPerHost = httpClientCfg.MaxIdleConnsPerHost / 2
+	httpClientCfg.MaxIdleConns -= streamingClientCfg.MaxIdleConns
+	httpClientCfg.MaxIdleConnsPerHost -= streamingClientCfg.MaxIdleConnsPerHost
 
 	// Compute max response body size from multiplier
 	multiplier := cfg.ResponseBodyMultiplier
@@ -642,6 +703,8 @@ func New(cfg *Config) *Proxy {
 		keyMetrics:                       cfg.KeyMetrics,
 		responseCompat:                   responseCompat,
 		client:                           httputil.NewHTTPClient(httpClientCfg),
+		streamingClient:                  httputil.NewHTTPClient(&streamingClientCfg),
+		responseHeaderTimeoutEnabled:     cfg.ResponseHeaderTimeout > 0,
 		version:                          cfg.Version,
 		commit:                           cfg.Commit,
 		serviceName:                      cfg.ServiceName,
@@ -1520,6 +1583,21 @@ func (p *Proxy) sendToCredential(
 	attemptedCreds[cred.Name] = true
 	p.stampFirstUpstreamSend(logCtx)
 	httputil.AttemptsFrom(proxyReq.Context()).Begin(cred.Name)
+	// useFastHeaderClient: true only when this attempt's body actually carries
+	// "stream": true to the provider — the client asked for it, or
+	// force_stream_for_ttft injected it (forcedChatNonStream/forcedNativeNonStream).
+	// A provider that sees stream:true sends response headers almost
+	// immediately regardless of how long the generation itself takes, which is
+	// what makes a short ResponseHeaderTimeout safe here. Image/embeddings
+	// endpoints never emit early headers regardless of what we send upstream
+	// (there's no streaming API for them here), so they're excluded even if
+	// something upstream of this call mistakenly set the streaming flags.
+	useFastHeaderClient := (streaming || prepared.forcedChatNonStream || prepared.forcedNativeNonStream) &&
+		!logCtx.IsImageGeneration && !isImageEdit && !isEmbeddings
+	sendClient := p.client
+	if useFastHeaderClient {
+		sendClient = p.streamingClient
+	}
 	if fanOut := embeddingFanOutBodies(conv); len(fanOut) > 1 {
 		// Vertex AI embedContent takes one content per call: one call per
 		// input, each within cred's rate limits, answered as a single
@@ -1534,7 +1612,7 @@ func (p *Proxy) sendToCredential(
 			limitModel: modelID,
 		}, embedFanOutReplies)
 	} else {
-		resp, doErr = p.client.Do(proxyReq) //nolint:gosec,bodyclose // G704: same targetURL as the request built above, host isn't attacker-controlled; resp.Body is closed by sendToCredential's caller (closeBody), once returned here via credentialSendOutcome
+		resp, doErr = sendClient.Do(proxyReq) //nolint:gosec,bodyclose // G704: same targetURL as the request built above, host isn't attacker-controlled; resp.Body is closed by sendToCredential's caller (closeBody), once returned here via credentialSendOutcome
 	}
 	if doErr != nil {
 		if isClientCanceledTransportError(r, doErr) {
@@ -1569,16 +1647,55 @@ func (p *Proxy) sendToCredential(
 		// Transport failure on one credential — retried with the next one;
 		// the final failure is logged at ERROR after the retry loop.
 		statusCode := http.StatusBadGateway
+		retryAfterSeconds := 0
+		reason := ""
 		if isTimeoutError(doErr) {
 			statusCode = http.StatusRequestTimeout
 			p.logger.WarnContext(r.Context(), "Upstream request timeout, will retry",
 				"credential", cred.Name, "model", modelID, "error", doErr, "url", targetURL)
+			// useFastHeaderClient: cred is never proxy-like here (those are
+			// diverted to executeProxyRequest before this retry loop, see
+			// proxyRequest's "Handle proxy/AIR credential types" branch above
+			// -- no separate check needed). isAttemptTimeoutError, not the
+			// broader isTimeoutError: excludes Go's HTTP/2 idle-ping teardown
+			// ("http2: client connection lost"), which isTimeoutError also
+			// classifies as a timeout for the 408/502 split but which means a
+			// pooled connection went silent and got pinged out, not that this
+			// credential is currently unresponsive.
+			//
+			// p.responseHeaderTimeoutEnabled: the feature is opt-in. With
+			// response_header_timeout unset the transport falls back to
+			// request_timeout, so a timeout then means "the provider needed
+			// longer than that" -- a healthy-but-slow credential, which must
+			// not be banned.
+			if p.responseHeaderTimeoutEnabled && useFastHeaderClient && isAttemptTimeoutError(doErr) {
+				// Never got a response at all within ResponseHeaderTimeout on an
+				// attempt we expected fast headers from (we sent stream:true) --
+				// likely dead/unreachable right now.
+				//
+				// Same convention as recordBanSignal: when ban decisions are
+				// external (account_events wired), this replica must not make
+				// its own local ban call -- the health worker is the single
+				// source of truth, and this replica picks the ban back up via
+				// the normal Redis/banreader round trip like every other ban
+				// reason already does. Only ban locally when that pipeline
+				// isn't wired at all. reportHealth below always fires either
+				// way, so the health worker learns about this outcome
+				// regardless (its own error_code_rules decide whether/how
+				// long to ban on it).
+				if !p.banDecisionsExternal {
+					p.balancer.BanUntil(cred.Name, modelID, statusCode,
+						time.Now().Add(timeoutAttemptBanDuration), "attempt_timeout")
+				}
+				retryAfterSeconds = int(timeoutAttemptBanDuration.Seconds())
+				reason = attemptTimeoutReason
+			}
 		} else {
 			p.logger.WarnContext(r.Context(), "Upstream request failed, will retry",
 				"credential", cred.Name, "model", modelID, "error", doErr, "url", targetURL)
 		}
 		p.recordBanSignal(cred, modelID, statusCode)
-		p.reportHealth(string(cred.Type), cred.Name, modelID, statusCode, 0)
+		p.reportHealth(string(cred.Type), cred.Name, modelID, statusCode, retryAfterSeconds, reason)
 		// Per-attempt failure only — the client-facing RequestsTotal/RequestDuration
 		// metrics are recorded exactly once at the final outcome below.
 		p.metrics.RecordCredentialAttemptError(cred.Name)
@@ -3489,12 +3606,21 @@ func (p *Proxy) recordBanSignal(cred *config.CredentialConfig, modelID string, s
 
 // reportHealth forwards one outcome observation to the health worker via
 // the kafka events publisher (nil-safe when disabled).
-func (p *Proxy) reportHealth(provider, credential, model string, statusCode int, retryAfterSeconds int) {
+//
+// reason is a short machine-readable marker for the outcome kind ("" for
+// none); the health worker reads it to tell an attempt timeout apart from
+// the other 408s, so it can ban on the first one instead of waiting for the
+// soft-failure threshold. See attemptTimeoutReason.
+func (p *Proxy) reportHealth(provider, credential, model string, statusCode int, retryAfterSeconds int, reason ...string) {
 	if p.events == nil {
 		return
 	}
 	if provider == "" {
 		provider = "unknown"
 	}
-	p.events.Report(credential, provider, model, statusCode, retryAfterSeconds, "")
+	marker := ""
+	if len(reason) > 0 {
+		marker = reason[0]
+	}
+	p.events.Report(credential, provider, model, statusCode, retryAfterSeconds, marker)
 }
