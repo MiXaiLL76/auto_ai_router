@@ -73,16 +73,27 @@ When `traces_enabled` is true, the router instruments inbound and outbound HTTP 
 - **Client spans** are created for every outbound request to a provider or chained router, and the `traceparent` header is injected so the trace continues across hops.
 - **Tunnels through a proxy**: for a credential with a `proxy_url`, the `CONNECT` that opens a tunnel carries the `traceparent` of the client span it is opened for (W3C trace context only, never baggage), so a proxy that traces can add a span of its own to the request's trace. A pooled tunnel is opened once: the requests that reuse it send no `CONNECT`.
 
-Each server span is annotated with routing attributes:
+Each server span says what the request was, whose it was, what served it and how it ended, under the names a spend event uses:
 
-| Attribute              | Example             | Description                         |
-| ---------------------- | ------------------- | ----------------------------------- |
-| `gen_ai.request.model` | `gpt-4o`            | Model requested by the client       |
-| `aar.real_model`       | `gpt-4o-2024-08-06` | Resolved underlying model           |
-| `aar.credential`       | `openai_main`       | Credential selected by the balancer |
-| `aar.provider`         | `openai`            | Provider type                       |
-| `aar.streaming`        | `true`              | Whether the response is streamed    |
-| `aar.request_id`       | `req_abc123`        | Internal request identifier         |
+| Attribute                                       | Example             | Description                                                                                       |
+| ----------------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------- |
+| `gen_ai.request.model`                          | `gpt-4o`            | Model requested by the client                                                                     |
+| `aar.streaming`                                 | `true`              | Whether the response is streamed                                                                  |
+| `aar.request_id`                                | `req_abc123`        | Internal request identifier                                                                       |
+| `aar.api_key_hash`                              | `9f86d0…`           | SHA-256 of the API key, as in the spend event. Absent when the request was refused before its key |
+| `aar.key_alias`, `aar.user_id`                  | `billing-bot`       | The key's alias and its owner, when it has them                                                   |
+| `aar.team_id`, `aar.team_alias`                 | `Billing`           | The key's team                                                                                    |
+| `aar.organization_id`, `aar.organization_alias` | `Acme`              | The key's organization                                                                            |
+| `aar.upstream_attempts`                         | `2`                 | Times the request was sent upstream, as in the spend event. 0: it was refused before any send     |
+| `aar.credential`                                | `openai_main`       | Credential that answered, or the one chosen for a request never sent. Absent when none could be   |
+| `aar.provider`                                  | `openai`            | That credential's provider type                                                                   |
+| `aar.real_model`                                | `gpt-4o-2024-08-06` | Resolved underlying model                                                                         |
+| `aar.status`                                    | `success`           | `success` or `failure`, as in the spend event                                                     |
+| `error.type`                                    | `RateLimitError`    | The failure's class (the spend event's `error_class`). Absent on success                          |
+
+The attributes of what served the request and how it ended are set when the request is over. A streamed response also marks the moment its first token arrived as the span event `first_token`: before it is the model's prefill, after it the generation.
+
+A request the router makes inside another has a span of its own beneath the outer one's, named like a server span and carrying these attributes, with its upstream requests beneath it: the describe call of the vision fallback, and each turn of a WebSocket session, whose server span lasts as long as the connection.
 
 Each client span is one upstream request, and says which attempt of the client's request it is and how it left:
 
