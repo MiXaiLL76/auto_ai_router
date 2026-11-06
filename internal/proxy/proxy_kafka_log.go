@@ -1,11 +1,21 @@
 package proxy
 
 import (
+	"context"
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter"
 	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
+	"go.opentelemetry.io/otel/trace"
 )
+
+// traceID is the id of the trace that ctx's span belongs to, "" without one.
+func traceID(ctx context.Context) string {
+	if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {
+		return sc.TraceID().String()
+	}
+	return ""
+}
 
 // logSpendToKafka publishes an expanded copy of the spend entry to Kafka
 // (internal/kafkalog) for downstream ClickHouse analytics. Best-effort in the
@@ -91,6 +101,7 @@ func (p *Proxy) buildKafkaSpendEvent(
 
 	event := &kafkalog.SpendEvent{
 		RequestID:           logCtx.spendRequestID(),
+		TraceID:             traceID(logCtx.Context()),
 		StartTime:           logCtx.StartTime,
 		EndTime:             endTime,
 		CompletionStartTime: completionStartTime,

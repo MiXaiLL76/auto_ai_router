@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/propagation"
 )
 
 const (
@@ -150,6 +152,7 @@ func newTransport(cfg *HTTPClientConfig) *http.Transport {
 
 	return &http.Transport{
 		Proxy:                 proxyFromRequest,
+		GetProxyConnectHeader: proxyConnectHeader,
 		TLSHandshakeTimeout:   timeout, // Timeout for TLS handshake phase
 		ResponseHeaderTimeout: timeout, // Timeout for connect + response headers only
 		MaxIdleConns:          maxIdleConns,
@@ -179,6 +182,12 @@ func newTransport(cfg *HTTPClientConfig) *http.Transport {
 			},
 		},
 	}
+}
+
+func proxyConnectHeader(ctx context.Context, _ *url.URL, _ string) (http.Header, error) {
+	header := http.Header{}
+	propagation.TraceContext{}.Inject(ctx, propagation.HeaderCarrier(header))
+	return header, nil
 }
 
 // newRoundTripper is newTransport's transport, or, when cfg.MaxConnectionLifetime

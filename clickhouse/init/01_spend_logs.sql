@@ -26,6 +26,7 @@ CREATE DATABASE IF NOT EXISTS air;
 CREATE TABLE air.spend_logs_kafka
 (
     request_id String,
+    trace_id String,
     start_time DateTime64(3),
     end_time DateTime64(3),
     completion_start_time Nullable(DateTime64(3)),
@@ -164,6 +165,7 @@ SETTINGS
 CREATE TABLE air.spend_logs
 (
     request_id String,
+    trace_id String,
     start_time DateTime64(3),
     end_time DateTime64(3),
     completion_start_time Nullable(DateTime64(3)),

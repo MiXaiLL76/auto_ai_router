@@ -11,7 +11,9 @@ import "time"
 // Request/response body capture is intentionally out of scope here (separate
 // ТЗ/PR) — the Body* fields are always zero-value placeholders.
 type SpendEvent struct {
-	RequestID string    `json:"request_id"`
+	RequestID string `json:"request_id"`
+	// TraceID is the OpenTelemetry trace id of the request's spans.
+	TraceID   string    `json:"trace_id,omitempty"`
 	StartTime time.Time `json:"start_time"`
 	EndTime   time.Time `json:"end_time"`
 	// CompletionStartTime is the time-to-first-token (TTFT) timestamp, nil
