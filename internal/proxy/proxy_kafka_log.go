@@ -5,9 +5,19 @@ import (
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter"
+	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"go.opentelemetry.io/otel/trace"
 )
+
+// milliseconds is d in whole milliseconds, nil for nil.
+func milliseconds(d *time.Duration) *int64 {
+	if d == nil {
+		return nil
+	}
+	ms := d.Milliseconds()
+	return &ms
+}
 
 // traceID is the id of the trace that ctx's span belongs to, "" without one.
 func traceID(ctx context.Context) string {
@@ -91,6 +101,18 @@ func (p *Proxy) buildKafkaSpendEvent(
 		upstreamSendMs = &us
 	}
 
+	attempts := httputil.AttemptsFrom(logCtx.Context())
+	var retryMs, connWaitMs, ttfbMs, exitRTTMs, exitConnectMs *int64
+	var connReused *bool
+	if stages, ok := attempts.Stages(logCtx.Credential.Name); ok {
+		retryMs = milliseconds(&stages.Retry)
+		connWaitMs = milliseconds(stages.ConnWait)
+		connReused = stages.Reused
+		ttfbMs = milliseconds(stages.TTFB)
+		exitRTTMs = milliseconds(stages.ExitRTT)
+		exitConnectMs = milliseconds(stages.ExitConnect)
+	}
+
 	var keyAlias, userAlias, teamAlias, organizationAlias string
 	if logCtx.TokenInfo != nil {
 		keyAlias = logCtx.TokenInfo.KeyAlias
@@ -106,6 +128,14 @@ func (p *Proxy) buildKafkaSpendEvent(
 		EndTime:             endTime,
 		CompletionStartTime: completionStartTime,
 		UpstreamSendMs:      upstreamSendMs,
+		RetryMs:             retryMs,
+		ConnWaitMs:          connWaitMs,
+		ConnReused:          connReused,
+		TTFBMs:              ttfbMs,
+		UpstreamAttempts:    attempts.Count(),
+		Exit:                attempts.Exit(logCtx.Credential.Name),
+		ExitRTTMs:           exitRTTMs,
+		ExitConnectMs:       exitConnectMs,
 		DurationMs:          endTime.Sub(logCtx.StartTime).Milliseconds(),
 		TTFTMs:              ttftMs,
 

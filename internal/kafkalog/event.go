@@ -27,8 +27,30 @@ type SpendEvent struct {
 	// and ttft_ms are derived timings, so duration_ms decomposes as
 	// upstream_send_ms + "time the upstream took".
 	UpstreamSendMs *int64 `json:"upstream_send_ms,omitempty"`
-	DurationMs     int64  `json:"duration_ms"`
-	TTFTMs         *int64 `json:"ttft_ms,omitempty"`
+	// RetryMs, ConnWaitMs and TTFBMs divide the time after upstream_send_ms
+	// for the serving credential's attempt.
+	//
+	// RetryMs is the first upstream send to the serving attempt's send.
+	RetryMs *int64 `json:"retry_ms,omitempty"`
+	// ConnWaitMs is the serving attempt asking for a connection to having one.
+	ConnWaitMs *int64 `json:"conn_wait_ms,omitempty"`
+	// ConnReused is whether that connection was a pooled one.
+	ConnReused *bool `json:"conn_reused,omitempty"`
+	// TTFBMs is the serving attempt's request written to the first byte of
+	// the response.
+	TTFBMs *int64 `json:"ttfb_ms,omitempty"`
+	// UpstreamAttempts is the number of times the request was sent upstream.
+	UpstreamAttempts int `json:"upstream_attempts"`
+	// Exit is the exit the serving attempt left through: the name its proxy
+	// gave itself in the Via of its reply to CONNECT.
+	Exit string `json:"exit,omitempty"`
+	// ExitRTTMs and ExitConnectMs are the round trip to that exit and the
+	// exit's connect to the provider (its Server-Timing), measured when the
+	// connection was opened.
+	ExitRTTMs     *int64 `json:"exit_rtt_ms,omitempty"`
+	ExitConnectMs *int64 `json:"exit_connect_ms,omitempty"`
+	DurationMs    int64  `json:"duration_ms"`
+	TTFTMs        *int64 `json:"ttft_ms,omitempty"`
 
 	CallType     string `json:"call_type"`
 	APIBase      string `json:"api_base"`

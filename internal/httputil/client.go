@@ -15,7 +15,6 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
-	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/propagation"
 )
 
@@ -151,14 +150,18 @@ func newTransport(cfg *HTTPClientConfig) *http.Transport {
 	}
 
 	return &http.Transport{
-		Proxy:                 proxyFromRequest,
-		GetProxyConnectHeader: proxyConnectHeader,
-		TLSHandshakeTimeout:   timeout, // Timeout for TLS handshake phase
-		ResponseHeaderTimeout: timeout, // Timeout for connect + response headers only
-		MaxIdleConns:          maxIdleConns,
-		MaxIdleConnsPerHost:   maxIdleConnsPerHost,
-		IdleConnTimeout:       idleConnTimeout,
-		DisableKeepAlives:     false,
+		Proxy: proxyFromRequest,
+		// A Transport with its own dial tries HTTP/2 only when told to.
+		DialContext:            dialContext,
+		ForceAttemptHTTP2:      true,
+		GetProxyConnectHeader:  proxyConnectHeader,
+		OnProxyConnectResponse: onProxyConnectResponse,
+		TLSHandshakeTimeout:    timeout, // Timeout for TLS handshake phase
+		ResponseHeaderTimeout:  timeout, // Timeout for connect + response headers only
+		MaxIdleConns:           maxIdleConns,
+		MaxIdleConnsPerHost:    maxIdleConnsPerHost,
+		IdleConnTimeout:        idleConnTimeout,
+		DisableKeepAlives:      false,
 		// Detects a connection that has gone silent (no HTTP/2 frames at all,
 		// including on in-flight streams) and closes it if it doesn't answer a
 		// PING, instead of leaving a dead connection in the pool for up to
@@ -185,6 +188,8 @@ func newTransport(cfg *HTTPClientConfig) *http.Transport {
 }
 
 func proxyConnectHeader(ctx context.Context, _ *url.URL, _ string) (http.Header, error) {
+	// The CONNECT is written next: its round trip begins here.
+	roundTripFrom(ctx).connectAsked(ctx)
 	header := http.Header{}
 	propagation.TraceContext{}.Inject(ctx, propagation.HeaderCarrier(header))
 	return header, nil
@@ -211,7 +216,7 @@ func NewHTTPClient(cfg *HTTPClientConfig) *http.Client {
 		// otelhttp creates client spans and injects traceparent into outgoing
 		// requests (providers and chained routers). It uses the global
 		// TracerProvider, which is a no-op unless OTEL is enabled in config.
-		Transport: otelhttp.NewTransport(transport),
+		Transport: instrument(transport),
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 			return http.ErrUseLastResponse
 		},

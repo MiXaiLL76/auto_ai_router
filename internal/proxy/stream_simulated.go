@@ -435,6 +435,7 @@ func (p *Proxy) handleSimulatedNonStream(
 			prepared.completionsPath = nextReq.completionsPath
 			prepared.messagesMetadata = nextReq.messagesMetadata
 			logCtx.RealModelID = realModelID
+			httputil.AttemptsFrom(r.Context()).Next(httputil.AttemptRetry, string(RetryReasonNetErr))
 
 			p.logger.InfoContext(r.Context(), "Retrying simulated non-stream with next credential",
 				"credential", cred.Name, "model", modelID,
@@ -1072,6 +1073,7 @@ func (p *Proxy) handleSimulatedNativeNonStream(
 			prepared.completionsPath = nextReq.completionsPath
 			prepared.messagesMetadata = nextReq.messagesMetadata
 			logCtx.RealModelID = realModelID
+			httputil.AttemptsFrom(r.Context()).Next(httputil.AttemptRetry, string(RetryReasonNetErr))
 
 			p.logger.InfoContext(r.Context(), "Retrying simulated native non-stream with next credential",
 				"credential", cred.Name, "model", modelID,
@@ -1541,6 +1543,7 @@ func (p *Proxy) handleSimulatedPassthroughNonStream(
 			prepared.completionsPath = nextReq.completionsPath
 			prepared.messagesMetadata = nextReq.messagesMetadata
 			logCtx.RealModelID = realModelID
+			httputil.AttemptsFrom(r.Context()).Next(httputil.AttemptRetry, string(RetryReasonNetErr))
 
 			p.logger.InfoContext(r.Context(), "Retrying simulated passthrough non-stream with next credential",
 				"credential", cred.Name, "model", modelID,

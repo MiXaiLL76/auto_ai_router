@@ -885,6 +885,7 @@ func (p *Proxy) executeProxyRequest(
 
 	// Send request
 	p.stampFirstUpstreamSend(logCtx)
+	httputil.AttemptsFrom(proxyReq.Context()).Begin(cred.Name)
 	resp, err := p.client.Do(proxyReq) //nolint:gosec // G704: same targetURL as above, host isn't attacker-controlled
 	if err != nil {
 		if isClientCanceledTransportError(r, err) {
@@ -1464,6 +1465,7 @@ func (p *Proxy) sendToCredential(
 	fannedOut := false
 	attemptedCreds[cred.Name] = true
 	p.stampFirstUpstreamSend(logCtx)
+	httputil.AttemptsFrom(proxyReq.Context()).Begin(cred.Name)
 	if fanOut := embeddingFanOutBodies(conv); len(fanOut) > 1 {
 		// Vertex AI embedContent takes one content per call: one call per
 		// input, each within cred's rate limits, answered as a single
@@ -1572,6 +1574,8 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 	r.Header.Del(HeaderAIRProxyClient)
 	r.Header.Del(HeaderLegacyAIRProxyClient)
 	r = captureCredentialDenylist(r, proxyMarkerPresent)
+	// The request's upstream attempts, for its trace and its spend event.
+	r = r.WithContext(httputil.WithAttempts(r.Context()))
 
 	// Create logging context that will be filled throughout request processing
 	// and logged at the end via defer to ensure all requests are logged
@@ -1727,6 +1731,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				cred = nextCred
 				triedCreds[cred.Name] = true
 				logCtx.Credential = cred
+				httputil.AttemptsFrom(r.Context()).Next(httputil.AttemptRetry, string(retryReason))
 				p.logger.WarnContext(r.Context(), "Retrying with next same-type proxy credential",
 					"credential", cred.Name, "model", modelID,
 					"attempt", attempt+1, "max_attempts", p.maxProviderRetries+1,
@@ -2261,6 +2266,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			prepared.completionsPath = nextReq.completionsPath
 			prepared.messagesMetadata = nextReq.messagesMetadata
 			logCtx.RealModelID = realModelID
+			httputil.AttemptsFrom(r.Context()).Next(httputil.AttemptRetry, string(retryReason))
 
 			p.logger.InfoContext(r.Context(), "Retrying with next credential",
 				"credential", cred.Name, "model", modelID,

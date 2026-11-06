@@ -84,7 +84,31 @@ Each server span is annotated with routing attributes:
 | `aar.streaming`        | `true`              | Whether the response is streamed    |
 | `aar.request_id`       | `req_abc123`        | Internal request identifier         |
 
-The Kafka spend event carries the trace's id as `trace_id` (see [Kafka spend log](../litellm-integration/kafka_spend_log.md)), so a spend row leads to the request's trace.
+Each client span is one upstream request, and says which attempt of the client's request it is and how it left:
+
+| Attribute               | Example      | Description                                                                                                                                                          |
+| ----------------------- | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `aar.credential`        | `openai_eu`  | Credential the request was sent to                                                                                                                                   |
+| `aar.attempt.number`    | `2`          | Which attempt of the client's request this is, from 1                                                                                                                |
+| `aar.attempt.kind`      | `retry`      | `first`, `retry` (the next credential after one failed) or `fallback` (a fallback credential)                                                                        |
+| `aar.attempt.reason`    | `rate_limit` | Why the attempt before it failed: `rate_limit`, `server_error`, `auth_error`, `network_error` or `payment_error`. Absent on the first                                |
+| `aar.connection.reused` | `true`       | Whether the request was sent on a pooled connection. Absent when it never got one                                                                                    |
+| `aar.exit`              | `de-ber-01`  | Exit the connection leaves through: the name the farthest proxy gave itself in the `Via` of its reply to `CONNECT`. Absent without a proxy, or when it names nothing |
+| `aar.exit_rtt_ms`       | `52`         | Round trip to that exit when the connection was opened, in milliseconds: the `CONNECT` written to its reply, less `aar.exit_connect_ms`                              |
+| `aar.exit_connect_ms`   | `98`         | The exit's connect to the provider when the connection was opened, as its reply to `CONNECT` says it in `Server-Timing`. Both absent without that header             |
+
+Beneath a client span, each step of the attempt that took time is a span of its own, with the same attributes:
+
+| Span               | From, to                                                          |
+| ------------------ | ----------------------------------------------------------------- |
+| `upstream.connect` | DNS and the TCP connect, to the proxy when the credential has one |
+| `upstream.tunnel`  | The connection made, the proxy's reply to `CONNECT`               |
+| `upstream.tls`     | The TLS handshake with the provider                               |
+| `upstream.ttfb`    | The request written, the first byte of the response               |
+
+A request on a pooled connection has only `upstream.ttfb`: the connection was opened by an earlier attempt, whose span has the other steps. The router's own requests (a price list, a token, a health check) are not attempts: their client span says how it left and has no steps. The exit is a property of the connection, so a request on a pooled tunnel names it too, and carries the two times the tunnel's opening measured: the round trip to the exit and the exit's connect to the provider. A proxy names itself with a `Via` header on its reply to `CONNECT` (`Via: HTTP/1.1 exit-name`) and gives the time it took to connect to the provider in `Server-Timing` (`Server-Timing: connect;dur=98`, in milliseconds); SOCKS proxies have no such reply.
+
+The Kafka spend event carries the summary of all this (see [Kafka spend log](../litellm-integration/kafka_spend_log.md)): the trace's id as `trace_id`, the number of attempts as `upstream_attempts`, the serving credential's exit as `exit` and the two legs of the way through it as `exit_rtt_ms` and `exit_connect_ms`, whether the request had its connection opened as `conn_reused`, and how the request's time divided as `retry_ms`, `conn_wait_ms` and `ttfb_ms`. A spend row says where a request's time went, and leads to the trace that says why.
 
 **Sampling** is head-based and parent-based: `trace_sample_ratio` controls the fraction of new root traces that are sampled, while decisions inherited from an upstream `traceparent` are always honored.
 
