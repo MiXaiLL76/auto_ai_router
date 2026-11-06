@@ -622,6 +622,11 @@ func (p *Proxy) handleSimulatedNonStream(
 				"model", modelID, "credential", cred.Name, "error", loopErr,
 				"request_id", logCtx.RequestID)
 		case searches > 0 || fetches > 0:
+			p.logger.WarnContext(r.Context(), "TMPDIAG simulated loop",
+				"searches", searches, "fetches", fetches,
+				"loopWebSearch", loopUsage.WebSearchRequests,
+				"loopWebFetch", loopUsage.WebFetchRequests,
+				"loopPrompt", loopUsage.PromptTokens)
 			result.finalChatBody = []byte(assembled)
 			// The loop's steps are separate upstream requests: their tokens
 			// are summed, and the router's own tool counters ride along.

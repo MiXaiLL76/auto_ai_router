@@ -1311,7 +1311,13 @@ func (p *Proxy) finalizeStreamingLogParsed(logCtx *RequestLogContext, totalToken
 	// chunk carries only the last step's. Applied here, before the spend row
 	// is written from this usage.
 	if logCtx.DeepSeekToolUsage != nil {
+		p.logger.WarnContext(logCtx.Context(), "TMPDIAG finalize apply",
+			"loopWebSearch", logCtx.DeepSeekToolUsage.WebSearchRequests,
+			"loopWebFetch", logCtx.DeepSeekToolUsage.WebFetchRequests)
 		applyDeepSeekToolUsageTo(logCtx.TokenUsage, logCtx.DeepSeekToolUsage)
+		p.logger.WarnContext(logCtx.Context(), "TMPDIAG after apply",
+			"usageWebSearch", logCtx.TokenUsage.WebSearchRequests,
+			"usageWebFetch", logCtx.TokenUsage.WebFetchRequests)
 	}
 	if providerUsage {
 		logCtx.UsageSource = "provider"
