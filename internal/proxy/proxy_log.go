@@ -36,13 +36,13 @@ func (p *Proxy) logUpstreamError(ctx context.Context, msg string, errorCode int,
 	}
 	args = append(args, "model", modelID)
 	if len(responseBody) > 0 {
-		args = appendResponseBodyForLogs(args, cred, string(responseBody))
+		args = appendResponseBodyForLogs(args, string(responseBody))
 	}
 	args = append(args, extra...)
 	p.logger.ErrorContext(ctx, msg, args...)
 }
 
-func appendResponseBodyForLogs(args []any, cred *config.CredentialConfig, body string) []any {
+func appendResponseBodyForLogs(args []any, body string) []any {
 	return append(args,
 		"response_body_masked", true,
 		"response_body", security.RedactBodyForLog(body),

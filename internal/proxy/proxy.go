@@ -2026,7 +2026,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				"reason", retryReason, "model", modelID,
 				"attempt", attempt + 1, "max_attempts", p.maxProviderRetries + 1,
 			}
-			retryLogArgs = appendResponseBodyForLogs(retryLogArgs, cred, string(proxyResp.Body))
+			retryLogArgs = appendResponseBodyForLogs(retryLogArgs, string(proxyResp.Body))
 			p.logger.WarnContext(r.Context(), "Proxy credential returned retryable error, will retry", retryLogArgs...)
 		}
 
@@ -2631,7 +2631,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 						"reason", retryReason, "model", modelID,
 						"attempt", attempt + 1, "max_attempts", p.maxProviderRetries + 1,
 					}
-					retryLogArgs = appendResponseBodyForLogs(retryLogArgs, cred, payload)
+					retryLogArgs = appendResponseBodyForLogs(retryLogArgs, payload)
 					p.logger.WarnContext(r.Context(), "Provider stream started with a retryable error event, will retry", retryLogArgs...)
 					continue
 				}
@@ -2714,7 +2714,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			"reason", retryReason, "model", modelID,
 			"attempt", attempt + 1, "max_attempts", p.maxProviderRetries + 1,
 		}
-		retryLogArgs = appendResponseBodyForLogs(retryLogArgs, cred, string(responseBody))
+		retryLogArgs = appendResponseBodyForLogs(retryLogArgs, string(responseBody))
 		p.logger.WarnContext(r.Context(), "Provider returned retryable error, will retry", retryLogArgs...)
 	}
 
@@ -2956,7 +2956,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 					"model", modelID, "error", convErr,
 					"request_id", logCtx.RequestID,
 				}
-				args = appendResponseBodyForLogs(args, cred, decodedBody)
+				args = appendResponseBodyForLogs(args, decodedBody)
 				p.logger.ErrorContext(r.Context(), "Failed to transform provider response to OpenAI format", args...)
 				finalResponseBody = []byte(decodedBody)
 			} else {
@@ -3024,7 +3024,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 					"model", modelID, "error", convErr,
 					"request_id", logCtx.RequestID,
 				}
-				args = appendResponseBodyForLogs(args, cred, decodedBody)
+				args = appendResponseBodyForLogs(args, decodedBody)
 				p.logger.ErrorContext(r.Context(), "Failed to convert native Responses API response", args...)
 				// finalResponseBody already holds decodedBody — return as-is
 			} else {
@@ -3099,7 +3099,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 					"model", modelID, "error", convErr,
 					"request_id", logCtx.RequestID,
 				}
-				args = appendResponseBodyForLogs(args, cred, decodedBody)
+				args = appendResponseBodyForLogs(args, decodedBody)
 				p.logger.ErrorContext(r.Context(), "Failed to convert Responses API response to Chat Completions format", args...)
 				// finalResponseBody already holds the raw Responses-API body — return as-is.
 			} else {
