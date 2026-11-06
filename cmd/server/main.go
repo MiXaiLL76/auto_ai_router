@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -18,8 +19,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mixaill76/auto_ai_router/internal/accountevents"
 	"github.com/mixaill76/auto_ai_router/internal/auth"
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
+	"github.com/mixaill76/auto_ai_router/internal/banreader"
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/fail2ban"
 	"github.com/mixaill76/auto_ai_router/internal/health"
@@ -133,6 +136,20 @@ func main() {
 	kafkaLogManager := initializeKafkaLog(cfg, log, litellmDBManager)
 	rawBodyLogManager := initializeRawBodyLog(cfg, log)
 
+	// Outcome events for the health worker: kafka-first transport (the
+	// service no longer accepts HTTP reports). Broker/SASL/TLS come from
+	// the kafka section; only the topic is account-events specific.
+	var accountEvents *accountevents.Publisher
+	if cfg.AccountEvents.Enabled {
+		accountEvents, err = accountevents.New(&cfg.AccountEvents, &cfg.Kafka, log)
+		if err != nil {
+			log.Error("Failed to create account events publisher, disabling", "error", err)
+			accountEvents = nil
+		} else {
+			log.Info("Account events publishing enabled", "topic", cfg.AccountEvents.Topic)
+		}
+	}
+
 	// ==================== Budget reservation & key-level RPM/TPM ====================
 	// Both are Redis-backed and reuse the shared valkey client with isolated key
 	// namespaces. When Redis is disabled they stay nil and the proxy falls back to
@@ -173,10 +190,33 @@ func main() {
 	// UpdateDBModels so that the sync loop can correctly add/remove DB-sourced entries.
 
 	priceRegistry := models.NewModelPriceRegistry()
-	_, rateLimiter, bal, hybridBackend := initializeBalancer(cfg, log, redisBackend, metrics)
+	f2b, rateLimiter, bal, hybridBackend := initializeBalancer(cfg, log, redisBackend, metrics)
 	if hybridBackend != nil {
 		defer hybridBackend.Close()
 	}
+
+	// Ban decision source: with account_events enabled (kafka path) the
+	// router reads the worker's bans straight from Redis and materializes
+	// them into the local fail2ban; otherwise no external bans are applied
+	// (the router keeps its fail2ban rules). Unknown/stale state always
+	// fails open (nothing is dead).
+	var banReader *banreader.Reader
+	banDecisionsExternal := false
+	if cfg.AccountEvents.Enabled {
+		if redisBackend != nil {
+			banReader = banreader.New(redisBackend.Client(), cfg.Redis, f2b,
+				credentialProviderTypes(cfg), cfg.AccountEvents.ReaderInterval, log)
+			bal.SetHealthChecker(banReader)
+			// The local fail2ban counters may now step aside: an external
+			// source of bans is really connected. Only then.
+			banDecisionsExternal = true
+			log.Info("Health worker ban reader active",
+				"interval", cfg.AccountEvents.ReaderInterval)
+		} else {
+			log.Warn("account_events enabled but redis disabled: ban reader inactive, local fail2ban stays active")
+		}
+	}
+
 	modelManager := initializeModelManager(log, cfg, rateLimiter, bal)
 
 	// ==================== Apply Initial DB Model Table ====================
@@ -243,6 +283,11 @@ func main() {
 	keyMetrics := initializeKeyMetrics(cfg, log)
 
 	// ==================== Create Proxy ====================
+	var deepSeekToolsRedis valkey.Client
+	if redisBackend != nil {
+		deepSeekToolsRedis = redisBackend.Client()
+	}
+
 	prx := proxy.New(&proxy.Config{
 		Balancer:                     bal,
 		Logger:                       log,
@@ -252,6 +297,7 @@ func main() {
 		MaxIdleConns:                 cfg.Server.MaxIdleConns,
 		MaxIdleConnsPerHost:          cfg.Server.MaxIdleConnsPerHost,
 		IdleConnTimeout:              cfg.Server.IdleConnTimeout,
+		ResponseHeaderTimeout:        cfg.Server.ResponseHeaderTimeout,
 		HTTP2IdlePingTimeout:         cfg.Server.HTTP2IdlePingTimeout,
 		HTTP2PingTimeout:             cfg.Server.HTTP2PingTimeout,
 		MaxConnectionLifetime:        cfg.Server.MaxConnectionLifetime,
@@ -262,6 +308,7 @@ func main() {
 		ModelManager:                 modelManager,
 		Version:                      Version,
 		Commit:                       Commit,
+		ServiceName:                  cfg.OTEL.ServiceName,
 		LiteLLMDB:                    litellmDBManager,
 		KafkaLog:                     kafkaLogManager,
 		RawBodyLog:                   rawBodyLogManager,
@@ -269,11 +316,17 @@ func main() {
 		RawBodyStoreOnlyErrors:       cfg.Kafka.RawBodies.StoreOnlyErrors,
 		RawBodyRedactSensitiveFields: cfg.Kafka.RawBodies.RedactSensitiveFields,
 		HealthChecker:                healthChecker,
+		Events:                       accountEvents,
+		BanDecisionsExternal:         banDecisionsExternal,
 		PriceRegistry:                priceRegistry,
 		OrganizationPolicies:         organizationPolicies,
 		MaxProviderRetries:           cfg.Server.MaxProviderRetries,
 		Retry:                        cfg.Retry,
 		MaxFallbackAttempts:          cfg.Server.MaxFallbackAttempts,
+		AnthropicDefaultMaxTokens:    cfg.Server.AnthropicDefaultMaxTokens,
+		DeepSeekTools:                cfg.Server.DeepSeekTools,
+		DeepSeekToolsKeyPrefix:       cfg.Redis.KeyPrefix + "deepseektools:",
+		DeepSeekToolsRedisClient:     deepSeekToolsRedis,
 		ResponseStore:                respStore,
 		SessionStickyEnabled:         cfg.Server.SessionStickyEnabled,
 		SessionStickyAutoCacheCtrl:   cfg.Server.SessionStickyAutoCacheCtrl,
@@ -281,6 +334,7 @@ func main() {
 		SessionStoreRedis:            sessionStoreRedis,
 		SessionStoreKeyPrefix:        cfg.Redis.KeyPrefix,
 		DrainUpstreamOnAbort:         cfg.Server.DrainUpstreamOnAbort,
+		ForceStreamForTTFT:           cfg.Server.ForceStreamForTTFT,
 		ResponseCompatibility:        cfg.Server.ResponseCompatibility,
 		TiktokenEnabled:              cfg.Server.TiktokenEnabled,
 		StrictAllTeamModelsACL:       cfg.Server.StrictAllTeamModelsACL,
@@ -298,12 +352,16 @@ func main() {
 	})
 
 	videoRuntime := initializeVideoOrExit(cfg, prx, litellmDBManager, log)
+	yandexSearchHandler := initializeYandexSearchOrExit(cfg, prx, litellmDBManager, kafkaLogManager, redisBackend, budgetReserver, log)
 
 	// ==================== Background Goroutines ====================
 	bgCtx, bgCancel := context.WithCancel(context.Background())
 	defer bgCancel()
 
 	prx.Start(bgCtx)
+	if banReader != nil {
+		go banReader.Start(bgCtx)
+	}
 
 	var wg sync.WaitGroup
 	videoRuntime.start(bgCtx, &wg)
@@ -345,6 +403,9 @@ func main() {
 	rtr := router.New(prx, modelManager, &cfg.Monitoring, log, cfg)
 	if videoRuntime != nil {
 		rtr.SetVideoHandler(videoRuntime.handler)
+	}
+	if yandexSearchHandler != nil {
+		rtr.SetYandexSearchHandler(yandexSearchHandler)
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/", rtr)
@@ -396,12 +457,18 @@ func main() {
 	trustIncomingTraceparent := otelSDK.TracesEnabled() && cfg.OTEL.TrustIncomingTraceparent
 	rootHandler = requestid.Middleware(trustIncomingTraceparent)(rootHandler)
 
+	// Every request context derives from reqCtx, so the requests still running
+	// when shutdown_timeout expires can be cancelled
+	reqCtx, cancelRequests := context.WithCancel(context.Background())
+	defer cancelRequests()
+
 	server := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Server.Port),
 		Handler:      rootHandler,
 		ReadTimeout:  cfg.Server.ReadTimeout,
 		WriteTimeout: cfg.Server.WriteTimeout,
 		IdleTimeout:  cfg.Server.IdleTimeout,
+		BaseContext:  func(net.Listener) context.Context { return reqCtx },
 	}
 
 	// Bind port explicitly so readiness is set only after the socket is open.
@@ -482,7 +549,7 @@ func main() {
 
 	// Shutdown HTTP server
 	log.Info("Waiting for in-flight requests", "timeout", cfg.Server.ShutdownTimeout)
-	shutdownOrExit(log, server, cfg.Server.ShutdownTimeout)
+	drainHTTP(log, server, cancelRequests, cfg.Server.ShutdownTimeout, requestCancelGrace)
 
 	if pprofServer != nil {
 		pprofCtx, pprofCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -510,35 +577,12 @@ func main() {
 		log.Warn("Background goroutines did not stop within 60 seconds timeout")
 	}
 
-	// Shutdown LiteLLM DB
-	if litellmDBManager.IsEnabled() {
-		log.Info("Shutting down LiteLLM DB...")
-		dbShutdownCtx, dbShutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer dbShutdownCancel()
-		if err := litellmDBManager.Shutdown(dbShutdownCtx); err != nil {
-			log.Error("LiteLLM DB shutdown error", "error", err)
-		}
-	}
-
-	// Shutdown Kafka spend-log publisher
-	if kafkaLogManager.IsEnabled() {
-		log.Info("Shutting down Kafka spend-log publisher...")
-		kafkaShutdownCtx, kafkaShutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer kafkaShutdownCancel()
-		if err := kafkaLogManager.Shutdown(kafkaShutdownCtx); err != nil {
-			log.Error("Kafka spend-log publisher shutdown error", "error", err)
-		}
-	}
-
-	// Shutdown Kafka raw-body publisher
-	if rawBodyLogManager.IsEnabled() {
-		log.Info("Shutting down Kafka raw-body publisher...")
-		rawBodyShutdownCtx, rawBodyShutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer rawBodyShutdownCancel()
-		if err := rawBodyLogManager.Shutdown(rawBodyShutdownCtx); err != nil {
-			log.Error("Kafka raw-body publisher shutdown error", "error", err)
-		}
-	}
+	// Kafka spend-log publisher first: its FallbackNotifier flags spend-log
+	// rows through the DB pool when it drops a batch, so the pool must stay
+	// open through Kafka's final flush.
+	shutdownSink(log, "Kafka spend-log publisher", kafkaLogManager)
+	shutdownSink(log, "Kafka raw-body publisher", rawBodyLogManager)
+	shutdownSink(log, "LiteLLM DB", litellmDBManager)
 
 	if err := router.CloseErrorLogFiles(); err != nil {
 		log.Error("Failed to close error log files", "error", err)
@@ -625,18 +669,60 @@ func bindOrExit(log *slog.Logger, what string, port int) net.Listener {
 	return ln
 }
 
-// shutdownOrExit is its own function for the same reason as bindOrExit
-// above, not just to bundle the ctx/cancel pair: cancel() is called
-// explicitly on both branches instead of deferred, so this function has no
-// defer of its own either — a local `defer cancel()` right next to os.Exit
-// would trip gocritic's exitAfterDefer exactly as before.
-func shutdownOrExit(log *slog.Logger, server *http.Server, timeout time.Duration) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	err := server.Shutdown(ctx)
-	cancel()
+// requestCancelGrace is how long the requests cancelled by drainHTTP get to
+// return before the sinks are shut down under them. Cancellation ends a
+// request at once, except with drain_upstream_on_abort: the request then keeps
+// reading the provider for up to proxy.StreamDrainTimeout to capture its real
+// usage, so the grace has to outlast that.
+const requestCancelGrace = proxy.StreamDrainTimeout + 5*time.Second
+
+// sinkShutdownTimeout bounds how long each spend/raw-body sink gets to flush
+// its queue on stop.
+const sinkShutdownTimeout = 15 * time.Second
+
+// drainHTTP stops the server and gives in-flight requests timeout to finish.
+// The ones still running then are cancelled through their request context —
+// the same path as a client disconnect, so they still log spend — and get
+// grace to return. It never exits the process: the sinks are shut down after
+// it, and exiting here would drop every spend entry still queued for them,
+// including those of requests that finished long before the stop.
+func drainHTTP(log *slog.Logger, server *http.Server, cancelRequests context.CancelFunc, timeout, grace time.Duration) {
+	err := shutdownWithin(server, timeout)
+	if errors.Is(err, context.DeadlineExceeded) {
+		log.Warn("In-flight requests did not finish within shutdown_timeout, cancelling them", "timeout", timeout)
+		cancelRequests()
+		if err = shutdownWithin(server, grace); errors.Is(err, context.DeadlineExceeded) {
+			log.Error("Requests still running after cancellation; they are cut when the process exits", "grace", grace)
+			return
+		}
+	}
 	if err != nil {
-		log.Error("Server forced to shutdown", "error", err)
-		os.Exit(1)
+		log.Error("HTTP server shutdown error", "error", err)
+	}
+}
+
+func shutdownWithin(server *http.Server, d time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), d)
+	defer cancel()
+	return server.Shutdown(ctx)
+}
+
+// sink is a spend or raw-body log destination with a queue to flush on stop.
+type sink interface {
+	IsEnabled() bool
+	Shutdown(ctx context.Context) error
+}
+
+// shutdownSink flushes and closes s, bounded by sinkShutdownTimeout.
+func shutdownSink(log *slog.Logger, name string, s sink) {
+	if !s.IsEnabled() {
+		return
+	}
+	log.Info("Shutting down " + name + "...")
+	ctx, cancel := context.WithTimeout(context.Background(), sinkShutdownTimeout)
+	defer cancel()
+	if err := s.Shutdown(ctx); err != nil {
+		log.Error(name+" shutdown error", "error", err)
 	}
 }
 
@@ -1524,4 +1610,19 @@ func startResponseStoreCleanup(
 		}
 	}()
 	log.Info("Response store cleanup worker started (runs every 1 hour)")
+}
+
+// credentialProviderTypes returns the unique credential types from the
+// static config; the ban reader merges them with the worker's providers set.
+func credentialProviderTypes(cfg *config.Config) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, cred := range cfg.Credentials {
+		t := string(cred.Type)
+		if t != "" && !seen[t] {
+			seen[t] = true
+			out = append(out, t)
+		}
+	}
+	return out
 }

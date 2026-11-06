@@ -712,13 +712,32 @@ func TestShouldRetryWithFallback_DeterministicBadRequest(t *testing.T) {
 		`{"error":{"code":400,"message":"Thinking level is unsupported: THINKING_LEVEL_MINIMAL","status":"INVALID_ARGUMENT"}}`,
 		`{"error":{"code":400,"message":"Unsupported MIME type: application/octet-stream","status":"INVALID_ARGUMENT"}}`,
 		`{"error":{"code":400,"message":"* GenerateContentRequest.contents[2].parts[0].data: required oneof field 'data' must have one initialized field","status":"INVALID_ARGUMENT"}}`,
-		`{"error":{"code":400,"message":"Unable to submit request because it has a maxOutputTokens value of 100000 but the supported range is from 1 (inclusive) to 65537 (exclusive)."}}`,
 	}
 	for _, body := range bodies {
 		t.Run(body[:60], func(t *testing.T) {
 			shouldRetry, _ := ShouldRetryWithFallback(http.StatusBadRequest, []byte(body))
 			if shouldRetry {
 				t.Errorf("expected no retry for deterministic bad request, got retry")
+			}
+		})
+	}
+}
+
+// A limit/range rejection is credential-specific, not a request fault: the same
+// public model id is served by backends with different limits (Vertex caps
+// maxOutputTokens at 65536, while Google AI Studio and aggregator accounts allow
+// more), so the identical request succeeds on the next credential type. It must
+// stay retryable, or the cascade stops on the first Vertex credential and hides
+// the credentials that would have served it.
+func TestShouldRetryWithFallback_RangeLimitRejectionRetries(t *testing.T) {
+	bodies := []string{
+		`{"error":{"code":400,"message":"Unable to submit request because it has a maxOutputTokens value of 100000 but the supported range is from 1 (inclusive) to 65537 (exclusive)."}}`,
+	}
+	for _, body := range bodies {
+		t.Run(body[:60], func(t *testing.T) {
+			shouldRetry, _ := ShouldRetryWithFallback(http.StatusBadRequest, []byte(body))
+			if !shouldRetry {
+				t.Errorf("expected a retry for a range/limit rejection, got none")
 			}
 		})
 	}

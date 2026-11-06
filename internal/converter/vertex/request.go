@@ -40,19 +40,27 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, isImageEdit bool,
 	if err := json.Unmarshal(openAIBody, &req); err != nil {
 		return nil, converterutil.RequestJSONValidationError(err)
 	}
+	if err := validateChatRequest(&req, model); err != nil {
+		return nil, err
+	}
 
 	vertexReq := VertexRequest{
 		Contents: make([]*genai.Content, 0),
 	}
 	var pendingToolParts []*genai.Part
+	callIDs := UsesFunctionCallIDs(model)
 
 	flushPendingToolParts := func() {
 		if len(pendingToolParts) == 0 {
 			return
 		}
+		var calls *genai.Content
+		if n := len(vertexReq.Contents); n > 0 {
+			calls = vertexReq.Contents[n-1]
+		}
 		vertexReq.Contents = append(vertexReq.Contents, &genai.Content{
 			Role:  "user",
-			Parts: pendingToolParts,
+			Parts: OrderFunctionResponses(pendingToolParts, calls),
 		})
 		pendingToolParts = nil
 	}
@@ -112,8 +120,15 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, isImageEdit bool,
 			} else {
 				responseData = map[string]interface{}{"output": ""}
 			}
+			// The call's own ID: Gemini 4 matches a response to its call by ID and
+			// name, see convertToolCallsToGenaiParts.
+			var responseID string
+			if callIDs {
+				responseID = msg.ToolCallID
+			}
 			pendingToolParts = append(pendingToolParts, &genai.Part{
 				FunctionResponse: &genai.FunctionResponse{
+					ID:       responseID,
 					Name:     funcName,
 					Response: responseData,
 				},
@@ -147,7 +162,7 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, isImageEdit bool,
 				}
 			}
 			if len(msg.ToolCalls) > 0 && role == "model" {
-				parts = append(parts, convertToolCallsToGenaiParts(msg.ToolCalls)...)
+				parts = append(parts, convertToolCallsToGenaiParts(msg.ToolCalls, callIDs)...)
 			}
 			// Gemini requires at least one text Part in user-role content.
 			// Multimodal messages with only images/audio/files will fail with
@@ -179,6 +194,9 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, isImageEdit bool,
 		})
 	}
 	if err := ValidateInputImages(model, vertexReq.Contents); err != nil {
+		return nil, err
+	}
+	if err := ValidateLastTurn(model, vertexReq.Contents, "messages"); err != nil {
 		return nil, err
 	}
 

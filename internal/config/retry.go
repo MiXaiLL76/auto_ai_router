@@ -68,13 +68,20 @@ var DefaultNonRetryableMarkers = []string{
 // Kept deliberately narrow: anything that could plausibly differ between
 // credentials (a model missing from one account, a disabled API, a quota) must
 // stay retryable, since moving to another credential is exactly what fixes those.
+//
+// A range/limit rejection is deliberately NOT here. "the supported range is
+// from"... reads like a request fault, but the limit belongs to the backend
+// serving the credential, not to the model the client named: the same public
+// model id is served by Vertex (maxOutputTokens <= 65536), by Google AI Studio
+// (higher) and by aggregator accounts, so the identical request succeeds on the
+// next credential type. Marking it non-retryable cut the cascade short on the
+// first Vertex credential and hid the working ones behind it.
 var DefaultBadRequestMarkers = []string{
 	"penalty is not enabled",
 	"thinking level is unsupported",
 	"thinking level minimal is not supported",
 	"unsupported mime type",
 	"required oneof field",
-	"but the supported range is from",
 }
 
 // DefaultRetryProviderExclusions are status codes removed from StatusCodes for

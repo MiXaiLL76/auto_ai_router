@@ -33,7 +33,7 @@ monitoring:
     enabled: true
     # Owner labels on auto_ai_router_key_info. Default (unset): all but
     # user_email; [] disables owner labels (the info series keeps only `key`).
-    info_labels: [key_alias, user_id, team_id, team_alias, organization_id]
+    info_labels: [key_alias, user_id, team_id, team_alias, organization_id, organization_alias]
     max_keys: 5000 # distinct keys; later keys are counted as key="__other__" (0 = unlimited)
     idle_ttl: 24h # drop series of keys without traffic this long (0 = never)
 ```
@@ -49,7 +49,7 @@ monitoring:
 - Owner labels are only on `auto_ai_router_key_info`; join them in PromQL on `(key, instance)`. Every replica exports its own info series for the keys it served, so joining on `key` alone fails with "many-to-many matching" as soon as there is more than one replica. With `otel.enabled` only (no `/metrics` scrape), make sure the OTLP pipeline still gives each replica a distinct `instance` label (e.g. from `service.instance.id`), or the join fails the same way. Changing a key's alias replaces its info series, so the join stays one-to-one.
 - The join drops `key="__other__"` (no info series), so once `max_keys` is reached every joined panel silently undercounts. The bundled Grafana dashboards show it as the "Overflow (`__other__`)" value of the Key RPM stat; alert on `sum(rate(auto_ai_router_key_requests_total{key="__other__"}[5m])) > 0` and raise `max_keys`.
 
-`info_labels` values: `key_alias`, `user_id`, `user_email`, `team_id`, `team_alias`, `organization_id`. `/metrics` is usually unauthenticated inside the cluster, so `user_email` is opt-in.
+`info_labels` values: `key_alias`, `user_id`, `user_email`, `team_id`, `team_alias`, `organization_id`, `organization_alias`. `/metrics` is usually unauthenticated inside the cluster, so `user_email` is opt-in.
 
 Example queries:
 

@@ -1,6 +1,10 @@
 package openai
 
-import "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
+import (
+	"encoding/json"
+
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
+)
 
 // Request types
 
@@ -151,6 +155,12 @@ type TokenDetails struct {
 	CacheCreationTokens       int                        `json:"cache_creation_tokens,omitempty"`
 	CacheCreationTokenDetails *CacheCreationTokenDetails `json:"cache_creation_token_details,omitempty"`
 	CacheWriteTokens          int                        `json:"cache_write_tokens,omitempty"`
+	// CacheWriteTokensDetails is OpenAI's cache-write TTL breakdown under
+	// prompt_cache_retention:"12h" (a 30-minute default and the 12-hour
+	// retention). Distinct from CacheCreationTokenDetails (Anthropic's 5m/1h):
+	// the TTL names are not interchangeable, and one request may carry both a
+	// 30m and a 12h write at once, each priced at its own rate.
+	CacheWriteTokensDetails *CacheWriteTokensDetails `json:"cache_write_tokens_details,omitempty"`
 	// AlibabaCacheCreation carries Alibaba/Qwen's cache-creation TTL detail,
 	// spelled cache_creation.ephemeral_5m_input_tokens (no _token_details
 	// suffix) — distinct from CacheCreationTokenDetails above.
@@ -163,6 +173,9 @@ type TokenDetails struct {
 	// prompt_tokens_details.cache_type.
 	CacheType string `json:"cache_type,omitempty"`
 	converterutil.CachingTokensExtension
+	// InitialPromptTokens is the context the client sent when a generation ran
+	// over several upstream requests; see converter.TokenUsage.InitialPromptTokens.
+	InitialPromptTokens int `json:"initial_prompt_tokens,omitempty"`
 }
 
 // CacheWrite returns the cache-write total and its 5m / 1h split under any
@@ -198,6 +211,15 @@ func (d *TokenDetails) CacheWrite() (total, fiveMinutes, oneHour int) {
 type CacheCreationTokenDetails struct {
 	Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
 	Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
+}
+
+// CacheWriteTokensDetails is OpenAI's cache-write TTL breakdown for the
+// 30-minute and 12-hour retentions (usage.prompt_tokens_details.
+// cache_write_tokens_details). The 12h tier is priced above the 30m one, so
+// the two are billed at their own rates rather than one rate by top TTL.
+type CacheWriteTokensDetails struct {
+	TTL30mTokens int `json:"ttl_30m_tokens,omitempty"`
+	TTL12hTokens int `json:"ttl_12h_tokens,omitempty"`
 }
 
 type CompletionTokenDetails struct {
@@ -236,9 +258,30 @@ type OpenAIStreamingChunk struct {
 }
 
 type OpenAIStreamingChoice struct {
-	Index        int                  `json:"index"`
-	Delta        OpenAIStreamingDelta `json:"delta"`
-	FinishReason *string              `json:"finish_reason"`
+	Index        int                      `json:"index"`
+	Delta        OpenAIStreamingDelta     `json:"delta"`
+	FinishReason *string                  `json:"finish_reason"`
+	Logprobs     *OpenAIStreamingLogprobs `json:"logprobs,omitempty"`
+	// Message carries choices[].message.annotations: some aggregators (e.g.
+	// Requesty) inject url_citation annotations into an SSE chunk under
+	// "message" instead of "delta".
+	Message *OpenAIStreamingMessageAnnotations `json:"message,omitempty"`
+}
+
+// OpenAIStreamingMessageAnnotations is the non-standard choices[].message
+// carrier described on OpenAIStreamingChoice.Message above.
+type OpenAIStreamingMessageAnnotations struct {
+	Annotations []json.RawMessage `json:"annotations,omitempty"`
+}
+
+// OpenAIStreamingLogprobs carries the per-chunk logprobs of one streaming
+// choice: an OpenAI-compatible upstream with logprobs=true sends one content
+// entry per token, in the same shape the non-stream response uses
+// (bytes/logprob/token/top_logprobs). Kept as raw JSON so no provider field is
+// dropped when the stream is reassembled into a single non-stream body.
+type OpenAIStreamingLogprobs struct {
+	Content []json.RawMessage `json:"content,omitempty"`
+	Refusal json.RawMessage   `json:"refusal,omitempty"`
 }
 
 type OpenAIStreamingDelta struct {
@@ -249,6 +292,10 @@ type OpenAIStreamingDelta struct {
 	ReasoningContent string                    `json:"reasoning_content,omitempty"`
 	Images           []ImageData               `json:"images,omitempty"`
 	ThinkingBlocks   interface{}               `json:"thinking_blocks,omitempty"` // see OpenAIResponseMessage.ThinkingBlocks
+	// Annotations carries url_citation (and similar) entries an
+	// OpenAI-compatible upstream streams on the delta, one or more per chunk,
+	// in the same shape the non-stream message.annotations uses.
+	Annotations []json.RawMessage `json:"annotations,omitempty"`
 }
 
 type OpenAIStreamingToolCall struct {

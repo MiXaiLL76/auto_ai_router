@@ -24,22 +24,24 @@ func TestKeyIdentityFromTokenInfo(t *testing.T) {
 
 	hash := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	id := keyIdentityFromTokenInfo(&dbmodels.TokenInfo{
-		Token:          hash,
-		KeyAlias:       "ci-bot",
-		UserID:         "u1",
-		UserEmail:      "u1@example.com",
-		TeamID:         "t1",
-		TeamAlias:      "ml",
-		OrganizationID: "o1",
+		Token:             hash,
+		KeyAlias:          "ci-bot",
+		UserID:            "u1",
+		UserEmail:         "u1@example.com",
+		TeamID:            "t1",
+		TeamAlias:         "ml",
+		OrganizationID:    "o1",
+		OrganizationAlias: "acme",
 	})
 	assert.Equal(t, monitoring.KeyIdentity{
-		Key:            "0123456789ab",
-		KeyAlias:       "ci-bot",
-		UserID:         "u1",
-		UserEmail:      "u1@example.com",
-		TeamID:         "t1",
-		TeamAlias:      "ml",
-		OrganizationID: "o1",
+		Key:               "0123456789ab",
+		KeyAlias:          "ci-bot",
+		UserID:            "u1",
+		UserEmail:         "u1@example.com",
+		TeamID:            "t1",
+		TeamAlias:         "ml",
+		OrganizationID:    "o1",
+		OrganizationAlias: "acme",
 	}, id)
 	// The full hash is itself a bearer credential and must never be exposed.
 	assert.NotContains(t, id.Key, hash)

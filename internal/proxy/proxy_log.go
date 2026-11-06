@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -51,10 +52,10 @@ func appendResponseBodyForLogs(args []any, cred *config.CredentialConfig, body s
 // errorMessageForLog prevents a captured provider body from escaping through
 // the long-lived spend event/metadata's error_message copy. Preserve internal
 // diagnostics when there was no provider body; classify provider failures from
-// status alone so reflected free text never reaches this sink.
+// the body using the allowlisted classifier so reflected free text never reaches this sink.
 func errorMessageForLog(logCtx *RequestLogContext) string {
-	if logCtx.ErrorMsg != "" && logCtx.ErrorBodyRaw != "" {
-		return classifiedErrorMessage(logCtx.HTTPStatus, nil)
+	if logCtx.ErrorBodyRaw != "" {
+		return classifiedErrorMessage(logCtx.HTTPStatus, []byte(logCtx.ErrorBodyRaw))
 	}
 	return logCtx.ErrorMsg
 }
@@ -175,7 +176,7 @@ func (p *Proxy) handleLiteLLMAuthError(ctx context.Context, w http.ResponseWrite
 	for errType, info := range errorMap {
 		if errors.Is(err, errType) {
 			logCtx.HTTPStatus = info.status
-			logCtx.ErrorMsg = "LiteLLM auth validation failed"
+			logCtx.ErrorMsg = "LiteLLM auth validation failed: " + info.logMsg
 			p.logger.WarnContext(ctx, info.logMsg,
 				"error_code", info.status,
 				"token_prefix", security.MaskAPIKey(token))
@@ -292,14 +293,7 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	}
 
 	// Determine final status if not explicitly set
-	status := logCtx.Status
-	if status == "" {
-		if logCtx.HTTPStatus >= 400 {
-			status = "failure"
-		} else {
-			status = "success"
-		}
-	}
+	status := logCtx.finalStatus()
 
 	// Ensure TokenUsage is not nil to prevent nil pointer dereference
 	if logCtx.TokenUsage == nil {
@@ -338,6 +332,19 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 		logCtx.applyCostMargin(tokenCosts)
 	}
 	cost := tokenCosts.TotalCost
+	// Record the client-billed cost so the response path can surface it as
+	// X-Total-Cost — but only for organizations that opted in (see
+	// setResponseCostHeader, which re-checks the mode). Set even for a $0 row: a
+	// free or unpriced-but-zero request is still "known".
+	logCtx.responseCostUSD = cost
+	logCtx.responseCostKnown = true
+	// The full breakdown is only needed for the breakdown mode; marshal it once,
+	// here, from the same map the spend metadata carries so the two never drift.
+	if logCtx.OrganizationPolicy.ReturnsCostBreakdown() {
+		if encoded, err := json.Marshal(costBreakdownMap(tokenCosts)); err == nil {
+			logCtx.responseCostBreakdown = encoded
+		}
+	}
 	p.logger.DebugContext(logSpendCtx, "Calculated cost for model",
 		"model_name", priceModelID,
 		"cost", cost,
@@ -402,6 +409,19 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	metadata = addOrganizationPolicySpendMetadata(metadata, logCtx)
 
 	var completionStartTime *time.Time
+	if logCtx.StreamOutcome == "" && logCtx.CompletionStartTime.IsZero() {
+		// Only requests that never streamed qualify for the definitional
+		// fill: a non-streaming response delivers its first (and only) token
+		// when the response completes, so TTFT equals total latency. Real
+		// streaming paths (including the simulated force_stream_for_ttft
+		// reassembly) always stamp StreamOutcome — "completed", "stream_error"
+		// or "client_aborted" — by the time the log runs, so a stream that
+		// died before its first token, only carried keep-alives, or exhausted
+		// the TTFT detector budget keeps its honest null instead of a fake
+		// ttft_ms = duration_ms mixed into the same column as real TTFT
+		// measurements.
+		logCtx.CompletionStartTime = endTime
+	}
 	if !logCtx.CompletionStartTime.IsZero() {
 		completionStartTime = &logCtx.CompletionStartTime
 	}

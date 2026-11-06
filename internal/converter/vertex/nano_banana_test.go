@@ -301,11 +301,12 @@ func TestCountWebSearchRequests_CountsImageSearchQueries(t *testing.T) {
 	grounded := func(web, image []string) []*genai.Candidate {
 		return []*genai.Candidate{{GroundingMetadata: &genai.GroundingMetadata{WebSearchQueries: web, ImageSearchQueries: image}}}
 	}
-	assert.Equal(t, 2, CountWebSearchRequests(grounded([]string{"a", "b", "a", " "}, nil)), "web only")
-	assert.Equal(t, 2, CountWebSearchRequests(grounded(nil, []string{"butterfly", "flower", "butterfly"})), "image only")
+	const model = "gemini-nano-banana-2.1"
+	assert.Equal(t, 2, CountWebSearchRequests(grounded([]string{"a", "b", "a", " "}, nil), model), "web only")
+	assert.Equal(t, 2, CountWebSearchRequests(grounded(nil, []string{"butterfly", "flower", "butterfly"}), model), "image only")
 	// The same text searched on the web and in images is two billed queries.
-	assert.Equal(t, 3, CountWebSearchRequests(grounded([]string{"butterfly", "species"}, []string{"butterfly"})), "web and image")
-	assert.Equal(t, 0, CountWebSearchRequests(grounded(nil, nil)), "no search")
+	assert.Equal(t, 3, CountWebSearchRequests(grounded([]string{"butterfly", "species"}, []string{"butterfly"}), model), "web and image")
+	assert.Equal(t, 0, CountWebSearchRequests(grounded(nil, nil), model), "no search")
 }
 
 func TestVertexToOpenAI_GoogleSearchGroundingBilling(t *testing.T) {

@@ -27,7 +27,7 @@ const FallbackPriorityGroup = 999
 // DefaultModelPricesSyncInterval is how often model prices are re-fetched from model_prices_link.
 const DefaultModelPricesSyncInterval = 5 * time.Minute
 
-// DefaultShutdownTimeout is how long a stopping server waits for in-flight requests before it exits.
+// DefaultShutdownTimeout is how long a stopping server waits for in-flight requests before it cancels them.
 const DefaultShutdownTimeout = 30 * time.Second
 
 var DefaultErrorCodes = []int{429}
@@ -281,10 +281,16 @@ type Config struct {
 	OrganizationPolicies []OrganizationPolicyConfig `yaml:"organization_policies,omitempty"`
 	LiteLLMDB            LiteLLMDBConfig            `yaml:"litellm_db,omitempty"`
 	Redis                RedisConfig                `yaml:"redis,omitempty"`
-	OTEL                 OTELConfig                 `yaml:"otel,omitempty"`
-	Kafka                KafkaConfig                `yaml:"kafka,omitempty"`
-	Video                VideoConfig                `yaml:"video,omitempty"`
-	VisionFallback       VisionFallbackConfig       `yaml:"vision_fallback,omitempty"`
+	// AccountEvents configures publishing outcome events to the health
+	// worker's Kafka topic (brokers/SASL/TLS come from the kafka section);
+	// with it enabled the router reads the worker's bans from Redis for
+	// the ban reader (see internal/banreader).
+	AccountEvents  AccountEventsConfig  `yaml:"account_events,omitempty"`
+	OTEL           OTELConfig           `yaml:"otel,omitempty"`
+	Kafka          KafkaConfig          `yaml:"kafka,omitempty"`
+	Video          VideoConfig          `yaml:"video,omitempty"`
+	YandexSearch   YandexSearchConfig   `yaml:"yandex_search,omitempty"`
+	VisionFallback VisionFallbackConfig `yaml:"vision_fallback,omitempty"`
 	// ModelTemplates stores x-model-templates entries as raw interface{} so that
 	// both single-model mappings and lists of models can be defined as YAML anchors
 	// without type errors. The actual model data is extracted via anchor expansion.
@@ -315,9 +321,11 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		OrganizationPolicies []OrganizationPolicyConfig `yaml:"organization_policies,omitempty"`
 		LiteLLMDB            LiteLLMDBConfig            `yaml:"litellm_db,omitempty"`
 		Redis                RedisConfig                `yaml:"redis,omitempty"`
+		AccountEvents        AccountEventsConfig        `yaml:"account_events,omitempty"`
 		OTEL                 OTELConfig                 `yaml:"otel,omitempty"`
 		Kafka                KafkaConfig                `yaml:"kafka,omitempty"`
 		Video                VideoConfig                `yaml:"video,omitempty"`
+		YandexSearch         YandexSearchConfig         `yaml:"yandex_search,omitempty"`
 		VisionFallback       VisionFallbackConfig       `yaml:"vision_fallback,omitempty"`
 		ModelTemplates       map[string]interface{}     `yaml:"x-model-templates,omitempty"`
 	}
@@ -341,9 +349,11 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.OrganizationPolicies = raw.OrganizationPolicies
 	c.LiteLLMDB = raw.LiteLLMDB
 	c.Redis = raw.Redis
+	c.AccountEvents = raw.AccountEvents
 	c.OTEL = raw.OTEL
 	c.Kafka = raw.Kafka
 	c.Video = raw.Video
+	c.YandexSearch = raw.YandexSearch
 	c.VisionFallback = raw.VisionFallback
 	c.ModelTemplates = raw.ModelTemplates
 
@@ -445,6 +455,48 @@ func resolveAliasesInNode(node *yaml.Node, anchors map[string]*yaml.Node) {
 	}
 }
 
+// DeepSeekToolsConfig holds the settings of the router-run DeepSeek
+// Search/Fetch adapter.
+//
+// DeepSeek's flash model cannot run the built-in web_search/web_fetch tools
+// itself, so the router runs them: it calls DeepSeek's own
+// /v1/tools/search and /v1/tools/fetch endpoints with the credential's key
+// and bills the calls separately from the model's tokens.
+type DeepSeekToolsConfig struct {
+	// Enabled turns the adapter on (default: true when the section is
+	// present; the adapter only ever engages for a DeepSeek credential that
+	// was asked for one of the built-in tools).
+	Enabled bool `yaml:"enabled"`
+	// RequestTimeout bounds one Search or Fetch call (default: 30s).
+	RequestTimeout time.Duration `yaml:"request_timeout"`
+	// SearchQPS is the per-account Search limit (default: 100, the
+	// provider's own limit). The limit is per DeepSeek account, shared by
+	// the account's keys and platforms.
+	SearchQPS int `yaml:"search_qps"`
+	// FetchQPS is the per-account Fetch limit (default: 25, the provider's
+	// own limit).
+	FetchQPS int `yaml:"fetch_qps"`
+	// MaxSteps bounds the router-run tool loop (default: 8): the model may
+	// call the tools this many times before the router stops and returns
+	// the last answer.
+	MaxSteps int `yaml:"max_steps"`
+	// MaxRetries is how many times a Search or Fetch call is retried after
+	// a 429 or a 5xx (default: 2). Other 4xx answers are not retried.
+	MaxRetries int `yaml:"max_retries"`
+}
+
+// DefaultDeepSeekToolsRequestTimeout is the default timeout of one
+// Search/Fetch call.
+const DefaultDeepSeekToolsRequestTimeout = 30 * time.Second
+
+// DefaultDeepSeekToolsMaxSteps is the default bound of the router-run tool
+// loop.
+const DefaultDeepSeekToolsMaxSteps = 8
+
+// DefaultDeepSeekToolsMaxRetries is the default number of retries of a
+// Search/Fetch call.
+const DefaultDeepSeekToolsMaxRetries = 2
+
 // RedisConfig holds configuration for Redis/Valkey-backed distributed rate limiting.
 // When Enabled=false the rate limiter falls back to in-process counters.
 type RedisConfig struct {
@@ -472,6 +524,14 @@ type RedisConfig struct {
 	// differ from the KeyPrefix of every such deployment: counters are treated as
 	// shared (never deleted) only where BalancerKeyPrefix != KeyPrefix.
 	BalancerKeyPrefix string `yaml:"balancer_key_prefix,omitempty"`
+
+	// HealthKeyPrefix is the namespace under which the ban reader looks for
+	// the health worker's keys ({prefix}{provider}:bans + {prefix}providers).
+	// It deliberately overrides KeyPrefix for this subsystem only: budget,
+	// auth, response-store, rate-limit and hybrid keys keep their own
+	// namespace (default KeyPrefix). Defaults to "hc:" (the worker's scheme),
+	// so it must differ from KeyPrefix when other subsystems use "hc:".
+	HealthKeyPrefix string `yaml:"health_key_prefix,omitempty"`
 
 	TLSEnabled bool `yaml:"tls_enabled,omitempty"`
 
@@ -502,6 +562,47 @@ type RedisConfig struct {
 	SyncInterval time.Duration `yaml:"sync_interval,omitempty"`
 }
 
+// AccountEventsConfig enables publishing upstream outcome events to the
+// health worker's Kafka topic. Broker/SASL/TLS settings are inherited from
+// the kafka section; only the topic is specific to account events.
+type AccountEventsConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// Topic is the account-events topic (e.g. "account-events").
+	Topic string `yaml:"topic"`
+	// ReaderInterval is how often the ban reader polls the worker's bans
+	// from Redis. Its own knob, deliberately not redis.sync_interval: that
+	// one is shared by the budget/rate-limit hybrid backends.
+	ReaderInterval time.Duration `yaml:"reader_interval,omitempty"` // default: 2s
+}
+
+func defaultAccountEventsConfig() AccountEventsConfig {
+	return AccountEventsConfig{Enabled: false, Topic: "account-events", ReaderInterval: 2 * time.Second}
+}
+
+func (a *AccountEventsConfig) UnmarshalYAML(value *yaml.Node) error {
+	type temp struct {
+		Enabled        string `yaml:"enabled"`
+		Topic          string `yaml:"topic"`
+		ReaderInterval string `yaml:"reader_interval,omitempty"`
+	}
+	var t temp
+	if err := value.Decode(&t); err != nil {
+		return err
+	}
+	var err error
+	if a.Enabled, err = parseField(t.Enabled, false, strconv.ParseBool, "account_events.enabled"); err != nil {
+		return err
+	}
+	a.Topic = resolveEnvString(t.Topic)
+	if a.Topic == "" {
+		a.Topic = "account-events"
+	}
+	if a.ReaderInterval, err = parseField(t.ReaderInterval, 2*time.Second, time.ParseDuration, "account_events.reader_interval"); err != nil {
+		return err
+	}
+	return nil
+}
+
 // UnmarshalYAML implements custom unmarshaling for RedisConfig with env variable support.
 func (r *RedisConfig) UnmarshalYAML(value *yaml.Node) error {
 	type tempConfig struct {
@@ -512,6 +613,7 @@ func (r *RedisConfig) UnmarshalYAML(value *yaml.Node) error {
 		SelectDB          string   `yaml:"select_db,omitempty"`
 		KeyPrefix         string   `yaml:"key_prefix,omitempty"`
 		BalancerKeyPrefix string   `yaml:"balancer_key_prefix,omitempty"`
+		HealthKeyPrefix   string   `yaml:"health_key_prefix,omitempty"`
 		TLSEnabled        string   `yaml:"tls_enabled,omitempty"`
 		ConnectTimeout    string   `yaml:"connect_timeout,omitempty"`
 		ConnWriteTimeout  string   `yaml:"conn_write_timeout,omitempty"`
@@ -546,6 +648,7 @@ func (r *RedisConfig) UnmarshalYAML(value *yaml.Node) error {
 	r.Password = resolveEnvString(temp.Password)
 	r.KeyPrefix = resolveEnvString(temp.KeyPrefix)
 	r.BalancerKeyPrefix = resolveEnvString(temp.BalancerKeyPrefix)
+	r.HealthKeyPrefix = resolveEnvString(temp.HealthKeyPrefix)
 
 	if r.SelectDB, err = parseField(temp.SelectDB, 0, strconv.Atoi, "redis.select_db"); err != nil {
 		return err
@@ -598,9 +701,17 @@ func (r *RedisConfig) UnmarshalYAML(value *yaml.Node) error {
 	if r.BalancerKeyPrefix == "" {
 		r.BalancerKeyPrefix = r.KeyPrefix
 	}
+	if r.HealthKeyPrefix == "" {
+		r.HealthKeyPrefix = "hc:"
+	}
 
 	return nil
 }
+
+// AnthropicDefaultMaxTokens is the max_tokens sent to a Claude model when the client
+// sends no limit. A small limit is spent on thinking before the answer starts; 32000
+// fits the output limit of every Claude the router serves (Opus 4 / 4.1: 32000).
+const AnthropicDefaultMaxTokens = 32000
 
 type ServerConfig struct {
 	Port                       int                   `yaml:"port"`
@@ -615,6 +726,7 @@ type ServerConfig struct {
 	MaxIdleConns               int                   `yaml:"max_idle_conns"`
 	MaxIdleConnsPerHost        int                   `yaml:"max_idle_conns_per_host"`
 	IdleConnTimeout            time.Duration         `yaml:"idle_conn_timeout"`
+	ResponseHeaderTimeout      time.Duration         `yaml:"response_header_timeout"`           // Max time to wait for a provider's response headers on one upstream attempt, not counting body/stream read. Only enforced for attempts actually sent upstream with "stream": true (see Proxy.streamingClient) — a credential that misses this is retried with the next one and, when external ban decisions aren't wired, banned for this model for 30s. Opt-in: unset (default 0) falls back to request_timeout, i.e. no behavior change — a short value (e.g. 4s) is only safe to pick with enough fallback credentials per model that one false-positive retry doesn't surface as an error. A negative duration, e.g. -1s, is the same as unset but explicit.
 	HTTP2IdlePingTimeout       time.Duration         `yaml:"http2_idle_ping_timeout"`           // How long a provider HTTP/2 connection may go without any frame before a liveness PING is sent (default: 15s; a negative duration, e.g. -1s, disables the check — either this or http2_ping_timeout alone turns it off)
 	HTTP2PingTimeout           time.Duration         `yaml:"http2_ping_timeout"`                // How long to wait for a liveness PING to be acked before closing the connection (default: 10s; a negative duration, e.g. -1s, disables the check — same as http2_idle_ping_timeout, either field alone turns it off)
 	MaxConnectionLifetime      time.Duration         `yaml:"max_connection_lifetime"`           // How long a provider connection takes new requests; it closes once its last request ends (default: 0, reused for as long as requests come)
@@ -623,14 +735,17 @@ type ServerConfig struct {
 	IdleTimeout                time.Duration         `yaml:"idle_timeout"`                      // HTTP server idle timeout (default: 2*write_timeout)
 	MaxProviderRetries         int                   `yaml:"max_provider_retries"`              // Max same-type credential retries on provider errors (default: 2, meaning 3 total attempts)
 	MaxFallbackAttempts        int                   `yaml:"max_fallback_attempts"`             // Max fallback proxy hops per request chain (default: 5)
+	AnthropicDefaultMaxTokens  int                   `yaml:"anthropic_default_max_tokens"`      // max_tokens sent to a Claude model when the client sends none (default: 32000, 0 = default)
+	DeepSeekTools              DeepSeekToolsConfig   `yaml:"deepseek_tools,omitempty"`          // The router-run DeepSeek Search/Fetch adapter (see DeepSeekToolsConfig)
 	SessionStickyEnabled       bool                  `yaml:"session_sticky_enabled"`            // Enable session-sticky credential routing (default: true)
 	SessionStickyTTL           int                   `yaml:"session_sticky_ttl_minutes"`        // Session binding TTL in minutes (0 = default 6)
 	SessionStickyAutoCacheCtrl bool                  `yaml:"session_sticky_auto_cache_control"` // Auto-inject Anthropic cache_control when session is active (default: true)
 	ModelPricesLink            string                `yaml:"model_prices_link,omitempty"`       // URL or file path to model prices JSON - supports os.environ/VAR_NAME
 	ModelPricesSyncInterval    time.Duration         `yaml:"model_prices_sync_interval"`        // How often model prices are re-fetched from model_prices_link (default: 5m)
 	ShutdownDelay              time.Duration         `yaml:"shutdown_delay"`                    // Delay between readiness=false and server.Shutdown (default: 5s)
-	ShutdownTimeout            time.Duration         `yaml:"shutdown_timeout"`                  // How long server.Shutdown waits for in-flight requests before the process exits and cuts the rest (default: 30s)
+	ShutdownTimeout            time.Duration         `yaml:"shutdown_timeout"`                  // How long server.Shutdown waits for in-flight requests before the rest are cancelled (default: 30s)
 	DrainUpstreamOnAbort       bool                  `yaml:"drain_upstream_on_abort"`           // When true, keep reading upstream after client disconnect to capture real usage chunk (default: false — estimate from delta text)
+	ForceStreamForTTFT         bool                  `yaml:"force_stream_for_ttft"`             // Force `"stream": true` upstream for non-streaming chat-shaped requests and reassemble the response back into non-stream JSON so every request gets a measurable TTFT (default: false)
 	TiktokenEnabled            bool                  `yaml:"tiktoken_enabled"`                  // Enable local tiktoken-based prompt/completion token estimation as a fallback when a provider omits usage (default: true; disable if all configured providers always report usage)
 	StrictAllTeamModelsACL     bool                  `yaml:"strict_all_team_models_acl"`        // Enforce key/team/user model ACLs (default: false)
 	CredentialNameAsTeamID     bool                  `yaml:"credential_name_as_team_id"`        // Use provider credential name as team_id when auth has no team_id (default: false)
@@ -722,6 +837,7 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		MaxIdleConns               string                `yaml:"max_idle_conns"`
 		MaxIdleConnsPerHost        string                `yaml:"max_idle_conns_per_host"`
 		IdleConnTimeout            string                `yaml:"idle_conn_timeout"`
+		ResponseHeaderTimeout      string                `yaml:"response_header_timeout"`
 		HTTP2IdlePingTimeout       string                `yaml:"http2_idle_ping_timeout"`
 		HTTP2PingTimeout           string                `yaml:"http2_ping_timeout"`
 		MaxConnectionLifetime      string                `yaml:"max_connection_lifetime"`
@@ -729,6 +845,7 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		IdleTimeout                string                `yaml:"idle_timeout"`
 		MaxProviderRetries         string                `yaml:"max_provider_retries"`
 		MaxFallbackAttempts        string                `yaml:"max_fallback_attempts"`
+		AnthropicDefaultMaxTokens  string                `yaml:"anthropic_default_max_tokens"`
 		SessionStickyEnabled       string                `yaml:"session_sticky_enabled"`
 		SessionStickyTTL           string                `yaml:"session_sticky_ttl_minutes"`
 		SessionStickyAutoCacheCtrl string                `yaml:"session_sticky_auto_cache_control"`
@@ -737,6 +854,7 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		ShutdownDelay              string                `yaml:"shutdown_delay"`
 		ShutdownTimeout            string                `yaml:"shutdown_timeout"`
 		DrainUpstreamOnAbort       string                `yaml:"drain_upstream_on_abort"`
+		ForceStreamForTTFT         string                `yaml:"force_stream_for_ttft"`
 		TiktokenEnabled            string                `yaml:"tiktoken_enabled"`
 		StrictAllTeamModelsACL     string                `yaml:"strict_all_team_models_acl"`
 		CredentialNameAsTeamID     string                `yaml:"credential_name_as_team_id"`
@@ -783,6 +901,9 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 	if s.IdleConnTimeout, err = parseField(temp.IdleConnTimeout, 120*time.Second, time.ParseDuration, "idle_conn_timeout"); err != nil {
 		return err
 	}
+	if s.ResponseHeaderTimeout, err = parseField(temp.ResponseHeaderTimeout, 0, time.ParseDuration, "response_header_timeout"); err != nil {
+		return err
+	}
 	if s.HTTP2IdlePingTimeout, err = parseField(temp.HTTP2IdlePingTimeout, 15*time.Second, time.ParseDuration, "http2_idle_ping_timeout"); err != nil {
 		return err
 	}
@@ -807,6 +928,10 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 	if s.MaxFallbackAttempts, err = parseField(temp.MaxFallbackAttempts, 5, strconv.Atoi, "max_fallback_attempts"); err != nil {
 		return err
 	}
+	// max_tokens for a Claude model when the client sends none (default: 32000)
+	if s.AnthropicDefaultMaxTokens, err = parseField(temp.AnthropicDefaultMaxTokens, AnthropicDefaultMaxTokens, strconv.Atoi, "anthropic_default_max_tokens"); err != nil {
+		return err
+	}
 	if s.SessionStickyEnabled, err = parseField(temp.SessionStickyEnabled, true, strconv.ParseBool, "session_sticky_enabled"); err != nil {
 		return err
 	}
@@ -827,6 +952,9 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if s.DrainUpstreamOnAbort, err = parseField(temp.DrainUpstreamOnAbort, false, strconv.ParseBool, "drain_upstream_on_abort"); err != nil {
+		return err
+	}
+	if s.ForceStreamForTTFT, err = parseField(temp.ForceStreamForTTFT, false, strconv.ParseBool, "force_stream_for_ttft"); err != nil {
 		return err
 	}
 	if s.TiktokenEnabled, err = parseField(temp.TiktokenEnabled, true, strconv.ParseBool, "tiktoken_enabled"); err != nil {
@@ -880,6 +1008,28 @@ type CredentialConfig struct {
 	// Priority is the primary-selection priority group (lower selects first).
 	// See EffectivePriority for the resolution chain against FallbackPriority.
 	Priority int `yaml:"priority,omitempty"`
+	// DeepSeekTools marks the credential as one whose provider runs its own
+	// Search and Fetch tools (POST {base_url}/v1/tools/search and
+	// /v1/tools/fetch). The router calls them with this credential's key and
+	// bills the calls apart from the model's tokens.
+	//
+	// It is an explicit opt-in rather than a guess from the base URL: the
+	// router must not start calling a provider's endpoints because its
+	// address happens to look like DeepSeek's.
+	DeepSeekTools bool `yaml:"deepseek_tools,omitempty"`
+
+	// ResponseHeaderTimeout overrides server.response_header_timeout for this
+	// one credential. Unset (0) inherits the server-level value (itself 0 by
+	// default, i.e. no per-attempt header budget at all). The fleet-wide
+	// distribution of this credential's own successful time-to-first-token
+	// is the thing to check before setting this: pick a value above its own
+	// p99, not a borrowed number from another credential or model -- a 20-30x
+	// spread between credentials' normal latency is common here, so there is
+	// no one value safe for all of them (see the 2026-11-06 gpt-6-luna
+	// incident, caused by exactly that). A negative duration, e.g. -1s,
+	// explicitly opts this credential out even if the server-level default
+	// is ever turned on fleet-wide.
+	ResponseHeaderTimeout time.Duration `yaml:"response_header_timeout,omitempty"`
 
 	ReasoningOnly           bool              `yaml:"reasoning_only,omitempty"`
 	Scopes                  []string          `yaml:"scopes,omitempty"`
@@ -900,6 +1050,13 @@ type CredentialConfig struct {
 
 	// Proxy/AIR remote-router specific fields
 	IsFallback bool `yaml:"is_fallback,omitempty"`
+
+	// SystemOne marks a credential that speaks only the native System One API
+	// (POST /v1/systemone). Such a credential serves nothing else, and
+	// /v1/systemone requests go only to credentials with this flag (or to
+	// proxy-like credentials, whose peer router decides). Only OpenAI-wire
+	// credentials (openai, vllm) may set it: they forward the request path as is.
+	SystemOne bool `yaml:"system_one,omitempty"`
 
 	// RequestHeaders are set on every upstream request sent with this direct
 	// provider credential (not air/proxy), replacing whatever the client sent
@@ -1010,29 +1167,32 @@ func (c CredentialConfig) SameProviderIdentity(other CredentialConfig) bool {
 func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 	// Create a temporary struct with all string fields
 	type tempConfig struct {
-		Name             string           `yaml:"name"`
-		Type             string           `yaml:"type"`
-		APIKey           string           `yaml:"api_key"`
-		BaseURL          string           `yaml:"base_url"`
-		ProxyURL         string           `yaml:"proxy_url,omitempty"`
-		AuthType         string           `yaml:"auth_type,omitempty"`
-		OpenAIProtocol   string           `yaml:"openai_proto,omitempty"`
-		GoogleProtocol   string           `yaml:"google_proto,omitempty"`
-		RPM              string           `yaml:"rpm"`
-		TPM              string           `yaml:"tpm"`
-		Weight           string           `yaml:"weight"`
-		FallbackPriority string           `yaml:"fallback_priority,omitempty"`
-		Priority         string           `yaml:"priority,omitempty"`
-		ReasoningOnly    string           `yaml:"reasoning_only,omitempty"`
-		Scopes           []string         `yaml:"scopes,omitempty"`
-		DeniedScopes     []string         `yaml:"denied_scopes,omitempty"`
-		ForbiddenScopes  []string         `yaml:"forbidden_scopes,omitempty"`
-		ProjectID        string           `yaml:"project_id,omitempty"`
-		Location         string           `yaml:"location,omitempty"`
-		CredentialsFile  string           `yaml:"credentials_file,omitempty"`
-		CredentialsJSON  string           `yaml:"credentials_json,omitempty"`
-		IsFallback       string           `yaml:"is_fallback,omitempty"`
-		Models           []ModelRPMConfig `yaml:"models,omitempty"`
+		Name                  string           `yaml:"name"`
+		Type                  string           `yaml:"type"`
+		APIKey                string           `yaml:"api_key"`
+		BaseURL               string           `yaml:"base_url"`
+		ProxyURL              string           `yaml:"proxy_url,omitempty"`
+		AuthType              string           `yaml:"auth_type,omitempty"`
+		OpenAIProtocol        string           `yaml:"openai_proto,omitempty"`
+		GoogleProtocol        string           `yaml:"google_proto,omitempty"`
+		RPM                   string           `yaml:"rpm"`
+		TPM                   string           `yaml:"tpm"`
+		Weight                string           `yaml:"weight"`
+		FallbackPriority      string           `yaml:"fallback_priority,omitempty"`
+		Priority              string           `yaml:"priority,omitempty"`
+		ReasoningOnly         string           `yaml:"reasoning_only,omitempty"`
+		SystemOne             string           `yaml:"system_one,omitempty"`
+		DeepSeekTools         string           `yaml:"deepseek_tools,omitempty"`
+		ResponseHeaderTimeout string           `yaml:"response_header_timeout,omitempty"`
+		Scopes                []string         `yaml:"scopes,omitempty"`
+		DeniedScopes          []string         `yaml:"denied_scopes,omitempty"`
+		ForbiddenScopes       []string         `yaml:"forbidden_scopes,omitempty"`
+		ProjectID             string           `yaml:"project_id,omitempty"`
+		Location              string           `yaml:"location,omitempty"`
+		CredentialsFile       string           `yaml:"credentials_file,omitempty"`
+		CredentialsJSON       string           `yaml:"credentials_json,omitempty"`
+		IsFallback            string           `yaml:"is_fallback,omitempty"`
+		Models                []ModelRPMConfig `yaml:"models,omitempty"`
 
 		RequestHeaders map[string]string `yaml:"request_headers,omitempty"`
 	}
@@ -1083,6 +1243,15 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if c.ReasoningOnly, err = parseField(temp.ReasoningOnly, false, strconv.ParseBool, "reasoning_only for credential '"+c.Name+"'"); err != nil {
+		return err
+	}
+	if c.DeepSeekTools, err = parseField(temp.DeepSeekTools, false, strconv.ParseBool, "deepseek_tools for credential '"+c.Name+"'"); err != nil {
+		return err
+	}
+	if c.ResponseHeaderTimeout, err = parseField(temp.ResponseHeaderTimeout, 0, time.ParseDuration, "response_header_timeout for credential '"+c.Name+"'"); err != nil {
+		return err
+	}
+	if c.SystemOne, err = parseField(temp.SystemOne, false, strconv.ParseBool, "system_one for credential '"+c.Name+"'"); err != nil {
 		return err
 	}
 	if c.OpenAIProtocol, err = parseField(temp.OpenAIProtocol, false, strconv.ParseBool, "openai_proto for credential '"+c.Name+"'"); err != nil {
@@ -1154,9 +1323,10 @@ type MonitoringConfig struct {
 type KeyMetricsConfig struct {
 	Enabled bool `yaml:"enabled"` // default: false
 	// InfoLabels selects the owner labels on auto_ai_router_key_info
-	// (key_alias, user_id, user_email, team_id, team_alias, organization_id).
-	// Unset (nil) means monitoring.DefaultKeyInfoLabels (everything but
-	// user_email); an explicit empty list disables owner labels entirely.
+	// (key_alias, user_id, user_email, team_id, team_alias, organization_id,
+	// organization_alias). Unset (nil) means
+	// monitoring.DefaultKeyInfoLabels (everything but user_email); an
+	// explicit empty list disables owner labels entirely.
 	InfoLabels []string `yaml:"info_labels,omitempty"`
 	// MaxKeys caps distinct key label values; keys first seen past the cap
 	// are counted under key="__other__". 0 = unlimited. default: 5000
@@ -1169,7 +1339,7 @@ type KeyMetricsConfig struct {
 // KeyMetricsInfoLabels lists the accepted info_labels values. It mirrors
 // monitoring.KeyInfoLabels (kept in sync by a test) so config does not pull in
 // the metrics package.
-var KeyMetricsInfoLabels = []string{"key_alias", "user_id", "user_email", "team_id", "team_alias", "organization_id"}
+var KeyMetricsInfoLabels = []string{"key_alias", "user_id", "user_email", "team_id", "team_alias", "organization_id", "organization_alias"}
 
 const (
 	defaultKeyMetricsMaxKeys = 5000
@@ -1850,6 +2020,10 @@ func Load(path string) (*Config, error) {
 		cfg.Redis = defaultRedisConfig()
 	}
 
+	if !hasMappingKey(&root, "account_events") {
+		cfg.AccountEvents = defaultAccountEventsConfig()
+	}
+
 	if !hasMappingKey(&root, "litellm_db") {
 		cfg.LiteLLMDB = defaultLiteLLMDBConfig()
 	}
@@ -1991,6 +2165,7 @@ func defaultRedisConfig() RedisConfig {
 		CommandTimeout:    3 * time.Second,
 	}
 	r.BalancerKeyPrefix = r.KeyPrefix
+	r.HealthKeyPrefix = "hc:"
 	return r
 }
 
@@ -2121,6 +2296,9 @@ func (c *Config) Validate() error {
 	if err := c.Video.Validate(); err != nil {
 		return err
 	}
+	if err := c.YandexSearch.Validate(); err != nil {
+		return err
+	}
 	if err := c.VisionFallback.Validate(); err != nil {
 		return err
 	}
@@ -2197,6 +2375,11 @@ func (c *Config) Validate() error {
 
 	// ReadTimeout equals RequestTimeout (not configurable via YAML)
 	c.Server.ReadTimeout = c.Server.RequestTimeout
+
+	// Validate AnthropicDefaultMaxTokens (0 = use default of 32000)
+	if c.Server.AnthropicDefaultMaxTokens < 0 {
+		return fmt.Errorf("invalid anthropic_default_max_tokens: %d (must be >= 0)", c.Server.AnthropicDefaultMaxTokens)
+	}
 
 	// Validate MaxProviderRetries
 	if c.Server.MaxProviderRetries < 0 {
@@ -2275,6 +2458,9 @@ func (c *Config) Validate() error {
 		}
 		if cred.OpenAIProtocol && cred.GoogleProtocol {
 			return fmt.Errorf("credential %s: openai_proto and google_proto are mutually exclusive", cred.Name)
+		}
+		if cred.SystemOne && cred.EffectiveProviderType() != ProviderTypeOpenAI {
+			return fmt.Errorf("credential %s: system_one needs an OpenAI-wire credential (openai, vllm), got: %s", cred.Name, cred.Type)
 		}
 		if err := validateCredentialRequestHeaders(cred.Name, cred.Type, cred.RequestHeaders); err != nil {
 			return err

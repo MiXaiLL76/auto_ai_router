@@ -1,0 +1,142 @@
+package yandexsearch
+
+import (
+	"context"
+	"log/slog"
+
+	"github.com/mixaill76/auto_ai_router/internal/litellmdb/budget"
+	dbmodels "github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
+)
+
+// budgetLevel is one entry of the token/user/team/org budget hierarchy to
+// reserve against before the upstream call.
+type budgetLevel struct {
+	entity    string
+	maxBudget *float64
+	dbSpend   float64
+}
+
+// budgetLevelsFor mirrors internal/proxy/budget_enforcement.go's
+// budgetLevels() (entity naming and field provenance kept identical:
+// "token:"+Token, "user:"+UserID, "team:"+TeamID, "org:"+OrganizationID,
+// "teammember:"+TeamID+":"+UserID, "orgmember:"+OrganizationID+":"+UserID)
+// — duplicated rather than imported because internal/yandexsearch is
+// deliberately decoupled from internal/proxy (mirrors internal/video's own
+// decoupling) and that function is unexported. If the LLM path's hierarchy
+// logic changes, check here too.
+func budgetLevelsFor(info *dbmodels.TokenInfo) []budgetLevel {
+	if info == nil {
+		return nil
+	}
+	levels := []budgetLevel{{
+		entity:    "token:" + info.Token,
+		maxBudget: info.MaxBudget,
+		dbSpend:   info.Spend,
+	}}
+	if info.TeamID == "" && info.UserID != "" {
+		levels = append(levels, budgetLevel{
+			entity:    "user:" + info.UserID,
+			maxBudget: info.UserMaxBudget,
+			dbSpend:   dereferenceFloat(info.UserSpend),
+		})
+	}
+	if info.TeamID != "" {
+		levels = append(levels, budgetLevel{
+			entity:    "team:" + info.TeamID,
+			maxBudget: info.TeamMaxBudget,
+			dbSpend:   dereferenceFloat(info.TeamSpend),
+		})
+	}
+	if info.OrganizationID != "" {
+		levels = append(levels, budgetLevel{
+			entity:    "org:" + info.OrganizationID,
+			maxBudget: info.OrgMaxBudget,
+			dbSpend:   dereferenceFloat(info.OrgSpend),
+		})
+	}
+	if info.TeamID != "" && info.UserID != "" {
+		levels = append(levels, budgetLevel{
+			entity:    "teammember:" + info.TeamID + ":" + info.UserID,
+			maxBudget: info.TeamMemberMaxBudget,
+			dbSpend:   dereferenceFloat(info.TeamMemberSpend),
+		})
+	}
+	if info.OrganizationID != "" && info.UserID != "" {
+		levels = append(levels, budgetLevel{
+			entity:    "orgmember:" + info.OrganizationID + ":" + info.UserID,
+			maxBudget: info.OrgMemberMaxBudget,
+			dbSpend:   dereferenceFloat(info.OrgMemberSpend),
+		})
+	}
+	return levels
+}
+
+func dereferenceFloat(value *float64) float64 {
+	if value == nil {
+		return 0
+	}
+	return *value
+}
+
+// reservation tracks the levels a budgetReserve call actually reserved
+// against, so they can be settled (or rolled back) exactly once.
+type reservation struct {
+	entities    []budgetLevel
+	estimateUSD float64
+	reconciled  bool
+}
+
+// budgetReserve reserves estimateUSD against every applicable level of
+// info's budget hierarchy (unlimited levels, maxBudget == nil, are
+// skipped — same convention as the LLM path). On a Reserver error it logs
+// and treats that level as allowed (fails OPEN — same "availability wins"
+// rationale as internal/proxy/budget_enforcement.go; this is money, not
+// the shared Yandex quota, which fails closed in quota.go for a different
+// reason). If any level rejects, every level already reserved by this call
+// is rolled back and ok=false is returned.
+func budgetReserve(ctx context.Context, reserver *budget.Reserver, info *dbmodels.TokenInfo, estimateUSD float64, logger *slog.Logger) (res *reservation, ok bool) {
+	levels := budgetLevelsFor(info)
+	reserved := make([]budgetLevel, 0, len(levels))
+	for _, level := range levels {
+		if level.maxBudget == nil {
+			continue
+		}
+		allowed, err := reserver.TryReserve(ctx, level.entity, level.dbSpend, estimateUSD, *level.maxBudget)
+		if err != nil {
+			if logger != nil {
+				logger.WarnContext(ctx, "Yandex search: budget reservation unavailable; request allowed",
+					"entity", level.entity, "error", err)
+			}
+			continue
+		}
+		if !allowed {
+			for _, done := range reserved {
+				if err := reserver.Reconcile(ctx, done.entity, -estimateUSD); err != nil && logger != nil {
+					logger.WarnContext(ctx, "Yandex search: failed to roll back budget reservation",
+						"entity", done.entity, "error", err)
+				}
+			}
+			return nil, false
+		}
+		reserved = append(reserved, level)
+	}
+	return &reservation{entities: reserved, estimateUSD: estimateUSD}, true
+}
+
+// settle reconciles every reserved level to actualUSD exactly once; a
+// repeated call is a no-op. Call with actualUSD == estimateUSD on a billed
+// success, or 0 on any outcome that isn't billed (non-2xx, local error,
+// timeout) — budget.Reserver.Reconcile itself no-ops when the resulting
+// delta is 0.
+func (r *reservation) settle(ctx context.Context, reserver *budget.Reserver, actualUSD float64, logger *slog.Logger) {
+	if r == nil || r.reconciled {
+		return
+	}
+	r.reconciled = true
+	for _, level := range r.entities {
+		if err := reserver.Reconcile(ctx, level.entity, actualUSD-r.estimateUSD); err != nil && logger != nil {
+			logger.WarnContext(ctx, "Yandex search: failed to reconcile budget reservation",
+				"entity", level.entity, "error", err)
+		}
+	}
+}

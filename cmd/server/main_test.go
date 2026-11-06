@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"testing"
 	"time"
 
@@ -198,4 +200,84 @@ func TestConnectRedisWithRetry_BoundedByOverallDeadline(t *testing.T) {
 	assert.Nil(t, rb, "expected fallback to nil against an unreachable address")
 	assert.Less(t, elapsed, 20*time.Second,
 		fmt.Sprintf("connectRedisWithRetry took %s — should be bounded well under the old ~75s worst case", elapsed))
+}
+
+// startDrainTestServer serves handler the way main does: request contexts
+// derive from a context that drainHTTP can cancel.
+func startDrainTestServer(t *testing.T, handler http.HandlerFunc) (*http.Server, context.CancelFunc, string) {
+	t.Helper()
+	reqCtx, cancelRequests := context.WithCancel(context.Background())
+	t.Cleanup(cancelRequests)
+	server := &http.Server{
+		Handler:     handler,
+		BaseContext: func(net.Listener) context.Context { return reqCtx },
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	go func() { _ = server.Serve(ln) }()
+	t.Cleanup(func() { _ = server.Close() })
+	return server, cancelRequests, "http://" + ln.Addr().String()
+}
+
+// sendDrainTestRequest issues a GET in the background; the returned channel
+// yields the request's error once it completes.
+func sendDrainTestRequest(url string) <-chan error {
+	done := make(chan error, 1)
+	go func() {
+		resp, err := http.Get(url)
+		if err == nil {
+			_ = resp.Body.Close()
+		}
+		done <- err
+	}()
+	return done
+}
+
+func TestDrainHTTP_LetsRequestsFinishWithinTimeout(t *testing.T) {
+	ctxErr := make(chan error, 1)
+	started := make(chan struct{})
+	server, cancelRequests, url := startDrainTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		time.Sleep(100 * time.Millisecond)
+		ctxErr <- r.Context().Err()
+		w.WriteHeader(http.StatusOK)
+	})
+	done := sendDrainTestRequest(url)
+	<-started
+
+	drainHTTP(slog.New(slog.DiscardHandler), server, cancelRequests, 5*time.Second, 5*time.Second)
+
+	require.NoError(t, <-done)
+	assert.NoError(t, <-ctxErr, "a request that finishes within shutdown_timeout must not be cancelled")
+}
+
+// TestDrainHTTP_CancelsRequestsPastTimeout is the regression test for the stop
+// path exiting the process when a request outlived shutdown_timeout, which cut
+// the request and skipped the spend-log flush and the DB pool close. Now the
+// request is cancelled and has returned, having logged its spend, by the time
+// drainHTTP returns and main shuts the sinks down.
+func TestDrainHTTP_CancelsRequestsPastTimeout(t *testing.T) {
+	started := make(chan struct{})
+	returned := make(chan struct{})
+	server, cancelRequests, url := startDrainTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-r.Context().Done()
+		// What the proxy's client-disconnect path does for an aborted request:
+		// log the spend, then return.
+		close(returned)
+	})
+	sendDrainTestRequest(url)
+	<-started
+
+	start := time.Now()
+	drainHTTP(slog.New(slog.DiscardHandler), server, cancelRequests, 50*time.Millisecond, time.Minute)
+
+	// Waiting out the grace would mean the request never reacted to the
+	// cancellation.
+	assert.Less(t, time.Since(start), 10*time.Second, "the cancelled request should return well within the grace")
+	select {
+	case <-returned:
+	default:
+		t.Fatal("drainHTTP returned before the cancelled request did")
+	}
 }

@@ -11,7 +11,9 @@ import "time"
 // Request/response body capture is intentionally out of scope here (separate
 // ТЗ/PR) — the Body* fields are always zero-value placeholders.
 type SpendEvent struct {
-	RequestID string    `json:"request_id"`
+	RequestID string `json:"request_id"`
+	// TraceID is the OpenTelemetry trace id of the request's spans.
+	TraceID   string    `json:"trace_id,omitempty"`
 	StartTime time.Time `json:"start_time"`
 	EndTime   time.Time `json:"end_time"`
 	// CompletionStartTime is the time-to-first-token (TTFT) timestamp, nil
@@ -25,8 +27,30 @@ type SpendEvent struct {
 	// and ttft_ms are derived timings, so duration_ms decomposes as
 	// upstream_send_ms + "time the upstream took".
 	UpstreamSendMs *int64 `json:"upstream_send_ms,omitempty"`
-	DurationMs     int64  `json:"duration_ms"`
-	TTFTMs         *int64 `json:"ttft_ms,omitempty"`
+	// RetryMs, ConnWaitMs and TTFBMs divide the time after upstream_send_ms
+	// for the serving credential's attempt.
+	//
+	// RetryMs is the first upstream send to the serving attempt's send.
+	RetryMs *int64 `json:"retry_ms,omitempty"`
+	// ConnWaitMs is the serving attempt asking for a connection to having one.
+	ConnWaitMs *int64 `json:"conn_wait_ms,omitempty"`
+	// ConnReused is whether that connection was a pooled one.
+	ConnReused *bool `json:"conn_reused,omitempty"`
+	// TTFBMs is the serving attempt's request written to the first byte of
+	// the response.
+	TTFBMs *int64 `json:"ttfb_ms,omitempty"`
+	// UpstreamAttempts is the number of times the request was sent upstream.
+	UpstreamAttempts int `json:"upstream_attempts"`
+	// Exit is the exit the serving attempt left through: the name its proxy
+	// gave itself in the Via of its reply to CONNECT.
+	Exit string `json:"exit,omitempty"`
+	// ExitRTTMs and ExitConnectMs are the round trip to that exit and the
+	// exit's connect to the provider (its Server-Timing), measured when the
+	// connection was opened.
+	ExitRTTMs     *int64 `json:"exit_rtt_ms,omitempty"`
+	ExitConnectMs *int64 `json:"exit_connect_ms,omitempty"`
+	DurationMs    int64  `json:"duration_ms"`
+	TTFTMs        *int64 `json:"ttft_ms,omitempty"`
 
 	CallType     string `json:"call_type"`
 	APIBase      string `json:"api_base"`
@@ -49,6 +73,7 @@ type SpendEvent struct {
 	ServerRouterID string `json:"server_router_id"`
 	ServerVersion  string `json:"server_version"`
 	ServerCommit   string `json:"server_commit"`
+	ServiceName    string `json:"service_name"`
 
 	PromptTokens           int `json:"prompt_tokens"`
 	CompletionTokens       int `json:"completion_tokens"`
@@ -60,6 +85,7 @@ type SpendEvent struct {
 	CacheCreationTokens    int `json:"cache_creation_tokens"`
 	CacheCreation5mTokens  int `json:"cache_creation_5m_tokens"`
 	CacheCreation1hTokens  int `json:"cache_creation_1h_tokens"`
+	CacheCreation12hTokens int `json:"cache_creation_12h_tokens"`
 	// CacheType is the explicit-cache mode marker (converter.CacheTypeExplicit,
 	// i.e. "ephemeral", for Alibaba/Qwen) — present even when the request's
 	// cache cost ended up zero (no explicit tariff configured, or free), so
@@ -75,6 +101,9 @@ type SpendEvent struct {
 	OutputImageTokens        int    `json:"output_image_tokens"`
 	WebSearchRequests        int    `json:"web_search_requests"`
 	WebSearchContextSize     string `json:"web_search_context_size,omitempty"`
+	// WebFetchRequests counts the billable web fetches the router executed
+	// (a fetch that returned page content).
+	WebFetchRequests int `json:"web_fetch_requests"`
 	// Built-in server-side tool usage beyond web search (xAI).
 	XSearchCalls           int `json:"x_search_calls"`
 	XSearchPosts           int `json:"x_search_posts"`
@@ -99,6 +128,7 @@ type SpendEvent struct {
 	ImageCost             float64 `json:"image_cost"`
 	VideoInputCost        float64 `json:"video_input_cost"`
 	WebSearchCost         float64 `json:"web_search_cost"`
+	WebFetchCost          float64 `json:"web_fetch_cost"`
 	XSearchCost           float64 `json:"x_search_cost"`
 	CodeExecutionCost     float64 `json:"code_execution_cost"`
 	AttachmentSearchCost  float64 `json:"attachment_search_cost"`
@@ -114,14 +144,15 @@ type SpendEvent struct {
 	// total_cost.
 	ProviderReportedCost *float64 `json:"provider_reported_cost,omitempty"`
 
-	APIKeyHash     string `json:"api_key_hash"`
-	UserID         string `json:"user_id"`
-	TeamID         string `json:"team_id"`
-	OrganizationID string `json:"organization_id"`
-	EndUser        string `json:"end_user"`
-	KeyAlias       string `json:"key_alias,omitempty"`
-	UserAlias      string `json:"user_alias,omitempty"`
-	TeamAlias      string `json:"team_alias,omitempty"`
+	APIKeyHash        string `json:"api_key_hash"`
+	UserID            string `json:"user_id"`
+	TeamID            string `json:"team_id"`
+	OrganizationID    string `json:"organization_id"`
+	EndUser           string `json:"end_user"`
+	KeyAlias          string `json:"key_alias,omitempty"`
+	UserAlias         string `json:"user_alias,omitempty"`
+	TeamAlias         string `json:"team_alias,omitempty"`
+	OrganizationAlias string `json:"organization_alias,omitempty"`
 
 	RequesterIP string  `json:"requester_ip"`
 	SessionID   string  `json:"session_id"`

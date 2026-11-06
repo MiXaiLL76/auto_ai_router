@@ -16,6 +16,35 @@ const (
 	maxOrganizationCredentialDenylistBytes   = 64 * 1024
 )
 
+// ResponseCostMode is how much of the request's cost an organization receives in
+// the response headers.
+type ResponseCostMode string
+
+const (
+	// ResponseCostModeOff emits no cost header (the default).
+	ResponseCostModeOff ResponseCostMode = "off"
+	// ResponseCostModeTotal emits X-Total-Cost only.
+	ResponseCostModeTotal ResponseCostMode = "total"
+	// ResponseCostModeBreakdown emits X-Total-Cost and X-Cost-Breakdown (the
+	// per-component breakdown as JSON).
+	ResponseCostModeBreakdown ResponseCostMode = "breakdown"
+)
+
+// ParseResponseCostMode normalizes a configured value, accepting the empty string
+// as off. An unknown value is an error.
+func ParseResponseCostMode(raw string) (ResponseCostMode, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", string(ResponseCostModeOff):
+		return ResponseCostModeOff, nil
+	case string(ResponseCostModeTotal):
+		return ResponseCostModeTotal, nil
+	case string(ResponseCostModeBreakdown):
+		return ResponseCostModeBreakdown, nil
+	default:
+		return "", fmt.Errorf("response_cost_mode must be one of off, total, breakdown, got %q", raw)
+	}
+}
+
 type OrganizationPolicyConfig struct {
 	OrganizationID     string            `yaml:"organization_id"`
 	PriceProfileID     string            `yaml:"price_profile_id"`
@@ -24,6 +53,23 @@ type OrganizationPolicyConfig struct {
 	AllowlistSet       bool              `yaml:"-"`
 	ModelMappings      map[string]string `yaml:"model_mappings,omitempty"`
 	CredentialDenylist []string          `yaml:"credential_denylist,omitempty"`
+	// ResponseCostMode selects how much of the request's cost this organization
+	// receives in the response headers: off (default, none), total (X-Total-Cost),
+	// or breakdown (X-Total-Cost and X-Cost-Breakdown). Set via the
+	// response_cost_mode field.
+	ResponseCostMode ResponseCostMode `yaml:"-"`
+	// ReturnResponseCost is the legacy boolean form: true maps to
+	// ResponseCostModeTotal, false to off. Kept so existing configs keep working.
+	ReturnResponseCost bool `yaml:"-"`
+	// ReturnResponseCostInBody adds the same final, margin-adjusted request
+	// cost response_cost_mode exposes in headers to the response body's
+	// "usage" object instead (usage.cost, or response.usage.cost for the
+	// native Responses API) -- OpenRouter's usage.cost convention. Independent
+	// of response_cost_mode: unlike the header, body injection also works for
+	// streaming responses, since the cost becomes known exactly when the
+	// final usage chunk is read rather than only after headers are already
+	// committed. Set via the response_cost_in_body field.
+	ReturnResponseCostInBody bool `yaml:"-"`
 }
 
 func (p *OrganizationPolicyConfig) UnmarshalYAML(value *yaml.Node) error {
@@ -32,20 +78,26 @@ func (p *OrganizationPolicyConfig) UnmarshalYAML(value *yaml.Node) error {
 	}
 
 	allowedFields := map[string]struct{}{
-		"organization_id":     {},
-		"price_profile_id":    {},
-		"model_prices_link":   {},
-		"model_allowlist":     {},
-		"model_mappings":      {},
-		"credential_denylist": {},
+		"organization_id":       {},
+		"price_profile_id":      {},
+		"model_prices_link":     {},
+		"model_allowlist":       {},
+		"model_mappings":        {},
+		"credential_denylist":   {},
+		"return_response_cost":  {},
+		"response_cost_mode":    {},
+		"response_cost_in_body": {},
 	}
 
 	var raw struct {
-		OrganizationID     string   `yaml:"organization_id"`
-		PriceProfileID     string   `yaml:"price_profile_id"`
-		ModelPricesLink    string   `yaml:"model_prices_link"`
-		ModelAllowlist     []string `yaml:"model_allowlist,omitempty"`
-		CredentialDenylist []string `yaml:"credential_denylist,omitempty"`
+		OrganizationID           string   `yaml:"organization_id"`
+		PriceProfileID           string   `yaml:"price_profile_id"`
+		ModelPricesLink          string   `yaml:"model_prices_link"`
+		ModelAllowlist           []string `yaml:"model_allowlist,omitempty"`
+		CredentialDenylist       []string `yaml:"credential_denylist,omitempty"`
+		ReturnResponseCost       *bool    `yaml:"return_response_cost,omitempty"`
+		ResponseCostMode         string   `yaml:"response_cost_mode,omitempty"`
+		ReturnResponseCostInBody bool     `yaml:"response_cost_in_body,omitempty"`
 	}
 	mappings := make(map[string]string)
 
@@ -99,6 +151,25 @@ func (p *OrganizationPolicyConfig) UnmarshalYAML(value *yaml.Node) error {
 		p.CredentialDenylist = append(p.CredentialDenylist, credentialName)
 	}
 	p.ModelMappings = mappings
+	// response_cost_mode wins when set; the legacy boolean is the fallback.
+	if raw.ResponseCostMode != "" {
+		mode, err := ParseResponseCostMode(raw.ResponseCostMode)
+		if err != nil {
+			return err
+		}
+		p.ResponseCostMode = mode
+		p.ReturnResponseCost = mode != ResponseCostModeOff
+	} else if raw.ReturnResponseCost != nil {
+		p.ReturnResponseCost = *raw.ReturnResponseCost
+		if *raw.ReturnResponseCost {
+			p.ResponseCostMode = ResponseCostModeTotal
+		} else {
+			p.ResponseCostMode = ResponseCostModeOff
+		}
+	} else {
+		p.ResponseCostMode = ResponseCostModeOff
+	}
+	p.ReturnResponseCostInBody = raw.ReturnResponseCostInBody
 	return nil
 }
 

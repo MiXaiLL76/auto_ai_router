@@ -35,6 +35,13 @@ type TokenUsage struct {
 	CacheCreationTokens    int
 	CacheCreation5mTokens  int
 	CacheCreation1hTokens  int
+	// CacheCreation12hTokens is the 12-hour cache-write tier (OpenAI's
+	// prompt_cache_retention:"12h", reported in
+	// usage.prompt_tokens_details.cache_write_tokens_details.ttl_12h_tokens).
+	// It is a separate tier from the 30-minute/5m and 1h writes because it is
+	// priced apart, and a single request may carry both at once — so each tier
+	// is billed at its own rate rather than one rate chosen by the top TTL.
+	CacheCreation12hTokens int
 	// CacheType is the explicit-cache mode marker from
 	// usage.prompt_tokens_details.cache_type (Alibaba/Qwen returns
 	// CacheTypeExplicit when the request ran with an explicit cache marker).
@@ -54,6 +61,10 @@ type TokenUsage struct {
 	OutputImageTokens        int // Generated image/video tokens
 	WebSearchRequests        int // Built-in web search tool calls/requests
 	WebSearchContextSize     string
+	// WebFetchRequests counts the billable built-in web fetches: a fetch the
+	// router executed that returned page content. A failed or empty fetch is
+	// not billable and is not counted here.
+	WebFetchRequests int
 	// ImageBilling carries per-image pricing inputs for image generation/edit
 	// requests (nil otherwise). A pointer keeps TokenUsage comparable.
 	ImageBilling *ImageBillingDetails
@@ -87,6 +98,11 @@ type TokenUsage struct {
 	// us (xAI usage.cost_in_usd_ticks, aggregators' usage.cost). It is kept
 	// for reconciliation only and never added to the billed price.
 	ProviderCostUSD float64
+	// InitialPromptTokens is the prompt of the first upstream request when a
+	// generation was continued over several (Gemini long decode): PromptTokens
+	// then sums every request's prompt, which re-reads the output so far, while
+	// this stays the size of the context the client sent. Logged, never billed.
+	InitialPromptTokens int
 }
 
 // HasServerToolUsage reports whether the per-tool counters are worth logging:
@@ -154,14 +170,20 @@ func (tu *TokenUsage) Normalize() *TokenUsage {
 	tu.CacheCreationTokens = converterutil.NonNegativeTokenCount(tu.CacheCreationTokens)
 	tu.CacheCreation5mTokens = converterutil.NonNegativeTokenCount(tu.CacheCreation5mTokens)
 	tu.CacheCreation1hTokens = converterutil.NonNegativeTokenCount(tu.CacheCreation1hTokens)
+	tu.CacheCreation12hTokens = converterutil.NonNegativeTokenCount(tu.CacheCreation12hTokens)
 	if tu.CacheCreationTokens == 0 {
-		tu.CacheCreationTokens = tu.CacheCreation5mTokens + tu.CacheCreation1hTokens
+		tu.CacheCreationTokens = tu.CacheCreation5mTokens + tu.CacheCreation1hTokens + tu.CacheCreation12hTokens
 	}
+	// Each TTL tier is capped so the three can never together bill more than the
+	// aggregate: 5m first, then 1h, then 12h takes whatever remains.
 	if tu.CacheCreation5mTokens > tu.CacheCreationTokens {
 		tu.CacheCreation5mTokens = tu.CacheCreationTokens
 	}
 	if tu.CacheCreation1hTokens > tu.CacheCreationTokens-tu.CacheCreation5mTokens {
 		tu.CacheCreation1hTokens = tu.CacheCreationTokens - tu.CacheCreation5mTokens
+	}
+	if tu.CacheCreation12hTokens > tu.CacheCreationTokens-tu.CacheCreation5mTokens-tu.CacheCreation1hTokens {
+		tu.CacheCreation12hTokens = tu.CacheCreationTokens - tu.CacheCreation5mTokens - tu.CacheCreation1hTokens
 	}
 	tu.CachedOutputTokens = converterutil.NonNegativeTokenCount(tu.CachedOutputTokens)
 	tu.OutputTextTokens = converterutil.NonNegativeTokenCount(tu.OutputTextTokens)
@@ -173,6 +195,7 @@ func (tu *TokenUsage) Normalize() *TokenUsage {
 	tu.VideoInputTokens = converterutil.NonNegativeTokenCount(tu.VideoInputTokens)
 	tu.OutputImageTokens = converterutil.NonNegativeTokenCount(tu.OutputImageTokens)
 	tu.WebSearchRequests = converterutil.NonNegativeTokenCount(tu.WebSearchRequests)
+	tu.WebFetchRequests = converterutil.NonNegativeTokenCount(tu.WebFetchRequests)
 	if tu.WebSearchRequests > 0 || tu.WebSearchContextSize != "" {
 		tu.WebSearchContextSize = NormalizeWebSearchContextSize(tu.WebSearchContextSize)
 	}
@@ -255,6 +278,9 @@ func (tu *TokenUsage) MergeNonZero(src *TokenUsage) {
 	if src.CacheCreation1hTokens != 0 {
 		tu.CacheCreation1hTokens = src.CacheCreation1hTokens
 	}
+	if src.CacheCreation12hTokens != 0 {
+		tu.CacheCreation12hTokens = src.CacheCreation12hTokens
+	}
 	if src.CacheType != "" {
 		tu.CacheType = src.CacheType
 	}
@@ -290,6 +316,9 @@ func (tu *TokenUsage) MergeNonZero(src *TokenUsage) {
 	}
 	if src.ImageBilling != nil {
 		tu.ImageBilling = src.ImageBilling
+	}
+	if src.InitialPromptTokens != 0 {
+		tu.InitialPromptTokens = src.InitialPromptTokens
 	}
 	tu.MergeUsageExtensions(src)
 }
@@ -334,6 +363,11 @@ func (tu *TokenUsage) mergeToolUsage(src *TokenUsage) {
 	}
 	tu.ServerToolUsageReported = replace
 	mergeToolCounter(&tu.WebSearchRequests, src.WebSearchRequests, replace)
+	// WebFetchRequests is the router's own count of the fetches it executed,
+	// never a provider-reported counter, so it is added rather than replaced:
+	// a provider's zero must not erase the fetches the router already billed
+	// for, and two sources of the same figure must not add up to twice it.
+	tu.WebFetchRequests += converterutil.NonNegativeTokenCount(src.WebFetchRequests)
 	srcCounters := src.serverToolCounters()
 	for i, counter := range tu.serverToolCounters() {
 		mergeToolCounter(counter, *srcCounters[i], replace)
@@ -371,6 +405,10 @@ type TokenCosts struct {
 	ImageCost               float64
 	VideoInputCost          float64
 	WebSearchCost           float64
+	// WebFetchCost is the built-in web fetch charge: billed per successful
+	// call (a fetch that returned page content), never by tokens, and part of
+	// TotalCost exactly once.
+	WebFetchCost float64
 	// Built-in server-side tool charges other than web search. Each is billed
 	// per unit (call, fetched X post/profile, generated image), never by
 	// tokens, and is part of TotalCost exactly once.

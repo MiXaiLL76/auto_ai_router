@@ -28,6 +28,15 @@ type OrganizationPolicy struct {
 	ModelPricesLink string
 	ProfileSHA256   string
 	AllowlistSet    bool
+	// ResponseCostMode selects how much of the request's billed cost this
+	// organization receives in the response headers: off, total (X-Total-Cost),
+	// or breakdown (X-Total-Cost and X-Cost-Breakdown).
+	ResponseCostMode config.ResponseCostMode
+	// ReturnResponseCostInBody adds the same cost to the response body's
+	// "usage" object instead (see config.OrganizationPolicyConfig's own doc
+	// comment) -- independent of ResponseCostMode, and the only one of the
+	// two that also works for streaming responses.
+	ReturnResponseCostInBody bool
 
 	allowlist          map[string]struct{}
 	mappings           map[string]string
@@ -93,8 +102,10 @@ func LoadOrganizationPolicies(
 	for _, cfg := range policies {
 		if cfg.PriceProfileID == "" {
 			registry.byOrganization[cfg.OrganizationID] = &OrganizationPolicy{
-				OrganizationID:     cfg.OrganizationID,
-				credentialDenylist: append([]string(nil), cfg.CredentialDenylist...),
+				OrganizationID:           cfg.OrganizationID,
+				ResponseCostMode:         cfg.ResponseCostMode,
+				ReturnResponseCostInBody: cfg.ReturnResponseCostInBody,
+				credentialDenylist:       append([]string(nil), cfg.CredentialDenylist...),
 			}
 			continue
 		}
@@ -116,15 +127,17 @@ func LoadOrganizationPolicies(
 		profiles[cfg.PriceProfileID] = identity
 
 		policy := &OrganizationPolicy{
-			OrganizationID:     cfg.OrganizationID,
-			PriceProfileID:     cfg.PriceProfileID,
-			ModelPricesLink:    cfg.ModelPricesLink,
-			ProfileSHA256:      identity.sha256,
-			AllowlistSet:       cfg.AllowlistSet,
-			allowlist:          make(map[string]struct{}, len(cfg.ModelAllowlist)),
-			mappings:           make(map[string]string, len(cfg.ModelMappings)),
-			prices:             priceRows,
-			credentialDenylist: append([]string(nil), cfg.CredentialDenylist...),
+			OrganizationID:           cfg.OrganizationID,
+			PriceProfileID:           cfg.PriceProfileID,
+			ModelPricesLink:          cfg.ModelPricesLink,
+			ProfileSHA256:            identity.sha256,
+			AllowlistSet:             cfg.AllowlistSet,
+			ResponseCostMode:         cfg.ResponseCostMode,
+			ReturnResponseCostInBody: cfg.ReturnResponseCostInBody,
+			allowlist:                make(map[string]struct{}, len(cfg.ModelAllowlist)),
+			mappings:                 make(map[string]string, len(cfg.ModelMappings)),
+			prices:                   priceRows,
+			credentialDenylist:       append([]string(nil), cfg.CredentialDenylist...),
 		}
 		for _, modelID := range cfg.ModelAllowlist {
 			policy.allowlist[modelID] = struct{}{}
@@ -152,6 +165,27 @@ func LoadOrganizationPolicies(
 
 func (p *OrganizationPolicy) HasCustomPricing() bool {
 	return p != nil && p.PriceProfileID != ""
+}
+
+// ReturnsResponseCost reports whether this organization opted into receiving the
+// request's billed cost in the response headers (X-Total-Cost, and the breakdown
+// for the breakdown mode).
+func (p *OrganizationPolicy) ReturnsResponseCost() bool {
+	return p != nil && p.ResponseCostMode != "" && p.ResponseCostMode != config.ResponseCostModeOff
+}
+
+// ReturnsCostBreakdown reports whether this organization opted into the full
+// per-component breakdown (X-Cost-Breakdown) in addition to X-Total-Cost.
+func (p *OrganizationPolicy) ReturnsCostBreakdown() bool {
+	return p != nil && p.ResponseCostMode == config.ResponseCostModeBreakdown
+}
+
+// ReturnsCostInBody reports whether this organization opted into having the
+// final, margin-adjusted request cost added to the response body's "usage"
+// object (usage.cost / response.usage.cost), OpenRouter-style. Independent
+// of ReturnsResponseCost/ReturnsCostBreakdown, which gate the header form.
+func (p *OrganizationPolicy) ReturnsCostInBody() bool {
+	return p != nil && p.ReturnResponseCostInBody
 }
 
 func (p *OrganizationPolicy) CredentialDenylist() []string {
@@ -605,7 +639,8 @@ func validateStrictToolAndModePricing(price *ModelPrice) error {
 		if !isAlias {
 			canonical = tool
 		}
-		if canonical != ToolCodeExecution && canonical != ToolAttachmentSearch && canonical != ToolCollectionsSearch {
+		if canonical != ToolCodeExecution && canonical != ToolAttachmentSearch &&
+			canonical != ToolCollectionsSearch && canonical != ToolWebFetch {
 			return fmt.Errorf("tool_cost_per_call: unknown tool %q", tool)
 		}
 		if cost < 0 {

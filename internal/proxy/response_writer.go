@@ -279,6 +279,14 @@ func statusCodeFromErrorSignals(signals []string) int {
 			return http.StatusTooManyRequests
 		case strings.Contains(signal, "timeout"):
 			return http.StatusRequestTimeout
+		case strings.Contains(signal, "content_policy") || strings.Contains(signal, "content policy"):
+			// The provider refused the prompt/answer on content-policy grounds.
+			// That is a fault of the request, not of the credential or the
+			// upstream connection: every credential refuses the same content, so
+			// it must surface as a 400 -- which the retry policy also treats as
+			// non-retryable via its "content policy" marker -- instead of a
+			// generic 502 that both hides the cause and triggers a retry storm.
+			return http.StatusBadRequest
 		case strings.Contains(signal, "overloaded") || strings.Contains(signal, "service_unavailable"):
 			return http.StatusServiceUnavailable
 		case strings.Contains(signal, "server_error") || strings.Contains(signal, "internal"):
@@ -288,8 +296,19 @@ func statusCodeFromErrorSignals(signals []string) int {
 	return http.StatusBadGateway
 }
 
-func writeProviderStreamErrorBeforeCommit(w http.ResponseWriter, statusCode int, requestID string) {
-	body := maskedUpstreamErrorBody(statusCode, requestID)
+// writeProviderStreamErrorBeforeCommit writes the client-facing error for a
+// terminal stream error caught before any byte reached the client. payload is
+// the provider's own terminal error event; when present it is classified into
+// the same fixed message/code a non-streaming error of that status would get
+// (e.g. a content-policy refusal becomes a 400 "content policy" message),
+// without ever echoing the provider's free text.
+func writeProviderStreamErrorBeforeCommit(w http.ResponseWriter, statusCode int, requestID string, payload string) {
+	var body []byte
+	if payload != "" {
+		body = maskedUpstreamErrorBody(statusCode, requestID, []byte(payload))
+	} else {
+		body = maskedUpstreamErrorBody(statusCode, requestID)
+	}
 	header := w.Header()
 	header.Set("Content-Type", "application/json")
 	header.Set("Content-Length", itoa(len(body)))
@@ -631,7 +650,7 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 		)
 		if err != nil && p.drainUpstreamOnAbort {
 			// Drain upstream so the usage chunk arrives even though the client left.
-			drainCtx, cancel := context.WithTimeout(context.Background(), streamDrainTimeout)
+			drainCtx, cancel := context.WithTimeout(context.Background(), StreamDrainTimeout)
 			defer cancel()
 
 			p.drainUpstream(

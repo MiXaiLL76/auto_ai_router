@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/scope"
 )
 
@@ -237,7 +238,15 @@ func (p *Proxy) TryFallbackProxy(
 		maxAttempts = defaultMaxFallbackAttempts
 	}
 
+	// System One never streams, so no streaming entry path armed the prompt
+	// estimate that systemOneUsage bills a reply without usage on; in
+	// writeFallbackResponse it has no request body of its own.
+	if logCtx != nil && logCtx.IsSystemOne {
+		p.setPromptTokensEstimate(logCtx, body, modelID)
+	}
+
 	exitReason := "no_fallback_available"
+	attemptReason := originalReason
 	var lastProxyResp *ProxyResponse
 	var lastFallbackCred *config.CredentialConfig
 
@@ -319,8 +328,10 @@ func (p *Proxy) TryFallbackProxy(
 		// Add jitter (0-50ms) to prevent thundering herd when multiple requests fail simultaneously
 		jitter := time.Duration(rand.IntN(50)) * time.Millisecond
 		time.Sleep(jitter)
+		httputil.AttemptsFrom(r.Context()).Next(httputil.AttemptFallback, string(attemptReason))
 		proxyResp, fwdErr := p.forwardToProxy(w, r, modelID, fallbackCred, body, start, logCtx)
 		if fwdErr != nil {
+			attemptReason = RetryReasonNetErr
 			// Mid-chain failure — the next fallback is tried; the final outcome
 			// is logged at ERROR when the response is written to the client.
 			p.logger.WarnContext(r.Context(), "Fallback proxy request failed, trying next fallback",
@@ -346,10 +357,11 @@ func (p *Proxy) TryFallbackProxy(
 			return p.writeFallbackResponse(w, r, proxyResp, fallbackCred, modelID, originalCredName, logCtx, start)
 		}
 
-		shouldRetry, _ := p.shouldRetry(fallbackCred, proxyResp.StatusCode, proxyResp.Body)
+		shouldRetry, retryReason := p.shouldRetry(fallbackCred, proxyResp.StatusCode, proxyResp.Body)
 		if !shouldRetry {
 			return p.writeFallbackResponse(w, r, proxyResp, fallbackCred, modelID, originalCredName, logCtx, start)
 		}
+		attemptReason = retryReason
 
 		p.logger.WarnContext(r.Context(), "Fallback credential returned retryable error, trying next fallback",
 			"fallback_credential", fallbackCred.Name,
@@ -497,6 +509,7 @@ func (p *Proxy) writeFallbackResponse(
 		// decode, not derived from each other — see
 		// converter.ExtractTotalTokensAndUsageWithOptions's doc comment.
 		tokens, usage := extractOpenAITokensAndUsage(proxyResp.Body, usageOptions)
+		tokens, usage = p.systemOneUsage(r.Context(), logCtx, fallbackCred.Name, proxyResp.StatusCode, nil, modelID, tokens, usage)
 		if logCtx != nil {
 			logCtx.TokenUsage = usage
 			if logCtx.IsImageGeneration && proxyResp.StatusCode < http.StatusBadRequest {

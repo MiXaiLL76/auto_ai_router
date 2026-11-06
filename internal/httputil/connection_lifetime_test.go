@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -163,11 +164,40 @@ func TestLifetimeTransport_NoRequestOnAConnectionOlderThanItsLifetime(t *testing
 }
 
 // connectProxy is an HTTP CONNECT proxy, the egress path's shape: it counts
-// the tunnels it holds open.
+// the tunnels it holds open and keeps the headers of the CONNECTs it got.
 type connectProxy struct {
 	listener net.Listener
 	open     atomic.Int32
 	total    atomic.Int32
+
+	mu       sync.Mutex
+	connects []http.Header
+	via      string        // its Via on the reply to a CONNECT, none when empty
+	timing   string        // its Server-Timing on that reply, none when empty
+	takes    time.Duration // how long it takes to reply
+	refuse   int           // the status it refuses every CONNECT with, when not 0
+}
+
+// times sets what the proxy says of its time on the replies to the CONNECTs
+// that follow (Server-Timing), and how long it takes to reply.
+func (p *connectProxy) times(serverTiming string, takes time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.timing, p.takes = serverTiming, takes
+}
+
+// answer sets how the proxy replies to the CONNECTs that follow: with this
+// Via, and with this status instead of a tunnel when it is not 0.
+func (p *connectProxy) answer(via string, refuse int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.via, p.refuse = via, refuse
+}
+
+func (p *connectProxy) connectHeaders() []http.Header {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]http.Header(nil), p.connects...)
 }
 
 func newConnectProxy(t *testing.T) *connectProxy {
@@ -194,6 +224,21 @@ func (p *connectProxy) tunnel(client net.Conn) {
 	if err != nil || req.Method != http.MethodConnect {
 		return
 	}
+	p.mu.Lock()
+	p.connects = append(p.connects, req.Header.Clone())
+	said, refuse, takes := "", p.refuse, p.takes
+	if p.via != "" {
+		said += "Via: " + p.via + "\r\n"
+	}
+	if p.timing != "" {
+		said += "Server-Timing: " + p.timing + "\r\n"
+	}
+	p.mu.Unlock()
+	time.Sleep(takes)
+	if refuse != 0 {
+		_, _ = io.WriteString(client, "HTTP/1.1 "+strconv.Itoa(refuse)+" Refused\r\n"+said+"\r\n")
+		return
+	}
 	upstream, err := net.Dial("tcp", req.Host)
 	if err != nil {
 		_, _ = io.WriteString(client, "HTTP/1.1 502 Bad Gateway\r\n\r\n")
@@ -203,7 +248,7 @@ func (p *connectProxy) tunnel(client net.Conn) {
 	p.total.Add(1)
 	p.open.Add(1)
 	defer p.open.Add(-1)
-	_, _ = io.WriteString(client, "HTTP/1.1 200 Connection established\r\n\r\n")
+	_, _ = io.WriteString(client, "HTTP/1.1 200 Connection established\r\n"+said+"\r\n")
 	done := make(chan struct{}, 2)
 	go func() { _, _ = io.Copy(upstream, client); done <- struct{}{} }()
 	go func() { _, _ = io.Copy(client, upstream); done <- struct{}{} }()
