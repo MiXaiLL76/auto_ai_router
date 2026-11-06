@@ -218,3 +218,31 @@ func TestAttemptTimeout_RealSlowProvider_Bans(t *testing.T) {
 	assert.True(t, prx.balancer.IsBanned("silent-cred", "gpt-4"),
 		"a provider that never sends headers must be banned for this model")
 }
+
+// TestNew_StreamingClientSharesClientWhenDisabled is the regression test for
+// the 2026-11-06 gpt-6-luna incident: with response_header_timeout disabled
+// (the default), client and streamingClient were still built as two
+// completely separate *http.Client (two separate Transports, two separate
+// idle-connection pools), each handed only half of MaxIdleConns/
+// MaxIdleConnsPerHost. force_stream_for_ttft routes nearly all chat traffic
+// through streamingClient, so that halving cut real idle-connection capacity
+// for busy models fleet-wide the moment this feature merged -- entirely
+// independent of whether ResponseHeaderTimeout ever actually fired. With the
+// feature off there is no reason for a second pool at all: both clients fall
+// back to the identical Timeout for ResponseHeaderTimeout, so streamingClient
+// must be the literal same *http.Client as client, not a look-alike copy.
+func TestNew_StreamingClientSharesClientWhenDisabled(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	assert.Same(t, prx.client, prx.streamingClient,
+		"with response_header_timeout disabled, streamingClient must be the exact same *http.Client as client -- a separate pool here silently halves real idle-connection capacity for no benefit")
+}
+
+// TestNew_StreamingClientDistinctWhenEnabled is the flip side: once the
+// feature is actually opted into, the two clients must carry different
+// ResponseHeaderTimeout budgets, which Go only allows via separate
+// Transports -- so they must NOT be collapsed to the same object here.
+func TestNew_StreamingClientDistinctWhenEnabled(t *testing.T) {
+	prx := NewTestProxyBuilder().WithResponseHeaderTimeout(4 * time.Second).Build()
+	assert.NotSame(t, prx.client, prx.streamingClient,
+		"with response_header_timeout enabled, streamingClient needs its own Transport to carry a different ResponseHeaderTimeout")
+}

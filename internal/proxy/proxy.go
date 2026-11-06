@@ -597,6 +597,19 @@ func New(cfg *Config) *Proxy {
 	httpClientCfg.HTTP2PingTimeout = cfg.HTTP2PingTimeout
 	httpClientCfg.MaxConnectionLifetime = cfg.MaxConnectionLifetime
 
+	// responseHeaderTimeoutEnabled: the feature is opt-in (see the field's own
+	// doc comment on Proxy). With it disabled, client and streamingClient
+	// would be built with byte-for-byte identical configs (both fall back to
+	// the same Timeout for ResponseHeaderTimeout) -- there is then no reason
+	// to pay for a second Transport/idle-connection pool at all, so
+	// streamingClient is literally the same *http.Client as client below.
+	// Splitting the pool unconditionally here was a real incident (gpt-6-luna,
+	// 2026-11-06): force_stream_for_ttft routes nearly all chat traffic
+	// through streamingClient, so halving its MaxIdleConnsPerHost cut real
+	// capacity for busy models even though the ban feature itself was still
+	// off -- had nothing to do with ResponseHeaderTimeout ever firing.
+	responseHeaderTimeoutEnabled := cfg.ResponseHeaderTimeout > 0
+
 	// streamingClientCfg is identical except for ResponseHeaderTimeout: used only
 	// for attempts whose outbound body actually carries "stream": true (the
 	// client asked for it, or force_stream_for_ttft injected it) — there, a
@@ -608,15 +621,25 @@ func New(cfg *Config) *Proxy {
 	// It gets its own idle-connection pool (http.Transport.Clone can't help:
 	// ResponseHeaderTimeout is enforced per-Transport, and the idle pool is
 	// owned by the Transport, so two different timeouts mean two different
-	// pools, unavoidably) — split the configured budget between the two
-	// rather than handing each the full amount, so adding this client doesn't
-	// silently double total idle connections kept open per replica.
-	streamingClientCfg := *httpClientCfg
-	streamingClientCfg.ResponseHeaderTimeout = cfg.ResponseHeaderTimeout
-	streamingClientCfg.MaxIdleConns = httpClientCfg.MaxIdleConns / 2
-	streamingClientCfg.MaxIdleConnsPerHost = httpClientCfg.MaxIdleConnsPerHost / 2
-	httpClientCfg.MaxIdleConns -= streamingClientCfg.MaxIdleConns
-	httpClientCfg.MaxIdleConnsPerHost -= streamingClientCfg.MaxIdleConnsPerHost
+	// pools, unavoidably) — split the configured budget between the two,
+	// rather than handing each the full amount, so enabling this doesn't
+	// silently double total idle connections kept open per replica. Only
+	// reached when the feature is actually enabled -- see above.
+	var streamingClientCfg httputil.HTTPClientConfig
+	if responseHeaderTimeoutEnabled {
+		streamingClientCfg = *httpClientCfg
+		streamingClientCfg.ResponseHeaderTimeout = cfg.ResponseHeaderTimeout
+		streamingClientCfg.MaxIdleConns = httpClientCfg.MaxIdleConns / 2
+		streamingClientCfg.MaxIdleConnsPerHost = httpClientCfg.MaxIdleConnsPerHost / 2
+		httpClientCfg.MaxIdleConns -= streamingClientCfg.MaxIdleConns
+		httpClientCfg.MaxIdleConnsPerHost -= streamingClientCfg.MaxIdleConnsPerHost
+	}
+
+	client := httputil.NewHTTPClient(httpClientCfg)
+	streamingClient := client
+	if responseHeaderTimeoutEnabled {
+		streamingClient = httputil.NewHTTPClient(&streamingClientCfg)
+	}
 
 	// Compute max response body size from multiplier
 	multiplier := cfg.ResponseBodyMultiplier
@@ -702,9 +725,9 @@ func New(cfg *Config) *Proxy {
 		serverWriteTimeout:               cfg.ServerWriteTimeout,
 		keyMetrics:                       cfg.KeyMetrics,
 		responseCompat:                   responseCompat,
-		client:                           httputil.NewHTTPClient(httpClientCfg),
-		streamingClient:                  httputil.NewHTTPClient(&streamingClientCfg),
-		responseHeaderTimeoutEnabled:     cfg.ResponseHeaderTimeout > 0,
+		client:                           client,
+		streamingClient:                  streamingClient,
+		responseHeaderTimeoutEnabled:     responseHeaderTimeoutEnabled,
 		version:                          cfg.Version,
 		commit:                           cfg.Commit,
 		serviceName:                      cfg.ServiceName,
