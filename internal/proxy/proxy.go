@@ -267,14 +267,20 @@ func (logCtx *RequestLogContext) spendModelGroup() string {
 // RequestLogContext holds all data needed for logging a request to LiteLLM DB
 // Filled throughout request processing and logged at the end via defer
 type RequestLogContext struct {
-	RequestID             string                   // Internal request UUID; may be adopted from a trusted inbound traceparent (see requestid.Middleware), so two distinct requests can share this value
-	EventID               string                   // Always server-minted, never client-influenced; used as AirEventID so spend-log collision resolution stays meaningful even when RequestID collides
-	ClientResponseID      string                   // ID returned to the client
-	StartTime             time.Time                // Request start time
-	CompletionStartTime   time.Time                // Timestamp of the first real content/tool/reasoning delta (TTFT), not just the first byte/chunk; zero if not streamed or never reached
-	UpstreamSendTime      time.Time                // Timestamp of the first request handed to an upstream provider (first attempt only; retries do not overwrite). Zero when the request never reached a provider (e.g. all credentials exhausted before send). Together with StartTime this breaks duration_ms into router processing time and upstream time.
-	Request               *http.Request            // HTTP request
-	Token                 string                   // Auth token (raw, will be hashed)
+	RequestID           string        // Internal request UUID; may be adopted from a trusted inbound traceparent (see requestid.Middleware), so two distinct requests can share this value
+	EventID             string        // Always server-minted, never client-influenced; used as AirEventID so spend-log collision resolution stays meaningful even when RequestID collides
+	ClientResponseID    string        // ID returned to the client
+	StartTime           time.Time     // Request start time
+	CompletionStartTime time.Time     // Timestamp of the first real content/tool/reasoning delta (TTFT), not just the first byte/chunk; zero if not streamed or never reached
+	UpstreamSendTime    time.Time     // Timestamp of the first request handed to an upstream provider (first attempt only; retries do not overwrite). Zero when the request never reached a provider (e.g. all credentials exhausted before send). Together with StartTime this breaks duration_ms into router processing time and upstream time.
+	Request             *http.Request // HTTP request
+	Token               string        // Auth token (raw, will be hashed)
+	// DeepSeekToolUsage is the router-run search/fetch loop's own usage: the
+	// summed tokens of its steps and its tool counters. It is applied to the
+	// request's usage after the streaming log has written its figures, so the
+	// loop's steps are billed (the log reads the last chunk's usage, which
+	// carries only the last step's).
+	DeepSeekToolUsage     *converter.TokenUsage
 	PublicModelID         string                   // Client-facing model before alias resolution
 	CanonicalModelID      string                   // Organization canonical public model after scoped admission
 	ModelID               string                   // Model alias name (what client requested)
@@ -3015,6 +3021,11 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		// fetches) and its summed token counts ride alongside the provider's
 		// usage: the loop made several upstream requests, and the client is
 		// charged for all of them.
+		// The loop's usage is applied to the request's own usage here: the
+		// spend log (written in the deferred call) reads it from there.
+		if logCtx.TokenUsage == nil {
+			logCtx.TokenUsage = &converter.TokenUsage{}
+		}
 		applyDeepSeekToolUsageTo(logCtx.TokenUsage, deepSeekToolUsage)
 		logCtx.Status = "success"
 		logCtx.HTTPStatus = resp.StatusCode

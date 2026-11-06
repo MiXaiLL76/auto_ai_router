@@ -38,6 +38,20 @@ const (
 	FetchPath = "/v1/tools/fetch"
 )
 
+// endpointPath returns the URL of a tool endpoint for a base URL.
+//
+// The endpoints live under /v1, but a credential's base URL may already end
+// with it (https://api.deepseek.com/v1) or not
+// (https://api.deepseek.com): appending the path verbatim would ask for
+// /v1/v1/tools/search on the second kind.
+func endpointPath(baseURL, path string) string {
+	base := strings.TrimSuffix(baseURL, "/")
+	if strings.HasSuffix(base, "/v1") {
+		return base + strings.TrimPrefix(path, "/v1")
+	}
+	return base + path
+}
+
 // ClientConfig configures a Client.
 type ClientConfig struct {
 	// BaseURL is the credential's base URL (https://api.deepseek.com or
@@ -144,7 +158,7 @@ func (c *Client) do(ctx context.Context, path string, body any) (int, []byte, er
 	if err != nil {
 		return 0, nil, fmt.Errorf("deepseektools: encoding request: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(encoded))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointPath(c.baseURL, path), bytes.NewReader(encoded))
 	if err != nil {
 		return 0, nil, fmt.Errorf("deepseektools: building upstream request: %w", err)
 	}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -73,12 +74,12 @@ func collectDeepSeekStreamToolCalls(resp *http.Response) ([]byte, []deepSeekStre
 		}
 		for _, choice := range chunk.Choices {
 			for _, delta := range choice.Delta.ToolCalls {
-				key := delta.ID
-				if key == "" {
-					// A streamed tool call's arguments arrive in pieces under
-					// the same index; the id may only be on the first piece.
-					key = "index:" + string(rune('0'+delta.Index))
-				}
+				// A streamed tool call's pieces arrive under the same index:
+				// the id and the name only on the first piece, the arguments
+				// split across the rest. The index is therefore the key --
+				// the id is not (a later piece may carry it empty, and two
+				// calls may share one id in a provider's stream).
+				key := strconv.Itoa(delta.Index)
 				call, seen := calls[key]
 				if !seen {
 					call = &deepSeekStreamToolCall{ID: delta.ID}
@@ -281,33 +282,12 @@ func (p *Proxy) runDeepSeekStreamToolStep(
 
 // deepSeekToolCallsFromStream reads the tool calls out of a buffered stream.
 func deepSeekToolCallsFromStream(raw []byte) ([]deepSeekStreamToolCall, error) {
-	var calls []deepSeekStreamToolCall
-	for _, payload := range splitSSEPayloads(raw, nil) {
-		var chunk struct {
-			Choices []struct {
-				Delta struct {
-					ToolCalls []struct {
-						ID       string `json:"id"`
-						Function struct {
-							Name      string `json:"name"`
-							Arguments string `json:"arguments"`
-						} `json:"function"`
-					} `json:"tool_calls"`
-				} `json:"delta"`
-			} `json:"choices"`
-		}
-		if err := json.Unmarshal(payload, &chunk); err != nil {
-			continue
-		}
-		for _, choice := range chunk.Choices {
-			for _, delta := range choice.Delta.ToolCalls {
-				calls = append(calls, deepSeekStreamToolCall{
-					ID:        delta.ID,
-					Name:      delta.Function.Name,
-					Arguments: delta.Function.Arguments,
-				})
-			}
-		}
+	// The pieces of one streamed tool call arrive under the same index: the id
+	// and the name only on the first piece, the arguments split across the
+	// rest. The collector folds them back into one call per index.
+	_, calls, _, err := collectDeepSeekStreamToolCalls(&http.Response{Body: io.NopCloser(bytes.NewReader(raw))})
+	if err != nil {
+		return nil, err
 	}
 	return calls, nil
 }

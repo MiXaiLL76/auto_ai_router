@@ -514,6 +514,51 @@ func TestDeepSeekFetchIsBilled(t *testing.T) {
 	}
 }
 
+// TestDeepSeekToolLoopWithV1BaseURL checks the credential whose base URL
+// already ends with /v1: the tool endpoints live under /v1, so the path must
+// not be doubled.
+func TestDeepSeekToolLoopWithV1BaseURL(t *testing.T) {
+	fake := &deepSeekFake{
+		searchResults: []map[string]any{{
+			"title": "DeepSeek V4 released",
+			"url":   "https://example.com/v4",
+		}},
+	}
+	server := httptest.NewServer(fake.handler())
+	defer server.Close()
+	fake.baseURL = server.URL + "/v1"
+
+	prx, dbStub := deepSeekTestProxy(t, fake)
+	// The fake serves /v1/chat/completions; with the /v1 base the router
+	// asks for /v1/chat/completions too, and the tools for /v1/tools/search.
+	body := `{
+		"model": "deepseek-flash",
+		"messages": [{"role": "user", "content": "What is new in DeepSeek V4?"}],
+		"tools": [{"type": "web_search"}]
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	prx.ProxyRequest(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if fake.searchCalls != 1 {
+		t.Errorf("the router made %d search calls, want 1 (the tools path must not be doubled)", fake.searchCalls)
+	}
+	if fake.chatCalls != 2 {
+		t.Errorf("the model was called %d times, want 2", fake.chatCalls)
+	}
+	if len(dbStub.loggedEntries) != 1 {
+		t.Fatalf("got %d spend rows, want 1", len(dbStub.loggedEntries))
+	}
+	if searches, _ := toolCountsFromMetadata(t, dbStub.loggedEntries[0].Metadata); searches != 1 {
+		t.Errorf("the web search count = %d, want 1", searches)
+	}
+}
+
 // TestDeepSeekStreamingToolLoopRunsSearch checks the streaming variant: the
 // model asks for a search mid-stream, the router runs it, and the client
 // gets the final answer's stream -- not the tool call.
@@ -602,5 +647,130 @@ func TestDeepSeekStreamingToolLoopRunsSearch(t *testing.T) {
 	// Both steps' tokens.
 	if entry.PromptTokens != 300 {
 		t.Errorf("PromptTokens = %d, want 300 (both steps summed)", entry.PromptTokens)
+	}
+}
+
+// TestDeepSeekForceStreamToolLoopRunsSearch covers the path a non-streaming
+// client actually takes when the router forces stream:true upstream: the
+// provider's SSE is reassembled into the Chat JSON, and a tool call in it
+// must still be run by the router.
+func TestDeepSeekForceStreamToolLoopRunsSearch(t *testing.T) {
+	fake := &deepSeekFake{
+		searchResults: []map[string]any{{
+			"title": "DeepSeek V4 released",
+			"url":   "https://example.com/v4",
+		}},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		switch r.URL.Path {
+		case "/v1/tools/search":
+			fake.mu.Lock()
+			fake.searchCalls++
+			results := fake.searchResults
+			fake.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"results": results})
+		case "/v1/chat/completions":
+			fake.mu.Lock()
+			fake.chatCalls++
+			call := fake.chatCalls
+			var parsed map[string]json.RawMessage
+			_ = json.Unmarshal(body, &parsed)
+			fake.lastChatBody = parsed
+			fake.mu.Unlock()
+			w.Header().Set("Content-Type", "text/event-stream")
+			if call == 1 {
+				// The first stream asks for the search tool.
+				_, _ = w.Write([]byte("data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_s1","type":"function","function":{"name":"` + deepseektools.SearchToolName + `","arguments":"{\"query\":\"deepseek v4\"}"}}]}}]}` + "\n\n"))
+				_, _ = w.Write([]byte("data: " + `{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":100,"completion_tokens":10,"total_tokens":110}}` + "\n\n"))
+				_, _ = w.Write([]byte("data: [DONE]\n\n"))
+				return
+			}
+			_, _ = w.Write([]byte("data: " + `{"choices":[{"index":0,"delta":{"content":"DeepSeek V4 was released."}}]}` + "\n\n"))
+			_, _ = w.Write([]byte("data: " + `{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":200,"completion_tokens":20,"total_tokens":220}}` + "\n\n"))
+			_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	fake.baseURL = server.URL
+
+	prx, dbStub := deepSeekTestProxy(t, fake)
+	prx.forceStreamForTTFT = true
+
+	body := `{
+		"model": "deepseek-flash",
+		"messages": [{"role": "user", "content": "What is new in DeepSeek V4?"}],
+		"tools": [{"type": "web_search"}]
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	prx.ProxyRequest(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if fake.searchCalls != 1 {
+		t.Errorf("the router made %d search calls, want 1", fake.searchCalls)
+	}
+	if fake.chatCalls != 2 {
+		t.Errorf("the model was called %d times, want 2", fake.chatCalls)
+	}
+	out := rec.Body.String()
+	if !strings.Contains(out, "DeepSeek V4 was released.") {
+		t.Errorf("the client did not get the answer: %s", out)
+	}
+	if strings.Contains(out, deepseektools.SearchToolName) {
+		t.Errorf("the client saw the router's function tool: %s", out)
+	}
+	if len(dbStub.loggedEntries) != 1 {
+		t.Fatalf("got %d spend rows, want 1", len(dbStub.loggedEntries))
+	}
+	entry := dbStub.loggedEntries[0]
+	if searches, _ := toolCountsFromMetadata(t, entry.Metadata); searches != 1 {
+		t.Errorf("the web search count = %d, want 1", searches)
+	}
+	if entry.PromptTokens != 300 {
+		t.Errorf("PromptTokens = %d, want 300 (both steps summed)", entry.PromptTokens)
+	}
+}
+
+// TestDeepSeekStreamToolCallPiecesAreFolded checks that a tool call whose
+// arguments arrive in pieces is one call, not one per piece: a provider sends
+// the id and the name with the first piece and the arguments split across the
+// rest, under the same index.
+func TestDeepSeekStreamToolCallPiecesAreFolded(t *testing.T) {
+	raw := []byte("data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"deepseek_web_search","arguments":"{\"query\":"}}]}}]}` + "\n\n" +
+		"data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"deepseek"}}]}}]}` + "\n\n" +
+		"data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":" v4\"}"}}]}}]}` + "\n\n" +
+		"data: [DONE]\n\n")
+
+	calls, err := deepSeekToolCallsFromStream(raw)
+	if err != nil {
+		t.Fatalf("deepSeekToolCallsFromStream: %v", err)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("got %d calls, want 1: %+v", len(calls), calls)
+	}
+	if calls[0].ID != "call_1" {
+		t.Errorf("id = %q, want call_1", calls[0].ID)
+	}
+	if calls[0].Name != "deepseek_web_search" {
+		t.Errorf("name = %q, want deepseek_web_search", calls[0].Name)
+	}
+	if calls[0].Arguments != `{"query":"deepseek v4"}` {
+		t.Errorf("arguments = %q, want the folded JSON", calls[0].Arguments)
+	}
+	// The folded arguments must parse as the tool's arguments.
+	args, err := deepseektools.ParseSearchArguments(calls[0].Arguments)
+	if err != nil {
+		t.Fatalf("the folded arguments do not parse: %v", err)
+	}
+	if args.Query != "deepseek v4" {
+		t.Errorf("query = %q, want %q", args.Query, "deepseek v4")
 	}
 }

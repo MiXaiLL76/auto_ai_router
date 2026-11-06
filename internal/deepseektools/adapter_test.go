@@ -167,3 +167,23 @@ func TestParseArguments(t *testing.T) {
 		t.Error("a fetch without a url must be an error")
 	}
 }
+
+func TestEndpointPathForBothBaseURLForms(t *testing.T) {
+	cases := []struct {
+		base string
+		path string
+		want string
+	}{
+		{"https://api.deepseek.com", SearchPath, "https://api.deepseek.com/v1/tools/search"},
+		{"https://api.deepseek.com/", SearchPath, "https://api.deepseek.com/v1/tools/search"},
+		{"https://api.deepseek.com/v1", SearchPath, "https://api.deepseek.com/v1/tools/search"},
+		{"https://api.deepseek.com/v1/", SearchPath, "https://api.deepseek.com/v1/tools/search"},
+		{"https://api.deepseek.com", FetchPath, "https://api.deepseek.com/v1/tools/fetch"},
+		{"https://api.deepseek.com/v1", FetchPath, "https://api.deepseek.com/v1/tools/fetch"},
+	}
+	for _, tc := range cases {
+		if got := endpointPath(tc.base, tc.path); got != tc.want {
+			t.Errorf("endpointPath(%q, %q) = %q, want %q", tc.base, tc.path, got, tc.want)
+		}
+	}
+}

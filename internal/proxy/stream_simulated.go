@@ -604,6 +604,37 @@ func (p *Proxy) handleSimulatedNonStream(
 		p.metrics.RecordCredentialAttemptError(cred.Name)
 	}
 
+	// The router-run DeepSeek Search/Fetch loop: the model asked for one of
+	// the router's tools, so the router runs it and asks the model again.
+	//
+	// It runs here, on the reassembled body: a non-streaming client goes
+	// through this path when the router forces stream:true upstream, and the
+	// tool call only becomes visible after the reassembly.
+	if result.streamErr == nil && len(result.finalChatBody) > 0 {
+		assembled, loopUsage, searches, fetches, loopErr := p.deepSeekSimulatedLoop(
+			r, w, logCtx, prepared, cred, modelID, realModelID, requestBody,
+			result.finalChatBody, start, attemptedCreds)
+		switch {
+		case errors.Is(loopErr, errDeepSeekToolCycleAborted):
+			return
+		case loopErr != nil:
+			p.logger.WarnContext(r.Context(), "The router-run search/fetch loop failed",
+				"model", modelID, "credential", cred.Name, "error", loopErr,
+				"request_id", logCtx.RequestID)
+		case searches > 0 || fetches > 0:
+			result.finalChatBody = []byte(assembled)
+			// The loop's steps are separate upstream requests: their tokens
+			// are summed, and the router's own tool counters ride along.
+			// The loop's usage is applied to the request's own usage after the
+			// streaming log wrote its figures (below): the log read the last
+			// chunk's usage, which carries only the last step's.
+			logCtx.DeepSeekToolUsage = loopUsage
+			p.logger.DebugContext(r.Context(), "The router ran the model's search/fetch tools",
+				"model", modelID, "credential", cred.Name,
+				"search_calls", searches, "fetch_calls", fetches)
+		}
+	}
+
 	p.finishSimulatedNonStream(w, r, resp, prepared, cred, modelID, realModelID, logCtx, saveResponseFn, targetURL, requestBody, result, rateLimitExhausted)
 }
 
@@ -805,6 +836,11 @@ func (p *Proxy) finishSimulatedNonStream(
 	// Stream-domain logging: usage extraction from the stream, spend log, TTFT
 	// metric and kafka event — all keyed off CompletionStartTime / lastChunk.
 	p.setPromptTokensEstimate(logCtx, requestBody, realModelID)
+	// The router-run tool loop's own usage is applied inside
+	// finalizeStreamingLog (it writes the spend row synchronously from the
+	// request's usage, and it read the last chunk's figures -- which carry
+	// only the last step's, while the loop's steps are separate upstream
+	// requests the client was charged for).
 	p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerLabel, resp.StatusCode, audioInputAlreadyExcludesCachedAudio)
 
 	logCtx.RequestCompleted = true

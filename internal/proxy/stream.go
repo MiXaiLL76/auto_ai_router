@@ -1306,6 +1306,13 @@ func (p *Proxy) finalizeStreamingLogParsed(logCtx *RequestLogContext, totalToken
 		logCtx.TokenUsage.CompletionTokens = fallbackCompletion
 	}
 	logCtx.TokenUsage.Normalize()
+	// The router-run search/fetch loop's own usage wins over the figures read
+	// from the last chunk: the loop made several upstream requests, and the
+	// chunk carries only the last step's. Applied here, before the spend row
+	// is written from this usage.
+	if logCtx.DeepSeekToolUsage != nil {
+		applyDeepSeekToolUsageTo(logCtx.TokenUsage, logCtx.DeepSeekToolUsage)
+	}
 	if providerUsage {
 		logCtx.UsageSource = "provider"
 	} else if logCtx.UsageSource == "" {
