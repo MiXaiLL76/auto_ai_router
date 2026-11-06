@@ -163,11 +163,20 @@ func TestLifetimeTransport_NoRequestOnAConnectionOlderThanItsLifetime(t *testing
 }
 
 // connectProxy is an HTTP CONNECT proxy, the egress path's shape: it counts
-// the tunnels it holds open.
+// the tunnels it holds open and keeps the headers of the CONNECTs it got.
 type connectProxy struct {
 	listener net.Listener
 	open     atomic.Int32
 	total    atomic.Int32
+
+	mu       sync.Mutex
+	connects []http.Header
+}
+
+func (p *connectProxy) connectHeaders() []http.Header {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]http.Header(nil), p.connects...)
 }
 
 func newConnectProxy(t *testing.T) *connectProxy {
@@ -194,6 +203,9 @@ func (p *connectProxy) tunnel(client net.Conn) {
 	if err != nil || req.Method != http.MethodConnect {
 		return
 	}
+	p.mu.Lock()
+	p.connects = append(p.connects, req.Header.Clone())
+	p.mu.Unlock()
 	upstream, err := net.Dial("tcp", req.Host)
 	if err != nil {
 		_, _ = io.WriteString(client, "HTTP/1.1 502 Bad Gateway\r\n\r\n")

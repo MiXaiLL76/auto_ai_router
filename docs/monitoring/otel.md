@@ -71,6 +71,7 @@ When `traces_enabled` is true, the router instruments inbound and outbound HTTP 
 
 - **Server spans** are created for every API request. Health checks (`health_check_path`), readiness probes (`/health/readiness`), and metric scrapes (`/metrics`) are excluded to avoid trace noise. Spans are named `METHOD /path` (e.g. `POST /v1/chat/completions`).
 - **Client spans** are created for every outbound request to a provider or chained router, and the `traceparent` header is injected so the trace continues across hops.
+- **Tunnels through a proxy**: for a credential with a `proxy_url`, the `CONNECT` that opens a tunnel carries the `traceparent` of the client span it is opened for (W3C trace context only, never baggage), so a proxy that traces can add a span of its own to the request's trace. A pooled tunnel is opened once: the requests that reuse it send no `CONNECT`.
 
 Each server span is annotated with routing attributes:
 
@@ -82,6 +83,8 @@ Each server span is annotated with routing attributes:
 | `aar.provider`         | `openai`            | Provider type                       |
 | `aar.streaming`        | `true`              | Whether the response is streamed    |
 | `aar.request_id`       | `req_abc123`        | Internal request identifier         |
+
+The Kafka spend event carries the trace's id as `trace_id` (see [Kafka spend log](../litellm-integration/kafka_spend_log.md)), so a spend row leads to the request's trace.
 
 **Sampling** is head-based and parent-based: `trace_sample_ratio` controls the fraction of new root traces that are sampled, while decisions inherited from an upstream `traceparent` are always honored.
 

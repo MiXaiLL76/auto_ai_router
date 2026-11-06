@@ -16,6 +16,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // stubKafkaManager is a minimal kafkalog.Manager test double that records
@@ -150,6 +151,30 @@ func TestBuildKafkaSpendEvent_UsesClientResponseID(t *testing.T) {
 		"", "", "", "", "api.openai.com", "success", 0, nil, 0, logCtx.StartTime)
 
 	assert.Equal(t, "chatcmpl-client-123", event.RequestID)
+}
+
+func TestBuildKafkaSpendEvent_TraceID(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	logCtx := testLogCtx(t)
+	endTime := logCtx.StartTime.Add(time.Second)
+	build := func() *kafkalog.SpendEvent {
+		return prx.buildKafkaSpendEvent(logCtx, "openai_primary", "openai_primary:gpt-4o-mini", "hashed-token",
+			"", "", "", "", "api.openai.com", "success", 0, nil, 0, endTime)
+	}
+
+	event := build()
+	assert.Empty(t, event.TraceID, "no span on the request, no trace id")
+	payload, err := json.Marshal(event)
+	require.NoError(t, err)
+	assert.NotContains(t, string(payload), "trace_id")
+
+	sc := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID: trace.TraceID{0x4b, 0xf9, 0x2f, 0x35, 0x77, 0xb3, 0x4d, 0xa6, 0xa3, 0xce, 0x92, 0x9d, 0x0e, 0x0e, 0x47, 0x36},
+		SpanID:  trace.SpanID{0x00, 0xf0, 0x67, 0xaa, 0x0b, 0xa9, 0x02, 0xb7},
+	})
+	logCtx.Request = logCtx.Request.WithContext(trace.ContextWithSpanContext(logCtx.Request.Context(), sc))
+	assert.Equal(t, "4bf92f3577b34da6a3ce929d0e0e4736", build().TraceID,
+		"the request's span names the trace, sampled or not")
 }
 
 func TestBuildKafkaSpendEvent_NilTokenUsage(t *testing.T) {
