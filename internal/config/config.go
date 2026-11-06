@@ -455,6 +455,48 @@ func resolveAliasesInNode(node *yaml.Node, anchors map[string]*yaml.Node) {
 	}
 }
 
+// DeepSeekToolsConfig holds the settings of the router-run DeepSeek
+// Search/Fetch adapter.
+//
+// DeepSeek's flash model cannot run the built-in web_search/web_fetch tools
+// itself, so the router runs them: it calls DeepSeek's own
+// /v1/tools/search and /v1/tools/fetch endpoints with the credential's key
+// and bills the calls separately from the model's tokens.
+type DeepSeekToolsConfig struct {
+	// Enabled turns the adapter on (default: true when the section is
+	// present; the adapter only ever engages for a DeepSeek credential that
+	// was asked for one of the built-in tools).
+	Enabled bool `yaml:"enabled"`
+	// RequestTimeout bounds one Search or Fetch call (default: 30s).
+	RequestTimeout time.Duration `yaml:"request_timeout"`
+	// SearchQPS is the per-account Search limit (default: 100, the
+	// provider's own limit). The limit is per DeepSeek account, shared by
+	// the account's keys and platforms.
+	SearchQPS int `yaml:"search_qps"`
+	// FetchQPS is the per-account Fetch limit (default: 25, the provider's
+	// own limit).
+	FetchQPS int `yaml:"fetch_qps"`
+	// MaxSteps bounds the router-run tool loop (default: 8): the model may
+	// call the tools this many times before the router stops and returns
+	// the last answer.
+	MaxSteps int `yaml:"max_steps"`
+	// MaxRetries is how many times a Search or Fetch call is retried after
+	// a 429 or a 5xx (default: 2). Other 4xx answers are not retried.
+	MaxRetries int `yaml:"max_retries"`
+}
+
+// DefaultDeepSeekToolsRequestTimeout is the default timeout of one
+// Search/Fetch call.
+const DefaultDeepSeekToolsRequestTimeout = 30 * time.Second
+
+// DefaultDeepSeekToolsMaxSteps is the default bound of the router-run tool
+// loop.
+const DefaultDeepSeekToolsMaxSteps = 8
+
+// DefaultDeepSeekToolsMaxRetries is the default number of retries of a
+// Search/Fetch call.
+const DefaultDeepSeekToolsMaxRetries = 2
+
 // RedisConfig holds configuration for Redis/Valkey-backed distributed rate limiting.
 // When Enabled=false the rate limiter falls back to in-process counters.
 type RedisConfig struct {
@@ -693,6 +735,7 @@ type ServerConfig struct {
 	MaxProviderRetries         int                   `yaml:"max_provider_retries"`              // Max same-type credential retries on provider errors (default: 2, meaning 3 total attempts)
 	MaxFallbackAttempts        int                   `yaml:"max_fallback_attempts"`             // Max fallback proxy hops per request chain (default: 5)
 	AnthropicDefaultMaxTokens  int                   `yaml:"anthropic_default_max_tokens"`      // max_tokens sent to a Claude model when the client sends none (default: 32000, 0 = default)
+	DeepSeekTools              DeepSeekToolsConfig   `yaml:"deepseek_tools,omitempty"`          // The router-run DeepSeek Search/Fetch adapter (see DeepSeekToolsConfig)
 	SessionStickyEnabled       bool                  `yaml:"session_sticky_enabled"`            // Enable session-sticky credential routing (default: true)
 	SessionStickyTTL           int                   `yaml:"session_sticky_ttl_minutes"`        // Session binding TTL in minutes (0 = default 6)
 	SessionStickyAutoCacheCtrl bool                  `yaml:"session_sticky_auto_cache_control"` // Auto-inject Anthropic cache_control when session is active (default: true)
@@ -960,6 +1003,15 @@ type CredentialConfig struct {
 	// Priority is the primary-selection priority group (lower selects first).
 	// See EffectivePriority for the resolution chain against FallbackPriority.
 	Priority int `yaml:"priority,omitempty"`
+	// DeepSeekTools marks the credential as one whose provider runs its own
+	// Search and Fetch tools (POST {base_url}/v1/tools/search and
+	// /v1/tools/fetch). The router calls them with this credential's key and
+	// bills the calls apart from the model's tokens.
+	//
+	// It is an explicit opt-in rather than a guess from the base URL: the
+	// router must not start calling a provider's endpoints because its
+	// address happens to look like DeepSeek's.
+	DeepSeekTools bool `yaml:"deepseek_tools,omitempty"`
 
 	ReasoningOnly           bool              `yaml:"reasoning_only,omitempty"`
 	Scopes                  []string          `yaml:"scopes,omitempty"`

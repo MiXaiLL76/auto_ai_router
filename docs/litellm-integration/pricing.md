@@ -213,7 +213,7 @@ For reference:
 | `output_cost_per_image`                                       | Cost per generated image (takes priority over `output_cost_per_image_token`)                                                                                                             |
 | `search_context_cost_per_query`                               | Web Search cost per request/call, keyed by `search_context_size_*`                                                                                                                       |
 | `web_search_billing_unit`                                     | `per_query` or `per_prompt` Web Search charging mode                                                                                                                                     |
-| `tool_cost_per_call`                                          | Price per successful call: `code_execution`, `attachment_search`, `collections_search` (aliases `code_interpreter`, `document_search`, `file_search`)                                    |
+| `tool_cost_per_call`                                          | Price per successful call: `code_execution`, `attachment_search`, `collections_search`, `web_fetch` (aliases `code_interpreter`, `document_search`, `file_search`, `fetch`)              |
 | `x_search_cost_per_post`                                      | X Search price per fetched post (parent and quoted posts included, not de-duplicated)                                                                                                    |
 | `x_search_cost_per_profile`                                   | X Search price per fetched user profile                                                                                                                                                  |
 | `image_generation_tool_model`                                 | Price row (same price source) for images of a built-in `image_generation` tool, e.g. `grok-imagine-image-2.0`                                                                            |
@@ -439,3 +439,57 @@ Kafka and ClickHouse expose the same breakdown as typed fields, including `web_s
 ### Lookup
 
 When a request completes, the router calls `GetPrice(modelName)` which normalises the name and returns the `*ModelPrice`. If no entry is found, cost calculation is skipped, `spend` is stored as `0`, and the metadata cost breakdown is omitted.
+
+## The router-run DeepSeek Search and Fetch tools
+
+DeepSeek's flash model cannot run the built-in `web_search` tool itself: a Chat Completions request carrying it is rejected (HTTP 422), and `web_fetch` is ignored — the model answers that it cannot search the web. DeepSeek runs both as separate REST endpoints outside the chat protocol:
+
+```
+POST {base_url}/v1/tools/search   {"query": ..., "count": ..., "ori_question": ..., "localization": ..., "need_content": ...}
+POST {base_url}/v1/tools/fetch   {"url": ...}
+```
+
+So for those models the **router** runs the tools. A credential opts in with `deepseek_tools: true`, and the router:
+
+1. replaces the client's built-in `web_search` / `web_fetch` tools with ordinary function tools, so the model can only reach them by calling a function;
+2. runs the tool itself with the credential's key (`Authorization: Bearer …`) and the credential's proxy;
+3. hands the result back as a tool result and asks the model again — the loop is bounded by `server.deepseek_tools.max_steps`;
+4. bills the tool calls apart from the model's tokens.
+
+The takeover happens before the Responses-to-Chat conversion, because the conversion drops every built-in tool: the adapter's replacement is an ordinary function tool, which the conversion keeps.
+
+### What is billed
+
+| Call | Billed when | Price |
+| --- | --- | --- |
+| Search | HTTP 200 and a non-empty `results` array | `search_context_cost_per_query` (the context size the request asked for) |
+| Fetch | HTTP 200 and a non-empty `content` | `tool_cost_per_call.fetch` |
+
+A failed call, a timeout and an empty result cost nothing. `need_content: true` inside a search does **not** create a Fetch charge — a Fetch is billed only for its own successful REST call, so a Search followed by a Fetch costs both. The price is per call, independent of `count` and of the number of pages found. A search's peak/off-peak schedule does not change the tool price.
+
+The model's own tokens are billed as usual, for **every** step of the loop: the steps are separate upstream requests, and the client is charged for all of them. The loop's token counts are summed (the router's own merge helpers replace a counter rather than add to it, which is right for a stream but wrong for a loop), and the tool counters are added to the provider's.
+
+### Limits
+
+DeepSeek counts the limits per account, not per key, and the two tools have separate pools (100 QPS for Search, 25 QPS for Fetch; Fetch is additionally capped per domain). The router keeps the pools per account in Redis, so the limit is shared by the router's replicas and the platforms, and the pools fall back to in-process counters when Redis is unavailable. A 429 or a 5xx is retried with a delay (`server.deepseek_tools.max_retries`); other 4xx answers are not retried.
+
+### Configuration
+
+```yaml
+server:
+  deepseek_tools:
+    request_timeout: 30s
+    search_qps: 100
+    fetch_qps: 25
+    max_steps: 8
+    max_retries: 2
+
+credentials:
+  - name: deepseek-aionov-chatgpt-1@aori.com
+    type: openai
+    base_url: https://api.deepseek.com
+    api_key: os.environ/KEY11
+    deepseek_tools: true   # the provider runs its own Search and Fetch tools
+```
+
+The adapter is off for every request that did not ask for one of the built-in tools, and for every credential without the opt-in.

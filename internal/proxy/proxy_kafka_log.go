@@ -183,6 +183,7 @@ func (p *Proxy) buildKafkaSpendEvent(
 		OutputImageTokens:        usage.OutputImageTokens,
 		WebSearchRequests:        usage.WebSearchRequests,
 		WebSearchContextSize:     usage.WebSearchContextSize,
+		WebFetchRequests:         usage.WebFetchRequests,
 		XSearchCalls:             usage.XSearchCalls,
 		XSearchPosts:             usage.XSearchPosts,
 		XSearchProfiles:          usage.XSearchProfiles,
@@ -224,6 +225,7 @@ func (p *Proxy) buildKafkaSpendEvent(
 		event.ImageCost = tokenCosts.ImageCost
 		event.VideoInputCost = tokenCosts.VideoInputCost
 		event.WebSearchCost = tokenCosts.WebSearchCost
+		event.WebFetchCost = tokenCosts.WebFetchCost
 		event.XSearchCost = tokenCosts.XSearchCost
 		event.CodeExecutionCost = tokenCosts.CodeExecutionCost
 		event.AttachmentSearchCost = tokenCosts.AttachmentSearchCost

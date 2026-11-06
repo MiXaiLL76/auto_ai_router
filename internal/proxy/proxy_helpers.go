@@ -757,6 +757,7 @@ func costBreakdownMap(costs *converter.TokenCosts) map[string]interface{} {
 		"discount_amount":            0.0,
 		"tool_usage_cost":            costs.ToolUsageCost,
 		"web_search_cost":            costs.WebSearchCost,
+		"web_fetch_cost":             costs.WebFetchCost,
 		"x_search_cost":              costs.XSearchCost,
 		"code_execution_cost":        costs.CodeExecutionCost,
 		"attachment_search_cost":     costs.AttachmentSearchCost,
@@ -837,6 +838,9 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 		serverToolUse["web_search_requests"] = usage.WebSearchRequests
 		if usage.WebSearchRequests > 0 {
 			serverToolUse["web_search_context_size"] = usage.WebSearchContextSize
+		}
+		if usage.WebFetchRequests > 0 {
+			serverToolUse["web_fetch_requests"] = usage.WebFetchRequests
 		}
 		if usage.HasServerToolUsage() {
 			serverToolUse["x_search_calls"] = usage.XSearchCalls

@@ -17,6 +17,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
+	"github.com/mixaill76/auto_ai_router/internal/deepseektools"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/auth"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
@@ -445,9 +446,44 @@ func (p *Proxy) sanitizeClientParams(r *http.Request, modelID string, cred *conf
 		}
 	}
 	if chatShaped {
-		return openai.ReplaceBodyParam(req.realModelID, body)
+		body = openai.ReplaceBodyParam(req.realModelID, body)
+	} else {
+		body = openai.ReplaceResponsesBodyParam(req.realModelID, body)
 	}
-	return openai.ReplaceResponsesBodyParam(req.realModelID, body)
+	// DeepSeek's flash model cannot run the built-in web search/fetch tools
+	// itself (web_search is rejected outright, web_fetch is ignored), so the
+	// router takes them over: the built-in tools become function tools the
+	// model can call, and the router runs them itself.
+	//
+	// This runs after the conversion above, so the body is Chat-shaped for
+	// both client shapes (/v1/chat/completions and a /v1/responses request
+	// converted to Chat), which is the shape the model actually answers in.
+	return p.applyDeepSeekToolTools(r, modelID, cred, body, chatShaped)
+}
+
+// applyDeepSeekToolTools replaces the built-in search/fetch tools with the
+// adapter's function tools, when the request and the credential call for it.
+//
+// It returns the body unchanged for every other request: a model that can
+// run the tools itself, a request without them, or a credential that is not
+// DeepSeek's.
+func (p *Proxy) applyDeepSeekToolTools(r *http.Request, modelID string, cred *config.CredentialConfig, body []byte, chatShaped bool) []byte {
+	if !deepSeekToolsEnabledFor(modelID, cred) {
+		return body
+	}
+	plan := deepseektools.PlanTools(body)
+	if plan.Empty() {
+		return body
+	}
+	rewritten, rewrittenPlan, err := deepseektools.RewriteRequest(body)
+	if err != nil {
+		p.logger.WarnContext(r.Context(), "Could not rewrite the built-in search tools for the router-run adapter",
+			"model", modelID, "credential", cred.Name, "error", err)
+		return body
+	}
+	p.logger.DebugContext(r.Context(), "Router will run the built-in search/fetch tools itself",
+		"model", modelID, "credential", cred.Name, "plan", describeToolPlan(rewrittenPlan))
+	return rewritten
 }
 
 // applyAnthropicDefaultMaxTokens gives a Claude request the default max_tokens when the
@@ -866,6 +902,25 @@ func (p *Proxy) buildCredentialRequestInner(
 			// notices this model always behaves oddly on /v1/responses.
 			p.logger.WarnContext(r.Context(), "responses_only set on a credential that cannot serve native Responses API passthrough; converting to Chat Completions instead",
 				"model", modelID, "credential", cred.Name, "provider", string(cred.Type))
+		}
+		// The router-run DeepSeek Search/Fetch tools are taken over BEFORE
+		// the conversion: the conversion drops every built-in tool (they
+		// have no Chat Completions equivalent), so a web_search the client
+		// asked for would be gone by the time the adapter could see it. The
+		// adapter's replacement is an ordinary function tool, which the
+		// conversion keeps.
+		if p.deepSeekToolsEnabled && deepSeekToolsEnabledFor(modelID, cred) {
+			rewritten, plan, rewriteErr := deepseektools.RewriteResponsesRequest(body)
+			switch {
+			case rewriteErr != nil:
+				p.logger.WarnContext(r.Context(), "Could not rewrite the built-in search tools for the router-run adapter",
+					"model", modelID, "credential", cred.Name, "error", rewriteErr)
+			case plan != nil:
+				body = rewritten
+				proxyBody = rewritten
+				p.logger.DebugContext(r.Context(), "Router will run the built-in search/fetch tools itself",
+					"model", modelID, "credential", cred.Name, "plan", describeToolPlan(plan))
+			}
 		}
 		chatBody, err := responses.RequestToChat(body)
 		if err != nil {

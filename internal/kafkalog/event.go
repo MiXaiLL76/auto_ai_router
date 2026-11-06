@@ -101,6 +101,9 @@ type SpendEvent struct {
 	OutputImageTokens        int    `json:"output_image_tokens"`
 	WebSearchRequests        int    `json:"web_search_requests"`
 	WebSearchContextSize     string `json:"web_search_context_size,omitempty"`
+	// WebFetchRequests counts the billable web fetches the router executed
+	// (a fetch that returned page content).
+	WebFetchRequests int `json:"web_fetch_requests"`
 	// Built-in server-side tool usage beyond web search (xAI).
 	XSearchCalls           int `json:"x_search_calls"`
 	XSearchPosts           int `json:"x_search_posts"`
@@ -125,6 +128,7 @@ type SpendEvent struct {
 	ImageCost             float64 `json:"image_cost"`
 	VideoInputCost        float64 `json:"video_input_cost"`
 	WebSearchCost         float64 `json:"web_search_cost"`
+	WebFetchCost          float64 `json:"web_fetch_cost"`
 	XSearchCost           float64 `json:"x_search_cost"`
 	CodeExecutionCost     float64 `json:"code_execution_cost"`
 	AttachmentSearchCost  float64 `json:"attachment_search_cost"`

@@ -61,6 +61,10 @@ type TokenUsage struct {
 	OutputImageTokens        int // Generated image/video tokens
 	WebSearchRequests        int // Built-in web search tool calls/requests
 	WebSearchContextSize     string
+	// WebFetchRequests counts the billable built-in web fetches: a fetch the
+	// router executed that returned page content. A failed or empty fetch is
+	// not billable and is not counted here.
+	WebFetchRequests int
 	// ImageBilling carries per-image pricing inputs for image generation/edit
 	// requests (nil otherwise). A pointer keeps TokenUsage comparable.
 	ImageBilling *ImageBillingDetails
@@ -191,6 +195,7 @@ func (tu *TokenUsage) Normalize() *TokenUsage {
 	tu.VideoInputTokens = converterutil.NonNegativeTokenCount(tu.VideoInputTokens)
 	tu.OutputImageTokens = converterutil.NonNegativeTokenCount(tu.OutputImageTokens)
 	tu.WebSearchRequests = converterutil.NonNegativeTokenCount(tu.WebSearchRequests)
+	tu.WebFetchRequests = converterutil.NonNegativeTokenCount(tu.WebFetchRequests)
 	if tu.WebSearchRequests > 0 || tu.WebSearchContextSize != "" {
 		tu.WebSearchContextSize = NormalizeWebSearchContextSize(tu.WebSearchContextSize)
 	}
@@ -358,6 +363,11 @@ func (tu *TokenUsage) mergeToolUsage(src *TokenUsage) {
 	}
 	tu.ServerToolUsageReported = replace
 	mergeToolCounter(&tu.WebSearchRequests, src.WebSearchRequests, replace)
+	// WebFetchRequests is the router's own count of the fetches it executed,
+	// never a provider-reported counter, so it is added rather than replaced:
+	// a provider's zero must not erase the fetches the router already billed
+	// for, and two sources of the same figure must not add up to twice it.
+	tu.WebFetchRequests += converterutil.NonNegativeTokenCount(src.WebFetchRequests)
 	srcCounters := src.serverToolCounters()
 	for i, counter := range tu.serverToolCounters() {
 		mergeToolCounter(counter, *srcCounters[i], replace)
@@ -395,6 +405,10 @@ type TokenCosts struct {
 	ImageCost               float64
 	VideoInputCost          float64
 	WebSearchCost           float64
+	// WebFetchCost is the built-in web fetch charge: billed per successful
+	// call (a fetch that returned page content), never by tokens, and part of
+	// TotalCost exactly once.
+	WebFetchCost float64
 	// Built-in server-side tool charges other than web search. Each is billed
 	// per unit (call, fetched X post/profile, generated image), never by
 	// tokens, and is part of TotalCost exactly once.
