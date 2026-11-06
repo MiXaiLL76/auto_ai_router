@@ -41,6 +41,7 @@ help:
 	@echo "  fmt                  - Format code"
 	@echo "  vet                  - Run go vet"
 	@echo "  lint                 - Run golangci-lint (requires installation)"
+	@echo "  install-hooks        - Enable automatic format and lint before commits"
 	@echo "  install-lint         - Install pinned golangci-lint"
 	@echo "  vuln                 - Run govulncheck (latest, same as CI)"
 	@echo "  format               - Format code and run pre-commit checks"
@@ -200,6 +201,11 @@ format:
 	@which pre-commit > /dev/null || (echo "pre-commit not installed. Install with: pip install pre-commit" && exit 1)
 	pre-commit run --all-files
 	@echo "Format complete"
+
+## install-hooks: Enable repository pre-commit hook in this clone
+install-hooks:
+	git config --local core.hooksPath .githooks
+	@echo "Git pre-commit hook enabled for this clone"
 
 ## install-deps: Install/update dependencies
 install-deps:

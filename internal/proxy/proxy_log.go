@@ -17,7 +17,6 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/spendlog"
-	"github.com/mixaill76/auto_ai_router/internal/logger"
 	"github.com/mixaill76/auto_ai_router/internal/security"
 	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
@@ -37,20 +36,28 @@ func (p *Proxy) logUpstreamError(ctx context.Context, msg string, errorCode int,
 	}
 	args = append(args, "model", modelID)
 	if len(responseBody) > 0 {
-		args = appendResponseBodyForLogs(args, cred, string(responseBody))
+		args = appendResponseBodyForLogs(args, string(responseBody))
 	}
 	args = append(args, extra...)
 	p.logger.ErrorContext(ctx, msg, args...)
 }
 
-func appendResponseBodyForLogs(args []any, cred *config.CredentialConfig, body string) []any {
-	if shouldMaskUpstreamErrors(cred) {
-		return append(args,
-			"response_body_masked", true,
-			"response_body", body,
-		)
+func appendResponseBodyForLogs(args []any, body string) []any {
+	return append(args,
+		"response_body_masked", true,
+		"response_body", security.RedactBodyForLog(body),
+	)
+}
+
+// errorMessageForLog prevents a captured provider body from escaping through
+// the long-lived spend event/metadata's error_message copy. Preserve internal
+// diagnostics when there was no provider body; classify provider failures from
+// the body using the allowlisted classifier so reflected free text never reaches this sink.
+func errorMessageForLog(logCtx *RequestLogContext) string {
+	if logCtx.ErrorBodyRaw != "" {
+		return classifiedErrorMessage(logCtx.HTTPStatus, []byte(logCtx.ErrorBodyRaw))
 	}
-	return append(args, "response_body", logger.TruncateLongFields(body, 500))
+	return logCtx.ErrorMsg
 }
 
 func shouldMaskUpstreamErrors(cred *config.CredentialConfig) bool {
@@ -117,7 +124,7 @@ func (p *Proxy) logTransformedResponse(ctx context.Context, credName, providerNa
 		p.logger.DebugContext(ctx, "Transformed response to OpenAI format",
 			"credential", credName,
 			"provider", providerName,
-			"body", logger.TruncateLongFields(string(body), 500),
+			"body", security.RedactBodyForLog(string(body)),
 		)
 	}
 }
@@ -396,7 +403,7 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	if !logCtx.UpstreamSendTime.IsZero() {
 		upstreamSendDelayMs = float64(logCtx.UpstreamSendTime.Sub(logCtx.StartTime).Microseconds()) / 1000.0
 	}
-	metadata := buildMetadata(hashedToken, logCtx.TokenInfo, logCtx.ErrorMsg, logCtx.HTTPStatus, logCtx.TokenUsage, requesterIP, tokenCosts, logCtx.ModelID, overheadMs, upstreamSendDelayMs, kafkaFallbackReason)
+	metadata := buildMetadata(hashedToken, logCtx.TokenInfo, errorMessageForLog(logCtx), logCtx.HTTPStatus, logCtx.TokenUsage, requesterIP, tokenCosts, logCtx.ModelID, overheadMs, upstreamSendDelayMs, kafkaFallbackReason)
 	metadata = addAIRSpendMetadata(metadata, logCtx.RequestID, logCtx.ClientResponseID, logCtx.IsProxyRequest, logCtx.ModelID, logCtx.PublicModelID, logCtx.billingPriceModelID)
 	metadata = addRequestSpendMetadata(metadata, logCtx)
 	metadata = addOrganizationPolicySpendMetadata(metadata, logCtx)

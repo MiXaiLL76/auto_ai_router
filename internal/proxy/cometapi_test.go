@@ -104,14 +104,13 @@ func TestIsDeepSeekModel(t *testing.T) {
 	}
 }
 
-func TestAppendResponseBodyForLogs_CometKeepsMaskedFlagAndLogsBody(t *testing.T) {
-	cred := &config.CredentialConfig{Type: config.ProviderTypeCometAPI}
+func TestAppendResponseBodyForLogsOmitsBody(t *testing.T) {
 	body := `{"error":{"code":"permission_denied","message":"` + strings.Repeat("model access denied ", 50) + `","type":"comet_api_error"}}`
 
-	args := appendResponseBodyForLogs([]any{}, cred, body)
+	args := appendResponseBodyForLogs([]any{}, body)
 
 	assert.Contains(t, args, "response_body_masked")
 	assert.Contains(t, args, true)
 	assert.Contains(t, args, "response_body")
-	assert.Contains(t, args, body)
+	assert.NotContains(t, args, body)
 }

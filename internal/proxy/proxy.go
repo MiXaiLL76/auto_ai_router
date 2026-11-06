@@ -34,7 +34,6 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/budget"
-	"github.com/mixaill76/auto_ai_router/internal/logger"
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/proxy/modelutils"
@@ -96,6 +95,16 @@ func requestWithPath(r *http.Request, path string) *http.Request {
 	clone := r.Clone(r.Context())
 	clone.URL.Path = path
 	return clone
+}
+
+func upstreamErrorForLog(err error, targetURL string) string {
+	if err == nil {
+		return ""
+	}
+	if targetURL == "" {
+		return err.Error()
+	}
+	return strings.ReplaceAll(err.Error(), targetURL, security.RedactURLForLog(targetURL))
 }
 
 const unsupportedCredentialRequestMessage = "request parameters are not supported by available providers"
@@ -1045,7 +1054,7 @@ func (p *Proxy) executeProxyRequest(
 	body = forceWebSearchResultsForPath(r.URL.Path, body)
 	proxyReq, err := http.NewRequestWithContext(httputil.WithProxyURL(upstreamCtx, cred.ProxyURL), r.Method, targetURL, bytes.NewReader(body)) //nolint:gosec // G704: targetURL's host is proxyBaseURL from a configured credential, not attacker-controlled — only the path/query comes from the incoming request
 	if err != nil {
-		p.logger.ErrorContext(r.Context(), "Failed to create proxy request", "error", err, "url", targetURL)
+		p.logger.ErrorContext(r.Context(), "Failed to create proxy request", "error", upstreamErrorForLog(err, targetURL), "url", security.RedactURLForLog(targetURL))
 		return nil, err
 	}
 
@@ -1075,8 +1084,8 @@ func (p *Proxy) executeProxyRequest(
 			p.logger.DebugContext(r.Context(), "Proxy request aborted: client disconnected",
 				"credential", cred.Name,
 				"model", modelID,
-				"error", err,
-				"url", targetURL,
+				"error", upstreamErrorForLog(err, targetURL),
+				"url", security.RedactURLForLog(targetURL),
 			)
 			return nil, err
 		}
@@ -1089,15 +1098,15 @@ func (p *Proxy) executeProxyRequest(
 			p.logger.WarnContext(r.Context(), "Proxy request timeout",
 				"credential", cred.Name,
 				"model", modelID,
-				"error", err,
-				"url", targetURL,
+				"error", upstreamErrorForLog(err, targetURL),
+				"url", security.RedactURLForLog(targetURL),
 			)
 		} else {
 			p.logger.WarnContext(r.Context(), "Failed to proxy request",
 				"credential", cred.Name,
 				"model", modelID,
-				"error", err,
-				"url", targetURL,
+				"error", upstreamErrorForLog(err, targetURL),
+				"url", security.RedactURLForLog(targetURL),
 			)
 		}
 		// Proxy/AIR credentials are dynamic relays — don't record them in fail2ban.
@@ -1124,7 +1133,7 @@ func (p *Proxy) executeProxyRequest(
 
 	p.logger.DebugContext(r.Context(), "Proxy request forwarded",
 		"credential", cred.Name,
-		"target_url", targetURL,
+		"target_url", security.RedactURLForLog(targetURL),
 		"status_code", resp.StatusCode,
 		"duration", time.Since(start),
 	)
@@ -1556,7 +1565,7 @@ func (p *Proxy) sendToCredential(
 	proxyReq, reqErr := http.NewRequestWithContext(httputil.WithProxyURL(upstreamCtx, cred.ProxyURL), r.Method, targetURL, bytes.NewReader(requestBody)) //nolint:gosec // G704: targetURL's host comes from the matched credential's base URL, not the incoming request
 	if reqErr != nil {
 		// Fatal: request creation error
-		p.logger.ErrorContext(r.Context(), "Failed to create proxy request", "error", reqErr, "url", targetURL)
+		p.logger.ErrorContext(r.Context(), "Failed to create proxy request", "error", upstreamErrorForLog(reqErr, targetURL), "url", security.RedactURLForLog(targetURL))
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = http.StatusInternalServerError
 		logCtx.ErrorMsg = fmt.Sprintf("Failed to create request: %v", reqErr)
@@ -1614,8 +1623,8 @@ func (p *Proxy) sendToCredential(
 
 	if p.logger.Enabled(context.Background(), slog.LevelDebug) {
 		p.logger.DebugContext(r.Context(), "Proxy request details",
-			"target_url", targetURL, "credential", cred.Name,
-			"request_body", logger.SanitizeRequestBodyForLog(requestBody, 500))
+			"target_url", security.RedactURLForLog(targetURL), "credential", cred.Name,
+			"request_body", security.RedactBodyForLog(string(requestBody)))
 	}
 
 	var configuredHeaders map[string]bool
@@ -1626,10 +1635,7 @@ func (p *Proxy) sendToCredential(
 		}
 	}
 	debugHeaders := make(map[string]string)
-	for key, values := range proxyReq.Header {
-		if key == "Authorization" || key == "X-Api-Key" || key == "X-Goog-Api-Key" {
-			continue
-		}
+	for key, values := range security.MaskSensitiveHeaders(proxyReq.Header) {
 		if configuredHeaders[key] {
 			// request_headers values may come from os.environ/ secrets.
 			debugHeaders[key] = "[credential request_headers]"
@@ -1689,7 +1695,7 @@ func (p *Proxy) sendToCredential(
 			// behavior. Stop retrying immediately; the final "no
 			// response" block below handles the classification/logging.
 			p.logger.DebugContext(r.Context(), "Upstream request aborted: client disconnected",
-				"credential", cred.Name, "model", modelID, "error", doErr, "url", targetURL)
+				"credential", cred.Name, "model", modelID, "error", upstreamErrorForLog(doErr, targetURL), "url", security.RedactURLForLog(targetURL))
 			return credentialSendOutcome{}, false, true, false, "", doErr
 		}
 		if errors.Is(doErr, ErrResponseBodyTooLarge) {
@@ -1718,7 +1724,7 @@ func (p *Proxy) sendToCredential(
 		if isTimeoutError(doErr) {
 			statusCode = http.StatusRequestTimeout
 			p.logger.WarnContext(r.Context(), "Upstream request timeout, will retry",
-				"credential", cred.Name, "model", modelID, "error", doErr, "url", targetURL)
+				"credential", cred.Name, "model", modelID, "error", upstreamErrorForLog(doErr, targetURL), "url", security.RedactURLForLog(targetURL))
 			// cred is never proxy-like here (those are diverted to
 			// executeProxyRequest before this retry loop, see proxyRequest's
 			// "Handle proxy/AIR credential types" branch above -- no separate
@@ -1758,7 +1764,7 @@ func (p *Proxy) sendToCredential(
 			}
 		} else {
 			p.logger.WarnContext(r.Context(), "Upstream request failed, will retry",
-				"credential", cred.Name, "model", modelID, "error", doErr, "url", targetURL)
+				"credential", cred.Name, "model", modelID, "error", upstreamErrorForLog(doErr, targetURL), "url", security.RedactURLForLog(targetURL))
 		}
 		p.recordBanSignal(cred, modelID, statusCode)
 		p.reportHealth(string(cred.Type), cred.Name, modelID, statusCode, retryAfterSeconds, reason)
@@ -2020,7 +2026,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				"reason", retryReason, "model", modelID,
 				"attempt", attempt + 1, "max_attempts", p.maxProviderRetries + 1,
 			}
-			retryLogArgs = appendResponseBodyForLogs(retryLogArgs, cred, string(proxyResp.Body))
+			retryLogArgs = appendResponseBodyForLogs(retryLogArgs, string(proxyResp.Body))
 			p.logger.WarnContext(r.Context(), "Proxy credential returned retryable error, will retry", retryLogArgs...)
 		}
 
@@ -2625,7 +2631,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 						"reason", retryReason, "model", modelID,
 						"attempt", attempt + 1, "max_attempts", p.maxProviderRetries + 1,
 					}
-					retryLogArgs = appendResponseBodyForLogs(retryLogArgs, cred, payload)
+					retryLogArgs = appendResponseBodyForLogs(retryLogArgs, payload)
 					p.logger.WarnContext(r.Context(), "Provider stream started with a retryable error event, will retry", retryLogArgs...)
 					continue
 				}
@@ -2671,7 +2677,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			// Transport error reading body — retryable with another credential
-			p.logger.WarnContext(r.Context(), "Failed to read response body, will retry", "error", readErr,
+			p.logger.WarnContext(r.Context(), "Failed to read response body, will retry", "error", upstreamErrorForLog(readErr, targetURL),
 				"credential", cred.Name, "attempt", attempt+1)
 			shouldRetry = true
 			retryReason = RetryReasonNetErr
@@ -2708,7 +2714,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			"reason", retryReason, "model", modelID,
 			"attempt", attempt + 1, "max_attempts", p.maxProviderRetries + 1,
 		}
-		retryLogArgs = appendResponseBodyForLogs(retryLogArgs, cred, string(responseBody))
+		retryLogArgs = appendResponseBodyForLogs(retryLogArgs, string(responseBody))
 		p.logger.WarnContext(r.Context(), "Provider returned retryable error, will retry", retryLogArgs...)
 	}
 
@@ -2797,13 +2803,13 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		case clientCanceled:
 			p.logger.DebugContext(r.Context(), "All provider attempts aborted: client disconnected",
 				"error_code", statusCode, "credential", cred.Name, "provider", string(cred.Type), "model", modelID,
-				"error", transportErr,
-				"url", targetURL,
+				"error", upstreamErrorForLog(transportErr, targetURL),
+				"url", security.RedactURLForLog(targetURL),
 				"request_id", logCtx.RequestID)
 		case rateLimited:
 			p.logger.ErrorContext(r.Context(), "Embeddings request ran out of credential rate limits before every input was sent",
 				"error_code", statusCode, "credential", cred.Name, "provider", string(cred.Type), "model", modelID,
-				"error", transportErr,
+				"error", upstreamErrorForLog(transportErr, targetURL),
 				"request_id", logCtx.RequestID)
 		case cascadeRateLimited:
 			p.logger.WarnContext(r.Context(), "All credentials for this model are rate limited",
@@ -2811,8 +2817,8 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				"request_id", logCtx.RequestID)
 		default:
 			p.logUpstreamError(r.Context(), "All provider attempts failed: no upstream response", statusCode, cred, modelID, nil,
-				"error", transportErr,
-				"url", targetURL,
+				"error", upstreamErrorForLog(transportErr, targetURL),
+				"url", security.RedactURLForLog(targetURL),
 				"request_id", logCtx.RequestID)
 		}
 		logCtx.Status = "failure"
@@ -2950,7 +2956,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 					"model", modelID, "error", convErr,
 					"request_id", logCtx.RequestID,
 				}
-				args = appendResponseBodyForLogs(args, cred, decodedBody)
+				args = appendResponseBodyForLogs(args, decodedBody)
 				p.logger.ErrorContext(r.Context(), "Failed to transform provider response to OpenAI format", args...)
 				finalResponseBody = []byte(decodedBody)
 			} else {
@@ -3018,7 +3024,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 					"model", modelID, "error", convErr,
 					"request_id", logCtx.RequestID,
 				}
-				args = appendResponseBodyForLogs(args, cred, decodedBody)
+				args = appendResponseBodyForLogs(args, decodedBody)
 				p.logger.ErrorContext(r.Context(), "Failed to convert native Responses API response", args...)
 				// finalResponseBody already holds decodedBody — return as-is
 			} else {
@@ -3093,7 +3099,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 					"model", modelID, "error", convErr,
 					"request_id", logCtx.RequestID,
 				}
-				args = appendResponseBodyForLogs(args, cred, decodedBody)
+				args = appendResponseBodyForLogs(args, decodedBody)
 				p.logger.ErrorContext(r.Context(), "Failed to convert Responses API response to Chat Completions format", args...)
 				// finalResponseBody already holds the raw Responses-API body — return as-is.
 			} else {
@@ -3192,7 +3198,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			} else {
 				p.logger.DebugContext(r.Context(), "Proxy response body",
 					"credential", cred.Name, "content_encoding", contentEncoding,
-					"body", logger.TruncateLongFields(string(finalResponseBody), 500))
+					"body", security.RedactBodyForLog(string(finalResponseBody)))
 			}
 		}
 
@@ -3236,7 +3242,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			// Final error returned to the client — single unified ERROR record
 			// with everything needed for debugging.
 			p.logUpstreamError(r.Context(), "Upstream request completed with error status", resp.StatusCode, cred, modelID, rawErrorBody,
-				"url", targetURL,
+				"url", security.RedactURLForLog(targetURL),
 				"request_id", logCtx.RequestID)
 			p.billKeptEmbedFanOutReplies(r.Context(), logCtx, &embedFanOutReplies)
 		} else if logCtx.TokenUsage != nil {
@@ -3298,7 +3304,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			// Error status on a streaming response — the body is forwarded to the
 			// client as a stream and is not available here for logging.
 			p.logUpstreamError(r.Context(), "Upstream returned error status on streaming response", resp.StatusCode, cred, modelID, nil,
-				"url", targetURL,
+				"url", security.RedactURLForLog(targetURL),
 				"request_id", logCtx.RequestID)
 			body := maskedUpstreamErrorBody(resp.StatusCode, logCtx.RequestID)
 			w.Header().Set("Content-Type", "application/json")
@@ -3542,8 +3548,8 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 // limit. It is fatal: another credential won't help.
 func (p *Proxy) failResponseTooLarge(w http.ResponseWriter, r *http.Request, logCtx *RequestLogContext, cred *config.CredentialConfig, modelID, targetURL string, readErr error, start time.Time) {
 	p.logUpstreamError(r.Context(), "Failed to read response body: too large", http.StatusBadGateway, cred, modelID, nil,
-		"error", readErr,
-		"url", targetURL,
+		"error", upstreamErrorForLog(readErr, targetURL),
+		"url", security.RedactURLForLog(targetURL),
 		"request_id", logCtx.RequestID)
 	logCtx.Status = "failure"
 	logCtx.HTTPStatus = http.StatusBadGateway

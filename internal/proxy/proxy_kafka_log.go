@@ -7,6 +7,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/converter"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
+	"github.com/mixaill76/auto_ai_router/internal/security"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -143,7 +144,7 @@ func (p *Proxy) buildKafkaSpendEvent(
 		APIBase:      apiBase,
 		Status:       status,
 		HTTPStatus:   logCtx.HTTPStatus,
-		ErrorMessage: logCtx.ErrorMsg,
+		ErrorMessage: errorMessageForLog(logCtx),
 
 		Model:      logCtx.ModelID,
 		RealModel:  realModel,
@@ -284,6 +285,10 @@ func (p *Proxy) buildRawBodyEvent(logCtx *RequestLogContext, status string, endT
 		HTTPStatus:         logCtx.HTTPStatus,
 		ResponseBody:       logCtx.ErrorBodyRaw,
 		ClientResponseBody: logCtx.ClientResponseBody,
+	}
+	if p.rawBodyRedactSensitiveFields {
+		event.ResponseBody = security.RedactBodyForLog(event.ResponseBody)
+		event.ClientResponseBody = security.RedactBodyForLog(event.ClientResponseBody)
 	}
 	if status == "failure" {
 		event.ErrorClass = mapHTTPStatusToErrorClass(logCtx.HTTPStatus)
