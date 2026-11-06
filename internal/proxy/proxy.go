@@ -71,6 +71,14 @@ const DefaultResponseBodyMultiplier = 10
 // act on a single occurrence, or the ban effectively never happens anywhere.
 const timeoutAttemptBanDuration = 30 * time.Second
 
+// attemptTimeoutReason is the marker the router puts in an outcome event's
+// "error" field when the failure was an attempt timeout -- an upstream that
+// never sent response headers within the per-attempt budget. The health
+// worker reads it to tell this 408 apart from the other ones (a provider
+// that was merely slow, and which must keep counting towards the
+// soft-failure threshold instead of being banned on the first occurrence).
+const attemptTimeoutReason = "attempt_timeout"
+
 // respCtx returns the context of the request that produced this upstream
 // response (it carries the OTEL span for log/trace correlation), or
 // context.Background() when unavailable (e.g. in unit tests).
@@ -1640,6 +1648,7 @@ func (p *Proxy) sendToCredential(
 		// the final failure is logged at ERROR after the retry loop.
 		statusCode := http.StatusBadGateway
 		retryAfterSeconds := 0
+		reason := ""
 		if isTimeoutError(doErr) {
 			statusCode = http.StatusRequestTimeout
 			p.logger.WarnContext(r.Context(), "Upstream request timeout, will retry",
@@ -1679,13 +1688,14 @@ func (p *Proxy) sendToCredential(
 						time.Now().Add(timeoutAttemptBanDuration), "attempt_timeout")
 				}
 				retryAfterSeconds = int(timeoutAttemptBanDuration.Seconds())
+				reason = attemptTimeoutReason
 			}
 		} else {
 			p.logger.WarnContext(r.Context(), "Upstream request failed, will retry",
 				"credential", cred.Name, "model", modelID, "error", doErr, "url", targetURL)
 		}
 		p.recordBanSignal(cred, modelID, statusCode)
-		p.reportHealth(string(cred.Type), cred.Name, modelID, statusCode, retryAfterSeconds)
+		p.reportHealth(string(cred.Type), cred.Name, modelID, statusCode, retryAfterSeconds, reason)
 		// Per-attempt failure only — the client-facing RequestsTotal/RequestDuration
 		// metrics are recorded exactly once at the final outcome below.
 		p.metrics.RecordCredentialAttemptError(cred.Name)
@@ -3596,12 +3606,21 @@ func (p *Proxy) recordBanSignal(cred *config.CredentialConfig, modelID string, s
 
 // reportHealth forwards one outcome observation to the health worker via
 // the kafka events publisher (nil-safe when disabled).
-func (p *Proxy) reportHealth(provider, credential, model string, statusCode int, retryAfterSeconds int) {
+//
+// reason is a short machine-readable marker for the outcome kind ("" for
+// none); the health worker reads it to tell an attempt timeout apart from
+// the other 408s, so it can ban on the first one instead of waiting for the
+// soft-failure threshold. See attemptTimeoutReason.
+func (p *Proxy) reportHealth(provider, credential, model string, statusCode int, retryAfterSeconds int, reason ...string) {
 	if p.events == nil {
 		return
 	}
 	if provider == "" {
 		provider = "unknown"
 	}
-	p.events.Report(credential, provider, model, statusCode, retryAfterSeconds, "")
+	marker := ""
+	if len(reason) > 0 {
+		marker = reason[0]
+	}
+	p.events.Report(credential, provider, model, statusCode, retryAfterSeconds, marker)
 }
