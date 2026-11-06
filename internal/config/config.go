@@ -1164,6 +1164,7 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 		Priority         string           `yaml:"priority,omitempty"`
 		ReasoningOnly    string           `yaml:"reasoning_only,omitempty"`
 		SystemOne        string           `yaml:"system_one,omitempty"`
+		DeepSeekTools    string           `yaml:"deepseek_tools,omitempty"`
 		Scopes           []string         `yaml:"scopes,omitempty"`
 		DeniedScopes     []string         `yaml:"denied_scopes,omitempty"`
 		ForbiddenScopes  []string         `yaml:"forbidden_scopes,omitempty"`
@@ -1223,6 +1224,9 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if c.ReasoningOnly, err = parseField(temp.ReasoningOnly, false, strconv.ParseBool, "reasoning_only for credential '"+c.Name+"'"); err != nil {
+		return err
+	}
+	if c.DeepSeekTools, err = parseField(temp.DeepSeekTools, false, strconv.ParseBool, "deepseek_tools for credential '"+c.Name+"'"); err != nil {
 		return err
 	}
 	if c.SystemOne, err = parseField(temp.SystemOne, false, strconv.ParseBool, "system_one for credential '"+c.Name+"'"); err != nil {

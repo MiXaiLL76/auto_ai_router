@@ -134,6 +134,20 @@ system_one: true
 	assert.True(t, credential.SystemOne)
 }
 
+func TestCredentialConfigDeepSeekTools(t *testing.T) {
+	var credential CredentialConfig
+	err := yaml.Unmarshal([]byte(`
+name: deepseek
+type: openai
+api_key: key
+base_url: https://api.deepseek.com
+deepseek_tools: true
+`), &credential)
+
+	require.NoError(t, err)
+	assert.True(t, credential.DeepSeekTools)
+}
+
 func TestConfig_Validate_SystemOneOnlyForOpenAIWire(t *testing.T) {
 	newConfig := func(cred CredentialConfig) *Config {
 		return &Config{
