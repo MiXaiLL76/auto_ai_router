@@ -509,9 +509,40 @@ type Config struct {
 }
 
 type Proxy struct {
-	balancer                         *balancer.RoundRobin
-	client                           *http.Client
-	streamingClient                  *http.Client // same as client, but with a short ResponseHeaderTimeout — only for attempts sent upstream with "stream": true
+	balancer *balancer.RoundRobin
+	client   *http.Client
+	// streamingClients holds one *http.Client per distinct positive
+	// ResponseHeaderTimeout actually in effect (the server-level default
+	// and/or individual credentials' own overrides -- see
+	// config.CredentialConfig.ResponseHeaderTimeout), keyed by that
+	// time.Duration. Built lazily by attemptClient: credentials can arrive
+	// after New() (DB-sourced, balancer.UpdateDBCredentials), so there is no
+	// fixed set to pre-build from at startup. Shared across every credential
+	// that resolves to the same value, not one *http.Client per credential:
+	// a distinct ResponseHeaderTimeout needs a distinct *http.Transport
+	// (Go enforces it per-Transport), which means a distinct connection
+	// pool, and handing those out more liberally than "one per distinct
+	// value actually configured" is exactly what caused the 2026-11-06
+	// gpt-6-luna incident.
+	//
+	// The map's size is bounded today only by how many distinct values an
+	// operator actually writes into static config -- DB-sourced credentials
+	// (balancer.UpdateDBCredentials) never carry their own
+	// ResponseHeaderTimeout, so they always resolve to the one server-level
+	// default. If that ever changes, a distinct value per DB-sourced
+	// credential would need capping or deduplicating before it reaches here,
+	// since each one still buys a full connection pool (MaxIdleConns).
+	streamingClients sync.Map
+	// streamingClientBaseCfg is httpClientCfg's settings minus
+	// ResponseHeaderTimeout -- the template attemptClient clones and sets
+	// ResponseHeaderTimeout on when it needs to build a new entry in
+	// streamingClients.
+	streamingClientBaseCfg httputil.HTTPClientConfig
+	// globalResponseHeaderTimeout mirrors Config.ResponseHeaderTimeout (the
+	// server-level default): a credential without its own override falls
+	// back to this. <= 0 means off, same convention as the per-credential
+	// field.
+	globalResponseHeaderTimeout      time.Duration
 	logger                           *slog.Logger
 	maxBodySizeMB                    int
 	maxResponseBodySize              int64 // Pre-computed max response body size in bytes
@@ -566,14 +597,6 @@ type Proxy struct {
 	version                          string
 	commit                           string
 	serviceName                      string // Config.ServiceName
-
-	// responseHeaderTimeoutEnabled is true when a dedicated short
-	// ResponseHeaderTimeout budget is configured (server.response_header_timeout
-	// > 0). With it unset the transport falls back to the general
-	// request_timeout, and a timeout then means "the provider needed longer
-	// than request_timeout", not "the provider never answered" -- so the
-	// attempt_timeout ban must not fire.
-	responseHeaderTimeoutEnabled bool
 }
 
 func New(cfg *Config) *Proxy {
@@ -597,26 +620,16 @@ func New(cfg *Config) *Proxy {
 	httpClientCfg.HTTP2PingTimeout = cfg.HTTP2PingTimeout
 	httpClientCfg.MaxConnectionLifetime = cfg.MaxConnectionLifetime
 
-	// streamingClientCfg is identical except for ResponseHeaderTimeout: used only
-	// for attempts whose outbound body actually carries "stream": true (the
-	// client asked for it, or force_stream_for_ttft injected it) — there, a
-	// healthy provider sends headers almost immediately regardless of how long
-	// the generation itself takes, so a short wait here only catches a
-	// credential that never responds at all, never a legitimately slow-but-live
-	// stream.
-	//
-	// It gets its own idle-connection pool (http.Transport.Clone can't help:
-	// ResponseHeaderTimeout is enforced per-Transport, and the idle pool is
-	// owned by the Transport, so two different timeouts mean two different
-	// pools, unavoidably) — split the configured budget between the two
-	// rather than handing each the full amount, so adding this client doesn't
-	// silently double total idle connections kept open per replica.
-	streamingClientCfg := *httpClientCfg
-	streamingClientCfg.ResponseHeaderTimeout = cfg.ResponseHeaderTimeout
-	streamingClientCfg.MaxIdleConns = httpClientCfg.MaxIdleConns / 2
-	streamingClientCfg.MaxIdleConnsPerHost = httpClientCfg.MaxIdleConnsPerHost / 2
-	httpClientCfg.MaxIdleConns -= streamingClientCfg.MaxIdleConns
-	httpClientCfg.MaxIdleConnsPerHost -= streamingClientCfg.MaxIdleConnsPerHost
+	client := httputil.NewHTTPClient(httpClientCfg)
+	// streamingClientBaseCfg is the template attemptClient clones per distinct
+	// ResponseHeaderTimeout it needs to build a client for -- see the field's
+	// doc comment on Proxy for why this is lazy and shared, not one client
+	// per credential or one shared split pool: both of those are exactly what
+	// caused the 2026-11-06 gpt-6-luna incident (see git history of this
+	// file). No idle-conn budget split here: a credential opting into this is
+	// expected to be the exception, not nearly all traffic, so its pool is
+	// sized the same as the default client's rather than carved out of it.
+	streamingClientBaseCfg := *httpClientCfg
 
 	// Compute max response body size from multiplier
 	multiplier := cfg.ResponseBodyMultiplier
@@ -702,9 +715,9 @@ func New(cfg *Config) *Proxy {
 		serverWriteTimeout:               cfg.ServerWriteTimeout,
 		keyMetrics:                       cfg.KeyMetrics,
 		responseCompat:                   responseCompat,
-		client:                           httputil.NewHTTPClient(httpClientCfg),
-		streamingClient:                  httputil.NewHTTPClient(&streamingClientCfg),
-		responseHeaderTimeoutEnabled:     cfg.ResponseHeaderTimeout > 0,
+		client:                           client,
+		streamingClientBaseCfg:           streamingClientBaseCfg,
+		globalResponseHeaderTimeout:      cfg.ResponseHeaderTimeout,
 		version:                          cfg.Version,
 		commit:                           cfg.Commit,
 		serviceName:                      cfg.ServiceName,
@@ -735,6 +748,57 @@ func New(cfg *Config) *Proxy {
 		cfg.DeepSeekTools.FetchQPS,
 	)
 	return p
+}
+
+// effectiveResponseHeaderTimeout resolves the ResponseHeaderTimeout budget
+// that applies to cred: its own override (config.CredentialConfig.
+// ResponseHeaderTimeout), if that is anything other than zero, otherwise the
+// server-level default (server.response_header_timeout). The two zero-ish
+// inputs are never conflated: a cred left unset (0) always inherits the
+// server default, including a positive one, while a cred explicitly set
+// negative always disables the budget for itself, including when the server
+// default is positive. See attemptClient for the one place this distinction
+// stops mattering.
+func (p *Proxy) effectiveResponseHeaderTimeout(cred *config.CredentialConfig) time.Duration {
+	if cred != nil && cred.ResponseHeaderTimeout != 0 {
+		return cred.ResponseHeaderTimeout
+	}
+	return p.globalResponseHeaderTimeout
+}
+
+// attemptClient returns the *http.Client to send cred's attempt on, and
+// whether the attempt-timeout ban applies to it. useFastHeaderClient must
+// already reflect that this specific attempt is sent upstream with
+// "stream": true (see its own doc comment at the call site) -- a credential
+// whose own override or the server default is positive still gets the plain
+// client when that is not the case (image generation, embeddings,
+// non-streaming Responses API: see the client field's doc comment for why).
+func (p *Proxy) attemptClient(cred *config.CredentialConfig, useFastHeaderClient bool) (client *http.Client, timeoutEnabled bool) {
+	if !useFastHeaderClient {
+		return p.client, false
+	}
+	timeout := p.effectiveResponseHeaderTimeout(cred)
+	if timeout <= 0 {
+		// <= 0 collapses two different sources back into one outcome: cred
+		// never had a budget to begin with (its own override and the server
+		// default both zero), or cred explicitly opted out of a positive
+		// server default (a negative override). effectiveResponseHeaderTimeout
+		// tells those apart; past this point there is nothing left to tell
+		// apart -- neither case has a budget to enforce or a ban to apply.
+		return p.client, false
+	}
+	if v, ok := p.streamingClients.Load(timeout); ok {
+		return v.(*http.Client), true
+	}
+	cfg := p.streamingClientBaseCfg
+	cfg.ResponseHeaderTimeout = timeout
+	built := httputil.NewHTTPClient(&cfg)
+	// LoadOrStore, not Store: two goroutines racing to build the same new
+	// timeout's client both succeed, but only one's result survives -- the
+	// loser's client is simply unused and garbage-collected, never a leak
+	// (no background goroutines, no open connections yet).
+	actual, _ := p.streamingClients.LoadOrStore(timeout, built)
+	return actual.(*http.Client), true
 }
 
 // Start launches background workers owned by Proxy.
@@ -1594,10 +1658,12 @@ func (p *Proxy) sendToCredential(
 	// something upstream of this call mistakenly set the streaming flags.
 	useFastHeaderClient := (streaming || prepared.forcedChatNonStream || prepared.forcedNativeNonStream) &&
 		!logCtx.IsImageGeneration && !isImageEdit && !isEmbeddings
-	sendClient := p.client
-	if useFastHeaderClient {
-		sendClient = p.streamingClient
-	}
+	// sendClient/responseHeaderTimeoutEnabled: per-credential, not a single
+	// fleet-wide choice -- see attemptClient and config.CredentialConfig.
+	// ResponseHeaderTimeout's own doc comments for why (a 20-30x spread in
+	// normal time-to-first-token between credentials is common here, so one
+	// value is never safe for all of them at once).
+	sendClient, responseHeaderTimeoutEnabled := p.attemptClient(cred, useFastHeaderClient)
 	if fanOut := embeddingFanOutBodies(conv); len(fanOut) > 1 {
 		// Vertex AI embedContent takes one content per call: one call per
 		// input, each within cred's rate limits, answered as a single
@@ -1653,22 +1719,22 @@ func (p *Proxy) sendToCredential(
 			statusCode = http.StatusRequestTimeout
 			p.logger.WarnContext(r.Context(), "Upstream request timeout, will retry",
 				"credential", cred.Name, "model", modelID, "error", doErr, "url", targetURL)
-			// useFastHeaderClient: cred is never proxy-like here (those are
-			// diverted to executeProxyRequest before this retry loop, see
-			// proxyRequest's "Handle proxy/AIR credential types" branch above
-			// -- no separate check needed). isAttemptTimeoutError, not the
-			// broader isTimeoutError: excludes Go's HTTP/2 idle-ping teardown
+			// cred is never proxy-like here (those are diverted to
+			// executeProxyRequest before this retry loop, see proxyRequest's
+			// "Handle proxy/AIR credential types" branch above -- no separate
+			// check needed). isAttemptTimeoutError, not the broader
+			// isTimeoutError: excludes Go's HTTP/2 idle-ping teardown
 			// ("http2: client connection lost"), which isTimeoutError also
 			// classifies as a timeout for the 408/502 split but which means a
 			// pooled connection went silent and got pinged out, not that this
 			// credential is currently unresponsive.
 			//
-			// p.responseHeaderTimeoutEnabled: the feature is opt-in. With
-			// response_header_timeout unset the transport falls back to
-			// request_timeout, so a timeout then means "the provider needed
-			// longer than that" -- a healthy-but-slow credential, which must
-			// not be banned.
-			if p.responseHeaderTimeoutEnabled && useFastHeaderClient && isAttemptTimeoutError(doErr) {
+			// responseHeaderTimeoutEnabled (from attemptClient, above): opt-in
+			// per credential. Without a budget actually in effect for THIS
+			// credential, the transport fell back to request_timeout, so a
+			// timeout then means "the provider needed longer than that" -- a
+			// healthy-but-slow credential, which must not be banned.
+			if responseHeaderTimeoutEnabled && isAttemptTimeoutError(doErr) {
 				// Never got a response at all within ResponseHeaderTimeout on an
 				// attempt we expected fast headers from (we sent stream:true) --
 				// likely dead/unreachable right now.

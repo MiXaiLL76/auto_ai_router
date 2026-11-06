@@ -79,7 +79,7 @@ func TestAttemptTimeout_HeaderTimeout_Bans(t *testing.T) {
 		WithResponseHeaderTimeout(4 * time.Second).
 		Build()
 	prx.client.Transport = erroringTransport{err: headerTimeoutError()}
-	prx.streamingClient.Transport = erroringTransport{err: headerTimeoutError()}
+	prx.streamingClientForTest(nil).Transport = erroringTransport{err: headerTimeoutError()}
 
 	w := httptest.NewRecorder()
 	prx.ProxyRequest(w, streamingChatRequest("gpt-4"))
@@ -102,7 +102,7 @@ func TestAttemptTimeout_FeatureDisabled_NoBan(t *testing.T) {
 		Build()
 	// No WithResponseHeaderTimeout: the feature is off, as it is by default.
 	prx.client.Transport = erroringTransport{err: headerTimeoutError()}
-	prx.streamingClient.Transport = erroringTransport{err: headerTimeoutError()}
+	prx.streamingClientForTest(nil).Transport = erroringTransport{err: headerTimeoutError()}
 
 	w := httptest.NewRecorder()
 	prx.ProxyRequest(w, streamingChatRequest("gpt-4"))
@@ -125,7 +125,7 @@ func TestAttemptTimeout_HTTP2ConnectionLost_DoesNotBan(t *testing.T) {
 		WithResponseHeaderTimeout(4 * time.Second).
 		Build()
 	prx.client.Transport = erroringTransport{err: http2LostError()}
-	prx.streamingClient.Transport = erroringTransport{err: http2LostError()}
+	prx.streamingClientForTest(nil).Transport = erroringTransport{err: http2LostError()}
 
 	w := httptest.NewRecorder()
 	prx.ProxyRequest(w, streamingChatRequest("gpt-4"))
@@ -150,7 +150,7 @@ func TestAttemptTimeout_DialTimeout_DoesNotBan(t *testing.T) {
 		Err: &netTimeoutError{msg: "dial tcp 10.255.255.1:443: i/o timeout"},
 	}
 	prx.client.Transport = erroringTransport{err: dialErr}
-	prx.streamingClient.Transport = erroringTransport{err: dialErr}
+	prx.streamingClientForTest(nil).Transport = erroringTransport{err: dialErr}
 
 	w := httptest.NewRecorder()
 	prx.ProxyRequest(w, streamingChatRequest("gpt-4"))
@@ -171,7 +171,7 @@ func TestAttemptTimeout_NonStreaming_HeaderTimeout_DoesNotBan(t *testing.T) {
 		WithResponseHeaderTimeout(4 * time.Second).
 		Build()
 	prx.client.Transport = erroringTransport{err: headerTimeoutError()}
-	prx.streamingClient.Transport = erroringTransport{err: headerTimeoutError()}
+	prx.streamingClientForTest(nil).Transport = erroringTransport{err: headerTimeoutError()}
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations",
 		strings.NewReader(`{"model":"gpt-image-1","prompt":"a cat","n":1}`))
@@ -217,4 +217,144 @@ func TestAttemptTimeout_RealSlowProvider_Bans(t *testing.T) {
 		"the attempt must give up on the header budget quickly, not wait out request_timeout")
 	assert.True(t, prx.balancer.IsBanned("silent-cred", "gpt-4"),
 		"a provider that never sends headers must be banned for this model")
+}
+
+// TestAttemptClient_SharesClientWhenDisabled is the regression test for the
+// 2026-11-06 gpt-6-luna incident: client and the per-timeout streaming
+// clients were built as two (then: N) completely separate *http.Client (two
+// separate Transports, two separate idle-connection pools), one handed only
+// half of MaxIdleConns/MaxIdleConnsPerHost. force_stream_for_ttft routes
+// nearly all chat traffic through the streaming path, so splitting its pool
+// cut real idle-connection capacity for busy models fleet-wide the moment
+// this feature merged -- entirely independent of whether
+// ResponseHeaderTimeout ever actually fired anywhere. With no budget
+// configured for a credential (its own override, and the server-level
+// default, both unset) there is no reason for a second pool at all:
+// attemptClient must hand back the literal same *http.Client as p.client,
+// not a look-alike copy.
+func TestAttemptClient_SharesClientWhenDisabled(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	client, enabled := prx.attemptClient(nil, true)
+	assert.Same(t, prx.client, client,
+		"with no response_header_timeout configured, attemptClient must return the exact same *http.Client as p.client -- a separate pool here silently cuts real idle-connection capacity for no benefit")
+	assert.False(t, enabled, "the attempt-timeout ban must not be enabled when no budget is configured")
+}
+
+// TestAttemptClient_DistinctWhenEnabled is the flip side: once a budget is
+// actually configured (the server-level default here), attemptClient must
+// hand back a distinct client with its own ResponseHeaderTimeout -- Go only
+// allows a different budget via a separate Transport, so it must NOT be
+// collapsed to the same object as p.client.
+func TestAttemptClient_DistinctWhenEnabled(t *testing.T) {
+	prx := NewTestProxyBuilder().WithResponseHeaderTimeout(4 * time.Second).Build()
+	client, enabled := prx.attemptClient(nil, true)
+	assert.NotSame(t, prx.client, client,
+		"with a response_header_timeout configured, attemptClient needs a distinct Transport to carry it")
+	assert.True(t, enabled, "the attempt-timeout ban must be enabled once a budget is configured")
+}
+
+// TestAttemptClient_CredentialOverride_IndependentOfServerDefault is the
+// regression test for the per-credential redesign's own main claim: a
+// credential's own response_header_timeout takes effect even when the
+// server-level default is off, which is exactly the state the fleet is in
+// today after the 2026-11-06 revert -- everything stays unlimited except the
+// specific credentials an operator opts in by hand.
+func TestAttemptClient_CredentialOverride_IndependentOfServerDefault(t *testing.T) {
+	prx := NewTestProxyBuilder().Build() // server default: off (0)
+	cred := &config.CredentialConfig{Name: "opted-in", ResponseHeaderTimeout: 4 * time.Second}
+
+	client, enabled := prx.attemptClient(cred, true)
+
+	assert.NotSame(t, prx.client, client,
+		"a credential's own override must get its own Transport even though the server default is off")
+	assert.True(t, enabled, "a credential with its own override must be ban-eligible regardless of the server default")
+}
+
+// TestAttemptClient_CredentialOptOut_OverridesServerDefault is the flip side:
+// a negative override must disable the budget for that one credential even
+// while the server default is positive for everyone else -- the "A negative
+// duration ... explicitly opts this credential out" promise on
+// config.CredentialConfig.ResponseHeaderTimeout's own doc comment.
+func TestAttemptClient_CredentialOptOut_OverridesServerDefault(t *testing.T) {
+	prx := NewTestProxyBuilder().WithResponseHeaderTimeout(4 * time.Second).Build()
+	cred := &config.CredentialConfig{Name: "opted-out", ResponseHeaderTimeout: -1 * time.Second}
+
+	client, enabled := prx.attemptClient(cred, true)
+
+	assert.Same(t, prx.client, client,
+		"a negative override must opt this credential out even while the server default is positive")
+	assert.False(t, enabled, "an opted-out credential must never be ban-eligible on this path")
+}
+
+// TestAttemptClient_DistinctCredentials_GetDistinctPools checks the other
+// direction from TestAttemptClient_SharesClientWhenDisabled: two credentials
+// with two different overrides must not collapse onto the same client (Go
+// enforces one ResponseHeaderTimeout per Transport), but asking for the same
+// credential's client twice must return the literal same instance both
+// times (attemptClient's LoadOrStore cache), not build a fresh pool per call.
+func TestAttemptClient_DistinctCredentials_GetDistinctPools(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	fast := &config.CredentialConfig{Name: "fast", ResponseHeaderTimeout: 2 * time.Second}
+	slow := &config.CredentialConfig{Name: "slow", ResponseHeaderTimeout: 6 * time.Second}
+
+	fastClient, fastEnabled := prx.attemptClient(fast, true)
+	slowClient, slowEnabled := prx.attemptClient(slow, true)
+	fastClientAgain, _ := prx.attemptClient(fast, true)
+
+	assert.True(t, fastEnabled)
+	assert.True(t, slowEnabled)
+	assert.NotSame(t, fastClient, slowClient, "two different timeout values must never share a Transport/pool")
+	assert.NotSame(t, prx.client, fastClient)
+	assert.NotSame(t, prx.client, slowClient)
+	assert.Same(t, fastClient, fastClientAgain,
+		"the same timeout value must reuse its cached client, not build a new pool on every attempt")
+}
+
+// TestAttemptTimeout_PerCredentialOverride_OnlyOverriddenCredentialBans is
+// the end-to-end version of the three unit tests above: in one real fleet
+// with two credentials behind the same dead provider, a response-header
+// timeout must ban only the credential that actually had a budget in
+// effect -- the other one falls through to request_timeout and must come
+// back healthy, exactly the mixed state "давай предусмотрим per credential
+// вариант... у остальных оставим пока без лимита" asks for.
+func TestAttemptTimeout_PerCredentialOverride_OnlyOverriddenCredentialBans(t *testing.T) {
+	// A server that accepts the request and never answers it, for every attempt.
+	silent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(10 * time.Second):
+		}
+	}))
+	defer silent.Close()
+
+	prx := NewTestProxyBuilder().
+		WithCredentials(
+			config.CredentialConfig{
+				Name: "fast-budget", Type: config.ProviderTypeOpenAI, BaseURL: silent.URL, APIKey: "test-key",
+				RPM: 100, TPM: 10000, IsFallback: false,
+				ResponseHeaderTimeout: 300 * time.Millisecond,
+			},
+			config.CredentialConfig{
+				// No ResponseHeaderTimeout: inherits the server-level default,
+				// which WithResponseHeaderTimeout is deliberately not called
+				// here to configure, matching every credential's state today.
+				Name: "plain-cred", Type: config.ProviderTypeOpenAI, BaseURL: silent.URL, APIKey: "test-key",
+				RPM: 100, TPM: 10000, IsFallback: true,
+			},
+		).
+		WithRequestTimeout(1 * time.Second).
+		Build()
+
+	w := httptest.NewRecorder()
+	start := time.Now()
+	prx.ProxyRequest(w, streamingChatRequest("gpt-4"))
+	elapsed := time.Since(start)
+
+	require.Equal(t, http.StatusRequestTimeout, w.Code, "body: %s", w.Body.String())
+	assert.Less(t, elapsed, 3*time.Second,
+		"fast-budget must give up on its own short budget, not wait out plain-cred's full request_timeout twice")
+	assert.True(t, prx.balancer.IsBanned("fast-budget", "gpt-4"),
+		"fast-budget has its own response_header_timeout -- a provider that never sends headers must ban it")
+	assert.False(t, prx.balancer.IsBanned("plain-cred", "gpt-4"),
+		"plain-cred has no override and the server default is off -- it must fall back to request_timeout (Client.Timeout, a different error entirely) and never be banned")
 }

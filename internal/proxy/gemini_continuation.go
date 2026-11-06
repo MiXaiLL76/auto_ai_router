@@ -121,6 +121,11 @@ func (c *geminiContinuation) sendOnce(body []byte) (*http.Response, bool, error)
 	c.p.logger.InfoContext(c.template.Context(), "Continuing Gemini long decode",
 		"credential", c.cred.Name, "model", c.modelID, "continuation", c.requests,
 		"request_id", c.requestID)
+	// p.client, not p.attemptClient(c.cred, ...): this is a continuation of an
+	// already-running generation, not a new streaming attempt starting cold --
+	// c.cred's own response_header_timeout budgeted the first request's wait
+	// for headers, which already happened, so it has nothing to say about this
+	// follow-up call.
 	resp, err := c.p.client.Do(req) //nolint:gosec // G704: the first request's URL, from the credential's configuration
 	if err != nil {
 		if c.clientCtx.Err() != nil {

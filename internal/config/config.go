@@ -1018,6 +1018,19 @@ type CredentialConfig struct {
 	// address happens to look like DeepSeek's.
 	DeepSeekTools bool `yaml:"deepseek_tools,omitempty"`
 
+	// ResponseHeaderTimeout overrides server.response_header_timeout for this
+	// one credential. Unset (0) inherits the server-level value (itself 0 by
+	// default, i.e. no per-attempt header budget at all). The fleet-wide
+	// distribution of this credential's own successful time-to-first-token
+	// is the thing to check before setting this: pick a value above its own
+	// p99, not a borrowed number from another credential or model -- a 20-30x
+	// spread between credentials' normal latency is common here, so there is
+	// no one value safe for all of them (see the 2026-11-06 gpt-6-luna
+	// incident, caused by exactly that). A negative duration, e.g. -1s,
+	// explicitly opts this credential out even if the server-level default
+	// is ever turned on fleet-wide.
+	ResponseHeaderTimeout time.Duration `yaml:"response_header_timeout,omitempty"`
+
 	ReasoningOnly           bool              `yaml:"reasoning_only,omitempty"`
 	Scopes                  []string          `yaml:"scopes,omitempty"`
 	DeniedScopes            []string          `yaml:"denied_scopes,omitempty"`
@@ -1154,31 +1167,32 @@ func (c CredentialConfig) SameProviderIdentity(other CredentialConfig) bool {
 func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 	// Create a temporary struct with all string fields
 	type tempConfig struct {
-		Name             string           `yaml:"name"`
-		Type             string           `yaml:"type"`
-		APIKey           string           `yaml:"api_key"`
-		BaseURL          string           `yaml:"base_url"`
-		ProxyURL         string           `yaml:"proxy_url,omitempty"`
-		AuthType         string           `yaml:"auth_type,omitempty"`
-		OpenAIProtocol   string           `yaml:"openai_proto,omitempty"`
-		GoogleProtocol   string           `yaml:"google_proto,omitempty"`
-		RPM              string           `yaml:"rpm"`
-		TPM              string           `yaml:"tpm"`
-		Weight           string           `yaml:"weight"`
-		FallbackPriority string           `yaml:"fallback_priority,omitempty"`
-		Priority         string           `yaml:"priority,omitempty"`
-		ReasoningOnly    string           `yaml:"reasoning_only,omitempty"`
-		SystemOne        string           `yaml:"system_one,omitempty"`
-		DeepSeekTools    string           `yaml:"deepseek_tools,omitempty"`
-		Scopes           []string         `yaml:"scopes,omitempty"`
-		DeniedScopes     []string         `yaml:"denied_scopes,omitempty"`
-		ForbiddenScopes  []string         `yaml:"forbidden_scopes,omitempty"`
-		ProjectID        string           `yaml:"project_id,omitempty"`
-		Location         string           `yaml:"location,omitempty"`
-		CredentialsFile  string           `yaml:"credentials_file,omitempty"`
-		CredentialsJSON  string           `yaml:"credentials_json,omitempty"`
-		IsFallback       string           `yaml:"is_fallback,omitempty"`
-		Models           []ModelRPMConfig `yaml:"models,omitempty"`
+		Name                  string           `yaml:"name"`
+		Type                  string           `yaml:"type"`
+		APIKey                string           `yaml:"api_key"`
+		BaseURL               string           `yaml:"base_url"`
+		ProxyURL              string           `yaml:"proxy_url,omitempty"`
+		AuthType              string           `yaml:"auth_type,omitempty"`
+		OpenAIProtocol        string           `yaml:"openai_proto,omitempty"`
+		GoogleProtocol        string           `yaml:"google_proto,omitempty"`
+		RPM                   string           `yaml:"rpm"`
+		TPM                   string           `yaml:"tpm"`
+		Weight                string           `yaml:"weight"`
+		FallbackPriority      string           `yaml:"fallback_priority,omitempty"`
+		Priority              string           `yaml:"priority,omitempty"`
+		ReasoningOnly         string           `yaml:"reasoning_only,omitempty"`
+		SystemOne             string           `yaml:"system_one,omitempty"`
+		DeepSeekTools         string           `yaml:"deepseek_tools,omitempty"`
+		ResponseHeaderTimeout string           `yaml:"response_header_timeout,omitempty"`
+		Scopes                []string         `yaml:"scopes,omitempty"`
+		DeniedScopes          []string         `yaml:"denied_scopes,omitempty"`
+		ForbiddenScopes       []string         `yaml:"forbidden_scopes,omitempty"`
+		ProjectID             string           `yaml:"project_id,omitempty"`
+		Location              string           `yaml:"location,omitempty"`
+		CredentialsFile       string           `yaml:"credentials_file,omitempty"`
+		CredentialsJSON       string           `yaml:"credentials_json,omitempty"`
+		IsFallback            string           `yaml:"is_fallback,omitempty"`
+		Models                []ModelRPMConfig `yaml:"models,omitempty"`
 
 		RequestHeaders map[string]string `yaml:"request_headers,omitempty"`
 	}
@@ -1232,6 +1246,9 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if c.DeepSeekTools, err = parseField(temp.DeepSeekTools, false, strconv.ParseBool, "deepseek_tools for credential '"+c.Name+"'"); err != nil {
+		return err
+	}
+	if c.ResponseHeaderTimeout, err = parseField(temp.ResponseHeaderTimeout, 0, time.ParseDuration, "response_header_timeout for credential '"+c.Name+"'"); err != nil {
 		return err
 	}
 	if c.SystemOne, err = parseField(temp.SystemOne, false, strconv.ParseBool, "system_one for credential '"+c.Name+"'"); err != nil {
