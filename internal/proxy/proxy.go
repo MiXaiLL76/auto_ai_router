@@ -55,6 +55,14 @@ import (
 // Can be overridden via Config.ResponseBodyMultiplier.
 const DefaultResponseBodyMultiplier = 10
 
+// timeoutAttemptBanDuration is how long a credential is banned (for the model
+// that just missed ResponseHeaderTimeout on a real streaming attempt) after
+// one attempt never got a response at all. Short on purpose: this steers the
+// *next* few requests away from a credential that's currently dead/
+// unreachable, not a punishment on the scale of a real provider error
+// (429/5xx) — see fail2ban's own thresholds for those.
+const timeoutAttemptBanDuration = 30 * time.Second
+
 // respCtx returns the context of the request that produced this upstream
 // response (it carries the OTEL span for log/trace correlation), or
 // context.Background() when unavailable (e.g. in unit tests).
@@ -421,6 +429,7 @@ type Config struct {
 	MaxIdleConns                 int
 	MaxIdleConnsPerHost          int
 	IdleConnTimeout              time.Duration
+	ResponseHeaderTimeout        time.Duration // Per-attempt budget for connect+response-headers only; only applied when an attempt is sent upstream with "stream": true (default: 4s)
 	HTTP2IdlePingTimeout         time.Duration // See httputil.HTTPClientConfig.HTTP2IdlePingTimeout (default: 15s)
 	HTTP2PingTimeout             time.Duration // See httputil.HTTPClientConfig.HTTP2PingTimeout (default: 10s)
 	MaxConnectionLifetime        time.Duration // See httputil.HTTPClientConfig.MaxConnectionLifetime (default: 0, connections are kept while reused)
@@ -486,6 +495,7 @@ type Config struct {
 type Proxy struct {
 	balancer                         *balancer.RoundRobin
 	client                           *http.Client
+	streamingClient                  *http.Client // same as client, but with a short ResponseHeaderTimeout — only for attempts sent upstream with "stream": true
 	logger                           *slog.Logger
 	maxBodySizeMB                    int
 	maxResponseBodySize              int64 // Pre-computed max response body size in bytes
@@ -548,6 +558,12 @@ func New(cfg *Config) *Proxy {
 	}
 
 	// Create HTTP client using centralized factory with request-specific timeout
+	// Deliberately NOT setting ResponseHeaderTimeout here: this is the client used
+	// for any attempt that isn't known to be a real streaming call upstream (image
+	// generation, embeddings, non-streaming Responses API, etc.) — those providers
+	// hold back headers until the whole answer is ready, so a short header timeout
+	// would time out the entire generation, not just a dead connection. See
+	// streamingClientCfg below for the short-timeout path.
 	httpClientCfg := httputil.DefaultHTTPClientConfig()
 	httpClientCfg.Timeout = cfg.RequestTimeout
 	httpClientCfg.MaxIdleConns = cfg.MaxIdleConns
@@ -556,6 +572,16 @@ func New(cfg *Config) *Proxy {
 	httpClientCfg.HTTP2IdlePingTimeout = cfg.HTTP2IdlePingTimeout
 	httpClientCfg.HTTP2PingTimeout = cfg.HTTP2PingTimeout
 	httpClientCfg.MaxConnectionLifetime = cfg.MaxConnectionLifetime
+
+	// streamingClientCfg is identical except for ResponseHeaderTimeout: used only
+	// for attempts whose outbound body actually carries "stream": true (the
+	// client asked for it, or force_stream_for_ttft injected it) — there, a
+	// healthy provider sends headers almost immediately regardless of how long
+	// the generation itself takes, so a short wait here only catches a
+	// credential that never responds at all, never a legitimately slow-but-live
+	// stream.
+	streamingClientCfg := *httpClientCfg
+	streamingClientCfg.ResponseHeaderTimeout = cfg.ResponseHeaderTimeout
 
 	// Compute max response body size from multiplier
 	multiplier := cfg.ResponseBodyMultiplier
@@ -642,6 +668,7 @@ func New(cfg *Config) *Proxy {
 		keyMetrics:                       cfg.KeyMetrics,
 		responseCompat:                   responseCompat,
 		client:                           httputil.NewHTTPClient(httpClientCfg),
+		streamingClient:                  httputil.NewHTTPClient(&streamingClientCfg),
 		version:                          cfg.Version,
 		commit:                           cfg.Commit,
 		serviceName:                      cfg.ServiceName,
@@ -1520,6 +1547,21 @@ func (p *Proxy) sendToCredential(
 	attemptedCreds[cred.Name] = true
 	p.stampFirstUpstreamSend(logCtx)
 	httputil.AttemptsFrom(proxyReq.Context()).Begin(cred.Name)
+	// useFastHeaderClient: true only when this attempt's body actually carries
+	// "stream": true to the provider — the client asked for it, or
+	// force_stream_for_ttft injected it (forcedChatNonStream/forcedNativeNonStream).
+	// A provider that sees stream:true sends response headers almost
+	// immediately regardless of how long the generation itself takes, which is
+	// what makes a short ResponseHeaderTimeout safe here. Image/embeddings
+	// endpoints never emit early headers regardless of what we send upstream
+	// (there's no streaming API for them here), so they're excluded even if
+	// something upstream of this call mistakenly set the streaming flags.
+	useFastHeaderClient := (streaming || prepared.forcedChatNonStream || prepared.forcedNativeNonStream) &&
+		!logCtx.IsImageGeneration && !isImageEdit && !isEmbeddings
+	sendClient := p.client
+	if useFastHeaderClient {
+		sendClient = p.streamingClient
+	}
 	if fanOut := embeddingFanOutBodies(conv); len(fanOut) > 1 {
 		// Vertex AI embedContent takes one content per call: one call per
 		// input, each within cred's rate limits, answered as a single
@@ -1534,7 +1576,7 @@ func (p *Proxy) sendToCredential(
 			limitModel: modelID,
 		}, embedFanOutReplies)
 	} else {
-		resp, doErr = p.client.Do(proxyReq) //nolint:gosec,bodyclose // G704: same targetURL as the request built above, host isn't attacker-controlled; resp.Body is closed by sendToCredential's caller (closeBody), once returned here via credentialSendOutcome
+		resp, doErr = sendClient.Do(proxyReq) //nolint:gosec,bodyclose // G704: same targetURL as the request built above, host isn't attacker-controlled; resp.Body is closed by sendToCredential's caller (closeBody), once returned here via credentialSendOutcome
 	}
 	if doErr != nil {
 		if isClientCanceledTransportError(r, doErr) {
@@ -1573,6 +1615,18 @@ func (p *Proxy) sendToCredential(
 			statusCode = http.StatusRequestTimeout
 			p.logger.WarnContext(r.Context(), "Upstream request timeout, will retry",
 				"credential", cred.Name, "model", modelID, "error", doErr, "url", targetURL)
+			if useFastHeaderClient && !cred.IsProxyLike() {
+				// Never got a response at all within ResponseHeaderTimeout on an
+				// attempt we expected fast headers from (we sent stream:true) --
+				// likely dead/unreachable right now. Ban this credential for
+				// this model for a short cooldown so the next few requests skip
+				// straight past it instead of each eating the same dead wait,
+				// and let other router replicas learn the same thing via
+				// reportHealth's Retry-After-becomes-ban-time rule.
+				p.balancer.BanUntil(cred.Name, modelID, statusCode,
+					time.Now().Add(timeoutAttemptBanDuration), "attempt_timeout")
+				p.reportHealth(string(cred.Type), cred.Name, modelID, statusCode, int(timeoutAttemptBanDuration.Seconds()))
+			}
 		} else {
 			p.logger.WarnContext(r.Context(), "Upstream request failed, will retry",
 				"credential", cred.Name, "model", modelID, "error", doErr, "url", targetURL)

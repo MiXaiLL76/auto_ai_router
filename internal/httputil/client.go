@@ -52,10 +52,19 @@ func (e *ProxyStatusError) Error() string {
 
 // HTTPClientConfig holds configuration for HTTP client creation
 type HTTPClientConfig struct {
-	Timeout             time.Duration
-	MaxIdleConns        int
-	MaxIdleConnsPerHost int
-	IdleConnTimeout     time.Duration
+	Timeout time.Duration
+	// ResponseHeaderTimeout bounds only the connect+send+wait-for-headers phase
+	// of one upstream attempt — independent of Timeout, which also feeds
+	// TLSHandshakeTimeout. Left at zero it falls back to Timeout (previous
+	// behavior); callers that want a short, dedicated per-attempt deadline
+	// (e.g. config.ServerConfig.ResponseHeaderTimeout) should set this
+	// explicitly instead of lowering Timeout, which would also shrink the TLS
+	// handshake budget and have no effect on a credential that never responds
+	// at all.
+	ResponseHeaderTimeout time.Duration
+	MaxIdleConns          int
+	MaxIdleConnsPerHost   int
+	IdleConnTimeout       time.Duration
 	// HTTP2IdlePingTimeout and HTTP2PingTimeout configure HTTP/2 keepalive pings
 	// (http.HTTP2Config.SendPingTimeout / .PingTimeout) so a pooled connection that
 	// has gone silent — not idle, just unresponsive — gets probed and, if it
@@ -149,6 +158,18 @@ func newTransport(cfg *HTTPClientConfig) *http.Transport {
 		http2PingTimeout = defaultHTTP2PingTimeout
 	}
 
+	// ResponseHeaderTimeout defaults to the shared Timeout (previous behavior)
+	// when not set; a negative value is an explicit opt-out (0 at the
+	// Transport level, matching Go's own "no timeout" meaning), same
+	// convention as the HTTP2 ping fields above.
+	responseHeaderTimeout := cfg.ResponseHeaderTimeout
+	switch {
+	case responseHeaderTimeout < 0:
+		responseHeaderTimeout = 0
+	case responseHeaderTimeout == 0:
+		responseHeaderTimeout = timeout
+	}
+
 	return &http.Transport{
 		Proxy: proxyFromRequest,
 		// A Transport with its own dial tries HTTP/2 only when told to.
@@ -156,8 +177,8 @@ func newTransport(cfg *HTTPClientConfig) *http.Transport {
 		ForceAttemptHTTP2:      true,
 		GetProxyConnectHeader:  proxyConnectHeader,
 		OnProxyConnectResponse: onProxyConnectResponse,
-		TLSHandshakeTimeout:    timeout, // Timeout for TLS handshake phase
-		ResponseHeaderTimeout:  timeout, // Timeout for connect + response headers only
+		TLSHandshakeTimeout:    timeout,               // Timeout for TLS handshake phase
+		ResponseHeaderTimeout:  responseHeaderTimeout, // Timeout for connect + response headers only — independent per-attempt budget, see HTTPClientConfig.ResponseHeaderTimeout
 		MaxIdleConns:           maxIdleConns,
 		MaxIdleConnsPerHost:    maxIdleConnsPerHost,
 		IdleConnTimeout:        idleConnTimeout,

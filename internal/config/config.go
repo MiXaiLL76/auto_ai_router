@@ -726,6 +726,7 @@ type ServerConfig struct {
 	MaxIdleConns               int                   `yaml:"max_idle_conns"`
 	MaxIdleConnsPerHost        int                   `yaml:"max_idle_conns_per_host"`
 	IdleConnTimeout            time.Duration         `yaml:"idle_conn_timeout"`
+	ResponseHeaderTimeout      time.Duration         `yaml:"response_header_timeout"`           // Max time to wait for a provider's response headers on one upstream attempt, not counting body/stream read (default: 4s). Only enforced for attempts actually sent upstream with "stream": true (see Proxy.streamingClient) — a credential that misses this is retried with the next one and banned for this model for 30s. A negative duration, e.g. -1s, disables the check (falls back to request_timeout).
 	HTTP2IdlePingTimeout       time.Duration         `yaml:"http2_idle_ping_timeout"`           // How long a provider HTTP/2 connection may go without any frame before a liveness PING is sent (default: 15s; a negative duration, e.g. -1s, disables the check — either this or http2_ping_timeout alone turns it off)
 	HTTP2PingTimeout           time.Duration         `yaml:"http2_ping_timeout"`                // How long to wait for a liveness PING to be acked before closing the connection (default: 10s; a negative duration, e.g. -1s, disables the check — same as http2_idle_ping_timeout, either field alone turns it off)
 	MaxConnectionLifetime      time.Duration         `yaml:"max_connection_lifetime"`           // How long a provider connection takes new requests; it closes once its last request ends (default: 0, reused for as long as requests come)
@@ -836,6 +837,7 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		MaxIdleConns               string                `yaml:"max_idle_conns"`
 		MaxIdleConnsPerHost        string                `yaml:"max_idle_conns_per_host"`
 		IdleConnTimeout            string                `yaml:"idle_conn_timeout"`
+		ResponseHeaderTimeout      string                `yaml:"response_header_timeout"`
 		HTTP2IdlePingTimeout       string                `yaml:"http2_idle_ping_timeout"`
 		HTTP2PingTimeout           string                `yaml:"http2_ping_timeout"`
 		MaxConnectionLifetime      string                `yaml:"max_connection_lifetime"`
@@ -897,6 +899,9 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if s.IdleConnTimeout, err = parseField(temp.IdleConnTimeout, 120*time.Second, time.ParseDuration, "idle_conn_timeout"); err != nil {
+		return err
+	}
+	if s.ResponseHeaderTimeout, err = parseField(temp.ResponseHeaderTimeout, 4*time.Second, time.ParseDuration, "response_header_timeout"); err != nil {
 		return err
 	}
 	if s.HTTP2IdlePingTimeout, err = parseField(temp.HTTP2IdlePingTimeout, 15*time.Second, time.ParseDuration, "http2_idle_ping_timeout"); err != nil {

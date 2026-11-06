@@ -86,6 +86,7 @@ func (u *longDecodeUpstream) proxy() (*Proxy, *stubLiteLLMManager) {
 		WithMasterKey("master-key").
 		Build()
 	prx.client = &http.Client{Transport: rewriteHostTransport{target: target}}
+	prx.streamingClient = prx.client
 	prx.LiteLLMDB = dbStub
 	setTestModelPrice(prx, "gemini-4-argon", argonTestPrice())
 	return prx, dbStub

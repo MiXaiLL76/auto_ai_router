@@ -297,6 +297,7 @@ func main() {
 		MaxIdleConns:                 cfg.Server.MaxIdleConns,
 		MaxIdleConnsPerHost:          cfg.Server.MaxIdleConnsPerHost,
 		IdleConnTimeout:              cfg.Server.IdleConnTimeout,
+		ResponseHeaderTimeout:        cfg.Server.ResponseHeaderTimeout,
 		HTTP2IdlePingTimeout:         cfg.Server.HTTP2IdlePingTimeout,
 		HTTP2PingTimeout:             cfg.Server.HTTP2PingTimeout,
 		MaxConnectionLifetime:        cfg.Server.MaxConnectionLifetime,

@@ -307,7 +307,7 @@ func (b *TestProxyBuilder) Build() *Proxy {
 		f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 		b.config.Balancer = balancer.New(b.config.Credentials, f2b, b.config.RateLimiter)
 	}
-	return New(&Config{
+	prx := New(&Config{
 		Balancer:               b.config.Balancer,
 		Logger:                 b.config.Logger,
 		MaxBodySizeMB:          b.config.MaxBodySizeMB,
@@ -334,6 +334,14 @@ func (b *TestProxyBuilder) Build() *Proxy {
 		OrganizationPolicies:   b.config.OrganizationPolicies,
 		VisionFallback:         b.config.VisionFallback,
 	})
+	// Tests overwhelmingly mock prx.client.Transport and have no reason to
+	// care about the ResponseHeaderTimeout distinction between client and
+	// streamingClient — collapse them to the same object so an existing
+	// test's mock transport is picked up regardless of which one a given
+	// attempt happens to use. A test that specifically wants to exercise the
+	// two-client split should reassign prx.streamingClient itself afterward.
+	prx.streamingClient = prx.client
+	return prx
 }
 
 // ============================================================================
