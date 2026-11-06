@@ -61,6 +61,14 @@ const DefaultResponseBodyMultiplier = 10
 // *next* few requests away from a credential that's currently dead/
 // unreachable, not a punishment on the scale of a real provider error
 // (429/5xx) — see fail2ban's own thresholds for those.
+//
+// Also used as the retryAfterSeconds hint sent to the health worker via
+// reportHealth — when ban decisions are external (banDecisionsExternal),
+// this is the only place the ban actually gets decided; this replica picks
+// it back up through the normal Redis/banreader round trip like every other
+// ban reason. The health worker's own error_code_rules must recognize this
+// status code (currently reported as 408) with max_attempts small enough to
+// act on a single occurrence, or the ban effectively never happens anywhere.
 const timeoutAttemptBanDuration = 30 * time.Second
 
 // respCtx returns the context of the request that produced this upstream
@@ -1618,13 +1626,21 @@ func (p *Proxy) sendToCredential(
 			if useFastHeaderClient && !cred.IsProxyLike() {
 				// Never got a response at all within ResponseHeaderTimeout on an
 				// attempt we expected fast headers from (we sent stream:true) --
-				// likely dead/unreachable right now. Ban this credential for
-				// this model for a short cooldown so the next few requests skip
-				// straight past it instead of each eating the same dead wait,
-				// and let other router replicas learn the same thing via
-				// reportHealth's Retry-After-becomes-ban-time rule.
-				p.balancer.BanUntil(cred.Name, modelID, statusCode,
-					time.Now().Add(timeoutAttemptBanDuration), "attempt_timeout")
+				// likely dead/unreachable right now.
+				//
+				// Same convention as recordBanSignal: when ban decisions are
+				// external (account_events wired), this replica must not make
+				// its own local ban call -- the health worker is the single
+				// source of truth, and this replica picks the ban back up via
+				// the normal Redis/banreader round trip like every other ban
+				// reason already does. Only ban locally when that pipeline
+				// isn't wired at all. reportHealth always fires either way, so
+				// the health worker learns about this outcome regardless (its
+				// own error_code_rules decide whether/how long to ban on it).
+				if !p.banDecisionsExternal {
+					p.balancer.BanUntil(cred.Name, modelID, statusCode,
+						time.Now().Add(timeoutAttemptBanDuration), "attempt_timeout")
+				}
 				p.reportHealth(string(cred.Type), cred.Name, modelID, statusCode, int(timeoutAttemptBanDuration.Seconds()))
 			}
 		} else {
