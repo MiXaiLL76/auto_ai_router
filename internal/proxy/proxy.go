@@ -588,8 +588,19 @@ func New(cfg *Config) *Proxy {
 	// the generation itself takes, so a short wait here only catches a
 	// credential that never responds at all, never a legitimately slow-but-live
 	// stream.
+	//
+	// It gets its own idle-connection pool (http.Transport.Clone can't help:
+	// ResponseHeaderTimeout is enforced per-Transport, and the idle pool is
+	// owned by the Transport, so two different timeouts mean two different
+	// pools, unavoidably) — split the configured budget between the two
+	// rather than handing each the full amount, so adding this client doesn't
+	// silently double total idle connections kept open per replica.
 	streamingClientCfg := *httpClientCfg
 	streamingClientCfg.ResponseHeaderTimeout = cfg.ResponseHeaderTimeout
+	streamingClientCfg.MaxIdleConns = httpClientCfg.MaxIdleConns / 2
+	streamingClientCfg.MaxIdleConnsPerHost = httpClientCfg.MaxIdleConnsPerHost / 2
+	httpClientCfg.MaxIdleConns -= streamingClientCfg.MaxIdleConns
+	httpClientCfg.MaxIdleConnsPerHost -= streamingClientCfg.MaxIdleConnsPerHost
 
 	// Compute max response body size from multiplier
 	multiplier := cfg.ResponseBodyMultiplier
@@ -1619,11 +1630,21 @@ func (p *Proxy) sendToCredential(
 		// Transport failure on one credential — retried with the next one;
 		// the final failure is logged at ERROR after the retry loop.
 		statusCode := http.StatusBadGateway
+		retryAfterSeconds := 0
 		if isTimeoutError(doErr) {
 			statusCode = http.StatusRequestTimeout
 			p.logger.WarnContext(r.Context(), "Upstream request timeout, will retry",
 				"credential", cred.Name, "model", modelID, "error", doErr, "url", targetURL)
-			if useFastHeaderClient && !cred.IsProxyLike() {
+			// useFastHeaderClient: cred is never proxy-like here (those are
+			// diverted to executeProxyRequest before this retry loop, see
+			// proxyRequest's "Handle proxy/AIR credential types" branch above
+			// -- no separate check needed). isAttemptTimeoutError, not the
+			// broader isTimeoutError: excludes Go's HTTP/2 idle-ping teardown
+			// ("http2: client connection lost"), which isTimeoutError also
+			// classifies as a timeout for the 408/502 split but which means a
+			// pooled connection went silent and got pinged out, not that this
+			// credential is currently unresponsive.
+			if useFastHeaderClient && isAttemptTimeoutError(doErr) {
 				// Never got a response at all within ResponseHeaderTimeout on an
 				// attempt we expected fast headers from (we sent stream:true) --
 				// likely dead/unreachable right now.
@@ -1634,21 +1655,22 @@ func (p *Proxy) sendToCredential(
 				// source of truth, and this replica picks the ban back up via
 				// the normal Redis/banreader round trip like every other ban
 				// reason already does. Only ban locally when that pipeline
-				// isn't wired at all. reportHealth always fires either way, so
-				// the health worker learns about this outcome regardless (its
-				// own error_code_rules decide whether/how long to ban on it).
+				// isn't wired at all. reportHealth below always fires either
+				// way, so the health worker learns about this outcome
+				// regardless (its own error_code_rules decide whether/how
+				// long to ban on it).
 				if !p.banDecisionsExternal {
 					p.balancer.BanUntil(cred.Name, modelID, statusCode,
 						time.Now().Add(timeoutAttemptBanDuration), "attempt_timeout")
 				}
-				p.reportHealth(string(cred.Type), cred.Name, modelID, statusCode, int(timeoutAttemptBanDuration.Seconds()))
+				retryAfterSeconds = int(timeoutAttemptBanDuration.Seconds())
 			}
 		} else {
 			p.logger.WarnContext(r.Context(), "Upstream request failed, will retry",
 				"credential", cred.Name, "model", modelID, "error", doErr, "url", targetURL)
 		}
 		p.recordBanSignal(cred, modelID, statusCode)
-		p.reportHealth(string(cred.Type), cred.Name, modelID, statusCode, 0)
+		p.reportHealth(string(cred.Type), cred.Name, modelID, statusCode, retryAfterSeconds)
 		// Per-attempt failure only — the client-facing RequestsTotal/RequestDuration
 		// metrics are recorded exactly once at the final outcome below.
 		p.metrics.RecordCredentialAttemptError(cred.Name)

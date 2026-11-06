@@ -65,6 +65,29 @@ func isTimeoutError(err error) bool {
 	return false
 }
 
+// isAttemptTimeoutError reports whether err means this specific attempt never
+// got a response within its own deadline (ResponseHeaderTimeout, or a dial/
+// connect timeout) -- narrower than isTimeoutError, which also classifies
+// Go's HTTP/2 idle-ping teardown (http2ConnectionLostSubstring) as a timeout
+// so the 408/502 split stays stable. That teardown means a *pooled*
+// connection went silent and got pinged out -- a pool-hygiene event, not
+// evidence this credential is currently unresponsive -- so it must not feed
+// a ban keyed on "never responded at all". Everything isAttemptTimeoutError
+// catches does implement net.Error with Timeout()==true (or wraps
+// context.DeadlineExceeded); the http2 case is deliberately excluded because
+// (per isTimeoutError's own doc comment) it is a plain errors.New with
+// neither.
+func isAttemptTimeoutError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
 // isClientContextCanceled reports whether r's own context is already
 // canceled — i.e. the client itself gave up (closed the connection, hit its
 // own request timeout) before AIR finished talking to any upstream. Checked
