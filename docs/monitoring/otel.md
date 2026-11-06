@@ -91,7 +91,20 @@ Each server span says what the request was, whose it was, what served it and how
 | `aar.status`                                    | `success`           | `success` or `failure`, as in the spend event                                                     |
 | `error.type`                                    | `RateLimitError`    | The failure's class (the spend event's `error_class`). Absent on success                          |
 
-The attributes of what served the request and how it ended are set when the request is over. A streamed response also marks the moment its first token arrived as the span event `first_token`: before it is the model's prefill, after it the generation.
+The attributes of what served the request and how it ended are set when the request is over.
+
+The server span also has the moments of the request as span events, in the order the router passes them. The time between two of them is one phase:
+
+| Event                 | The phase that ends with it                                                 |
+| --------------------- | --------------------------------------------------------------------------- |
+| `authenticated`       | The key is looked up and checked                                            |
+| `body_read`           | The client sends the request's body                                         |
+| `credential_selected` | The body is parsed, the model resolved and a credential chosen              |
+| `request_prepared`    | The body is converted for the credential's provider                         |
+| `admitted`            | The budget and the rate limits are checked, the prompt's tokens estimated   |
+| `first_token`         | The model's prefill, for a streamed response. After it comes the generation |
+
+After `admitted` the request is built and sent: the first client span begins. A small request passes the first five within a millisecond or two; in a large one they tell the client's upload from the router's own work. A request refused on the way has the events it got to.
 
 A request the router makes inside another has a span of its own beneath the outer one's, named like a server span and carrying these attributes, with its upstream requests beneath it: the describe call of the vision fallback, and each turn of a WebSocket session, whose server span lasts as long as the connection.
 

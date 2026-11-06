@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -193,6 +194,58 @@ func TestMarkFirstToken(t *testing.T) {
 	assert.False(t, untraced.CompletionStartTime.IsZero(), "the stamp does not need a span")
 }
 
+// Through the handler: the request's span has the moments before the
+// request is first sent, in the order the router passes them, then the
+// first token of a streamed answer.
+func TestProxyRequest_RequestSpanMarksThePhases(t *testing.T) {
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, openAIChatSSE(
+			`{"id":"c1","object":"chat.completion.chunk","model":"gpt-4","choices":[{"index":0,"delta":{"role":"assistant","content":"Hello"},"finish_reason":"stop"}]}`,
+		))
+	}))
+	defer upstream.Close()
+	prx := NewTestProxyBuilder().WithSingleCredential("openai", config.ProviderTypeOpenAI, upstream.URL, "key").Build()
+
+	ctx, said := recordRequestSpan(t)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model": "gpt-4", "stream": true, "messages": [{"role": "user", "content": "Hello"}]}`)).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	_, events := said()
+	assert.Equal(t, []string{
+		markAuthenticated, markBodyRead, markRouted, markRequestPrepared, markAdmitted, markFirstTokenEvent,
+	}, events)
+}
+
+// A request refused at the door has the moments it got to and no more.
+func TestProxyRequest_RequestSpanMarksStopWhereTheRequestDid(t *testing.T) {
+	prx := NewTestProxyBuilder().WithSingleCredential("openai", config.ProviderTypeOpenAI, "http://127.0.0.1:1", "key").Build()
+
+	ctx, said := recordRequestSpan(t)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}]}`)).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer not-the-key")
+	w := httptest.NewRecorder()
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusUnauthorized, w.Code, w.Body.String())
+	_, events := said()
+	assert.Empty(t, events)
+}
+
+func TestMark_WithoutASpan(t *testing.T) {
+	assert.NotPanics(t, func() {
+		(&RequestLogContext{}).mark(markBodyRead)
+		(*RequestLogContext)(nil).mark(markBodyRead)
+	})
+}
+
 func TestFinalStatus(t *testing.T) {
 	assert.Equal(t, "success", (&RequestLogContext{HTTPStatus: http.StatusOK}).finalStatus())
 	assert.Equal(t, "failure", (&RequestLogContext{HTTPStatus: http.StatusBadGateway}).finalStatus())
@@ -271,5 +324,15 @@ func TestProxyRequest_ADescribeHasItsOwnSpan(t *testing.T) {
 	assert.Equal(t, "success", said(describe)["aar.status"])
 	assert.Equal(t, "glm", said(outer)["gen_ai.request.model"], "the outer request's span is its own")
 	assert.Equal(t, []any{int64(1)}, attemptsOf[describe.SpanContext().SpanID()], "the describe's one attempt is beneath its span")
+	moments := func(span sdktrace.ReadOnlySpan) []string {
+		names := make([]string, 0, len(span.Events()))
+		for _, event := range span.Events() {
+			names = append(names, event.Name)
+		}
+		return names
+	}
+	passed := []string{markAuthenticated, markBodyRead, markRouted, markRequestPrepared, markAdmitted}
+	assert.Equal(t, passed, moments(describe), "the describe's moments are on its own span")
+	assert.Equal(t, passed, moments(outer), "and the request's on the request's, once each")
 	assert.Equal(t, []any{int64(1)}, attemptsOf[rootID], "and the request's own beneath the request's")
 }
