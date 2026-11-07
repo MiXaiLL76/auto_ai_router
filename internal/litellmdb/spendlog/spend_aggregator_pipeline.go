@@ -37,9 +37,13 @@ type spendLogRecord struct {
 	Status                   string
 	RequestID                string
 	TeamID                   string
-	OrganizationID           string
-	EndUser                  string
-	SkipDaily                bool
+	// BillingTeamID is the team the event is billed to. TeamID may be replaced
+	// by the credential name (credential_name_as_team_id), so billing decisions
+	// must use this field instead.
+	BillingTeamID  string
+	OrganizationID string
+	EndUser        string
+	SkipDaily      bool
 }
 
 // spendRoute ties together the three spellings AIR needs for one supported
@@ -154,6 +158,7 @@ func buildSpendLogRecords(
 			Status:                   entry.Status,
 			RequestID:                item.requestID,
 			TeamID:                   entry.TeamID,
+			BillingTeamID:            entry.BillingTeamID,
 			OrganizationID:           entry.OrganizationID,
 			EndUser:                  entry.EndUser,
 		}
@@ -302,10 +307,18 @@ func sortedDailyKeys[K dailyLockOrdered, V any](aggregations map[K]V) []K {
 // that inserted the source rows. The first error aborts the pipeline because a
 // PostgreSQL transaction is unusable after a statement error and must roll back.
 func (sl *Logger) runAggregators(aggCtx context.Context, tx dailySpendExecer, scope string, records []spendLogRecord) error {
+	includeTeamSpendInUserSpend := sl.config.TeamSpendUpdatesUserSpend()
 	dailyRecords := make([]spendLogRecord, 0, len(records))
+	userRecords := make([]spendLogRecord, 0, len(records))
 	for _, record := range records {
-		if !record.SkipDaily {
-			dailyRecords = append(dailyRecords, record)
+		if record.SkipDaily {
+			continue
+		}
+		dailyRecords = append(dailyRecords, record)
+		// Same policy as LiteLLM_UserTable in aggregateSpendUpdates: team-billed
+		// spend stays out of the user projection when the flag is off.
+		if includeTeamSpendInUserSpend || record.BillingTeamID == "" {
+			userRecords = append(userRecords, record)
 		}
 	}
 	aggregators := []struct {
@@ -315,7 +328,7 @@ func (sl *Logger) runAggregators(aggCtx context.Context, tx dailySpendExecer, sc
 		{"User", func() error {
 			c, cn := context.WithTimeout(aggCtx, 30*time.Second)
 			defer cn()
-			return aggregateDailyUserSpendLogs(c, tx, sl.logger, dailyRecords)
+			return aggregateDailyUserSpendLogs(c, tx, sl.logger, userRecords)
 		}},
 		{"Team", func() error {
 			c, cn := context.WithTimeout(aggCtx, 30*time.Second)

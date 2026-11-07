@@ -1445,7 +1445,7 @@ type LiteLLMDBConfig struct {
 	DisableSpendLogsWrite bool `yaml:"disable_spend_logs_write"` // default: false
 
 	// IncludeTeamSpendInUserSpend controls whether team-bound events update the
-	// cumulative LiteLLM_UserTable spend projection.
+	// user spend projections: cumulative LiteLLM_UserTable and LiteLLM_DailyUserSpend.
 	IncludeTeamSpendInUserSpend bool `yaml:"include_team_spend_in_user_spend"` // default: true
 
 	// EnforceBudgetReservation enables atomic Redis-backed budget pre-reservation

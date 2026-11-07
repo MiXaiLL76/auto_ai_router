@@ -74,7 +74,8 @@ type Config struct {
 	DisableSpendLogsWrite bool
 
 	// IncludeTeamSpendInUserSpend controls whether team-bound events update the
-	// cumulative LiteLLM_UserTable spend projection. Nil defaults to true.
+	// user spend projections: cumulative LiteLLM_UserTable and
+	// LiteLLM_DailyUserSpend. Nil defaults to true.
 	IncludeTeamSpendInUserSpend *bool
 
 	// DailySpendTimezone sets the calendar day the Daily* spend tables are
