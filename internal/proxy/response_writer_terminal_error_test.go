@@ -266,6 +266,42 @@ func TestStatusCodeFromProviderBodyError(t *testing.T) {
 			body:       `{"error":{"code":"invalid_request_error","message":"invalid parameter"}}`,
 			wantOK:     false,
 		},
+		{
+			// OpenRouter relays Alibaba's error that way: an HTTP 200 whose
+			// body carries the status as a JSON number. The number used to
+			// fail the unmarshal of the whole error object, so the message
+			// and the type were lost with it and the client got a blanket
+			// 502 instead of the 400 the provider reported.
+			name:       "numeric code in error object",
+			statusCode: http.StatusOK,
+			body:       `{"id":"gen-1","object":"chat.completion.chunk","provider":"Alibaba","choices":[],"error":{"code":400,"message":"Video inputs are not supported by this model.","metadata":{"error_type":"invalid_request"}}}`,
+			wantStatus: http.StatusBadRequest,
+			wantOK:     true,
+		},
+		{
+			name:       "numeric code 5xx in error object",
+			statusCode: http.StatusOK,
+			body:       `{"id":"gen-2","object":"chat.completion.chunk","provider":"Alibaba","choices":[],"error":{"code":502,"message":"Upstream error from Alibaba: inference generation failed","metadata":{"error_type":"provider_unavailable"}}}`,
+			wantStatus: http.StatusBadGateway,
+			wantOK:     true,
+		},
+		{
+			name:       "error object is a bare number",
+			statusCode: http.StatusOK,
+			body:       `{"error":400,"message":"bad request"}`,
+			wantStatus: http.StatusBadRequest,
+			wantOK:     true,
+		},
+		{
+			// A number that is not an HTTP status says nothing about the
+			// failure and must not become a status of its own: the generic
+			// 502 stays, which is what an unrecognized error message yields.
+			name:       "numeric code that is not an http status",
+			statusCode: http.StatusOK,
+			body:       `{"error":{"code":42,"message":"unclear"}}`,
+			wantStatus: http.StatusBadGateway,
+			wantOK:     true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -343,4 +379,46 @@ func TestMarkProxyProviderStreamError_ClientSaw(t *testing.T) {
 		markProxyProviderStreamError(logCtx, http.StatusBadGateway, "", "some client body")
 		assert.Equal(t, "pre-existing", logCtx.ClientResponseBody, "no-op guard must not be bypassed just because clientSaw is non-empty")
 	})
+}
+
+// TestStatusCodeFromProviderStreamError_NumericCode is the streaming
+// counterpart of the numeric-code cases in
+// TestStatusCodeFromProviderBodyError: a provider that states the status as a
+// JSON number (OpenRouter relays Alibaba's {"code":400,...} that way) used to
+// fail the unmarshal of the whole error object, so the message and the type
+// were lost with it and the terminal stream error was classified as a blanket
+// 502 instead of the 400 the provider reported.
+func TestStatusCodeFromProviderStreamError_NumericCode(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+		want    int
+	}{
+		{
+			name:    "numeric code in error object",
+			payload: `{"type":"error","error":{"code":400,"message":"Video inputs are not supported by this model."}}`,
+			want:    http.StatusBadRequest,
+		},
+		{
+			name:    "numeric code in response error object",
+			payload: `{"type":"response.failed","response":{"status":"failed","error":{"code":400,"message":"bad request"}}}`,
+			want:    http.StatusBadRequest,
+		},
+		{
+			name:    "numeric code 429",
+			payload: `{"type":"error","error":{"code":429,"message":"too many requests"}}`,
+			want:    http.StatusTooManyRequests,
+		},
+		{
+			name:    "string code still classifies by keyword",
+			payload: `{"type":"error","error":{"code":"rate_limit_exceeded","message":"slow down"}}`,
+			want:    http.StatusTooManyRequests,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, statusCodeFromProviderStreamError(tt.payload))
+		})
+	}
 }

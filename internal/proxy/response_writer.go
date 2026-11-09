@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
@@ -206,16 +207,16 @@ func statusCodeFromProviderStreamError(payload string) int {
 	var evt struct {
 		Type  string `json:"type"`
 		Error struct {
-			Type    string `json:"type"`
-			Code    string `json:"code"`
-			Message string `json:"message"`
+			Type    string          `json:"type"`
+			Code    json.RawMessage `json:"code"`
+			Message string          `json:"message"`
 		} `json:"error"`
 		Response struct {
 			Status string `json:"status"`
 			Error  struct {
-				Type    string `json:"type"`
-				Code    string `json:"code"`
-				Message string `json:"message"`
+				Type    string          `json:"type"`
+				Code    json.RawMessage `json:"code"`
+				Message string          `json:"message"`
 			} `json:"error"`
 		} `json:"response"`
 	}
@@ -223,15 +224,18 @@ func statusCodeFromProviderStreamError(payload string) int {
 		return http.StatusBadGateway
 	}
 
+	// "code" is decoded as a number too -- see providerErrorSignals' comment:
+	// a provider that states the status as a JSON number would otherwise
+	// fail the whole unmarshal and lose the message and the type with it.
 	signals := []string{
-		evt.Error.Code,
 		evt.Error.Type,
 		evt.Error.Message,
-		evt.Response.Error.Code,
 		evt.Response.Error.Type,
 		evt.Response.Error.Message,
 		evt.Type,
 	}
+	signals = append(signals, numericOrStringSignal(evt.Error.Code)...)
+	signals = append(signals, numericOrStringSignal(evt.Response.Error.Code)...)
 	return statusCodeFromErrorSignals(signals)
 }
 
@@ -250,14 +254,31 @@ func providerErrorSignals(raw json.RawMessage) ([]string, bool) {
 		return []string{text}, true
 	}
 
+	// The error object itself can be a bare number: {"error":400} is how
+	// several providers report the status when they answer with an HTTP 200.
+	var number json.Number
+	if err := json.Unmarshal(trimmed, &number); err == nil {
+		if signal := number.String(); signal != "" {
+			return []string{signal}, true
+		}
+		return nil, false
+	}
+
+	// "code" is decoded as a number too: providers that answer with an HTTP
+	// 200 and an error object (OpenRouter relays Alibaba's {"code":400,...}
+	// that way) write the status as a JSON number, and a string-only field
+	// would fail the whole unmarshal -- dropping the message and the type
+	// along with it, so the error became invisible and the client got a
+	// blanket 502 instead of the 400 the provider actually reported.
 	var fields struct {
-		Type    string `json:"type"`
-		Code    string `json:"code"`
-		Message string `json:"message"`
-		Status  string `json:"status"`
+		Type    string          `json:"type"`
+		Code    json.RawMessage `json:"code"`
+		Message string          `json:"message"`
+		Status  string          `json:"status"`
 	}
 	if err := json.Unmarshal(trimmed, &fields); err == nil {
-		signals := []string{fields.Code, fields.Type, fields.Message, fields.Status}
+		signals := []string{fields.Type, fields.Message, fields.Status}
+		signals = append(signals, numericOrStringSignal(fields.Code)...)
 		for _, signal := range signals {
 			if strings.TrimSpace(signal) != "" {
 				return signals, true
@@ -267,6 +288,26 @@ func providerErrorSignals(raw json.RawMessage) ([]string, bool) {
 	}
 
 	return nil, false
+}
+
+// numericOrStringSignal renders a JSON value that may be either a number or
+// a string as a signal string: "400" for the number 400, "rate_limit" for the
+// string "rate_limit". An object or array yields nothing -- it carries no
+// status or keyword the classifier could use.
+func numericOrStringSignal(raw json.RawMessage) []string {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil
+	}
+	var number json.Number
+	if err := json.Unmarshal(trimmed, &number); err == nil {
+		return []string{number.String()}
+	}
+	var text string
+	if err := json.Unmarshal(trimmed, &text); err == nil {
+		return []string{text}
+	}
+	return nil
 }
 
 func statusCodeFromErrorSignals(signals []string) int {
@@ -293,7 +334,37 @@ func statusCodeFromErrorSignals(signals []string) int {
 			return http.StatusInternalServerError
 		}
 	}
+	// A provider that reports the status as a bare number (OpenRouter relays
+	// Alibaba's {"code":400,...} that way) states it explicitly, so it is
+	// taken at face value: a 400 in the body is a 400 to the client, not the
+	// 502 the keyword scan falls back to. Only a real HTTP status is
+	// accepted -- an arbitrary number in the body ("code":42) says nothing
+	// about the failure and must not be turned into a status of its own.
+	if status, ok := httpStatusFromNumericSignal(signals); ok {
+		return status
+	}
 	return http.StatusBadGateway
+}
+
+// httpStatusFromNumericSignal returns the HTTP status a signal list states as
+// a bare number, if any. It looks at every signal, because the number can
+// sit in any of them ("code":400, "status":429), and reports the first one
+// that is a status the router can relay (400-599).
+func httpStatusFromNumericSignal(signals []string) (int, bool) {
+	for _, signal := range signals {
+		signal = strings.TrimSpace(signal)
+		if signal == "" || len(signal) > 3 {
+			continue
+		}
+		status, err := strconv.Atoi(signal)
+		if err != nil {
+			continue
+		}
+		if status >= http.StatusBadRequest && status <= 599 {
+			return status, true
+		}
+	}
+	return 0, false
 }
 
 // writeProviderStreamErrorBeforeCommit writes the client-facing error for a
