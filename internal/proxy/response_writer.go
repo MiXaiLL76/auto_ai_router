@@ -307,8 +307,8 @@ func providerErrorSignals(raw json.RawMessage) ([]string, bool) {
 	return signals, true
 }
 
-// contentFilterSignals is the shared content-policy marker set, used here to
-// classify a provider's refusal as a 400.
+// isContentFilterSignal reports whether a provider signal describes a
+// content-policy refusal rather than a provider or credential failure.
 //
 // Such a refusal is a fault of the REQUEST, not of the credential or the
 // upstream connection: every credential refuses the same content, so it must
@@ -316,17 +316,11 @@ func providerErrorSignals(raw json.RawMessage) ([]string, bool) {
 // instead of a generic 502 that both hides the cause and triggers a retry
 // storm (in production: 4 attempts and 55s for one blocked prompt).
 //
-// The list itself lives in upstreamerror (ContentPolicyMarkers), shared with
-// the LiteLLM compatibility layer, the retry policy and the client-facing
-// classifier -- it used to be a copy here, and the copies drifted.
-var contentFilterSignals = upstreamerror.ContentPolicyMarkers
-
-// isContentFilterSignal reports whether a provider signal describes a
-// content-policy refusal rather than a provider or credential failure.
-// isContentFilterSignal reports whether a provider signal describes a
-// content-policy refusal rather than a provider or credential failure. It
-// delegates to upstreamerror.IsContentPolicySignal so the status
-// classification and the client-facing message always agree on what counts
+// The marker set itself lives in upstreamerror (ContentPolicyMarkers),
+// shared with the LiteLLM compatibility layer, the retry policy and the
+// client-facing classifier -- it used to be a copy here, and the copies
+// drifted. Delegating to upstreamerror.IsContentPolicySignal keeps the status
+// classification and the client-facing message in agreement on what counts
 // as a refusal.
 func isContentFilterSignal(signal string) bool {
 	return upstreamerror.IsContentPolicySignal(signal)
