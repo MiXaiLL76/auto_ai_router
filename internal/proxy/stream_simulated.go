@@ -881,6 +881,19 @@ type simulatedNativeNonStreamAttemptResult struct {
 
 	httpStatus int
 	httpBody   []byte
+
+	// classifiedStatus is the status derived from the provider's terminal
+	// error event (a 429 rate limit, a 400 content-policy refusal, ...),
+	// when that event could be classified at all. 0 means "not classifiable",
+	// and the outcome stays the generic 502 of simulatedFailureStatus.
+	//
+	// A native Responses provider (e.g. Azure's /v1/responses) answers a
+	// rate-limited request with HTTP 200 and a terminal error event carrying
+	// type "too_many_requests" / code "rate_limit_exceeded". Without this
+	// the client got a bare 502 that blames the provider for being broken,
+	// instead of the 429 it could have backed off from.
+	classifiedStatus  int
+	classifiedPayload []byte
 }
 
 // attemptSimulatedNativeNonStream drains one provider SSE response for the
@@ -1000,9 +1013,23 @@ func (p *Proxy) attemptSimulatedNativeNonStream(
 
 	var streamErr error
 	var clientAborted bool
+	var classifiedStatus int
+	var classifiedPayload []byte
 	if streamErr = resolveCapturedProviderStreamError(logCtx, resp.StatusCode, readErrForResolve, rawProviderStreamError, outputStreamError); streamErr != nil {
 		markStreamFailure(logCtx, streamErr)
 		clientAborted = isClientCanceledTransportError(logCtx.Request, streamErr)
+		// The upstream answered 2xx but its stream ended in a terminal error
+		// event: the status that event implies (429 for a rate limit, 400 for
+		// a content-policy refusal) is the status this attempt really failed
+		// with. The chat-shaped sibling (attemptSimulatedNonStream) already
+		// classifies it this way; without it the native Responses path
+		// reported every provider-side rate limit as a bare 502.
+		if payload := logCtx.ErrorBodyRaw; payload != "" {
+			if status := statusCodeFromProviderStreamError(payload); status >= http.StatusBadRequest {
+				classifiedStatus = status
+				classifiedPayload = []byte(payload)
+			}
+		}
 	} else if overflow {
 		streamErr = ErrResponseBodyTooLarge
 		markStreamFailure(logCtx, streamErr)
@@ -1020,6 +1047,10 @@ func (p *Proxy) attemptSimulatedNativeNonStream(
 		// attemptSimulatedNonStream (see its doc comment).
 		transportFailure: readErrForResolve != nil,
 		clientAborted:    clientAborted,
+		// A classifiable terminal error event keeps its real status: the
+		// client must be able to tell a rate limit (429) from an outage.
+		classifiedStatus:  classifiedStatus,
+		classifiedPayload: classifiedPayload,
 	}
 }
 
@@ -1178,6 +1209,43 @@ func (p *Proxy) handleSimulatedNativeNonStream(
 		// Client went away: stop without blaming the credential or retrying
 		// against a dead context; finishSimulatedNativeNonStream surfaces 499.
 		if result.clientAborted {
+			break
+		}
+		// A 2xx stream whose terminal error event classifies to a real status
+		// (a 429 rate limit, a 400 content-policy refusal): nothing reached
+		// the client, so a retryable one is replayed on the next credential,
+		// and the status is kept as the terminal outcome so the client gets
+		// the provider's real status instead of a blanket 502. Same contract
+		// as the chat-shaped sibling (see handleSimulatedNonStream).
+		if result.classifiedStatus >= http.StatusBadRequest {
+			status := result.classifiedStatus
+			body := result.classifiedPayload
+			if retry, _ := ShouldRetryWithFallback(status, body); retry {
+				p.recordBanSignal(cred, modelID, status)
+				p.reportHealth(string(cred.Type), cred.Name, modelID, status, 0)
+				p.metrics.RecordCredentialAttemptError(cred.Name)
+				p.logger.WarnContext(r.Context(), "Provider stream carried a retryable error event, will retry",
+					"error_code", status, "credential", cred.Name, "model", modelID,
+					"attempt", attempt+1, "max_attempts", p.maxProviderRetries+1)
+				resp = nil
+				result = simulatedNativeNonStreamAttemptResult{
+					httpStatus:        status,
+					httpBody:          body,
+					classifiedStatus:  status,
+					classifiedPayload: body,
+				}
+				continue
+			}
+			p.logger.WarnContext(r.Context(), "Provider stream carried a non-retryable error event, returning it to the client",
+				"error_code", status, "credential", cred.Name, "model", modelID,
+				"attempt", attempt+1)
+			resp = nil
+			result = simulatedNativeNonStreamAttemptResult{
+				httpStatus:        status,
+				httpBody:          body,
+				classifiedStatus:  status,
+				classifiedPayload: body,
+			}
 			break
 		}
 		if result.streamErr == nil || !result.transportFailure {
@@ -1369,6 +1437,19 @@ type simulatedPassthroughNonStreamAttemptResult struct {
 
 	httpStatus int
 	httpBody   []byte
+
+	// classifiedStatus is the status derived from the provider's terminal
+	// error event (a 429 rate limit, a 400 content-policy refusal, ...),
+	// when that event could be classified at all. 0 means "not classifiable",
+	// and the outcome stays the generic 502 of simulatedFailureStatus.
+	//
+	// A Responses provider (e.g. Azure's /v1/responses) answers a
+	// rate-limited request with HTTP 200 and a terminal error event carrying
+	// type "too_many_requests" / code "rate_limit_exceeded". Without this
+	// the client got a bare 502 that blames the provider for being broken,
+	// instead of the 429 it could have backed off from.
+	classifiedStatus  int
+	classifiedPayload []byte
 }
 
 // attemptSimulatedPassthroughNonStream drains one provider SSE response for
@@ -1474,9 +1555,23 @@ func (p *Proxy) attemptSimulatedPassthroughNonStream(
 	}
 
 	var clientAborted bool
+	var classifiedStatus int
+	var classifiedPayload []byte
 	if streamErr = resolveCapturedProviderStreamError(logCtx, resp.StatusCode, streamErr, rawProviderStreamError); streamErr != nil {
 		markStreamFailure(logCtx, streamErr)
 		clientAborted = isClientCanceledTransportError(logCtx.Request, streamErr)
+		// The upstream answered 2xx but its stream ended in a terminal error
+		// event: the status that event implies (429 for a rate limit, 400 for
+		// a content-policy refusal) is the status this attempt really failed
+		// with. The chat-shaped sibling (attemptSimulatedNonStream) already
+		// classifies it this way; without it the passthrough Responses path
+		// reported every provider-side rate limit as a bare 502.
+		if payload := logCtx.ErrorBodyRaw; payload != "" {
+			if status := statusCodeFromProviderStreamError(payload); status >= http.StatusBadRequest {
+				classifiedStatus = status
+				classifiedPayload = []byte(payload)
+			}
+		}
 	} else if overflow {
 		streamErr = ErrResponseBodyTooLarge
 		markStreamFailure(logCtx, streamErr)
@@ -1497,6 +1592,10 @@ func (p *Proxy) attemptSimulatedPassthroughNonStream(
 		// attemptSimulatedNonStream (see its doc comment).
 		transportFailure: lastReadErr != nil,
 		clientAborted:    clientAborted,
+		// A classifiable terminal error event keeps its real status: the
+		// client must be able to tell a rate limit (429) from an outage.
+		classifiedStatus:  classifiedStatus,
+		classifiedPayload: classifiedPayload,
 	}
 }
 
@@ -1647,6 +1746,43 @@ func (p *Proxy) handleSimulatedPassthroughNonStream(
 		// Client went away: stop without blaming the credential or retrying
 		// against a dead context; finishSimulatedPassthroughNonStream surfaces 499.
 		if result.clientAborted {
+			break
+		}
+		// A 2xx stream whose terminal error event classifies to a real status
+		// (a 429 rate limit, a 400 content-policy refusal): nothing reached
+		// the client, so a retryable one is replayed on the next credential,
+		// and the status is kept as the terminal outcome so the client gets
+		// the provider's real status instead of a blanket 502. Same contract
+		// as the chat-shaped sibling (see handleSimulatedNonStream).
+		if result.classifiedStatus >= http.StatusBadRequest {
+			status := result.classifiedStatus
+			body := result.classifiedPayload
+			if retry, _ := ShouldRetryWithFallback(status, body); retry {
+				p.recordBanSignal(cred, modelID, status)
+				p.reportHealth(string(cred.Type), cred.Name, modelID, status, 0)
+				p.metrics.RecordCredentialAttemptError(cred.Name)
+				p.logger.WarnContext(r.Context(), "Provider stream carried a retryable error event, will retry",
+					"error_code", status, "credential", cred.Name, "model", modelID,
+					"attempt", attempt+1, "max_attempts", p.maxProviderRetries+1)
+				resp = nil
+				result = simulatedPassthroughNonStreamAttemptResult{
+					httpStatus:        status,
+					httpBody:          body,
+					classifiedStatus:  status,
+					classifiedPayload: body,
+				}
+				continue
+			}
+			p.logger.WarnContext(r.Context(), "Provider stream carried a non-retryable error event, returning it to the client",
+				"error_code", status, "credential", cred.Name, "model", modelID,
+				"attempt", attempt+1)
+			resp = nil
+			result = simulatedPassthroughNonStreamAttemptResult{
+				httpStatus:        status,
+				httpBody:          body,
+				classifiedStatus:  status,
+				classifiedPayload: body,
+			}
 			break
 		}
 		if result.streamErr == nil || !result.transportFailure {
