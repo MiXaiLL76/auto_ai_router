@@ -156,3 +156,99 @@ func TestProviderUnavailableAloneStaysRetryable(t *testing.T) {
 	retry, _ := ShouldRetryWithFallback(http.StatusBadGateway, body)
 	assert.True(t, retry, "a provider outage must stay retryable")
 }
+
+// TestStatusCodeFromErrorSignalsPriority pins the priority order between a
+// content-policy refusal and the other signals it can arrive alongside.
+//
+// The refusal is checked in its own pass, so it outranks the PROVIDER-side
+// signals regardless of the order they appear in the object: an aggregator
+// reports the refusal with the upstream's own code and error type, and that
+// must not turn a request fault into a 5xx.
+//
+// It does NOT outrank the request-side ones. A rate limit or a timeout is a
+// property of the account's state at that moment, not of the content:
+// reporting those as 400 would tell the client "your prompt was refused" when
+// the truth is "slow down", and would stop a retry that would have
+// succeeded.
+func TestStatusCodeFromErrorSignalsPriority(t *testing.T) {
+	tests := []struct {
+		name    string
+		signals []string
+		want    int
+	}{
+		{
+			name:    "refusal outranks the provider's own error type",
+			signals: []string{"Output data may contain inappropriate content.", "provider_unavailable"},
+			want:    http.StatusBadRequest,
+		},
+		{
+			name:    "refusal outranks a provider error even when it comes second",
+			signals: []string{"server_error", "Output data may contain inappropriate content."},
+			want:    http.StatusBadRequest,
+		},
+		{
+			name:    "refusal outranks an internal error",
+			signals: []string{"internal_error", "content_filter"},
+			want:    http.StatusBadRequest,
+		},
+		{
+			name:    "a rate limit outranks the refusal",
+			signals: []string{"rate_limit_exceeded", "content_filter"},
+			want:    http.StatusTooManyRequests,
+		},
+		{
+			name:    "a timeout outranks the refusal",
+			signals: []string{"timeout", "content_filter"},
+			want:    http.StatusRequestTimeout,
+		},
+		{
+			name:    "a rate limit alone",
+			signals: []string{"rate_limit_exceeded"},
+			want:    http.StatusTooManyRequests,
+		},
+		{
+			name:    "a provider failure alone",
+			signals: []string{"provider_unavailable", "inference generation failed"},
+			want:    http.StatusBadGateway,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, statusCodeFromErrorSignals(tt.signals))
+		})
+	}
+}
+
+// TestDataInspectionFailedIsContentPolicy pins Alibaba's own code for a
+// content refusal.
+//
+// It is the most frequent content-refusal marker in production by a wide
+// margin (~164k of the refusals logged in a month), and it arrives in the
+// "code"/"type" field rather than the message -- with a message that may
+// name no content at all ("Provider returned error"). Without the marker a
+// refusal like that is classified as a generic error, and the request stays
+// retryable across the pool.
+func TestDataInspectionFailedIsContentPolicy(t *testing.T) {
+	body := []byte(`{"error":{"code":"data_inspection_failed","param":null,` +
+		`"message":"Output data may contain inappropriate content.","type":"data_inspection_failed"},` +
+		`"id":"chatcmpl-1"}`)
+
+	// A provider that reports the refusal inside a 200 body: the status has
+	// to be derived from the body.
+	status, ok := statusCodeFromProviderBodyError(http.StatusOK, body)
+	require.True(t, ok)
+	assert.Equal(t, http.StatusBadRequest, status)
+
+	// The same code with a message that names no content at all.
+	body2 := []byte(`{"error":{"code":"data_inspection_failed","param":null,` +
+		`"message":"Provider returned error","type":"data_inspection_failed"},"id":"chatcmpl-2"}`)
+	status2, ok2 := statusCodeFromProviderBodyError(http.StatusOK, body2)
+	require.True(t, ok2)
+	assert.Equal(t, http.StatusBadRequest, status2,
+		"the code alone identifies the refusal, even when the message does not")
+
+	// And it must not be retried: every credential refuses the same content.
+	retry, _ := ShouldRetryWithFallback(http.StatusBadRequest, body2)
+	assert.False(t, retry, "a data_inspection_failed refusal must not be retried")
+}

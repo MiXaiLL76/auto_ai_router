@@ -327,18 +327,26 @@ func isContentFilterSignal(signal string) bool {
 }
 
 func statusCodeFromErrorSignals(signals []string) int {
-	// A content-policy refusal wins over every other signal, including the
-	// provider-side ones: an aggregator that wraps a content refusal reports
-	// it with an upstream code and an "provider_unavailable" error type
-	// (OpenRouter forwards the upstream provider's own numeric code verbatim),
-	// but the refusal itself is still a fault of the request. Classifying it
-	// as 503/502 would both mislabel the cause and make the request look
-	// worth retrying on another credential -- which every credential refuses
-	// identically.
-	for _, signal := range signals {
-		if isContentFilterSignal(signal) {
-			return http.StatusBadRequest
-		}
+	// A content-policy refusal is checked in its own pass, before the
+	// provider-side signals below, because an aggregator that wraps a refusal
+	// reports it with the upstream's own code and error type (OpenRouter
+	// forwards the upstream provider's numeric code verbatim) -- the refusal is
+	// still a fault of the request, and classifying it as 503/502 would both
+	// mislabel the cause and make the request look worth retrying on another
+	// credential, which every credential refuses identically.
+	//
+	// The pass is deliberately narrow: it wins only over the PROVIDER-side
+	// signals (overload, unavailability, internal error), never over the
+	// request-side ones. A rate limit or a timeout is a property of the
+	// account's state at that moment, not of the content -- reporting those
+	// as 400 would tell the client "your prompt was refused" when the truth
+	// is "slow down", and would stop a retry that would have succeeded.
+	// This differs from the single-pass order this replaced, where whichever
+	// signal happened to come first in the object won; the refusal now
+	// outranks the provider-side ones regardless of their order, and the
+	// request-side ones still outrank the refusal.
+	if hasContentPolicyRefusal(signals) && !hasRequestSideSignal(signals) {
+		return http.StatusBadRequest
 	}
 
 	for _, signal := range signals {
@@ -357,6 +365,31 @@ func statusCodeFromErrorSignals(signals []string) int {
 		}
 	}
 	return http.StatusBadGateway
+}
+
+// hasContentPolicyRefusal reports whether any signal describes a
+// content-policy refusal.
+func hasContentPolicyRefusal(signals []string) bool {
+	for _, signal := range signals {
+		if isContentFilterSignal(signal) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasRequestSideSignal reports whether any signal describes a request-side
+// condition -- a rate limit or a timeout -- which is a property of the
+// account's state rather than of the content.
+func hasRequestSideSignal(signals []string) bool {
+	for _, signal := range signals {
+		signal = strings.ToLower(strings.TrimSpace(signal))
+		if strings.Contains(signal, "rate_limit") || strings.Contains(signal, "too_many_requests") ||
+			strings.Contains(signal, "timeout") {
+			return true
+		}
+	}
+	return false
 }
 
 // writeProviderStreamErrorBeforeCommit writes the client-facing error for a

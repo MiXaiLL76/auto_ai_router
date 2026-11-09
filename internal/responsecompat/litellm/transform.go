@@ -360,42 +360,17 @@ func errorStatus(value any) int {
 	return http.StatusUnprocessableEntity
 }
 
-// contentPolicyErrorMarkers is the shared content-policy marker set, used
-// here to classify a provider's refusal as a 400 instead of the upstream
-// status it carries.
-//
-// The list itself lives in upstreamerror (ContentPolicyMarkers), shared with
-// the proxy's status classification, the retry policy and the client-facing
-// classifier -- it used to be a copy here, and the copies drifted.
-var contentPolicyErrorMarkers = upstreamerror.ContentPolicyMarkers
-
 // isContentPolicyError reports whether a provider's error object describes a
-// content-policy refusal. The check reads the object's text fields (message,
-// type, and a metadata error_type) -- a numeric "code" says nothing about the
-// cause.
+// content-policy refusal.
+//
+// It delegates to upstreamerror.IsContentPolicyErrorObject, which reads the
+// same fields the proxy's own classification reads. The compatibility layer
+// used to re-implement the check over a narrower set of fields (message,
+// type, reason -- but not code or status), so a refusal phrased in "status":
+// "content_filter" was recognized by the proxy and passed through as a 5xx
+// here: the same body classified differently depending on which path it took.
 func isContentPolicyError(body map[string]any) bool {
-	texts := make([]string, 0, 4)
-	for _, key := range []string{"message", "type", "reason"} {
-		if s, ok := body[key].(string); ok {
-			texts = append(texts, s)
-		}
-	}
-	if meta, ok := body["metadata"].(map[string]any); ok {
-		for _, key := range []string{"error_type", "type", "reason"} {
-			if s, ok := meta[key].(string); ok {
-				texts = append(texts, s)
-			}
-		}
-	}
-	for _, text := range texts {
-		lower := strings.ToLower(text)
-		for _, marker := range contentPolicyErrorMarkers {
-			if strings.Contains(lower, marker) {
-				return true
-			}
-		}
-	}
-	return false
+	return upstreamerror.IsContentPolicyErrorObject(body)
 }
 
 // normalizeError builds the litellm-compatible error body for a non-2xx

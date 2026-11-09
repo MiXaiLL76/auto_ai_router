@@ -2,7 +2,9 @@ package litellm
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -97,5 +99,54 @@ func TestErrorStatusContentFilter(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.want, errorStatus(tt.body))
 		})
+	}
+}
+
+// TestIsContentPolicyErrorReadsTheSameFieldsAsProxy pins that the
+// compatibility layer's refusal check reads the same fields the proxy's own
+// classification reads.
+//
+// They used to diverge: the proxy read "code" and "status" as well, while
+// this layer read only the message-bearing fields. A refusal phrased in
+// "status": "content_filter" was therefore recognized by the proxy and
+// passed through as a 5xx here -- the same body classified differently
+// depending on which path it took.
+func TestIsContentPolicyErrorReadsTheSameFieldsAsProxy(t *testing.T) {
+	objects := []map[string]any{
+		{"message": "Output data may contain inappropriate content."},
+		{"type": "content_filter", "message": "refused"},
+		{"status": "content_filter", "message": "refused"},
+		{"code": "content_filter", "message": "refused"},
+		{"reason": "content_filter", "message": "refused"},
+		{"message": "refused", "metadata": map[string]any{"error_type": "content_filter"}},
+		{"message": "refused", "metadata": map[string]any{"type": "content_filter"}},
+		{"message": "refused", "metadata": map[string]any{"reason": "content_filter"}},
+		{"code": "data_inspection_failed", "type": "data_inspection_failed", "message": "Provider returned error"},
+	}
+
+	for _, obj := range objects {
+		t.Run(strings.Join([]string{
+			fmt.Sprint(obj["message"]), fmt.Sprint(obj["type"]),
+			fmt.Sprint(obj["status"]), fmt.Sprint(obj["code"]),
+		}, "|"), func(t *testing.T) {
+			assert.True(t, isContentPolicyError(obj),
+				"a refusal must be recognized wherever the marker sits: %v", obj)
+		})
+	}
+}
+
+// TestIsContentPolicyErrorIgnoresNonRefusals is the counterpart: a provider
+// failure must not be mistaken for a refusal, whatever it carries.
+func TestIsContentPolicyErrorIgnoresNonRefusals(t *testing.T) {
+	for _, obj := range []map[string]any{
+		{"code": float64(502), "message": "inference generation failed"},
+		{"message": "Rate limit exceeded"},
+		{"message": "Your account has been blocked by the provider for suspected billing fraud."},
+		{"message": "This request was blocked by the provider due to an IP/region restriction."},
+		{"message": "safety_identifier must be a string"},
+		{"code": float64(500), "message": "internal server error"},
+	} {
+		assert.False(t, isContentPolicyError(obj),
+			"a provider failure must not be reported as a content refusal: %v", obj)
 	}
 }
