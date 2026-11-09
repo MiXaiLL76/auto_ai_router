@@ -42,6 +42,7 @@ func (p *Proxy) deepSeekSimulatedLoop(
 
 	runner := &deepSeekToolRunner{
 		client:  p.deepSeekToolsClient(cred),
+		logger:  p.logger,
 		quota:   p.deepSeekToolsQuota,
 		account: deepSeekAccountKey(cred),
 		state:   newDeepSeekToolState(),
@@ -62,11 +63,11 @@ func (p *Proxy) deepSeekSimulatedLoop(
 	for step := 1; step < p.deepSeekToolsMaxSteps; step++ {
 		next, err := cycle.nextBody(current)
 		if err != nil {
-			return current, total.toTokenUsage(), runner.state.billableSearch, runner.state.billableFetch, err
+			return cycle.result(current, total, runner, err)
 		}
 		body, usage, err := p.deepSeekSimulatedStep(r, w, logCtx, prepared, cred, modelID, realModelID, next, start, attemptedCreds)
 		if err != nil {
-			return current, total.toTokenUsage(), runner.state.billableSearch, runner.state.billableFetch, err
+			return cycle.result(current, total, runner, err)
 		}
 		total.add(usage)
 		current = body
@@ -74,9 +75,20 @@ func (p *Proxy) deepSeekSimulatedLoop(
 			break
 		}
 	}
+	return cycle.result(current, total, runner, nil)
+}
+
+// result is the loop's outcome: the body so far, the usage every step
+// accumulated, and the tool counters.
+//
+// The counters are read from the runner, not from the accumulated usage, so
+// a step that fails leaves the loop early and the search that already ran
+// and returned results is still billed -- "a successful tool counts even when
+// the model that follows it fails".
+func (cycle *deepSeekToolCycle) result(body []byte, total *deepSeekToolUsage, runner *deepSeekToolRunner, err error) ([]byte, *converter.TokenUsage, int, int, error) {
 	total.webSearchRequests = runner.state.billableSearch
 	total.webFetchRequests = runner.state.billableFetch
-	return current, total.toTokenUsage(), runner.state.billableSearch, runner.state.billableFetch, nil
+	return body, total.toTokenUsage(), runner.state.billableSearch, runner.state.billableFetch, err
 }
 
 // deepSeekSimulatedStep sends one upstream request of the simulated loop and
