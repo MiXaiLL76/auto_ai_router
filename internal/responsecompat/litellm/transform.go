@@ -360,25 +360,14 @@ func errorStatus(value any) int {
 	return http.StatusUnprocessableEntity
 }
 
-// contentPolicyErrorMarkers are the texts a provider uses when it refuses
-// content on safety/policy grounds. Kept in step with the proxy's own
-// content-policy signals (internal/proxy/response_writer.go) and the
-// upstreamerror classifier's.
-var contentPolicyErrorMarkers = []string{
-	"content policy",
-	"content_policy",
-	"content filter",
-	"content_filter",
-	"content moderation",
-	"inappropriate content",
-	"safety violation",
-	"safety_violation",
-	"prompt_blocked",
-	"prompt blocked",
-	"blocked by content",
-	"content management policy",
-	"policy violation",
-}
+// contentPolicyErrorMarkers is the shared content-policy marker set, used
+// here to classify a provider's refusal as a 400 instead of the upstream
+// status it carries.
+//
+// The list itself lives in upstreamerror (ContentPolicyMarkers), shared with
+// the proxy's status classification, the retry policy and the client-facing
+// classifier -- it used to be a copy here, and the copies drifted.
+var contentPolicyErrorMarkers = upstreamerror.ContentPolicyMarkers
 
 // isContentPolicyError reports whether a provider's error object describes a
 // content-policy refusal. The check reads the object's text fields (message,

@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/mixaill76/auto_ai_router/internal/upstreamerror"
 )
 
 // RetryConfig controls which upstream error responses make the router replay the
@@ -55,31 +57,20 @@ var DefaultRetryStatusCodes = append([]int{400, 401, 402, 403, 404, 429}, status
 // DefaultNonRetryableMarkers are content-policy rejections: the provider refused
 // the content, and every other credential would refuse it too.
 //
-// The list covers the phrasings providers actually use, not just one canonical
-// form: a policy refusal reaches the router in whichever wording that
-// provider chose -- "content policy", "content filter", or a message like
-// "Output data may contain inappropriate content." (an aggregator forwarding
-// the upstream provider's own refusal text). Missing one of them does not
-// break the classification (the status still comes out as a 400 from
-// statusCodeFromErrorSignals' content-policy branch) -- it only leaves the
-// request retryable, so every credential in the pool is asked to refuse the
-// same content, and the client waits for the whole cascade (measured in
-// production: 4 attempts and 55s for one blocked prompt).
-var DefaultNonRetryableMarkers = []string{
-	"content policy",
-	"content_policy",
-	"content filter",
-	"content_filter",
-	"content moderation",
-	"inappropriate content",
-	"safety violation",
-	"safety_violation",
-	"prompt_blocked",
-	"prompt blocked",
-	"blocked by content",
-	"content management policy",
-	"policy violation",
-}
+// The list is the shared content-policy marker set (upstreamerror.
+// ContentPolicyMarkers) -- the same one the proxy's status classification, the
+// LiteLLM compatibility layer and the client-facing classifier use. It was
+// four separate copies until the drift showed up: three gained a wording and
+// the fourth did not, so a refusal phrased that way was correctly classified
+// as a 400 and treated as non-retryable, yet the client was told the generic
+// "Invalid request" instead of the content-policy message.
+//
+// Missing a wording does not break the classification (the status still comes
+// out as a 400) -- it only leaves the request retryable, so every credential
+// in the pool is asked to refuse the same content, and the client waits for
+// the whole cascade (measured in production: 4 attempts and 55s for one
+// blocked prompt).
+var DefaultNonRetryableMarkers = upstreamerror.ContentPolicyMarkers
 
 // DefaultBadRequestMarkers are upstream 400 texts that fault the request itself —
 // a parameter the target model does not implement, a media part it cannot use —

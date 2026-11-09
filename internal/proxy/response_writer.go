@@ -12,6 +12,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/converter"
 	promanutils "github.com/mixaill76/auto_ai_router/internal/converter/proman/utils"
 	"github.com/mixaill76/auto_ai_router/internal/proxy/modelutils"
+	"github.com/mixaill76/auto_ai_router/internal/upstreamerror"
 )
 
 func clientResponseBodyForCredential(statusCode int, body []byte, _ *config.CredentialConfig, displayModel, requestID string) ([]byte, bool, bool) {
@@ -306,46 +307,29 @@ func providerErrorSignals(raw json.RawMessage) ([]string, bool) {
 	return signals, true
 }
 
-// contentFilterSignals are the texts a provider uses when it refuses content
-// on safety/policy grounds. The provider may phrase the refusal in the
-// message ("Output data may contain inappropriate content."), in the error
-// type ("content_filter"), or in a metadata field ("error_type":
-// "content_policy_violation") -- all of them mean the same thing.
+// contentFilterSignals is the shared content-policy marker set, used here to
+// classify a provider's refusal as a 400.
 //
 // Such a refusal is a fault of the REQUEST, not of the credential or the
 // upstream connection: every credential refuses the same content, so it must
 // surface as a 400 -- which the retry policy also treats as non-retryable --
 // instead of a generic 502 that both hides the cause and triggers a retry
 // storm (in production: 4 attempts and 55s for one blocked prompt).
-var contentFilterSignals = []string{
-	"content policy",
-	"content_policy",
-	"content filter",
-	"content_filter",
-	"content moderation",
-	"inappropriate content",
-	"safety violation",
-	"safety_violation",
-	"prompt_blocked",
-	"prompt blocked",
-	"blocked by content",
-	"content management policy",
-	"policy violation",
-}
+//
+// The list itself lives in upstreamerror (ContentPolicyMarkers), shared with
+// the LiteLLM compatibility layer, the retry policy and the client-facing
+// classifier -- it used to be a copy here, and the copies drifted.
+var contentFilterSignals = upstreamerror.ContentPolicyMarkers
 
 // isContentFilterSignal reports whether a provider signal describes a
 // content-policy refusal rather than a provider or credential failure.
+// isContentFilterSignal reports whether a provider signal describes a
+// content-policy refusal rather than a provider or credential failure. It
+// delegates to upstreamerror.IsContentPolicySignal so the status
+// classification and the client-facing message always agree on what counts
+// as a refusal.
 func isContentFilterSignal(signal string) bool {
-	signal = strings.ToLower(strings.TrimSpace(signal))
-	if signal == "" {
-		return false
-	}
-	for _, marker := range contentFilterSignals {
-		if strings.Contains(signal, marker) {
-			return true
-		}
-	}
-	return false
+	return upstreamerror.IsContentPolicySignal(signal)
 }
 
 func statusCodeFromErrorSignals(signals []string) int {
