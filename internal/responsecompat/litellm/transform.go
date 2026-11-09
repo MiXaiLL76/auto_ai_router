@@ -337,13 +337,40 @@ func hasMeaningfulError(value any) bool {
 	}
 }
 
+// errorStatus maps a provider's error object to the HTTP status the client
+// should see.
+//
+// A content-policy refusal is checked FIRST and always yields 400: the
+// provider may report it with an upstream status of its own (an aggregator
+// forwarding "code":502 for "Output data may contain inappropriate content."),
+// but the refusal is a fault of the request, not of the upstream connection.
+//
+// Otherwise a numeric "code" is used as the status when it is in the 4xx/5xx
+// range -- that is the provider's own status for the request, which is what
+// the client should see.
 func errorStatus(value any) int {
 	if body, ok := value.(map[string]any); ok {
+		if isContentPolicyError(body) {
+			return http.StatusBadRequest
+		}
 		if code, ok := body["code"].(float64); ok && code >= 400 && code <= 599 {
 			return int(code)
 		}
 	}
 	return http.StatusUnprocessableEntity
+}
+
+// isContentPolicyError reports whether a provider's error object describes a
+// content-policy refusal.
+//
+// It delegates to upstreamerror.IsContentPolicyErrorObject, which reads the
+// same fields the proxy's own classification reads. The compatibility layer
+// used to re-implement the check over a narrower set of fields (message,
+// type, reason -- but not code or status), so a refusal phrased in "status":
+// "content_filter" was recognized by the proxy and passed through as a 5xx
+// here: the same body classified differently depending on which path it took.
+func isContentPolicyError(body map[string]any) bool {
+	return upstreamerror.IsContentPolicyErrorObject(body)
 }
 
 // normalizeError builds the litellm-compatible error body for a non-2xx
