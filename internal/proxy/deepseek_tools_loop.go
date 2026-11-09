@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -52,6 +53,8 @@ func newDeepSeekToolState() *deepSeekToolState {
 type deepSeekToolRunner struct {
 	// client talks to DeepSeek's Search and Fetch endpoints.
 	client *deepseektools.Client
+	// logger records the tool calls the model asked for.
+	logger *slog.Logger
 	// quota admits the calls against DeepSeek's per-account QPS limits. It
 	// may be nil, in which case the calls are not limited.
 	quota *deepseektools.Quota
@@ -77,6 +80,9 @@ func (runner *deepSeekToolRunner) runSearch(ctx context.Context, arguments strin
 		return message
 	}
 	runner.state.searchCalls++
+	runner.logToolCall(ctx, "search", map[string]any{
+		"query": args.Query, "count": args.Count, "need_content": args.NeedContent,
+	})
 	status, result, raw, err := runner.client.Search(ctx, deepseektools.SearchRequest(args))
 	if err != nil {
 		return string(deepseektools.EncodeToolError(err.Error()))
@@ -97,6 +103,17 @@ func (runner *deepSeekToolRunner) runSearch(ctx context.Context, arguments strin
 	return string(encoded)
 }
 
+// logToolCall records the tool call the model asked for, with the arguments
+// it chose: the query it wants searched, the page it wants fetched. It is
+// what makes the router's own calls to DeepSeek visible in the router's logs.
+func (runner *deepSeekToolRunner) logToolCall(ctx context.Context, tool string, args map[string]any) {
+	if runner.logger == nil {
+		return
+	}
+	runner.logger.DebugContext(ctx, "The model asked for a tool the router runs",
+		"tool", tool, "arguments", args)
+}
+
 // runFetch executes one fetch and returns the tool result to send back to
 // the model.
 func (runner *deepSeekToolRunner) runFetch(ctx context.Context, arguments string) string {
@@ -108,6 +125,7 @@ func (runner *deepSeekToolRunner) runFetch(ctx context.Context, arguments string
 		return message
 	}
 	runner.state.fetchCalls++
+	runner.logToolCall(ctx, "fetch", map[string]any{"url": args.URL})
 	status, result, raw, err := runner.client.Fetch(ctx, deepseektools.FetchRequest(args))
 	if err != nil {
 		return string(deepseektools.EncodeToolError(err.Error()))

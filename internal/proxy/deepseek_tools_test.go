@@ -13,6 +13,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/deepseektools"
 	"github.com/mixaill76/auto_ai_router/internal/models"
+	"github.com/stretchr/testify/require"
 )
 
 // deepSeekFake is a fake DeepSeek: it serves the chat endpoint (answering
@@ -773,4 +774,192 @@ func TestDeepSeekStreamToolCallPiecesAreFolded(t *testing.T) {
 	if args.Query != "deepseek v4" {
 		t.Errorf("query = %q, want %q", args.Query, "deepseek v4")
 	}
+}
+
+// TestDeepSeekEmptySearchIsNotBilledInSpendRow проверяет правило "пустые
+// результаты — $0": строка spend получает нулевой счётчик поисков.
+func TestDeepSeekEmptySearchIsNotBilledInSpendRow(t *testing.T) {
+	fake := &deepSeekFake{searchResults: []map[string]any{}}
+	server := httptest.NewServer(fake.handler())
+	defer server.Close()
+	fake.baseURL = server.URL
+
+	prx, dbStub := deepSeekTestProxy(t, fake)
+	body := `{"model":"deepseek-flash","messages":[{"role":"user","content":"q"}],"tools":[{"type":"web_search"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	prx.ProxyRequest(rec, req)
+
+	require.Equal(t, 200, rec.Code, rec.Body.String())
+	require.Len(t, dbStub.loggedEntries, 1)
+	entry := dbStub.loggedEntries[0]
+	searches, _ := toolCountsFromMetadata(t, entry.Metadata)
+	require.Equal(t, 0, searches, "an empty search was billed")
+	// The request still cost its tokens.
+	require.Greater(t, entry.Spend, 0.0)
+}
+
+// TestDeepSeekKeepsReasoningAndToolHistory checks that the loop carries the
+// model's own state across the steps: its reasoning_content and its tool
+// calls, so the second request is a continuation of the first rather than a
+// fresh conversation.
+func TestDeepSeekKeepsReasoningAndToolHistory(t *testing.T) {
+	fake := &deepSeekFake{searchResults: []map[string]any{{"title": "T", "url": "https://e.com"}}}
+	// Первый ответ несёт reasoning_content вместе с вызовом инструмента.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		switch r.URL.Path {
+		case "/v1/tools/search":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"results":[{"title":"T","url":"https://e.com"}]}`))
+		case "/v1/chat/completions":
+			fake.mu.Lock()
+			fake.chatCalls++
+			call := fake.chatCalls
+			var parsed map[string]json.RawMessage
+			_ = json.Unmarshal(body, &parsed)
+			fake.lastChatBody = parsed
+			fake.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			if call == 1 {
+				_, _ = w.Write([]byte(`{"choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":"","reasoning_content":"I need to search for that","tool_calls":[{"id":"c1","type":"function","function":{"name":"deepseek_web_search","arguments":"{\"query\":\"deepseek v4\"}"}}]}}]}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"done"}}]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	fake.baseURL = server.URL
+
+	prx, _ := deepSeekTestProxy(t, fake)
+	body := `{"model":"deepseek-flash","messages":[{"role":"user","content":"q"}],"tools":[{"type":"web_search"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	prx.ProxyRequest(rec, req)
+	require.Equal(t, 200, rec.Code, rec.Body.String())
+
+	require.NotNil(t, fake.lastChatBody)
+	rawMessages, ok := fake.lastChatBody["messages"]
+	require.True(t, ok, "the second request has no messages")
+	var messages []map[string]any
+	require.NoError(t, json.Unmarshal(rawMessages, &messages))
+	require.Len(t, messages, 3, "the conversation is not the user's, the tool call and its result")
+
+	// Ассистентский ход сохраняет вызов инструмента с его id.
+	assistant := messages[1]
+	require.Equal(t, "assistant", assistant["role"])
+	calls, ok := assistant["tool_calls"].([]any)
+	require.True(t, ok, "the assistant's tool calls were dropped")
+	require.Len(t, calls, 1)
+	first := calls[0].(map[string]any)
+	require.Equal(t, "c1", first["id"], "the tool call's id was lost")
+
+	// Результат инструмента привязан к тому же id.
+	tool := messages[2]
+	require.Equal(t, "tool", tool["role"])
+	require.Equal(t, "c1", tool["tool_call_id"], "the tool result lost the call id")
+}
+
+// TestDeepSeekKeepsReasoningContent checks that the model's own reasoning
+// reaches the next request: it is part of the conversation the loop
+// continues, not something the router drops.
+func TestDeepSeekKeepsReasoningContent(t *testing.T) {
+	fake := &deepSeekFake{searchResults: []map[string]any{{"title": "T", "url": "https://e.com"}}}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		switch r.URL.Path {
+		case "/v1/tools/search":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"results":[{"title":"T","url":"https://e.com"}]}`))
+		case "/v1/chat/completions":
+			fake.mu.Lock()
+			fake.chatCalls++
+			call := fake.chatCalls
+			var parsed map[string]json.RawMessage
+			_ = json.Unmarshal(body, &parsed)
+			fake.lastChatBody = parsed
+			fake.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			if call == 1 {
+				_, _ = w.Write([]byte(`{"choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":"","reasoning_content":"I need to search for that","tool_calls":[{"id":"c1","type":"function","function":{"name":"deepseek_web_search","arguments":"{\"query\":\"deepseek v4\"}"}}]}}]}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"done"}}]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	fake.baseURL = server.URL
+
+	prx, _ := deepSeekTestProxy(t, fake)
+	body := `{"model":"deepseek-flash","messages":[{"role":"user","content":"q"}],"tools":[{"type":"web_search"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	prx.ProxyRequest(rec, req)
+	require.Equal(t, 200, rec.Code, rec.Body.String())
+
+	require.NotNil(t, fake.lastChatBody)
+	rawMessages, ok := fake.lastChatBody["messages"]
+	require.True(t, ok)
+	var messages []map[string]any
+	require.NoError(t, json.Unmarshal(rawMessages, &messages))
+	require.Len(t, messages, 3)
+	require.Equal(t, "I need to search for that", messages[1]["reasoning_content"],
+		"the model's reasoning did not reach the next request")
+}
+
+// TestDeepSeekSuccessfulToolIsBilledWhenTheModelFails checks the rule
+// "учитывать успешный инструмент и при последующей ошибке LLM": the search
+// that ran and returned results is billed even when the model that follows it
+// fails.
+func TestDeepSeekSuccessfulToolIsBilledWhenTheModelFails(t *testing.T) {
+	fake := &deepSeekFake{searchResults: []map[string]any{{"title": "T", "url": "https://e.com"}}}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		switch r.URL.Path {
+		case "/v1/tools/search":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"results":[{"title":"T","url":"https://e.com"}]}`))
+		case "/v1/chat/completions":
+			_ = body
+			fake.mu.Lock()
+			fake.chatCalls++
+			call := fake.chatCalls
+			fake.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			if call == 1 {
+				_, _ = w.Write([]byte(`{"choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":"","tool_calls":[{"id":"c1","type":"function","function":{"name":"deepseek_web_search","arguments":"{\"query\":\"q\"}"}}]}}]}`))
+				return
+			}
+			// Второй шаг падает: провайдер отвечает ошибкой.
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":{"message":"upstream failure","type":"server_error"}}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	fake.baseURL = server.URL
+
+	prx, dbStub := deepSeekTestProxy(t, fake)
+	body := `{"model":"deepseek-flash","messages":[{"role":"user","content":"q"}],"tools":[{"type":"web_search"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	prx.ProxyRequest(rec, req)
+
+	require.Len(t, dbStub.loggedEntries, 1, "the failed request wrote no spend row")
+	entry := dbStub.loggedEntries[0]
+	searches, _ := toolCountsFromMetadata(t, entry.Metadata)
+	require.Equal(t, 1, searches, "the successful search was not billed after the model failed")
 }

@@ -621,6 +621,12 @@ func (p *Proxy) handleSimulatedNonStream(
 			p.logger.WarnContext(r.Context(), "The router-run search/fetch loop failed",
 				"model", modelID, "credential", cred.Name, "error", loopErr,
 				"request_id", logCtx.RequestID)
+			// A tool that already ran and returned results is billed even
+			// though the model that followed it failed, so the loop's usage
+			// rides along here too.
+			if searches > 0 || fetches > 0 {
+				logCtx.DeepSeekToolUsage = loopUsage
+			}
 		case searches > 0 || fetches > 0:
 			result.finalChatBody = []byte(assembled)
 			// The loop's steps are separate upstream requests: their tokens

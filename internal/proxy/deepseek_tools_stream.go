@@ -186,6 +186,7 @@ func (p *Proxy) runDeepSeekStreamToolLoop(
 
 	runner := &deepSeekToolRunner{
 		client:  p.deepSeekToolsClient(cred),
+		logger:  p.logger,
 		quota:   p.deepSeekToolsQuota,
 		account: deepSeekAccountKey(cred),
 		state:   newDeepSeekToolState(),

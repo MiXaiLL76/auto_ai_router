@@ -2862,6 +2862,12 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				p.logger.WarnContext(r.Context(), "The router-run search/fetch loop failed",
 					"model", modelID, "credential", cred.Name, "error", toolErr,
 					"request_id", logCtx.RequestID)
+				// A tool that already ran and returned results is billed even
+				// though the model that followed it failed, so the loop's usage
+				// rides along here too.
+				if toolRun != nil {
+					deepSeekToolUsage = toolRun.usage
+				}
 			case toolRun != nil:
 				decodedBody = string(toolRun.body)
 				deepSeekToolUsage = toolRun.usage

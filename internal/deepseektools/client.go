@@ -29,6 +29,15 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
 )
 
+// Logger is the optional logger of a Client: it records every Search and
+// Fetch call -- the path, the status and how long it took -- so the calls
+// the router makes on the model's behalf are visible in the router's own
+// logs. A Client without one stays silent.
+type Logger interface {
+	DebugContext(ctx context.Context, msg string, args ...any)
+	WarnContext(ctx context.Context, msg string, args ...any)
+}
+
 const (
 	// SearchPath is DeepSeek's search endpoint, relative to the credential's
 	// base URL.
@@ -66,6 +75,8 @@ type ClientConfig struct {
 	ProxyURL string
 	// MaxRetries is how many times a call is retried after a 429 or a 5xx.
 	MaxRetries int
+	// Logger, when set, records every call this client makes.
+	Logger Logger
 }
 
 // Client calls DeepSeek's Search and Fetch endpoints.
@@ -74,6 +85,7 @@ type Client struct {
 	apiKey     string
 	http       *http.Client
 	MaxRetries int
+	logger     Logger
 }
 
 // NewClient builds a Client over the shared HTTP transport (connection
@@ -90,6 +102,7 @@ func NewClient(cfg ClientConfig) *Client {
 		apiKey:     cfg.APIKey,
 		http:       client,
 		MaxRetries: cfg.MaxRetries,
+		logger:     cfg.Logger,
 	}
 }
 
@@ -167,17 +180,40 @@ func (c *Client) do(ctx context.Context, path string, body any) (int, []byte, er
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 
+	started := time.Now()
 	resp, err := c.http.Do(req)
 	if err != nil {
+		c.logError(ctx, "DeepSeek tool call failed", path, 0, time.Since(started), err)
 		return 0, nil, fmt.Errorf("deepseektools: upstream request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
+		c.logError(ctx, "DeepSeek tool call failed", path, resp.StatusCode, time.Since(started), err)
 		return resp.StatusCode, nil, fmt.Errorf("deepseektools: reading upstream response: %w", err)
 	}
+	c.logCall(ctx, path, resp.StatusCode, time.Since(started), len(respBody))
 	return resp.StatusCode, respBody, nil
+}
+
+// logCall records a finished call: the endpoint, the status, how long it
+// took and how much came back.
+func (c *Client) logCall(ctx context.Context, path string, status int, took time.Duration, size int) {
+	if c.logger == nil {
+		return
+	}
+	c.logger.DebugContext(ctx, "DeepSeek tool call",
+		"path", path, "status", status, "duration_ms", took.Milliseconds(), "response_bytes", size)
+}
+
+// logError records a call that did not finish.
+func (c *Client) logError(ctx context.Context, msg, path string, status int, took time.Duration, err error) {
+	if c.logger == nil {
+		return
+	}
+	c.logger.WarnContext(ctx, msg,
+		"path", path, "status", status, "duration_ms", took.Milliseconds(), "error", err)
 }
 
 // Search runs a search and returns the parsed response.
