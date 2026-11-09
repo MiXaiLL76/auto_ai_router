@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
@@ -303,6 +304,16 @@ func providerErrorSignals(raw json.RawMessage) ([]string, bool) {
 		return []string{text}, true
 	}
 
+	// The error object itself can be a bare number: {"error":400} is how
+	// several providers state the status when they answer with an HTTP 200.
+	var number json.Number
+	if err := json.Unmarshal(trimmed, &number); err == nil {
+		if signal := number.String(); signal != "" {
+			return []string{signal}, true
+		}
+		return nil, false
+	}
+
 	var fields map[string]any
 	if err := json.Unmarshal(trimmed, &fields); err != nil {
 		return nil, false
@@ -316,16 +327,27 @@ func providerErrorSignals(raw json.RawMessage) ([]string, bool) {
 			}
 		}
 	}
-	// A numeric "code" is deliberately NOT turned into a signal. It is the
-	// provider's own code for the failure -- an aggregator forwards the
-	// upstream provider's code verbatim ({"error":{"code":502,...}}), which
-	// describes the UPSTREAM's failure, not the status this router should
-	// report to its client. Mapping it straight onto the response status
-	// would turn an upstream 502 into our 502 for a request that may deserve
-	// a 400 (a content refusal), and would surface a provider's 4xx for a
-	// request the router could have retried. It stays out of the signals;
-	// the message and type beside it carry the meaning.
+	// A numeric "code" is kept, but as a FALLBACK signal only: it is the
+	// provider's own code for the failure, and it is used only when nothing
+	// else says what went wrong. See statusCodeFromErrorSignals.
 	//
+	// It cannot simply become the response status: an aggregator forwards
+	// the upstream provider's code verbatim ({"error":{"code":502,...}}), and
+	// that describes the UPSTREAM's failure, not the status this router
+	// should report to its client -- an upstream 502 may be a content
+	// refusal (a 400) or a provider outage (a 502), and only the message
+	// beside it tells the two apart. It is also the provider's code for a
+	// request that may deserve a retry, which a status taken from it would
+	// wrongly turn into a final answer.
+	//
+	// When it IS all there is -- the provider states a bare status and
+	// nothing else ("code":400, no message) -- it is the only thing left to
+	// report, and the provider's own 4xx is the right answer for the client.
+	if code, ok := fields["code"].(float64); ok {
+		if s := strconv.Itoa(int(code)); s != "" {
+			signals = append(signals, s)
+		}
+	}
 	// "metadata": {"error_type": "..."} -- the machine-readable reason an
 	// aggregator reports alongside the message.
 	if meta, ok := fields["metadata"].(map[string]any); ok {
@@ -401,7 +423,37 @@ func statusCodeFromErrorSignals(signals []string) int {
 			return http.StatusInternalServerError
 		}
 	}
+
+	// Nothing in the signals says what went wrong, but a provider stated a
+	// status as a bare number ("code":400) -- that is the only thing it said,
+	// and it is the provider's own status for the request, so it is what the
+	// client should see. Only a real HTTP status is taken: an arbitrary
+	// number ("code":42) says nothing about the failure and stays a 502.
+	if status, ok := httpStatusFromNumericSignal(signals); ok {
+		return status
+	}
 	return http.StatusBadGateway
+}
+
+// httpStatusFromNumericSignal returns the HTTP status a signal list states as
+// a bare number, if any. It looks at every signal, because the number can
+// sit in any of them ("code":400, "status":429), and reports the first one
+// that is a status the router can relay (400-599).
+func httpStatusFromNumericSignal(signals []string) (int, bool) {
+	for _, signal := range signals {
+		signal = strings.TrimSpace(signal)
+		if signal == "" || len(signal) > 3 {
+			continue
+		}
+		status, err := strconv.Atoi(signal)
+		if err != nil {
+			continue
+		}
+		if status >= http.StatusBadRequest && status <= 599 {
+			return status, true
+		}
+	}
+	return 0, false
 }
 
 // hasContentPolicyRefusal reports whether any signal describes a

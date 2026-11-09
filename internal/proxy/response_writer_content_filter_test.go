@@ -326,3 +326,112 @@ func TestStatusCodeFromProviderBodyErrorReadsTopLevelFields(t *testing.T) {
 		})
 	}
 }
+
+// TestStatusCodeFromProviderBodyErrorNumericCode pins that a provider which
+// states its status as a JSON NUMBER is classified by that status.
+//
+// OpenRouter relays Alibaba's error that way: an HTTP 200 whose body carries
+// the status as a number. The number used to fail the unmarshal of the whole
+// error object, so the message and the type were lost with it and the client
+// got a blanket 502 instead of the 400 the provider reported.
+//
+// The number is a FALLBACK, not a first-class signal: it is used only when
+// nothing else says what went wrong (see statusCodeFromErrorSignals). An
+// aggregator's forwarding of the UPSTREAM's code ({"error":{"code":502,
+// "message":"Output data may contain inappropriate content."}}) must still be
+// classified by its message -- as the 400 the refusal is -- rather than
+// inherited as a 502.
+func TestStatusCodeFromProviderBodyErrorNumericCode(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       string
+		wantStatus int
+		wantOK     bool
+	}{
+		{
+			name:       "numeric code in error object",
+			body:       `{"id":"gen-1","object":"chat.completion.chunk","provider":"Alibaba","choices":[],"error":{"code":400,"message":"Video inputs are not supported by this model.","metadata":{"error_type":"invalid_request"}}}`,
+			wantStatus: http.StatusBadRequest,
+			wantOK:     true,
+		},
+		{
+			name:       "numeric code 5xx in error object",
+			body:       `{"id":"gen-2","object":"chat.completion.chunk","provider":"Alibaba","choices":[],"error":{"code":502,"message":"Upstream error from Alibaba: inference generation failed","metadata":{"error_type":"provider_unavailable"}}}`,
+			wantStatus: http.StatusBadGateway,
+			wantOK:     true,
+		},
+		{
+			name:       "error object is a bare number",
+			body:       `{"error":400,"message":"bad request"}`,
+			wantStatus: http.StatusBadRequest,
+			wantOK:     true,
+		},
+		{
+			// A number that is not an HTTP status says nothing about the
+			// failure and must not become a status of its own: the generic
+			// 502 stays.
+			name:       "numeric code that is not an http status",
+			body:       `{"error":{"code":42,"message":"unclear"}}`,
+			wantStatus: http.StatusBadGateway,
+			wantOK:     true,
+		},
+		{
+			// The refusal wins over the number beside it: the code is the
+			// upstream's, the message is the reason.
+			name:       "a refusal outranks the numeric code beside it",
+			body:       `{"error":{"code":502,"message":"Output data may contain inappropriate content.","metadata":{"error_type":"provider_unavailable"}}}`,
+			wantStatus: http.StatusBadRequest,
+			wantOK:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			status, ok := statusCodeFromProviderBodyError(http.StatusOK, []byte(tt.body))
+			assert.Equal(t, tt.wantOK, ok)
+			assert.Equal(t, tt.wantStatus, status)
+		})
+	}
+}
+
+// TestStatusCodeFromProviderStreamErrorNumericCode is the streaming
+// counterpart: the same numbers, in a terminal stream error event.
+func TestStatusCodeFromProviderStreamErrorNumericCode(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+		want    int
+	}{
+		{
+			name:    "numeric code in error object",
+			payload: `{"type":"error","error":{"code":400,"message":"Video inputs are not supported by this model."}}`,
+			want:    http.StatusBadRequest,
+		},
+		{
+			name:    "numeric code in response error object",
+			payload: `{"type":"response.failed","response":{"status":"failed","error":{"code":400,"message":"bad request"}}}`,
+			want:    http.StatusBadRequest,
+		},
+		{
+			name:    "numeric code 429",
+			payload: `{"type":"error","error":{"code":429,"message":"too many requests"}}`,
+			want:    http.StatusTooManyRequests,
+		},
+		{
+			name:    "string code still classifies by keyword",
+			payload: `{"type":"error","error":{"code":"rate_limit_exceeded","message":"slow down"}}`,
+			want:    http.StatusTooManyRequests,
+		},
+		{
+			name:    "a refusal outranks the numeric code beside it",
+			payload: `{"type":"error","error":{"code":502,"message":"Output data may contain inappropriate content."}}`,
+			want:    http.StatusBadRequest,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, statusCodeFromProviderStreamError(tt.payload))
+		})
+	}
+}
