@@ -27,34 +27,71 @@ func clientResponseBodyForCredential(statusCode int, body []byte, _ *config.Cred
 	return body, false, false
 }
 
+// statusCodeFromProviderBodyError classifies a provider's response body as
+// an error, and maps it onto the status the client should see.
+//
+// The body is decoded into a map rather than a struct with string fields: a
+// provider may put a NUMBER in "code" (an aggregator forwarding the upstream
+// provider's own code verbatim), and a struct decode then fails with
+// "cannot unmarshal number into Go struct field" -- taking the WHOLE
+// document with it, including the "error" object nested beside it. That is
+// the same principle the rest of this file's decoding follows (see
+// providerErrorSignals): one mistyped field must not cost us the fields
+// around it.
+//
+// A map decode has no such failure mode: a non-string value is simply not a
+// string, and every other key is read normally. Only a body that is not JSON
+// at all yields nothing.
 func statusCodeFromProviderBodyError(statusCode int, body []byte) (int, bool) {
 	if len(body) == 0 {
 		return 0, false
 	}
 
-	var evt struct {
-		Type     string          `json:"type"`
-		Status   string          `json:"status"`
-		Code     string          `json:"code"`
-		Message  string          `json:"message"`
-		Error    json.RawMessage `json:"error"`
-		Response struct {
-			Status string          `json:"status"`
-			Error  json.RawMessage `json:"error"`
-		} `json:"response"`
-	}
-	if err := json.Unmarshal(body, &evt); err != nil {
+	var doc map[string]any
+	if err := json.Unmarshal(body, &doc); err != nil {
 		return 0, false
 	}
 
-	signals := []string{evt.Type, evt.Status, evt.Code, evt.Message, evt.Response.Status}
-	topErrorSignals, hasTopError := providerErrorSignals(evt.Error)
-	responseErrorSignals, hasResponseError := providerErrorSignals(evt.Response.Error)
+	text := func(key string) string {
+		s, _ := doc[key].(string)
+		return s
+	}
+	raw := func(key string) json.RawMessage {
+		value, ok := doc[key]
+		if !ok {
+			return nil
+		}
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return nil
+		}
+		return encoded
+	}
+
+	evtType := text("type")
+	evtStatus := text("status")
+	evtCode := text("code")
+	evtMessage := text("message")
+
+	responseStatus := ""
+	var responseError json.RawMessage
+	if response, ok := doc["response"].(map[string]any); ok {
+		responseStatus, _ = response["status"].(string)
+		if errValue, ok := response["error"]; ok {
+			if encoded, err := json.Marshal(errValue); err == nil {
+				responseError = encoded
+			}
+		}
+	}
+
+	signals := []string{evtType, evtStatus, evtCode, evtMessage, responseStatus}
+	topErrorSignals, hasTopError := providerErrorSignals(raw("error"))
+	responseErrorSignals, hasResponseError := providerErrorSignals(responseError)
 	signals = append(signals, topErrorSignals...)
 	signals = append(signals, responseErrorSignals...)
 
-	hasFailedStatus := strings.EqualFold(evt.Status, "failed") || strings.EqualFold(evt.Response.Status, "failed")
-	hasTopLevelError := strings.TrimSpace(evt.Code) != "" || strings.TrimSpace(evt.Message) != ""
+	hasFailedStatus := strings.EqualFold(evtStatus, "failed") || strings.EqualFold(responseStatus, "failed")
+	hasTopLevelError := strings.TrimSpace(evtCode) != "" || strings.TrimSpace(evtMessage) != ""
 
 	if statusCode >= http.StatusOK && statusCode < http.StatusMultipleChoices {
 		if !hasTopError && !hasResponseError && !hasFailedStatus {

@@ -252,3 +252,77 @@ func TestDataInspectionFailedIsContentPolicy(t *testing.T) {
 	retry, _ := ShouldRetryWithFallback(http.StatusBadRequest, body2)
 	assert.False(t, retry, "a data_inspection_failed refusal must not be retried")
 }
+
+// TestStatusCodeFromProviderBodyErrorSurvivesRootNumericCode pins that a
+// provider's NUMERIC top-level "code" does not take the whole document with
+// it.
+//
+// The top-level fields used to be decoded through a struct with string
+// fields, so a numeric "code" failed the decode outright ("cannot unmarshal
+// number into Go struct field") and the function returned "no error here" --
+// losing the "error" object nested BESIDE it. A provider that reports a
+// content refusal that way would have been served as a success, with the
+// refusal body passed through to the client.
+//
+// The decode is a map now: a non-string value is simply not a string, and
+// every other key is read normally.
+func TestStatusCodeFromProviderBodyErrorSurvivesRootNumericCode(t *testing.T) {
+	body := []byte(`{"code":502,"error":{"message":"Output data may contain inappropriate content."},"id":"x"}`)
+
+	status, ok := statusCodeFromProviderBodyError(http.StatusOK, body)
+	require.True(t, ok, "the nested error must still be recognized")
+	assert.Equal(t, http.StatusBadRequest, status,
+		"the refusal nested beside a numeric code must still be classified as a 400")
+}
+
+// TestStatusCodeFromProviderBodyErrorReadsTopLevelFields pins that the
+// top-level fields are still read as before -- the map decode must not have
+// changed what a normal body yields.
+func TestStatusCodeFromProviderBodyErrorReadsTopLevelFields(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		body   string
+		want   int
+		wantOK bool
+	}{
+		{
+			name:   "top-level rate limit error",
+			status: http.StatusBadRequest,
+			body:   `{"type":"error","code":"rate_limit_exceeded","message":"slow down"}`,
+			want:   http.StatusTooManyRequests,
+			wantOK: true,
+		},
+		{
+			name:   "failed responses object",
+			status: http.StatusOK,
+			body:   `{"response":{"status":"failed","error":{"message":"boom"}}}`,
+			want:   http.StatusBadGateway,
+			wantOK: true,
+		},
+		{
+			name:   "nested failed response event body",
+			status: http.StatusOK,
+			body:   `{"type":"response.failed","response":{"status":"failed","error":{"code":"rate_limit_exceeded"}}}`,
+			want:   http.StatusTooManyRequests,
+			wantOK: true,
+		},
+		{
+			name:   "a plain success body",
+			status: http.StatusOK,
+			body:   `{"id":"x","choices":[]}`,
+			want:   0,
+			wantOK: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			status, ok := statusCodeFromProviderBodyError(tt.status, []byte(tt.body))
+			assert.Equal(t, tt.wantOK, ok)
+			if tt.wantOK {
+				assert.Equal(t, tt.want, status)
+			}
+		})
+	}
+}
