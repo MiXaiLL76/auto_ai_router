@@ -2464,3 +2464,73 @@ func TestHandleSimulatedPassthroughNonStream_ClientAbortReturns499(t *testing.T)
 	assert.Equal(t, "client_aborted", logCtx.StreamOutcome)
 	assert.Contains(t, w.Body.String(), "Client disconnected")
 }
+
+// azureRateLimitErrorSSE is the shape Azure's /v1/responses answers a
+// rate-limited request with: HTTP 200, and a terminal error event in the
+// stream carrying type "too_many_requests" / code "rate_limit_exceeded".
+// The first frame (response.created) precedes it, so the failure only
+// surfaces mid-stream -- the provider never sends an HTTP error status.
+const azureRateLimitErrorSSE = "event: response.created\n" +
+	`data: {"type":"response.created","response":{"id":"resp_1","object":"response","model":"gpt-6-luna","status":"in_progress"}}` + "\n\n" +
+	"event: error\n" +
+	`data: {"type":"error","error":{"type":"too_many_requests","code":"rate_limit_exceeded","headers":{"x-ms-fe-error":"true"},` +
+	`"message":"Your requests to gpt-6-luna for gpt-6-luna in eastus2 have exceeded token rate limit.","param":null},"sequence_number":1}` + "\n\n"
+
+// TestHandleSimulatedPassthroughNonStream_RateLimitErrorReturns429 is the
+// passthrough Responses sibling of the native test below: a provider that
+// answers HTTP 200 and then streams a terminal rate-limit error must surface
+// as 429 (with a Retry-After), not as a bare 502 blaming the provider for
+// being broken -- the model answers normally once the limit window rolls over.
+func TestHandleSimulatedPassthroughNonStream_RateLimitErrorReturns429(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(azureRateLimitErrorSSE)),
+	}
+	start := time.Now()
+	logCtx := &RequestLogContext{StartTime: start, RequestID: "pt-ratelimit", Request: req}
+	cred := &config.CredentialConfig{Name: "c", Type: config.ProviderTypeOpenAI, BaseURL: "http://upstream"}
+	prepared := &orchestratedRequest{streaming: false, passthroughResponses: true, forcedPassthroughNonStream: true, body: []byte(`{}`)}
+	w := httptest.NewRecorder()
+
+	prx.handleSimulatedPassthroughNonStream(w, req, resp, prepared, cred, "m", "m", logCtx, nil, "http://upstream", prepared.body,
+		false, false, false, start, map[string]bool{}, map[string]bool{})
+
+	require.Equal(t, http.StatusTooManyRequests, w.Code, "body: %s", w.Body.String())
+	assert.Contains(t, w.Body.String(), "rate_limit_error")
+	assert.NotEmpty(t, w.Header().Get("Retry-After"), "a 429 must tell the client when to come back")
+	assert.Equal(t, http.StatusTooManyRequests, logCtx.HTTPStatus)
+}
+
+// TestHandleSimulatedNativeNonStream_RateLimitErrorReturns429 is the native
+// Responses sibling of the passthrough test above: the same provider error,
+// reported through the native Responses converter's path.
+func TestHandleSimulatedNativeNonStream_RateLimitErrorReturns429(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(azureRateLimitErrorSSE)),
+	}
+	start := time.Now()
+	logCtx := &RequestLogContext{StartTime: start, RequestID: "native-ratelimit", Request: req}
+	cred := &config.CredentialConfig{Name: "c", Type: config.ProviderTypeAnthropic, BaseURL: "http://upstream"}
+	prepared := &orchestratedRequest{streaming: false, nativeResponses: true, forcedNativeNonStream: true, body: []byte(`{}`)}
+	w := httptest.NewRecorder()
+
+	prx.handleSimulatedNativeNonStream(w, req, resp, prepared, cred, &errPropagatingProviderResponses{}, "m", "m",
+		logCtx, nil, "http://upstream", prepared.body,
+		false, false, false, start, map[string]bool{}, map[string]bool{})
+
+	require.Equal(t, http.StatusTooManyRequests, w.Code, "body: %s", w.Body.String())
+	assert.Contains(t, w.Body.String(), "rate_limit_error")
+	assert.NotEmpty(t, w.Header().Get("Retry-After"), "a 429 must tell the client when to come back")
+	assert.Equal(t, http.StatusTooManyRequests, logCtx.HTTPStatus)
+}
