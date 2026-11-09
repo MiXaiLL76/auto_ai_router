@@ -174,6 +174,28 @@ func TestClassifyBadRequest(t *testing.T) {
 			wantCode:    "invalid_request",
 			notContains: []string{"content policy", "region restriction"},
 		},
+		{
+			// The production case: an aggregator forwarded the upstream
+			// provider's refusal text verbatim, next to the upstream's own
+			// NUMERIC code (502) and error_type ("provider_unavailable").
+			// The refusal must classify as a content-policy 400, and the
+			// provider's text must not reach the client.
+			name:        "aggregator forwarded inappropriate content refusal",
+			body:        `{"error":{"code":502,"message":"Upstream error from Alibaba: Output data may contain inappropriate content.","metadata":{"error_type":"provider_unavailable"}}}`,
+			wantMessage: "The prompt was blocked by the provider's content policy",
+			wantCode:    "content_policy_violation",
+			notContains: []string{"Alibaba", "inappropriate content", "provider_unavailable"},
+		},
+		{
+			// The same wording without a content-refusal phrase must stay a
+			// generic invalid_request -- the refusal detection must not turn
+			// every provider failure into a content-policy answer.
+			name:        "provider failure with numeric code is not content policy",
+			body:        `{"error":{"code":502,"message":"Upstream error from Darkbloom: inference generation failed","metadata":{"error_type":"provider_unavailable"}}}`,
+			wantMessage: "Invalid request",
+			wantCode:    "invalid_request",
+			notContains: []string{"content policy", "Darkbloom"},
+		},
 	}
 
 	for _, tt := range tests {

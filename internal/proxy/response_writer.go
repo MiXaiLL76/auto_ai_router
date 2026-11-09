@@ -202,39 +202,54 @@ func markProxyProviderStreamError(logCtx *RequestLogContext, statusCode int, pay
 	}
 }
 
+// statusCodeFromProviderStreamError classifies a provider's terminal stream
+// error event into the status the client should see.
+//
+// The decode goes through providerErrorSignals (a map decode) rather than a
+// struct with string fields, for the same reason: a provider may send a
+// NUMBER in "code", and a struct decode would then fail the whole object and
+// lose the message that says what actually went wrong. See
+// providerErrorSignals' doc comment.
 func statusCodeFromProviderStreamError(payload string) int {
 	var evt struct {
-		Type  string `json:"type"`
-		Error struct {
-			Type    string `json:"type"`
-			Code    string `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
+		Type     string          `json:"type"`
+		Error    json.RawMessage `json:"error"`
 		Response struct {
-			Status string `json:"status"`
-			Error  struct {
-				Type    string `json:"type"`
-				Code    string `json:"code"`
-				Message string `json:"message"`
-			} `json:"error"`
+			Status string          `json:"status"`
+			Error  json.RawMessage `json:"error"`
 		} `json:"response"`
 	}
 	if err := json.Unmarshal([]byte(payload), &evt); err != nil {
 		return http.StatusBadGateway
 	}
 
-	signals := []string{
-		evt.Error.Code,
-		evt.Error.Type,
-		evt.Error.Message,
-		evt.Response.Error.Code,
-		evt.Response.Error.Type,
-		evt.Response.Error.Message,
-		evt.Type,
+	signals := []string{evt.Type}
+	if topSignals, ok := providerErrorSignals(evt.Error); ok {
+		signals = append(signals, topSignals...)
+	}
+	if responseSignals, ok := providerErrorSignals(evt.Response.Error); ok {
+		signals = append(signals, responseSignals...)
 	}
 	return statusCodeFromErrorSignals(signals)
 }
 
+// providerErrorSignals extracts the text signals a provider's error object
+// carries: its code, type, message and status. The second return value
+// reports whether the object held any usable signal at all.
+//
+// The decode goes through map[string]any rather than a struct with string
+// fields on purpose. A provider may put a NUMBER in "code" -- OpenRouter, for
+// one, forwards the upstream provider's own numeric code verbatim
+// ({"error":{"code":502,"message":"..."}}) -- and a struct decode then fails
+// the WHOLE object with "cannot unmarshal number into Go struct field", so
+// the message and type are lost along with it. With the map decode a
+// non-string value is simply not a signal, and the message beside it survives:
+// an error whose only readable content is its message must still be
+// classified by that message.
+//
+// The signals are collected from the object and its "metadata" sub-object:
+// aggregators put the machine-readable reason ("provider_unavailable",
+// "content_filter") there, next to the human-readable message.
 func providerErrorSignals(raw json.RawMessage) ([]string, bool) {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
@@ -250,26 +265,104 @@ func providerErrorSignals(raw json.RawMessage) ([]string, bool) {
 		return []string{text}, true
 	}
 
-	var fields struct {
-		Type    string `json:"type"`
-		Code    string `json:"code"`
-		Message string `json:"message"`
-		Status  string `json:"status"`
-	}
-	if err := json.Unmarshal(trimmed, &fields); err == nil {
-		signals := []string{fields.Code, fields.Type, fields.Message, fields.Status}
-		for _, signal := range signals {
-			if strings.TrimSpace(signal) != "" {
-				return signals, true
-			}
-		}
+	var fields map[string]any
+	if err := json.Unmarshal(trimmed, &fields); err != nil {
 		return nil, false
 	}
 
-	return nil, false
+	signals := make([]string, 0, 8)
+	for _, key := range []string{"code", "type", "message", "status", "reason"} {
+		if s, ok := fields[key].(string); ok {
+			if s = strings.TrimSpace(s); s != "" {
+				signals = append(signals, s)
+			}
+		}
+	}
+	// A numeric "code" is deliberately NOT turned into a signal. It is the
+	// provider's own code for the failure -- an aggregator forwards the
+	// upstream provider's code verbatim ({"error":{"code":502,...}}), which
+	// describes the UPSTREAM's failure, not the status this router should
+	// report to its client. Mapping it straight onto the response status
+	// would turn an upstream 502 into our 502 for a request that may deserve
+	// a 400 (a content refusal), and would surface a provider's 4xx for a
+	// request the router could have retried. It stays out of the signals;
+	// the message and type beside it carry the meaning.
+	//
+	// "metadata": {"error_type": "..."} -- the machine-readable reason an
+	// aggregator reports alongside the message.
+	if meta, ok := fields["metadata"].(map[string]any); ok {
+		for _, key := range []string{"error_type", "type", "reason"} {
+			if s, ok := meta[key].(string); ok {
+				if s = strings.TrimSpace(s); s != "" {
+					signals = append(signals, s)
+				}
+			}
+		}
+	}
+
+	if len(signals) == 0 {
+		return nil, false
+	}
+	return signals, true
+}
+
+// contentFilterSignals are the texts a provider uses when it refuses content
+// on safety/policy grounds. The provider may phrase the refusal in the
+// message ("Output data may contain inappropriate content."), in the error
+// type ("content_filter"), or in a metadata field ("error_type":
+// "content_policy_violation") -- all of them mean the same thing.
+//
+// Such a refusal is a fault of the REQUEST, not of the credential or the
+// upstream connection: every credential refuses the same content, so it must
+// surface as a 400 -- which the retry policy also treats as non-retryable --
+// instead of a generic 502 that both hides the cause and triggers a retry
+// storm (in production: 4 attempts and 55s for one blocked prompt).
+var contentFilterSignals = []string{
+	"content policy",
+	"content_policy",
+	"content filter",
+	"content_filter",
+	"content moderation",
+	"inappropriate content",
+	"safety violation",
+	"safety_violation",
+	"prompt_blocked",
+	"prompt blocked",
+	"blocked by content",
+	"content management policy",
+	"policy violation",
+}
+
+// isContentFilterSignal reports whether a provider signal describes a
+// content-policy refusal rather than a provider or credential failure.
+func isContentFilterSignal(signal string) bool {
+	signal = strings.ToLower(strings.TrimSpace(signal))
+	if signal == "" {
+		return false
+	}
+	for _, marker := range contentFilterSignals {
+		if strings.Contains(signal, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func statusCodeFromErrorSignals(signals []string) int {
+	// A content-policy refusal wins over every other signal, including the
+	// provider-side ones: an aggregator that wraps a content refusal reports
+	// it with an upstream code and an "provider_unavailable" error type
+	// (OpenRouter forwards the upstream provider's own numeric code verbatim),
+	// but the refusal itself is still a fault of the request. Classifying it
+	// as 503/502 would both mislabel the cause and make the request look
+	// worth retrying on another credential -- which every credential refuses
+	// identically.
+	for _, signal := range signals {
+		if isContentFilterSignal(signal) {
+			return http.StatusBadRequest
+		}
+	}
+
 	for _, signal := range signals {
 		signal = strings.ToLower(strings.TrimSpace(signal))
 		switch {
@@ -279,14 +372,6 @@ func statusCodeFromErrorSignals(signals []string) int {
 			return http.StatusTooManyRequests
 		case strings.Contains(signal, "timeout"):
 			return http.StatusRequestTimeout
-		case strings.Contains(signal, "content_policy") || strings.Contains(signal, "content policy"):
-			// The provider refused the prompt/answer on content-policy grounds.
-			// That is a fault of the request, not of the credential or the
-			// upstream connection: every credential refuses the same content, so
-			// it must surface as a 400 -- which the retry policy also treats as
-			// non-retryable via its "content policy" marker -- instead of a
-			// generic 502 that both hides the cause and triggers a retry storm.
-			return http.StatusBadRequest
 		case strings.Contains(signal, "overloaded") || strings.Contains(signal, "service_unavailable"):
 			return http.StatusServiceUnavailable
 		case strings.Contains(signal, "server_error") || strings.Contains(signal, "internal"):

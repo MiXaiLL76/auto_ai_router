@@ -337,13 +337,76 @@ func hasMeaningfulError(value any) bool {
 	}
 }
 
+// errorStatus maps a provider's error object to the HTTP status the client
+// should see.
+//
+// A content-policy refusal is checked FIRST and always yields 400: the
+// provider may report it with an upstream status of its own (an aggregator
+// forwarding "code":502 for "Output data may contain inappropriate content."),
+// but the refusal is a fault of the request, not of the upstream connection.
+//
+// Otherwise a numeric "code" is used as the status when it is in the 4xx/5xx
+// range -- that is the provider's own status for the request, which is what
+// the client should see.
 func errorStatus(value any) int {
 	if body, ok := value.(map[string]any); ok {
+		if isContentPolicyError(body) {
+			return http.StatusBadRequest
+		}
 		if code, ok := body["code"].(float64); ok && code >= 400 && code <= 599 {
 			return int(code)
 		}
 	}
 	return http.StatusUnprocessableEntity
+}
+
+// contentPolicyErrorMarkers are the texts a provider uses when it refuses
+// content on safety/policy grounds. Kept in step with the proxy's own
+// content-policy signals (internal/proxy/response_writer.go) and the
+// upstreamerror classifier's.
+var contentPolicyErrorMarkers = []string{
+	"content policy",
+	"content_policy",
+	"content filter",
+	"content_filter",
+	"content moderation",
+	"inappropriate content",
+	"safety violation",
+	"safety_violation",
+	"prompt_blocked",
+	"prompt blocked",
+	"blocked by content",
+	"content management policy",
+	"policy violation",
+}
+
+// isContentPolicyError reports whether a provider's error object describes a
+// content-policy refusal. The check reads the object's text fields (message,
+// type, and a metadata error_type) -- a numeric "code" says nothing about the
+// cause.
+func isContentPolicyError(body map[string]any) bool {
+	texts := make([]string, 0, 4)
+	for _, key := range []string{"message", "type", "reason"} {
+		if s, ok := body[key].(string); ok {
+			texts = append(texts, s)
+		}
+	}
+	if meta, ok := body["metadata"].(map[string]any); ok {
+		for _, key := range []string{"error_type", "type", "reason"} {
+			if s, ok := meta[key].(string); ok {
+				texts = append(texts, s)
+			}
+		}
+	}
+	for _, text := range texts {
+		lower := strings.ToLower(text)
+		for _, marker := range contentPolicyErrorMarkers {
+			if strings.Contains(lower, marker) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // normalizeError builds the litellm-compatible error body for a non-2xx
