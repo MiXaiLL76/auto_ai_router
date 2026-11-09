@@ -50,11 +50,6 @@ func clickHouseQuery(t *testing.T, query string) []map[string]any {
 	if user == "" || password == "" {
 		t.Skip("AIR_CLICKHOUSE_USER / AIR_CLICKHOUSE_PASSWORD are not set")
 	}
-	db := os.Getenv("AIR_CLICKHOUSE_DB")
-	if db == "" {
-		db = "air"
-	}
-
 	full := query + " FORMAT JSONEachRow"
 	req, err := http.NewRequest(http.MethodPost, strings.TrimSuffix(base, "/")+"/", strings.NewReader(full))
 	require.NoError(t, err)
@@ -111,7 +106,7 @@ func TestDeepSeekLiveRouterBilledInDatabase(t *testing.T) {
 		rows := clickHouseQuery(t, fmt.Sprintf(
 			"SELECT request_id, web_search_requests, web_search_cost, web_fetch_requests, web_fetch_cost, total_cost "+
 				"FROM %s.logs WHERE request_id = '%s'",
-			os.Getenv("AIR_CLICKHOUSE_DB"), responseID))
+			clickHouseDB(), responseID))
 		if len(rows) > 0 {
 			row = rows[0]
 			break
@@ -126,6 +121,15 @@ func TestDeepSeekLiveRouterBilledInDatabase(t *testing.T) {
 		"the search was priced wrong")
 	require.Greater(t, numberForTest(t, row["total_cost"]), 0.000975,
 		"the request cost less than the search alone")
+}
+
+// clickHouseDB is the database the checks read, "air" unless the
+// environment says otherwise.
+func clickHouseDB() string {
+	if db := os.Getenv("AIR_CLICKHOUSE_DB"); db != "" {
+		return db
+	}
+	return "air"
 }
 
 // numberForTest reads a number the database returned, as a JSON number or as
@@ -172,7 +176,7 @@ func TestDeepSeekLiveRouterFetchBilledInDatabase(t *testing.T) {
 		rows := clickHouseQuery(t, fmt.Sprintf(
 			"SELECT request_id, web_search_requests, web_fetch_requests, web_fetch_cost, total_cost "+
 				"FROM %s.logs WHERE request_id = '%s'",
-			os.Getenv("AIR_CLICKHOUSE_DB"), responseID))
+			clickHouseDB(), responseID))
 		if len(rows) > 0 {
 			row = rows[0]
 			break
