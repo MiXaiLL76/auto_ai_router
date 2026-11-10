@@ -22,6 +22,7 @@ const (
 	RetryReasonAuthErr    RetryReason = "auth_error"
 	RetryReasonNetErr     RetryReason = "network_error"
 	RetryReasonPaymentErr RetryReason = "payment_error"
+	RetryReasonEmpty      RetryReason = "empty_stream"
 )
 
 // TriedCredentialsKey is the context key for tracking attempted credentials

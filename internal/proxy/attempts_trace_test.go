@@ -232,3 +232,136 @@ func TestHandleSimulatedNonStream_RetryIsTheNextAttempt(t *testing.T) {
 		"aar.attempt.reason": string(RetryReasonNetErr), "aar.connection.reused": false,
 	}}, clientSpans())
 }
+
+// recordSpans returns a context with a recording span in it, as the
+// server span is in production, and a function that ends it and returns it
+// with the client spans beneath it.
+func recordSpans(t *testing.T) (context.Context, func() (sdktrace.ReadOnlySpan, []sdktrace.ReadOnlySpan)) {
+	t.Helper()
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+	ctx, root := provider.Tracer("test").Start(context.Background(), "POST /v1/chat/completions")
+	return ctx, func() (sdktrace.ReadOnlySpan, []sdktrace.ReadOnlySpan) {
+		root.End()
+		var request sdktrace.ReadOnlySpan
+		var clients []sdktrace.ReadOnlySpan
+		for _, span := range recorder.Ended() {
+			switch {
+			case span.SpanContext().SpanID() == root.SpanContext().SpanID():
+				request = span
+			case span.SpanKind() == trace.SpanKindClient:
+				clients = append(clients, span)
+			}
+		}
+		return request, clients
+	}
+}
+
+// failedAttempts are the attributes of a span's attempt_failed events.
+func failedAttempts(span sdktrace.ReadOnlySpan) []map[string]any {
+	var failed []map[string]any
+	for _, event := range span.Events() {
+		if event.Name != markFailedAttempt {
+			continue
+		}
+		attrs := map[string]any{}
+		for _, kv := range event.Attributes {
+			attrs[string(kv.Key)] = kv.Value.AsInterface()
+		}
+		failed = append(failed, attrs)
+	}
+	return failed
+}
+
+// An aggregator's error event at the end of a 2xx stream, as OpenRouter sends it.
+const upstreamErrorEvent = `{"id":"gen-1","object":"chat.completion.chunk","model":"gpt-4o","provider":"Acme","choices":[],"error":{"code":502,"message":"Upstream error from Acme: the model broke","metadata":{"error_type":"provider_unavailable"}}}`
+
+// A 2xx stream that ends in a provider's error event is retried for that
+// error, not for a broken connection, and the request's span keeps what the
+// provider said: the attempt's own span ended with the stream.
+func TestHandleSimulatedNonStream_StreamErrorEventIsTheRetryReason(t *testing.T) {
+	secondary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, openAIChatSSE(
+			`{"id":"c2","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant","content":"answer"},"finish_reason":"stop"}]}`,
+		))
+	}))
+	defer secondary.Close()
+	prx := NewTestProxyBuilder().WithCredentials(
+		config.CredentialConfig{Name: "primary", Type: config.ProviderTypeOpenAI, BaseURL: "http://primary.invalid", APIKey: "primary-key", RPM: 100, TPM: 100000},
+		config.CredentialConfig{Name: "secondary", Type: config.ProviderTypeOpenAI, BaseURL: secondary.URL, APIKey: "secondary-key", Priority: 1, RPM: 100, TPM: 100000},
+	).WithMaxProviderRetries(2).Build()
+
+	ctx, spans := recordSpans(t)
+	ctx = httputil.WithAttempts(ctx)
+	httputil.AttemptsFrom(ctx).Begin("primary") // the send whose response is read below
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`)).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer master-key")
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body: io.NopCloser(strings.NewReader(openAIChatSSE(
+			`{"id":"c1","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}`,
+			upstreamErrorEvent,
+		))),
+	}
+	logCtx := &RequestLogContext{StartTime: time.Now(), RequestID: "test-req", Request: req}
+	cred := &config.CredentialConfig{Name: "primary", Type: config.ProviderTypeOpenAI, BaseURL: "http://primary.invalid"}
+	w := httptest.NewRecorder()
+
+	prx.handleSimulatedNonStream(w, req, resp, &orchestratedRequest{streaming: false}, cred, "gpt-4o", "gpt-4o",
+		logCtx, nil, "http://upstream", []byte(`{"model":"gpt-4o","messages":[]}`),
+		false, false, false, time.Now(), map[string]bool{}, map[string]bool{})
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	request, clients := spans()
+	require.Len(t, clients, 1)
+	var reason string
+	for _, kv := range clients[0].Attributes() {
+		if kv.Key == "aar.attempt.reason" {
+			reason = kv.Value.AsString()
+		}
+	}
+	assert.Equal(t, string(RetryReasonServerErr), reason)
+	assert.Equal(t, []map[string]any{{
+		"aar.credential": "primary", "aar.attempt.number": int64(1),
+		"aar.error.message": "Upstream error from Acme: the model broke", "aar.error.code": "502",
+	}}, failedAttempts(request))
+}
+
+// With no credential left, the last attempt's stream error is the request's
+// outcome, and the request's span says what each provider answered.
+func TestHandleSimulatedNonStream_LastStreamErrorIsTheOutcome(t *testing.T) {
+	prx := NewTestProxyBuilder().WithCredentials(
+		config.CredentialConfig{Name: "primary", Type: config.ProviderTypeOpenAI, BaseURL: "http://primary.invalid", APIKey: "primary-key", RPM: 100, TPM: 100000},
+	).WithMaxProviderRetries(2).Build()
+
+	ctx, spans := recordSpans(t)
+	ctx = httputil.WithAttempts(ctx)
+	httputil.AttemptsFrom(ctx).Begin("primary")
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`)).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer master-key")
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(openAIChatSSE(upstreamErrorEvent))),
+	}
+	logCtx := &RequestLogContext{StartTime: time.Now(), RequestID: "test-req", Request: req}
+	cred := &config.CredentialConfig{Name: "primary", Type: config.ProviderTypeOpenAI, BaseURL: "http://primary.invalid"}
+	w := httptest.NewRecorder()
+
+	prx.handleSimulatedNonStream(w, req, resp, &orchestratedRequest{streaming: false}, cred, "gpt-4o", "gpt-4o",
+		logCtx, nil, "http://upstream", []byte(`{"model":"gpt-4o","messages":[]}`),
+		false, false, false, time.Now(), map[string]bool{"primary": true}, map[string]bool{"primary": true})
+
+	require.GreaterOrEqual(t, w.Code, http.StatusInternalServerError, w.Body.String())
+	assert.Equal(t, "failure", logCtx.Status)
+	assert.Equal(t, "stream_error", logCtx.StreamOutcome)
+	request, _ := spans()
+	assert.Equal(t, []map[string]any{{
+		"aar.credential": "primary", "aar.attempt.number": int64(1),
+		"aar.error.message": "Upstream error from Acme: the model broke", "aar.error.code": "502",
+	}}, failedAttempts(request))
+}

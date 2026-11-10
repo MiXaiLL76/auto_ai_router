@@ -68,6 +68,12 @@ func (b *errorBody) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// ProviderError is what a provider's error body or stream error event says,
+// as span attributes.
+func ProviderError(body []byte) []attribute.KeyValue {
+	return providerError(body, true)
+}
+
 // providerError is what an error body says, as span attributes.
 func providerError(body []byte, whole bool) []attribute.KeyValue {
 	var message, kind, code string
