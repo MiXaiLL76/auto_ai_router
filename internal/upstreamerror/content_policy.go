@@ -61,13 +61,34 @@ var ContentPolicyMarkers = []string{
 // already knew about before the list was introduced), so a refusal is
 // classified as a content-policy 400 exactly when it is also reported as
 // non-retryable and given the content-policy message.
+//
+// Both the signal and each marker are run through normalizeKeywordSignal
+// (folds "_" to " ") before comparing -- the same fix applied to
+// ClassifyProviderErrorSignals' rate_limit/timeout/overloaded keywords for
+// the identical reason. ContentPolicyMarkers lists several markers in both
+// spellings already ("content policy"/"content_policy", "safety
+// violation"/"safety_violation", ...), but newer entries did not get a
+// second entry for their other spelling: "data_inspection_failed" (Alibaba's
+// own code, by far the most frequent marker in production) had no "data
+// inspection failed" counterpart, and the hardcoded "prohibited_content"/
+// "model_armor" checks below had no space-separated counterpart either --
+// so a refusal phrased in prose instead of the machine-readable field lost
+// to the 502 default. Folding both sides once here, instead of adding a
+// second literal entry per marker, means this cannot reopen the same gap for
+// a marker added later.
+//
+// ContentPolicyMarkers' own entries are left exactly as they are: the retry
+// policy (config.DefaultNonRetryableMarkers, the same slice) matches a
+// response body against them directly, as plain lowercase substrings with
+// no folding -- removing an existing spelling here would silently stop the
+// retry policy from recognizing it.
 func IsContentPolicySignal(signal string) bool {
-	signal = strings.ToLower(strings.TrimSpace(signal))
-	if signal == "" {
+	normalized := normalizeKeywordSignal(signal)
+	if normalized == "" {
 		return false
 	}
 	for _, marker := range ContentPolicyMarkers {
-		if strings.Contains(signal, marker) {
+		if strings.Contains(normalized, normalizeKeywordSignal(marker)) {
 			return true
 		}
 	}
@@ -75,7 +96,7 @@ func IsContentPolicySignal(signal string) bool {
 	// content-policy phrasings this package recognized before the list
 	// existed; they stay recognized here so the status classification and
 	// the client-facing message keep agreeing.
-	return strings.Contains(signal, "prohibited_content") || strings.Contains(signal, "model_armor")
+	return strings.Contains(normalized, "prohibited content") || strings.Contains(normalized, "model armor")
 }
 
 // HasContentPolicySignal reports whether any of the given provider signals

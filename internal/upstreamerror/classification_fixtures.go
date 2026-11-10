@@ -47,6 +47,21 @@ var ClassificationFixtures = []ClassificationFixture{
 		WantStatus: http.StatusBadRequest,
 	},
 	{
+		// Alibaba sends this marker in the machine-readable "code"/"type"
+		// field, snake_case, which is why the fixture above is the one that
+		// matters in production. This is the prose form of the same marker
+		// -- a provider that phrased it in a free-text message instead must
+		// not lose to the 502 default just for the choice of delimiter.
+		Name:       "data inspection failed, prose form of the same marker",
+		Body:       `{"message":"data inspection failed: Output data may contain inappropriate content."}`,
+		WantStatus: http.StatusBadRequest,
+	},
+	{
+		Name:       "prohibited content, prose form of prohibited_content",
+		Body:       `{"message":"The request was blocked: prohibited content detected."}`,
+		WantStatus: http.StatusBadRequest,
+	},
+	{
 		Name:       "provider failure with the same numeric code and error_type stays a 5xx",
 		Body:       `{"code":502,"message":"Upstream error from Darkbloom: inference generation failed","metadata":{"error_type":"provider_unavailable"}}`,
 		WantStatus: http.StatusBadGateway,
