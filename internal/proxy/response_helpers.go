@@ -205,6 +205,14 @@ func extractSessionIDFromRawBody(reqBody map[string]goccyjson.RawMessage) string
 	if pck, ok := rawJSONString(reqBody["prompt_cache_key"]); ok && pck != "" {
 		return pck
 	}
+	if metadataRaw, ok := reqBody["metadata"]; ok {
+		var metadata map[string]goccyjson.RawMessage
+		if err := goccyjson.Unmarshal(metadataRaw, &metadata); err == nil {
+			if sid, ok := rawJSONString(metadata["session_id"]); ok && sid != "" {
+				return sid
+			}
+		}
+	}
 	return ""
 }
 
