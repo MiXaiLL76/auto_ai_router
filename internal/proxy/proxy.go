@@ -2725,16 +2725,20 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		if resp.StatusCode == http.StatusTooManyRequests {
 			providerRateLimited = true
 		}
-		// The same for any other 4xx: it describes the request (a bad prompt,
-		// a content-policy refusal, an unknown model), and it stays the real
-		// reason the request could not be served when a later attempt fails on
-		// the transport. The LAST such status wins, because it is the one
-		// closest to the final attempt -- the same credential the client would
-		// have been told about had the cascade stopped there.
+		// The same for a status that describes the REQUEST (a bad prompt, a
+		// content-policy refusal, a model that does not exist): it stays the
+		// real reason the request could not be served when a later attempt
+		// fails on the transport. The LAST such status wins, because it is
+		// the one closest to the final attempt -- the same credential the
+		// client would have been told about had the cascade stopped there.
 		//
-		// 429 is excluded: providerRateLimited already carries it, and it
-		// needs its own Retry-After, which a plain status relay does not give.
-		if resp.StatusCode >= http.StatusBadRequest && resp.StatusCode < http.StatusInternalServerError {
+		// Credential-scoped statuses (401/402/403) are NOT kept: they say
+		// something about the one credential that answered, and the next one
+		// may serve the same request fine -- relaying them after an
+		// unrelated transport failure would tell the client its own key was
+		// rejected. 429 is excluded too: providerRateLimited carries it, and
+		// it needs its own Retry-After.
+		if isRequestScopedStatus(resp.StatusCode) {
 			providerRequestRejected = resp.StatusCode
 			providerRequestRejectedBody = responseBody
 		}

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -217,6 +218,101 @@ func TestProxyRequest_ProviderRejectionSurvivesLaterTransportFailureInSimulatedP
 	assert.Equal(t, http.StatusBadRequest, rec.Code,
 		"the provider's own 400 must survive a later transport failure in the forced-stream path too: body: %s",
 		rec.Body.String())
+}
+
+// TestProxyRequest_CredentialScopedStatusIsNotRelayed pins the other half of
+// the distinction: a 401/402/403 describes the CREDENTIAL that answered, not
+// the request.
+//
+// A credential whose key is rejected, whose account is exhausted, or which is
+// not allowed to serve the request says nothing about the request itself: the
+// next credential may serve it fine. So after a cascade that ended on the
+// transport, such a status must NOT be relayed to the client -- it would
+// tell the client its own key was rejected, which it never was (the router's
+// master key is a different thing entirely), and the client cannot act on
+// that answer. The client gets the 502 that says "the upstream broke",
+// which is what actually happened.
+//
+// Reproduces the review finding on this PR: credential A answered 401 and
+// credential B died on the transport; the client got
+// 401 {"type":"authentication_error"}, which points at the client's own key.
+func TestProxyRequest_CredentialScopedStatusIsNotRelayed(t *testing.T) {
+	for _, status := range []int{
+		http.StatusUnauthorized,
+		http.StatusPaymentRequired,
+		http.StatusForbidden,
+	} {
+		for _, simulated := range []bool{false, true} {
+			t.Run(fmt.Sprintf("status %d simulated %v", status, simulated), func(t *testing.T) {
+				var firstHits atomic.Int32
+				first := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					firstHits.Add(1)
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(status)
+					_, _ = w.Write([]byte(`{"error": {"message": "upstream says no"}}`))
+				}))
+				defer first.Close()
+
+				// The second credential dies on the transport: no response at all.
+				var secondHits atomic.Int32
+				second := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					secondHits.Add(1)
+					hijackAndClose(w)
+				}))
+				defer second.Close()
+
+				prx := NewTestProxyBuilder().WithCredentials(
+					config.CredentialConfig{
+						Name: "cred-a", Type: config.ProviderTypeOpenAI, BaseURL: first.URL,
+						APIKey: "k", RPM: 1000, TPM: 1000000,
+					},
+					config.CredentialConfig{
+						Name: "cred-b", Type: config.ProviderTypeOpenAI, BaseURL: second.URL,
+						APIKey: "k", RPM: 1000, TPM: 1000000,
+					},
+				).WithMaxProviderRetries(3).WithForceStreamForTTFT(simulated).Build()
+
+				req := httptest.NewRequest("POST", "/v1/chat/completions",
+					strings.NewReader(`{"model":"gpt-5-mini","messages":[{"role":"user","content":"hi"}]}`))
+				req.Header.Set("Authorization", "Bearer master-key")
+				req.Header.Set("Content-Type", "application/json")
+				rec := httptest.NewRecorder()
+				prx.ProxyRequest(rec, req)
+
+				assert.Equal(t, http.StatusBadGateway, rec.Code,
+					"a credential-scoped status must not be relayed after a transport failure: body: %s",
+					rec.Body.String())
+				assert.NotContains(t, rec.Body.String(), "authentication_error",
+					"the client must not be told its own key was rejected")
+				assert.Positive(t, firstHits.Load())
+				assert.Positive(t, secondHits.Load())
+			})
+		}
+	}
+}
+
+// TestIsRequestScopedStatus pins the set itself, so the two consumers of it
+// (the direct-provider path and the forced-stream path) cannot drift apart
+// about which statuses describe the request.
+func TestIsRequestScopedStatus(t *testing.T) {
+	for _, status := range []int{
+		http.StatusBadRequest,
+		http.StatusNotFound,
+	} {
+		assert.True(t, isRequestScopedStatus(status),
+			"status %d describes the request and must survive a later transport failure", status)
+	}
+	for _, status := range []int{
+		http.StatusUnauthorized,
+		http.StatusPaymentRequired,
+		http.StatusForbidden,
+		http.StatusTooManyRequests,
+		http.StatusInternalServerError,
+		http.StatusBadGateway,
+	} {
+		assert.False(t, isRequestScopedStatus(status),
+			"status %d describes the credential (or the outage) and must not be relayed as the request's verdict", status)
+	}
 }
 
 // TestProxyRequest_ProviderRateLimitStillWins pins that the 429 case keeps
