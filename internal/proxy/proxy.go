@@ -2938,7 +2938,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("Content-Length", fmt.Sprintf("%d", len(clientBody)))
 				w.WriteHeader(statusCode)
-				_, _ = w.Write(clientBody)
+				_, _ = w.Write(clientBody) //nolint:gosec // G705: clientBody is our own masked application/json (clientResponseBodyForCredential), not attacker-controlled HTML
 				break
 			}
 			WriteErrorBadGateway(w, statusMessage)
