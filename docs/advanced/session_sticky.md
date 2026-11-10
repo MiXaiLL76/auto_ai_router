@@ -148,18 +148,18 @@ With `redis.enabled`, bindings are stored in Redis/Valkey under `{redis.key_pref
 
 The proxy extracts a session ID from the request body in the following priority order:
 
-| Field                           | Location                                |
-| ------------------------------- | --------------------------------------- |
-| `extra_body.litellm_session_id` | nested in `extra_body`                  |
-| `litellm_session_id`            | top-level field                         |
-| `extra_body.chat_id`            | nested in `extra_body`                  |
-| `extra_body.session_id`         | nested in `extra_body`                  |
-| `session_id`                    | top-level field                         |
-| `prompt_cache_key`              | top-level field                         |
-| session headers                 | see [Header Fallback](#header-fallback) |
-| `safety_identifier`             | top-level field                         |
-| `user`                          | top-level field (OpenAI standard)       |
-| `metadata.session_id`            | nested in top-level `metadata` (last fallback) |
+| Field                           | Location                                       |
+| ------------------------------- | ---------------------------------------------- |
+| `extra_body.litellm_session_id` | nested in `extra_body`                         |
+| `litellm_session_id`            | top-level field                                |
+| `extra_body.chat_id`            | nested in `extra_body`                         |
+| `extra_body.session_id`         | nested in `extra_body`                         |
+| `session_id`                    | top-level field                                |
+| `prompt_cache_key`              | top-level field                                |
+| session headers                 | see [Header Fallback](#header-fallback)        |
+| `safety_identifier`             | top-level field                                |
+| `user`                          | top-level field (OpenAI standard)              |
+| `metadata.session_id`           | nested in top-level `metadata` (last fallback) |
 
 `user` and `safety_identifier` identify a client, not a conversation, so they follow explicit session fields and headers: binding
 to them pins every conversation of a client to one credential instead of balancing each one.
