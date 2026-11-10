@@ -86,10 +86,12 @@ func ExtractErrorSignals(raw json.RawMessage) ([]string, bool) {
 	// When it IS all there is -- the provider states a bare status and
 	// nothing else ("code":400, no message) -- it is the only thing left to
 	// report, and the provider's own 4xx is the right answer for the client.
-	if code, ok := fields["code"].(float64); ok {
-		if s := strconv.Itoa(int(code)); s != "" {
-			signals = append(signals, s)
-		}
+	//
+	// code != 0 excludes the one numeric value that is never a real signal:
+	// {"code":0} (no code set, or a placeholder) must not count as "this
+	// object has a signal" any more than an absent "code" field would.
+	if code, ok := fields["code"].(float64); ok && code != 0 {
+		signals = append(signals, strconv.Itoa(int(code)))
 	}
 	// "metadata": {"error_type": "..."} -- the machine-readable reason an
 	// aggregator reports alongside the message.
@@ -118,6 +120,11 @@ func ExtractErrorSignals(raw json.RawMessage) ([]string, bool) {
 // differently -- they used to: the compatibility layer's own copy knew only
 // content-policy and a numeric code, with no rate_limit/timeout/overloaded
 // keyword handling and a 422 default instead of a 502.
+//
+// Each keyword check runs on the signal with "_" folded to " "
+// (normalizeKeywordSignal), so "rate_limit_exceeded" and the prose an
+// aggregator relays verbatim ("Request timed out", "rate limit exceeded")
+// match the same check instead of only the snake_case form.
 func ClassifyProviderErrorSignals(signals []string) int {
 	// A content-policy refusal is checked in its own pass, before the
 	// provider-side signals below, because an aggregator that wraps a refusal
@@ -138,17 +145,17 @@ func ClassifyProviderErrorSignals(signals []string) int {
 	}
 
 	for _, signal := range signals {
-		signal = strings.ToLower(strings.TrimSpace(signal))
+		signal = normalizeKeywordSignal(signal)
 		switch {
 		case signal == "":
 			continue
-		case strings.Contains(signal, "rate_limit") || strings.Contains(signal, "too_many_requests"):
+		case strings.Contains(signal, "rate limit") || strings.Contains(signal, "too many requests"):
 			return http.StatusTooManyRequests
-		case strings.Contains(signal, "timeout"):
+		case strings.Contains(signal, "timeout") || strings.Contains(signal, "timed out"):
 			return http.StatusRequestTimeout
-		case strings.Contains(signal, "overloaded") || strings.Contains(signal, "service_unavailable"):
+		case strings.Contains(signal, "overloaded") || strings.Contains(signal, "service unavailable"):
 			return http.StatusServiceUnavailable
-		case strings.Contains(signal, "server_error") || strings.Contains(signal, "internal"):
+		case strings.Contains(signal, "server error") || strings.Contains(signal, "internal"):
 			return http.StatusInternalServerError
 		}
 	}
@@ -185,14 +192,28 @@ func httpStatusFromNumericSignal(signals []string) (int, bool) {
 	return 0, false
 }
 
+// normalizeKeywordSignal lowercases and trims a signal, and folds "_" to " "
+// so "rate_limit_exceeded" and "Rate limit exceeded" match the same keyword
+// check. Providers phrase the same failure both ways: an OpenAI-shaped error
+// type is snake_case ("rate_limit_exceeded"), but the free-text message an
+// aggregator relays verbatim is prose ("Request timed out", "Service
+// unavailable") -- without folding, only the snake_case form matched, so a
+// provider that wrote "Request timed out" classified as a generic 502
+// instead of a 408, and "rate limit exceeded" (prose) lost to a
+// content-policy signal sitting beside it that a snake_case
+// "rate_limit_exceeded" would have outranked (see hasRequestSideSignal).
+func normalizeKeywordSignal(signal string) string {
+	return strings.ReplaceAll(strings.ToLower(strings.TrimSpace(signal)), "_", " ")
+}
+
 // hasRequestSideSignal reports whether any signal describes a request-side
 // condition -- a rate limit or a timeout -- which is a property of the
 // account's state rather than of the content.
 func hasRequestSideSignal(signals []string) bool {
 	for _, signal := range signals {
-		signal = strings.ToLower(strings.TrimSpace(signal))
-		if strings.Contains(signal, "rate_limit") || strings.Contains(signal, "too_many_requests") ||
-			strings.Contains(signal, "timeout") {
+		signal = normalizeKeywordSignal(signal)
+		if strings.Contains(signal, "rate limit") || strings.Contains(signal, "too many requests") ||
+			strings.Contains(signal, "timeout") || strings.Contains(signal, "timed out") {
 			return true
 		}
 	}

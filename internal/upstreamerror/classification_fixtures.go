@@ -72,14 +72,41 @@ var ClassificationFixtures = []ClassificationFixture{
 		WantStatus: http.StatusTooManyRequests,
 	},
 	{
+		// The prose form of the same thing: no snake_case anywhere in the
+		// object (unlike the fixture above, whose "type" is already
+		// "rate_limit_exceeded"). An aggregator can relay the message
+		// verbatim in prose while still reporting a content-policy wording
+		// beside it -- the prose form must outrank that refusal exactly like
+		// the snake_case one does, not lose to it for being spelled
+		// differently.
+		Name:       "a prose rate limit outranks a content-policy wording beside it",
+		Body:       `{"message":"content_filter","type":"Rate limit exceeded"}`,
+		WantStatus: http.StatusTooManyRequests,
+	},
+	{
 		Name:       "timeout by keyword",
 		Body:       `{"message":"upstream request timeout"}`,
+		WantStatus: http.StatusRequestTimeout,
+	},
+	{
+		Name:       "timeout in prose, no snake_case anywhere",
+		Body:       `{"message":"Request timed out"}`,
 		WantStatus: http.StatusRequestTimeout,
 	},
 	{
 		Name:       "overloaded maps to 503",
 		Body:       `{"message":"model_overloaded"}`,
 		WantStatus: http.StatusServiceUnavailable,
+	},
+	{
+		Name:       "service unavailable in prose, no snake_case anywhere",
+		Body:       `{"message":"Service unavailable, please try again later."}`,
+		WantStatus: http.StatusServiceUnavailable,
+	},
+	{
+		Name:       "too many requests in prose, no snake_case anywhere",
+		Body:       `{"message":"Too Many Requests"}`,
+		WantStatus: http.StatusTooManyRequests,
 	},
 	{
 		Name:       "billing block is not a content refusal",
