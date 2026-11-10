@@ -337,40 +337,34 @@ func hasMeaningfulError(value any) bool {
 	}
 }
 
-// errorStatus maps a provider's error object to the HTTP status the client
+// errorStatus maps a provider's error value to the HTTP status the client
 // should see.
 //
-// A content-policy refusal is checked FIRST and always yields 400: the
-// provider may report it with an upstream status of its own (an aggregator
-// forwarding "code":502 for "Output data may contain inappropriate content."),
-// but the refusal is a fault of the request, not of the upstream connection.
+// It delegates to upstreamerror.ExtractErrorSignals and
+// ClassifyProviderErrorSignals -- the same two functions the native (non-compat)
+// path's own classification uses (statusCodeFromProviderBodyError /
+// statusCodeFromProviderStreamError). The compatibility layer used to
+// re-implement this independently: a narrower content-policy-only check (see
+// git history) with no rate_limit/timeout/overloaded/server_error keyword
+// handling and a 422 default instead of a 502, so the same provider body
+// could classify differently depending on which path it took. One
+// implementation, shared, cannot drift from itself.
 //
-// Otherwise a numeric "code" is used as the status when it is in the 4xx/5xx
-// range -- that is the provider's own status for the request, which is what
-// the client should see.
+// value is not necessarily a map: a provider may answer {"error":"boom"} or
+// {"error":400} too, which ExtractErrorSignals also reads. Re-marshaling it
+// to JSON is the one conversion needed to hand it to ExtractErrorSignals,
+// which the proxy's own callers reach more directly (they already hold
+// json.RawMessage).
 func errorStatus(value any) int {
-	if body, ok := value.(map[string]any); ok {
-		if isContentPolicyError(body) {
-			return http.StatusBadRequest
-		}
-		if code, ok := body["code"].(float64); ok && code >= 400 && code <= 599 {
-			return int(code)
-		}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return http.StatusUnprocessableEntity
 	}
-	return http.StatusUnprocessableEntity
-}
-
-// isContentPolicyError reports whether a provider's error object describes a
-// content-policy refusal.
-//
-// It delegates to upstreamerror.IsContentPolicyErrorObject, which reads the
-// same fields the proxy's own classification reads. The compatibility layer
-// used to re-implement the check over a narrower set of fields (message,
-// type, reason -- but not code or status), so a refusal phrased in "status":
-// "content_filter" was recognized by the proxy and passed through as a 5xx
-// here: the same body classified differently depending on which path it took.
-func isContentPolicyError(body map[string]any) bool {
-	return upstreamerror.IsContentPolicyErrorObject(body)
+	signals, ok := upstreamerror.ExtractErrorSignals(raw)
+	if !ok {
+		return http.StatusUnprocessableEntity
+	}
+	return upstreamerror.ClassifyProviderErrorSignals(signals)
 }
 
 // normalizeError builds the litellm-compatible error body for a non-2xx

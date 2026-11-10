@@ -61,13 +61,34 @@ var ContentPolicyMarkers = []string{
 // already knew about before the list was introduced), so a refusal is
 // classified as a content-policy 400 exactly when it is also reported as
 // non-retryable and given the content-policy message.
+//
+// Both the signal and each marker are run through normalizeKeywordSignal
+// (folds "_" to " ") before comparing -- the same fix applied to
+// ClassifyProviderErrorSignals' rate_limit/timeout/overloaded keywords for
+// the identical reason. ContentPolicyMarkers lists several markers in both
+// spellings already ("content policy"/"content_policy", "safety
+// violation"/"safety_violation", ...), but newer entries did not get a
+// second entry for their other spelling: "data_inspection_failed" (Alibaba's
+// own code, by far the most frequent marker in production) had no "data
+// inspection failed" counterpart, and the hardcoded "prohibited_content"/
+// "model_armor" checks below had no space-separated counterpart either --
+// so a refusal phrased in prose instead of the machine-readable field lost
+// to the 502 default. Folding both sides once here, instead of adding a
+// second literal entry per marker, means this cannot reopen the same gap for
+// a marker added later.
+//
+// ContentPolicyMarkers' own entries are left exactly as they are: the retry
+// policy (config.DefaultNonRetryableMarkers, the same slice) matches a
+// response body against them directly, as plain lowercase substrings with
+// no folding -- removing an existing spelling here would silently stop the
+// retry policy from recognizing it.
 func IsContentPolicySignal(signal string) bool {
-	signal = strings.ToLower(strings.TrimSpace(signal))
-	if signal == "" {
+	normalized := normalizeKeywordSignal(signal)
+	if normalized == "" {
 		return false
 	}
 	for _, marker := range ContentPolicyMarkers {
-		if strings.Contains(signal, marker) {
+		if strings.Contains(normalized, normalizeKeywordSignal(marker)) {
 			return true
 		}
 	}
@@ -75,55 +96,7 @@ func IsContentPolicySignal(signal string) bool {
 	// content-policy phrasings this package recognized before the list
 	// existed; they stay recognized here so the status classification and
 	// the client-facing message keep agreeing.
-	return strings.Contains(signal, "prohibited_content") || strings.Contains(signal, "model_armor")
-}
-
-// ContentPolicyErrorFields are the keys of a provider's error object that may
-// carry the reason for the failure.
-//
-// "code" and "status" are included alongside the obvious "type"/"message"/
-// "reason": a provider may put the refusal in any of them ("status":
-// "content_filter", "code": "content_policy_violation"), and a check that
-// reads only the message-bearing fields misses those. They are read as TEXT
-// only -- a numeric "code" describes the upstream's failure and says nothing
-// about the cause.
-var ContentPolicyErrorFields = []string{"code", "type", "message", "status", "reason"}
-
-// ContentPolicyErrorMetadataFields are the keys of a provider's error
-// object's "metadata" sub-object that may carry the reason. Aggregators put
-// the machine-readable one ("error_type": "provider_unavailable") there,
-// next to the human-readable message.
-var ContentPolicyErrorMetadataFields = []string{"error_type", "type", "reason"}
-
-// IsContentPolicyErrorObject reports whether a provider's error object
-// describes a content-policy refusal.
-//
-// It reads the same fields wherever the error object is inspected -- the
-// proxy's own classification and the LiteLLM compatibility layer's -- so the
-// two cannot disagree about what a refusal is. They used to: the proxy read
-// "code" and "status" as well, while the compatibility layer read only the
-// message-bearing fields, so a refusal the proxy recognized was passed
-// through as a 5xx when the same body went through the compatibility layer.
-//
-// obj must be the decoded error object (a map), as the compatibility layer
-// has it.
-func IsContentPolicyErrorObject(obj map[string]any) bool {
-	if obj == nil {
-		return false
-	}
-	for _, key := range ContentPolicyErrorFields {
-		if s, ok := obj[key].(string); ok && IsContentPolicySignal(s) {
-			return true
-		}
-	}
-	if meta, ok := obj["metadata"].(map[string]any); ok {
-		for _, key := range ContentPolicyErrorMetadataFields {
-			if s, ok := meta[key].(string); ok && IsContentPolicySignal(s) {
-				return true
-			}
-		}
-	}
-	return false
+	return strings.Contains(normalized, "prohibited content") || strings.Contains(normalized, "model armor")
 }
 
 // HasContentPolicySignal reports whether any of the given provider signals
