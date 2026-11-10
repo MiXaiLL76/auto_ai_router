@@ -89,8 +89,24 @@ func TestErrorStatusContentFilter(t *testing.T) {
 			want: http.StatusBadGateway,
 		},
 		{
-			name: "no status info at all",
+			// Before errorStatus delegated to the shared classifier, a
+			// message that matched no keyword fell to this function's own
+			// 422 default. Now ClassifyProviderErrorSignals runs on it like
+			// any other unclassified provider-side message, and its default
+			// is 502 -- matching the native path exactly, which is the point
+			// of sharing one implementation. A body with no recognized field
+			// at all still gets 422 (see the "truly no signal at all" case
+			// below).
+			name: "unrecognized message now maps to 502, like the native path",
 			body: map[string]any{"message": "something"},
+			want: http.StatusBadGateway,
+		},
+		{
+			// No recognized field at all (not even "message"): ExtractErrorSignals
+			// reports no signal, and errorStatus keeps its own 422 default --
+			// unchanged from before the delegation.
+			name: "truly no signal at all stays 422",
+			body: map[string]any{"unrelated_field": "something"},
 			want: http.StatusUnprocessableEntity,
 		},
 	}
@@ -102,16 +118,15 @@ func TestErrorStatusContentFilter(t *testing.T) {
 	}
 }
 
-// TestIsContentPolicyErrorReadsTheSameFieldsAsProxy pins that the
-// compatibility layer's refusal check reads the same fields the proxy's own
-// classification reads.
-//
-// They used to diverge: the proxy read "code" and "status" as well, while
-// this layer read only the message-bearing fields. A refusal phrased in
-// "status": "content_filter" was therefore recognized by the proxy and
-// passed through as a 5xx here -- the same body classified differently
-// depending on which path it took.
-func TestIsContentPolicyErrorReadsTheSameFieldsAsProxy(t *testing.T) {
+// TestErrorStatusReadsTheSameFieldsAsProxy pins that the compatibility
+// layer's status mapping reads the same fields the proxy's own
+// classification reads -- both now go through the same
+// upstreamerror.ExtractErrorSignals/ClassifyProviderErrorSignals, so they
+// cannot read a different field set again the way they once did (the proxy
+// read "code" and "status" as well, while this layer read only the
+// message-bearing fields; a refusal phrased in "status": "content_filter"
+// was recognized by the proxy and passed through as a 5xx here).
+func TestErrorStatusReadsTheSameFieldsAsProxy(t *testing.T) {
 	objects := []map[string]any{
 		{"message": "Output data may contain inappropriate content."},
 		{"type": "content_filter", "message": "refused"},
@@ -129,15 +144,15 @@ func TestIsContentPolicyErrorReadsTheSameFieldsAsProxy(t *testing.T) {
 			fmt.Sprint(obj["message"]), fmt.Sprint(obj["type"]),
 			fmt.Sprint(obj["status"]), fmt.Sprint(obj["code"]),
 		}, "|"), func(t *testing.T) {
-			assert.True(t, isContentPolicyError(obj),
+			assert.Equal(t, http.StatusBadRequest, errorStatus(obj),
 				"a refusal must be recognized wherever the marker sits: %v", obj)
 		})
 	}
 }
 
-// TestIsContentPolicyErrorIgnoresNonRefusals is the counterpart: a provider
-// failure must not be mistaken for a refusal, whatever it carries.
-func TestIsContentPolicyErrorIgnoresNonRefusals(t *testing.T) {
+// TestErrorStatusIgnoresNonRefusals is the counterpart: a provider failure
+// must not be mistaken for a refusal, whatever it carries.
+func TestErrorStatusIgnoresNonRefusals(t *testing.T) {
 	for _, obj := range []map[string]any{
 		{"code": float64(502), "message": "inference generation failed"},
 		{"message": "Rate limit exceeded"},
@@ -146,7 +161,7 @@ func TestIsContentPolicyErrorIgnoresNonRefusals(t *testing.T) {
 		{"message": "safety_identifier must be a string"},
 		{"code": float64(500), "message": "internal server error"},
 	} {
-		assert.False(t, isContentPolicyError(obj),
+		assert.NotEqual(t, http.StatusBadRequest, errorStatus(obj),
 			"a provider failure must not be reported as a content refusal: %v", obj)
 	}
 }

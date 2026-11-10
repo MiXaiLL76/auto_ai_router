@@ -78,54 +78,6 @@ func IsContentPolicySignal(signal string) bool {
 	return strings.Contains(signal, "prohibited_content") || strings.Contains(signal, "model_armor")
 }
 
-// ContentPolicyErrorFields are the keys of a provider's error object that may
-// carry the reason for the failure.
-//
-// "code" and "status" are included alongside the obvious "type"/"message"/
-// "reason": a provider may put the refusal in any of them ("status":
-// "content_filter", "code": "content_policy_violation"), and a check that
-// reads only the message-bearing fields misses those. They are read as TEXT
-// only -- a numeric "code" describes the upstream's failure and says nothing
-// about the cause.
-var ContentPolicyErrorFields = []string{"code", "type", "message", "status", "reason"}
-
-// ContentPolicyErrorMetadataFields are the keys of a provider's error
-// object's "metadata" sub-object that may carry the reason. Aggregators put
-// the machine-readable one ("error_type": "provider_unavailable") there,
-// next to the human-readable message.
-var ContentPolicyErrorMetadataFields = []string{"error_type", "type", "reason"}
-
-// IsContentPolicyErrorObject reports whether a provider's error object
-// describes a content-policy refusal.
-//
-// It reads the same fields wherever the error object is inspected -- the
-// proxy's own classification and the LiteLLM compatibility layer's -- so the
-// two cannot disagree about what a refusal is. They used to: the proxy read
-// "code" and "status" as well, while the compatibility layer read only the
-// message-bearing fields, so a refusal the proxy recognized was passed
-// through as a 5xx when the same body went through the compatibility layer.
-//
-// obj must be the decoded error object (a map), as the compatibility layer
-// has it.
-func IsContentPolicyErrorObject(obj map[string]any) bool {
-	if obj == nil {
-		return false
-	}
-	for _, key := range ContentPolicyErrorFields {
-		if s, ok := obj[key].(string); ok && IsContentPolicySignal(s) {
-			return true
-		}
-	}
-	if meta, ok := obj["metadata"].(map[string]any); ok {
-		for _, key := range ContentPolicyErrorMetadataFields {
-			if s, ok := meta[key].(string); ok && IsContentPolicySignal(s) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // HasContentPolicySignal reports whether any of the given provider signals
 // describes a content-policy refusal.
 func HasContentPolicySignal(signals []string) bool {
