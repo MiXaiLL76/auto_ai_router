@@ -2442,6 +2442,16 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		// all: then the outcome is a 429 with a Retry-After (the model is
 		// momentarily over its limit), not a 502 that blames the provider.
 		rateLimitExhausted bool
+		// providerRateLimited: an attempt got a 429 from the provider (the
+		// upstream account is over its own rate limit), as opposed to the
+		// router's own limiter refusing the candidate. It matters when the
+		// later attempts fail on the transport and no response is left to
+		// relay: the provider's 429 is the real reason the request could not
+		// be served -- the model is momentarily over its limit and answers
+		// normally once the window rolls over -- so the client gets a 429
+		// with a Retry-After instead of a 502 that blames the provider for
+		// being broken.
+		providerRateLimited bool
 		// Replies of a fanned-out embeddings request kept across attempts, so
 		// a retry only re-sends the inputs that did not get one.
 		embedFanOutReplies embedContentFanOutReplies
@@ -2692,6 +2702,14 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			resp.StatusCode = mappedStatus
 		}
 
+		// A 429 from the provider is remembered across attempts: it is the
+		// upstream account's own rate limit, and it stays the real reason the
+		// request could not be served even if a later attempt fails on the
+		// transport and leaves no response to relay (see providerRateLimited).
+		if resp.StatusCode == http.StatusTooManyRequests {
+			providerRateLimited = true
+		}
+
 		p.recordProviderResponse(r.Context(), cred, modelID, realModelID, resp.StatusCode, resp.Header, responseBody)
 
 		// Check if we should retry with another same-type credential
@@ -2774,6 +2792,14 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		// here both misreports the cause and leaves the client without the
 		// Retry-After it needs to back off instead of hammering the pool.
 		cascadeRateLimited := rateLimitExhausted
+		// An earlier attempt got a 429 from the provider (the upstream account
+		// is over its own rate limit) and a later one failed on the transport,
+		// so nothing is left to relay. The provider's 429 is the real reason
+		// the request could not be served: the model answers normally once the
+		// window rolls over. Answering 502 here would blame the provider for
+		// being broken and leave the client without the Retry-After it needs
+		// to back off instead of hammering the pool.
+		providerRateLimit := providerRateLimited
 		switch {
 		case clientCanceled:
 			// The client left before any credential attempt produced a
@@ -2789,6 +2815,11 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			statusMessage = "Rate limit exceeded"
 			errorMsg = "Credential rate limits ran out before every embeddings input was sent"
 			errorOrigin = ErrorOriginFanOutRateLimited
+		case providerRateLimit:
+			statusCode = http.StatusTooManyRequests
+			statusMessage = "Rate limit exceeded"
+			errorMsg = "All provider attempts were rate limited"
+			errorOrigin = ErrorOriginProviderRateLimited
 		case cascadeRateLimited:
 			statusCode = http.StatusTooManyRequests
 			statusMessage = "Rate limit exceeded"
@@ -2814,6 +2845,11 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		case cascadeRateLimited:
 			p.logger.WarnContext(r.Context(), "All credentials for this model are rate limited",
 				"error_code", statusCode, "credential", cred.Name, "provider", string(cred.Type), "model", modelID,
+				"request_id", logCtx.RequestID)
+		case providerRateLimit:
+			p.logger.WarnContext(r.Context(), "All provider attempts were rate limited; a later attempt failed on the transport",
+				"error_code", statusCode, "credential", cred.Name, "provider", string(cred.Type), "model", modelID,
+				"error", upstreamErrorForLog(transportErr, targetURL),
 				"request_id", logCtx.RequestID)
 		default:
 			p.logUpstreamError(r.Context(), "All provider attempts failed: no upstream response", statusCode, cred, modelID, nil,
