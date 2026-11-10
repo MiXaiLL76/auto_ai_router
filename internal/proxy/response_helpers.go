@@ -205,12 +205,20 @@ func extractSessionIDFromRawBody(reqBody map[string]goccyjson.RawMessage) string
 	if pck, ok := rawJSONString(reqBody["prompt_cache_key"]); ok && pck != "" {
 		return pck
 	}
+	if metadataRaw, ok := reqBody["metadata"]; ok {
+		var metadata map[string]goccyjson.RawMessage
+		if err := goccyjson.Unmarshal(metadataRaw, &metadata); err == nil {
+			if sid, ok := rawJSONString(metadata["session_id"]); ok && sid != "" {
+				return sid
+			}
+		}
+	}
 	return ""
 }
 
 // extractClientIDFromRawBody returns the per-client identifier
 // (safety_identifier, then the user field it replaces, the precedence OpenAI
-// applies). It is a fallback session key, after the body session fields
+// applies). It is the last-resort session key, after the body session fields
 // and the session headers: binding to it pins every conversation of a client
 // to one credential instead of balancing each one.
 func extractClientIDFromRawBody(reqBody map[string]goccyjson.RawMessage) string {
@@ -368,8 +376,6 @@ type sanitizedRequestBody struct {
 	SessionID string
 	ClientID  string
 	Changed   bool
-	// MetadataSessionID is used only when all existing session sources are empty.
-	MetadataSessionID string
 	// ServiceTiers are the client's service_tier values (top level, then
 	// extra_body), removed from Body.
 	ServiceTiers []string
@@ -450,10 +456,6 @@ func sanitizeJSONRequestBody(body []byte, isMessagesAPI bool) (sanitizedRequestB
 	// Extract session ID before removing LiteLLM-only request metadata.
 	result.SessionID = extractSessionIDFromRawBody(reqBody)
 	result.ClientID = extractClientIDFromRawBody(reqBody)
-	var metadata map[string]goccyjson.RawMessage
-	if err := goccyjson.Unmarshal(reqBody["metadata"], &metadata); err == nil {
-		result.MetadataSessionID, _ = rawJSONString(metadata["session_id"])
-	}
 	// litellm_session_id/session_id only ever drive AIR's own sticky-routing
 	// decision (already captured above into result.SessionID); no provider
 	// understands either as a wire-protocol field, and both are gone from

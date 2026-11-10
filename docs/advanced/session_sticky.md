@@ -148,26 +148,26 @@ With `redis.enabled`, bindings are stored in Redis/Valkey under `{redis.key_pref
 
 The proxy extracts a session ID from the request body in the following priority order:
 
-| Field                           | Location                                       |
-| ------------------------------- | ---------------------------------------------- |
-| `extra_body.litellm_session_id` | nested in `extra_body`                         |
-| `litellm_session_id`            | top-level field                                |
-| `extra_body.chat_id`            | nested in `extra_body`                         |
-| `extra_body.session_id`         | nested in `extra_body`                         |
-| `session_id`                    | top-level field                                |
-| `prompt_cache_key`              | top-level field                                |
-| session headers                 | see [Header Fallback](#header-fallback)        |
-| `safety_identifier`             | top-level field                                |
-| `user`                          | top-level field (OpenAI standard)              |
-| `metadata.session_id`           | nested in top-level `metadata` (last fallback) |
+| Field                           | Location                                |
+| ------------------------------- | --------------------------------------- |
+| `extra_body.litellm_session_id` | nested in `extra_body`                  |
+| `extra_body.chat_id`            | nested in `extra_body`                  |
+| `extra_body.session_id`         | nested in `extra_body`                  |
+| `litellm_session_id`            | top-level field                         |
+| `session_id`                    | top-level field                         |
+| `prompt_cache_key`              | top-level field                         |
+| `metadata.session_id`           | nested in top-level `metadata`          |
+| session headers                 | see [Header Fallback](#header-fallback) |
+| `safety_identifier`             | top-level field                         |
+| `user`                          | top-level field (OpenAI standard)       |
 
 `user` and `safety_identifier` identify a client, not a conversation, so they follow explicit session fields and headers: binding
 to them pins every conversation of a client to one credential instead of balancing each one.
 `prompt_cache_key` is OpenAI's cache routing key: requests that share it are meant to share a prompt
 cache, so they share a credential too. Codex sends the conversation id there.
 
-`metadata.session_id` is accepted as a non-empty JSON string only when every source above is empty.
-This preserves existing routing when clients also send session fields, headers, `safety_identifier`, or `user`.
+`metadata.session_id` is accepted as a non-empty JSON string when no higher-priority body field is set.
+It takes precedence over session headers, `safety_identifier`, and `user`.
 
 When the client has no conversation id, `user` still works as a session key:
 
