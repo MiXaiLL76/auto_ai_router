@@ -151,3 +151,90 @@ func TestProxyRequest_StructurallyExcludedCredentialRateLimited_Stays502(t *test
 	assert.Equal(t, http.StatusBadGateway, rec.Code,
 		"a structurally excluded credential's rate limit must not mask a transport failure: body: %s", rec.Body.String())
 }
+
+// TestProxyRequest_ProviderRateLimitedThenTransportFailure_Returns429 reproduces
+// the production incident behind this fix: a model served by several Azure
+// credentials, where the upstream accounts are over their own token rate
+// limit.
+//
+// The chain, as it happened in production (gpt-5-mini, seven credentials):
+//
+//  1. Three credentials answer 429 -- the upstream account is over its token
+//     rate limit, which the router retries on the next credential.
+//  2. The remaining four fail on the transport (the egress answered CONNECT
+//     with 503), so no response is left to relay.
+//
+// The outcome was a 502 "All provider attempts failed", which blames the
+// provider for being broken. It was really a rate limit: the model answers
+// normally once the upstream's window rolls over, and the client needs a
+// Retry-After to pace its retries -- without one it hammers the pool.
+func TestProxyRequest_ProviderRateLimitedThenTransportFailure_Returns429(t *testing.T) {
+	var hits atomic.Int32
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hits.Add(1) <= 3 {
+			// The upstream account is over its own rate limit.
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"code":"rate_limit_exceeded","message":"exceeded token rate limit"}}`))
+			return
+		}
+		// Transport-level failure: no response at all.
+		hijackAndClose(w)
+	}))
+	defer upstream.Close()
+
+	// Enough credentials for the cascade to run through the rate-limited ones
+	// and reach the transport failures.
+	creds := make([]config.CredentialConfig, 0, 7)
+	for i := range 7 {
+		creds = append(creds, config.CredentialConfig{
+			Name: "azure-cred-" + string(rune('a'+i)), Type: config.ProviderTypeOpenAI, BaseURL: upstream.URL,
+			APIKey: "k", RPM: 100, TPM: 100000,
+		})
+	}
+	prx := NewTestProxyBuilder().WithCredentials(creds...).WithMaxProviderRetries(6).Build()
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	prx.ProxyRequest(rec, req)
+
+	assert.Equal(t, http.StatusTooManyRequests, rec.Code,
+		"a model whose upstream accounts are rate limited must answer 429, not 502: body: %s", rec.Body.String())
+	assert.NotEmpty(t, rec.Header().Get("Retry-After"),
+		"a 429 must tell the client when to come back")
+	assert.NotContains(t, rec.Body.String(), "All provider attempts failed")
+}
+
+// TestProxyRequest_TransportFailureOnly_Stays502 is the counterweight to the
+// 429 fix: a request whose credentials all failed on the transport, with no
+// provider 429 anywhere, is a genuine outage and must keep its 502. Without
+// this the fix would report every exhausted cascade as a rate limit.
+func TestProxyRequest_TransportFailureOnly_Stays502(t *testing.T) {
+	var hits atomic.Int32
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		hijackAndClose(w)
+	}))
+	defer upstream.Close()
+
+	creds := make([]config.CredentialConfig, 0, 3)
+	for i := range 3 {
+		creds = append(creds, config.CredentialConfig{
+			Name: "azure-cred-" + string(rune('a'+i)), Type: config.ProviderTypeOpenAI, BaseURL: upstream.URL,
+			APIKey: "k", RPM: 100, TPM: 100000,
+		})
+	}
+	prx := NewTestProxyBuilder().WithCredentials(creds...).WithMaxProviderRetries(3).Build()
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	prx.ProxyRequest(rec, req)
+
+	assert.Equal(t, http.StatusBadGateway, rec.Code,
+		"a pure transport failure is an outage and must stay a 502: body: %s", rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), "Rate limit exceeded",
+		"a pure transport failure must not be reported as a rate limit")
+}

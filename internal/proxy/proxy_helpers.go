@@ -281,6 +281,15 @@ const (
 	// the model answers normally once the window rolls over, so reporting it
 	// as an outage misstates the cause and leaves the client retrying blindly.
 	ErrorOriginAllCredentialsRateLimited ErrorOrigin = "all_credentials_rate_limited"
+	// ErrorOriginProviderRateLimited: an attempt got a 429 from the provider
+	// (the upstream account is over its own rate limit) and a later attempt
+	// failed on the transport, so no response was left to relay. Distinct from
+	// ErrorOriginAllCredentialsRateLimited, which is the router's own limiter
+	// refusing the candidates: here the upstream itself reported the limit.
+	// Carries 429 with a Retry-After, not 502 — the model answers normally
+	// once the window rolls over, so reporting it as an outage misstates the
+	// cause and leaves the client retrying blindly.
+	ErrorOriginProviderRateLimited ErrorOrigin = "provider_rate_limited"
 	// ErrorOriginClientCanceled: the client disconnected (closed the
 	// connection, or its own request timeout fired) before any credential
 	// attempt produced a response — see isClientContextCanceled. Distinct
