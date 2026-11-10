@@ -481,7 +481,18 @@ func (p *Proxy) handleSimulatedNonStream(
 				// credential (transport failure before any body) -- nothing
 				// to reassemble, try the next one up to the same bound.
 				markStreamFailure(logCtx, sendErr)
+				// A transport failure on THIS attempt does not erase what an
+				// earlier attempt said: a 4xx the provider already returned
+				// describes the request itself, and it is the truth about why
+				// the request could not be served. Keeping it means the client
+				// gets that status instead of a generic 502 that blames the
+				// provider for being broken. A 5xx is NOT kept -- it is a
+				// provider-side failure, and a later attempt may still succeed.
+				keptStatus, keptBody := result.httpStatus, result.httpBody
 				result = simulatedNonStreamAttemptResult{streamErr: sendErr, transportFailure: true, providerLabel: providerLabel}
+				if keptStatus >= http.StatusBadRequest && keptStatus < http.StatusInternalServerError {
+					result.httpStatus, result.httpBody = keptStatus, keptBody
+				}
 				continue
 			}
 			// A retried credential can answer with an HTTP error status (429,
@@ -1190,7 +1201,11 @@ func (p *Proxy) handleSimulatedNativeNonStream(
 				// sendToCredential couldn't even get a response from this
 				// credential -- nothing to reassemble, try the next one.
 				markStreamFailure(logCtx, sendErr)
+				keptStatus, keptBody := result.httpStatus, result.httpBody
 				result = simulatedNativeNonStreamAttemptResult{streamErr: sendErr, transportFailure: true}
+				if keptStatus >= http.StatusBadRequest && keptStatus < http.StatusInternalServerError {
+					result.httpStatus, result.httpBody = keptStatus, keptBody
+				}
 				continue
 			}
 			if sendOutcome.resp != nil && sendOutcome.resp.StatusCode >= http.StatusBadRequest {
@@ -1736,7 +1751,11 @@ func (p *Proxy) handleSimulatedPassthroughNonStream(
 				// sendToCredential couldn't even get a response from this
 				// credential -- nothing to reassemble, try the next one.
 				markStreamFailure(logCtx, sendErr)
+				keptStatus, keptBody := result.httpStatus, result.httpBody
 				result = simulatedPassthroughNonStreamAttemptResult{streamErr: sendErr, transportFailure: true}
+				if keptStatus >= http.StatusBadRequest && keptStatus < http.StatusInternalServerError {
+					result.httpStatus, result.httpBody = keptStatus, keptBody
+				}
 				continue
 			}
 			if sendOutcome.resp != nil && sendOutcome.resp.StatusCode >= http.StatusBadRequest {
