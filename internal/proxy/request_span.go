@@ -41,6 +41,7 @@ const (
 	markRequestPrepared = "request_prepared"    // the body converted for the credential's provider
 	markAdmitted        = "admitted"            // the budget and the rate limits checked
 	markFirstTokenEvent = "first_token"
+	markFailedAttempt   = "attempt_failed" // a 2xx stream ended in an error
 )
 
 // mark names a moment of the request on its span.
@@ -51,6 +52,27 @@ func (logCtx *RequestLogContext) mark(name string) {
 	if span := trace.SpanFromContext(logCtx.Context()); span.IsRecording() {
 		span.AddEvent(name)
 	}
+}
+
+// markAttemptFailed names on the request's span what ended an attempt whose
+// 2xx stream had begun: the attempt's own span closed with the stream.
+func (logCtx *RequestLogContext) markAttemptFailed(credential string, err error) {
+	if logCtx == nil || err == nil {
+		return
+	}
+	span := trace.SpanFromContext(logCtx.Context())
+	if !span.IsRecording() {
+		return
+	}
+	said := logCtx.ErrorBodyRaw // the provider's error event, when it sent one
+	if said == "" {
+		said = err.Error()
+	}
+	attrs := append([]attribute.KeyValue{
+		attribute.String("aar.credential", credential),
+		attribute.Int("aar.attempt.number", httputil.AttemptsFrom(logCtx.Context()).Count()),
+	}, httputil.ProviderError([]byte(said))...)
+	span.AddEvent(markFailedAttempt, trace.WithAttributes(attrs...))
 }
 
 // markFirstToken stamps the first token's arrival and marks it on the span.

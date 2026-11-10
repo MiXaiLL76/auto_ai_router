@@ -113,6 +113,8 @@ The server span also has the moments of the request as span events, in the order
 
 After `admitted` the request is built and sent: the first client span begins. A small request passes the first five within a millisecond or two; in a large one they tell the client's upload from the router's own work. A request refused on the way has the events it got to.
 
+An attempt that answered 2xx and then failed in its stream, which the router reads itself for a non-streaming client (`force_stream_for_ttft`), leaves an `attempt_failed` event: its client span ended with the stream, before the failure was known. The event has `aar.credential`, `aar.attempt.number` and what ended the attempt as `aar.error.message`, `aar.error.type` and `aar.error.code`: the provider's error event in the stream, else the router's own error (a broken or an empty stream).
+
 A request the router makes inside another has a span of its own beneath the outer one's, named like a server span and carrying these attributes, with its upstream requests beneath it: the describe call of the vision fallback, and each turn of a WebSocket session, whose server span lasts as long as the connection.
 
 Each client span is one upstream request, and says which attempt of the client's request it is, how it left and what the provider answered:
@@ -122,7 +124,7 @@ Each client span is one upstream request, and says which attempt of the client's
 | `aar.credential`          | `openai_eu`           | Credential the request was sent to                                                                                                                                    |
 | `aar.attempt.number`      | `2`                   | Which attempt of the client's request this is, from 1                                                                                                                 |
 | `aar.attempt.kind`        | `retry`               | `first`, `retry` (the next credential after one failed) or `fallback` (a fallback credential)                                                                         |
-| `aar.attempt.reason`      | `rate_limit`          | Why the attempt before it failed: `rate_limit`, `server_error`, `auth_error`, `network_error` or `payment_error`. Absent on the first                                 |
+| `aar.attempt.reason`      | `rate_limit`          | Why the attempt before it failed: `rate_limit`, `server_error`, `auth_error`, `network_error`, `payment_error` or `empty_stream`. Absent on the first                 |
 | `aar.connection.reused`   | `true`                | Whether the request was sent on a pooled connection. Absent when it never got one                                                                                     |
 | `aar.exit`                | `de-ber-01`           | Exit the connection leaves through: the name the farthest proxy gave itself in the `Via` of its reply to `CONNECT`. Absent without a proxy, or when it names nothing  |
 | `aar.exit_rtt_ms`         | `52`                  | Round trip to that exit when the connection was opened, in milliseconds: the `CONNECT` written to its reply, less `aar.exit_connect_ms`                               |

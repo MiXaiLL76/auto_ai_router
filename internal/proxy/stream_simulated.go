@@ -313,6 +313,10 @@ func (p *Proxy) attemptSimulatedNonStream(
 		}
 	}
 
+	if !clientAborted {
+		logCtx.markAttemptFailed(cred.Name, streamErr)
+	}
+
 	return simulatedNonStreamAttemptResult{
 		finalChatBody:     reassembledBody,
 		conv:              conv,
@@ -390,7 +394,7 @@ func (p *Proxy) handleSimulatedNonStream(
 		// successful response as a failure. CompletionStartTime is reset for
 		// the same reason: content read from a dead attempt never reached the
 		// client, so it must not be credited as this request's TTFT.
-		resetSimulatedAttemptState(logCtx)
+		lastOutcome := resetSimulatedAttemptState(logCtx)
 
 		if attempt > 0 {
 			nextCred, nextReq, ready, rateLimited := p.nextRetryCredential(
@@ -402,6 +406,9 @@ func (p *Proxy) handleSimulatedNonStream(
 				// Retry-After instead of a 502 that blames the provider.
 				if rateLimited {
 					rateLimitExhausted = true
+				} else {
+					// Nothing follows the last attempt: its outcome is the request's.
+					logCtx.StreamOutcome = lastOutcome
 				}
 				break
 			}
@@ -435,12 +442,13 @@ func (p *Proxy) handleSimulatedNonStream(
 			prepared.completionsPath = nextReq.completionsPath
 			prepared.messagesMetadata = nextReq.messagesMetadata
 			logCtx.RealModelID = realModelID
-			httputil.AttemptsFrom(r.Context()).Next(httputil.AttemptRetry, string(RetryReasonNetErr))
+			retryReason := simulatedRetryReason(result.httpStatus, result.emptyStream)
+			httputil.AttemptsFrom(r.Context()).Next(httputil.AttemptRetry, string(retryReason))
 
 			p.logger.InfoContext(r.Context(), "Retrying simulated non-stream with next credential",
 				"credential", cred.Name, "model", modelID,
 				"attempt", attempt+1, "max_attempts", p.maxProviderRetries+1,
-				"retry_reason", RetryReasonNetErr, "prior_error", result.streamErr)
+				"retry_reason", retryReason, "prior_error", result.streamErr)
 
 			time.Sleep(time.Duration(rand.IntN(50)) * time.Millisecond)
 
@@ -1044,6 +1052,10 @@ func (p *Proxy) attemptSimulatedNativeNonStream(
 		markStreamFailure(logCtx, streamErr)
 	}
 
+	if !clientAborted {
+		logCtx.markAttemptFailed(cred.Name, streamErr)
+	}
+
 	return simulatedNativeNonStreamAttemptResult{
 		captured:  captured,
 		logTokens: logTokens,
@@ -1101,7 +1113,7 @@ func (p *Proxy) handleSimulatedNativeNonStream(
 	var result simulatedNativeNonStreamAttemptResult
 
 	for attempt := 0; attempt <= p.maxProviderRetries; attempt++ {
-		resetSimulatedAttemptState(logCtx)
+		lastOutcome := resetSimulatedAttemptState(logCtx)
 
 		if attempt > 0 {
 			nextCred, nextReq, ready, rateLimited := p.nextRetryCredential(
@@ -1113,6 +1125,9 @@ func (p *Proxy) handleSimulatedNativeNonStream(
 				// Retry-After instead of a 502 that blames the provider.
 				if rateLimited {
 					rateLimitExhausted = true
+				} else {
+					// Nothing follows the last attempt: its outcome is the request's.
+					logCtx.StreamOutcome = lastOutcome
 				}
 				break
 			}
@@ -1146,12 +1161,13 @@ func (p *Proxy) handleSimulatedNativeNonStream(
 			prepared.completionsPath = nextReq.completionsPath
 			prepared.messagesMetadata = nextReq.messagesMetadata
 			logCtx.RealModelID = realModelID
-			httputil.AttemptsFrom(r.Context()).Next(httputil.AttemptRetry, string(RetryReasonNetErr))
+			retryReason := simulatedRetryReason(result.httpStatus, false)
+			httputil.AttemptsFrom(r.Context()).Next(httputil.AttemptRetry, string(retryReason))
 
 			p.logger.InfoContext(r.Context(), "Retrying simulated native non-stream with next credential",
 				"credential", cred.Name, "model", modelID,
 				"attempt", attempt+1, "max_attempts", p.maxProviderRetries+1,
-				"retry_reason", RetryReasonNetErr, "prior_error", result.streamErr)
+				"retry_reason", retryReason, "prior_error", result.streamErr)
 
 			time.Sleep(time.Duration(rand.IntN(50)) * time.Millisecond)
 
@@ -1586,6 +1602,10 @@ func (p *Proxy) attemptSimulatedPassthroughNonStream(
 		markStreamFailure(logCtx, streamErr)
 	}
 
+	if !clientAborted {
+		logCtx.markAttemptFailed(cred.Name, streamErr)
+	}
+
 	return simulatedPassthroughNonStreamAttemptResult{
 		finalBody:           finalBody,
 		completedEvent:      completedEvent,
@@ -1639,7 +1659,7 @@ func (p *Proxy) handleSimulatedPassthroughNonStream(
 	var result simulatedPassthroughNonStreamAttemptResult
 
 	for attempt := 0; attempt <= p.maxProviderRetries; attempt++ {
-		resetSimulatedAttemptState(logCtx)
+		lastOutcome := resetSimulatedAttemptState(logCtx)
 
 		if attempt > 0 {
 			nextCred, nextReq, ready, rateLimited := p.nextRetryCredential(
@@ -1651,6 +1671,9 @@ func (p *Proxy) handleSimulatedPassthroughNonStream(
 				// Retry-After instead of a 502 that blames the provider.
 				if rateLimited {
 					rateLimitExhausted = true
+				} else {
+					// Nothing follows the last attempt: its outcome is the request's.
+					logCtx.StreamOutcome = lastOutcome
 				}
 				break
 			}
@@ -1684,12 +1707,13 @@ func (p *Proxy) handleSimulatedPassthroughNonStream(
 			prepared.completionsPath = nextReq.completionsPath
 			prepared.messagesMetadata = nextReq.messagesMetadata
 			logCtx.RealModelID = realModelID
-			httputil.AttemptsFrom(r.Context()).Next(httputil.AttemptRetry, string(RetryReasonNetErr))
+			retryReason := simulatedRetryReason(result.httpStatus, false)
+			httputil.AttemptsFrom(r.Context()).Next(httputil.AttemptRetry, string(retryReason))
 
 			p.logger.InfoContext(r.Context(), "Retrying simulated passthrough non-stream with next credential",
 				"credential", cred.Name, "model", modelID,
 				"attempt", attempt+1, "max_attempts", p.maxProviderRetries+1,
-				"retry_reason", RetryReasonNetErr, "prior_error", result.streamErr)
+				"retry_reason", retryReason, "prior_error", result.streamErr)
 
 			time.Sleep(time.Duration(rand.IntN(50)) * time.Millisecond)
 
@@ -2027,16 +2051,30 @@ func simulatedFailureStatus(err error) int {
 	return http.StatusBadGateway
 }
 
+// simulatedRetryReason is why a simulated non-stream attempt is retried: its
+// answer's or its stream error event's status, an empty stream, else a break.
+func simulatedRetryReason(status int, emptyStream bool) RetryReason {
+	switch {
+	case status > 0:
+		return retryReasonForStatus(status)
+	case emptyStream:
+		return RetryReasonEmpty
+	}
+	return RetryReasonNetErr
+}
+
 // resetSimulatedAttemptState clears the outcome fields a failed attempt may
 // have set on logCtx via markStreamFailure or markProxyProviderStreamError
 // (Status, StreamOutcome, ErrorMsg, ErrorBodyRaw, ClientResponseBody,
 // ErrorOrigin, HTTPStatus) plus CompletionStartTime, so a dead attempt on a
 // credential that handleSimulatedNonStream's retry loop moves past never
-// leaks into the outcome of a later attempt on the same logCtx.
-func resetSimulatedAttemptState(logCtx *RequestLogContext) {
+// leaks into the outcome of a later attempt on the same logCtx. It returns
+// the stream outcome it cleared.
+func resetSimulatedAttemptState(logCtx *RequestLogContext) (outcome string) {
 	if logCtx == nil {
-		return
+		return ""
 	}
+	outcome = logCtx.StreamOutcome
 	logCtx.Status = ""
 	logCtx.StreamOutcome = ""
 	logCtx.ErrorMsg = ""
@@ -2051,6 +2089,7 @@ func resetSimulatedAttemptState(logCtx *RequestLogContext) {
 	// back to zero by MergeNonZero, so it would otherwise survive into the
 	// billed usage of a response that never had it.
 	logCtx.TokenUsage = nil
+	return outcome
 }
 
 // writeSimulatedError writes a masked JSON error for a failed simulated
