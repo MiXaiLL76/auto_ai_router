@@ -212,6 +212,42 @@ func TestLoopGateObserver_KeepaliveWhileRestartIsOnItsWay(t *testing.T) {
 	assert.Contains(t, out.String(), `w29 "`, "the new attempt follows the keepalives")
 }
 
+// TestLoopGateObserver_KeepaliveAfterASlowClientRead pins that a client which
+// comes back for the next bytes after the restart has already finished still
+// gets the heartbeat it was promised.
+//
+// The keepalive interval counted from the moment awaitRestart was entered, so
+// a restart that had finished by then skipped the heartbeat entirely -- even
+// though the client had been waiting out the interval since the loop was
+// detected. That is what made
+// TestLoopGate_RestartKeepaliveReachesTheClient flaky: on a loaded CI runner
+// the gap between the loop being detected and the client reading again is
+// long enough for the restart to finish first, and the heartbeat went missing.
+func TestLoopGateObserver_KeepaliveAfterASlowClientRead(t *testing.T) {
+	saved := loopGateKeepaliveInterval
+	loopGateKeepaliveInterval = 10 * time.Millisecond
+	t.Cleanup(func() { loopGateKeepaliveInterval = saved })
+
+	o := newTestLoopGateObserver(t, config.LoopGateEnforce)
+	var out strings.Builder
+	o.keepalive = &out
+	release := make(chan struct{})
+	o.respawn = func(int, float64) (io.ReadCloser, error) {
+		<-release
+		return io.NopCloser(strings.NewReader("data: [DONE]\n\n")), nil
+	}
+	// The restart is sent now...
+	o.startRestart(&loopGateCut{channel: "reasoning"})
+	// ...the client reads much later, and the restart finished in between.
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	time.Sleep(10 * time.Millisecond)
+
+	require.NoError(t, o.awaitRestart())
+	assert.Contains(t, out.String(), string(loopGateKeepalive),
+		"a client that waited out the interval gets the promised heartbeat")
+}
+
 func TestLoopGateObserver_KeepaliveWhenRestartAndTimerAreBothReady(t *testing.T) {
 	saved := loopGateKeepaliveInterval
 	loopGateKeepaliveInterval = time.Nanosecond
