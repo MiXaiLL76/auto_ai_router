@@ -181,8 +181,8 @@ lint:
 vuln:
 	@echo "Running govulncheck..."
 	# Analyze the same patched standard library as CI and release builds,
-	# including the crypto/x509 mitigation in Go 1.27.3.
-	export PATH=/usr/local/go/bin:$$PATH && GOTOOLCHAIN=go1.27.3 $(GO) run golang.org/x/vuln/cmd/govulncheck@latest ./...
+	# including the net/http fix (GO-2026-6859) in Go 1.27.4.
+	export PATH=/usr/local/go/bin:$$PATH && GOTOOLCHAIN=go1.27.4 $(GO) run golang.org/x/vuln/cmd/govulncheck@latest ./...
 	@echo "Vuln check complete"
 
 ## install-lint: Install pinned golangci-lint
