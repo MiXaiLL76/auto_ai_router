@@ -870,6 +870,17 @@ func (p *Proxy) finishSimulatedNonStream(
 	// Correlate billing/analytics rows with the provider's own completion id,
 	// same as the plain non-stream and streaming paths.
 	logCtx.captureClientResponseID(finalBody)
+	// The reassembled body the client is about to receive, captured for the
+	// router-response write-path. This is the force_stream_for_ttft path, so
+	// it is where most non-streaming clients' answers are produced -- the
+	// plain non-stream path below only serves the requests that did not go
+	// through the forced stream.
+	//
+	// The body is the REASSEMBLED (non-stream) shape, not the SSE the client
+	// received: the client asked for JSON and got JSON, so this is what it
+	// saw. isStreamingResp stays false here, and the flag on the event
+	// records that the client had asked for a stream.
+	p.captureRouterResponse(logCtx, finalBody, false)
 	audioInputAlreadyExcludesCachedAudio := !tokenUsageOptions.AudioInputIncludesCachedAudio
 
 	// Stream-domain logging: usage extraction from the stream, spend log, TTFT

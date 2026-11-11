@@ -135,6 +135,7 @@ func main() {
 	litellmDBManager := initializeLiteLLMDB(cfg, log)
 	kafkaLogManager := initializeKafkaLog(cfg, log, litellmDBManager)
 	rawBodyLogManager := initializeRawBodyLog(cfg, log)
+	routerResponseLogManager := initializeRouterResponseLog(cfg, log)
 
 	// Outcome events for the health worker: kafka-first transport (the
 	// service no longer accepts HTTP reports). Broker/SASL/TLS come from
@@ -315,6 +316,8 @@ func main() {
 		RawBodyStoreRawBody:          cfg.Kafka.RawBodies.StoreRawBody,
 		RawBodyStoreOnlyErrors:       cfg.Kafka.RawBodies.StoreOnlyErrors,
 		RawBodyRedactSensitiveFields: cfg.Kafka.RawBodies.RedactSensitiveFields,
+		RouterResponseLog:            routerResponseLogManager,
+		RouterResponseRedact:         cfg.Kafka.RouterResponses.RedactSensitiveFields,
 		HealthChecker:                healthChecker,
 		Events:                       accountEvents,
 		BanDecisionsExternal:         banDecisionsExternal,
@@ -378,6 +381,9 @@ func main() {
 	}
 	if rawBodyLogManager.IsEnabled() {
 		startRawBodyLogMetricsUpdater(bgCtx, cfg, log, rawBodyLogManager, metrics, &wg)
+	}
+	if routerResponseLogManager.IsEnabled() {
+		startRouterResponseLogMetricsUpdater(bgCtx, cfg, log, routerResponseLogManager, metrics, &wg)
 	}
 
 	if respStore != nil {
@@ -583,6 +589,7 @@ func main() {
 	// open through Kafka's final flush.
 	shutdownSink(log, "Kafka spend-log publisher", kafkaLogManager)
 	shutdownSink(log, "Kafka raw-body publisher", rawBodyLogManager)
+	shutdownSink(log, "Kafka router-response publisher", routerResponseLogManager)
 	shutdownSink(log, "LiteLLM DB", litellmDBManager)
 
 	if err := router.CloseErrorLogFiles(); err != nil {
@@ -1301,6 +1308,53 @@ func initializeRawBodyLog(cfg *config.Config, log *slog.Logger) kafkalog.RawBody
 	return manager
 }
 
+// initializeRouterResponseLog sets up the separate, independently-toggleable
+// Kafka write-path that publishes what the router ANSWERED to the client
+// (internal/kafkalog.RouterResponseManager).
+//
+// Like the raw-body path it has no Postgres counterpart, so a broker
+// unavailable at startup just keeps IsHealthy() false -- it never blocks
+// startup and never degrades into anything worse than "not publishing this
+// optional stream".
+func initializeRouterResponseLog(cfg *config.Config, log *slog.Logger) kafkalog.RouterResponseManager {
+	if !cfg.Kafka.Enabled || !cfg.Kafka.RouterResponses.Enabled {
+		log.Info("Kafka router-response publishing disabled - using NoopRouterResponseManager")
+		return kafkalog.NewNoopRouterResponseManager()
+	}
+
+	log.Info("Initializing Kafka router-response publisher...", "brokers", cfg.Kafka.Brokers, "topic", cfg.Kafka.RouterResponses.Topic)
+
+	// Same brokers/TLS/SASL/queue tuning as the spend-log path -- same
+	// cluster, a different topic with its own retention. Only Topic differs.
+	responseCfg := &kafkalog.Config{
+		Brokers:          cfg.Kafka.Brokers,
+		Topic:            cfg.Kafka.RouterResponses.Topic,
+		ClientID:         cfg.Kafka.ClientID,
+		LogQueueSize:     cfg.Kafka.LogQueueSize,
+		LogBatchSize:     cfg.Kafka.LogBatchSize,
+		LogFlushInterval: cfg.Kafka.LogFlushInterval,
+		LogWorkers:       cfg.Kafka.LogWorkers,
+		TLSEnabled:       cfg.Kafka.TLSEnabled,
+		SASLMechanism:    cfg.Kafka.SASLMechanism,
+		SASLUsername:     cfg.Kafka.SASLUsername,
+		SASLPassword:     cfg.Kafka.SASLPassword,
+		TLSCACert:        cfg.Kafka.TLSCACert,
+		Logger:           log,
+		// No FallbackNotifier: there's no Postgres row for this event to flag.
+	}
+
+	manager, err := kafkalog.NewRouterResponse(responseCfg)
+	if err != nil {
+		log.Warn("Failed to initialize Kafka router-response publisher, degrading to NoopRouterResponseManager",
+			"error", err,
+			"impact", "Router response bodies will not be published; spend logging is unaffected",
+		)
+		return kafkalog.NewNoopRouterResponseManager()
+	}
+	log.Info("Kafka router-response publisher initialized successfully")
+	return manager
+}
+
 // loadAndUpdateModelPrices loads model prices and updates the registry
 func loadAndUpdateModelPrices(
 	link string,
@@ -1436,6 +1490,40 @@ func startKafkaMetricsUpdater(
 	}()
 
 	log.Info("Kafka spend logger metrics updater started (updates every 10 seconds)")
+}
+
+// startRouterResponseLogMetricsUpdater mirrors startRawBodyLogMetricsUpdater
+// for the router-response write-path.
+func startRouterResponseLogMetricsUpdater(
+	bgCtx context.Context,
+	cfg *config.Config,
+	log *slog.Logger,
+	routerResponseLogManager kafkalog.RouterResponseManager,
+	metrics *monitoring.Metrics,
+	wg *sync.WaitGroup,
+) {
+	if !cfg.MetricsCollectionEnabled() {
+		return
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-bgCtx.Done():
+				return
+			case <-ticker.C:
+				stats := routerResponseLogManager.Stats()
+				metrics.UpdateKafkaRouterResponseLoggerStats(stats.Queued, stats.Produced, stats.Dropped, stats.Errors, stats.DLQSize, stats.Healthy)
+			}
+		}
+	}()
+
+	log.Info("Kafka router-response logger metrics updater started (updates every 10 seconds)")
 }
 
 // startRawBodyLogMetricsUpdater mirrors startKafkaMetricsUpdater for the

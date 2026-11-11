@@ -384,6 +384,50 @@ var (
 		},
 	)
 
+	// Router-response logger stats mirror the raw-body gauges above for the
+	// separate, independently-toggleable router-response write-path.
+	KafkaRouterResponseLoggerQueuedTotal = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_kafka_router_response_logger_queued_total",
+			Help: "Cumulative number of router-response events queued for Kafka publishing",
+		},
+	)
+
+	KafkaRouterResponseLoggerProducedTotal = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_kafka_router_response_logger_produced_total",
+			Help: "Cumulative number of router-response events successfully produced to Kafka",
+		},
+	)
+
+	KafkaRouterResponseLoggerDroppedTotal = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_kafka_router_response_logger_dropped_total",
+			Help: "Cumulative number of router-response events dropped because the producer queue was full",
+		},
+	)
+
+	KafkaRouterResponseLoggerErrorsTotal = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_kafka_router_response_logger_errors_total",
+			Help: "Cumulative number of router-response events that failed to produce after all retries",
+		},
+	)
+
+	KafkaRouterResponseLoggerDLQSize = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_kafka_router_response_logger_dlq_size",
+			Help: "Current number of batches held in the Kafka router-response logger dead letter queue",
+		},
+	)
+
+	KafkaRouterResponseLoggerHealthy = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_kafka_router_response_logger_healthy",
+			Help: "Kafka broker connectivity for router-response publishing (1 = healthy, 0 = unhealthy)",
+		},
+	)
+
 	SpendQueueDepth = promauto.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "auto_ai_router_spend_queue_depth",
@@ -783,6 +827,24 @@ func (m *Metrics) UpdateKafkaSpendLoggerStats(queued, produced, dropped, errors 
 		h = 1.0
 	}
 	KafkaSpendLoggerHealthy.Set(h)
+}
+
+// UpdateKafkaRouterResponseLoggerStats mirrors UpdateKafkaRawBodyLoggerStats
+// for the separate router-response write-path.
+func (m *Metrics) UpdateKafkaRouterResponseLoggerStats(queued, produced, dropped, errors uint64, dlqSize int, healthy bool) {
+	if !m.isEnabled() {
+		return
+	}
+	KafkaRouterResponseLoggerQueuedTotal.Set(float64(queued))
+	KafkaRouterResponseLoggerProducedTotal.Set(float64(produced))
+	KafkaRouterResponseLoggerDroppedTotal.Set(float64(dropped))
+	KafkaRouterResponseLoggerErrorsTotal.Set(float64(errors))
+	KafkaRouterResponseLoggerDLQSize.Set(float64(dlqSize))
+	h := 0.0
+	if healthy {
+		h = 1.0
+	}
+	KafkaRouterResponseLoggerHealthy.Set(h)
 }
 
 // UpdateKafkaRawBodyLoggerStats mirrors UpdateKafkaSpendLoggerStats for the

@@ -33,6 +33,13 @@ kafka:
     store_only_errors: os.environ/KAFKA_RAW_BODIES_STORE_ONLY_ERRORS # default: true
     redact_sensitive_fields: os.environ/KAFKA_RAW_BODIES_REDACT_SENSITIVE_FIELDS # default: true
 
+  # Separate, independently-toggleable write-path: what the router
+  # ANSWERED to the client. See "Router responses" below.
+  router_responses:
+    enabled: os.environ/KAFKA_ROUTER_RESPONSES_ENABLED   # default: false
+    topic: "router-responses"
+    redact_sensitive_fields: os.environ/KAFKA_ROUTER_RESPONSES_REDACT_SENSITIVE_FIELDS # default: true
+
 litellm_db:
   enabled: true
   database_url: "os.environ/LITELLM_DATABASE_URL"
@@ -134,9 +141,11 @@ docker compose -f docker-compose.kafka.yml up -d
 
 This exposes Kafka on `localhost:9092` and ClickHouse on `localhost:8123` (HTTP) / `localhost:9000` (native). Point `KAFKA_BROKERS=localhost:9092` (from the host) or `kafka:9092`/`kafka:29092` (from another container on the same compose network) at it to test the pipeline end to end.
 
-## Out of scope: request/response bodies for successful requests
+## Out of scope: request/response bodies in the spend log
 
-Capturing and storing request/response bodies for *every* request (success included) is still out of scope — it would make `air.spend_logs` both heavier and much longer-retained than it needs to be, and is a distinct problem from "help me debug this one failure" (see "Raw bodies" below, which covers that narrower case). The event fields `body_captured`, `body_request_bytes`, and `body_response_bytes` remain reserved placeholders: `body_captured: false`, byte counts `0`, no delivery/storage/PII-handling logic behind them.
+Request/response bodies do NOT go into the spend event (`air.spend_logs`). It is both heavier and much longer-retained than they need to be, and "what did every request cost" is a different question from "what did this request get" (see "Raw bodies" below for the failure case and "Router responses" below for the success case — each on its own topic, with its own retention).
+
+The event fields `body_captured`, `body_request_bytes`, and `body_response_bytes` remain reserved placeholders: `body_captured: false`, byte counts `0`, no delivery/storage/PII-handling logic behind them.
 
 ## Raw bodies (separate write-path)
 
@@ -187,6 +196,62 @@ FROM air.errors AS e
 LEFT JOIN air.raw_bodies AS b
     ON e.request_id = b.request_id AND e.server_router_id = b.server_router_id;
 ```
+
+## Router responses (separate write-path)
+
+What the router **answered** to the client is published on its own topic (`kafka.router_responses`, default topic `router-responses`, staged in ClickHouse as `air.router_responses`/`air.router_responses_read`) as a flat `kafkalog.RouterResponseEvent`.
+
+It is a separate path from both of the ones above, for two reasons. The **volume** is different — one message per request, not per failure — so its retention is sized on its own (7 days, against the spend log's months). And the **question** is different: the spend log says what a request cost, the raw bodies say why it failed, and this says what the client actually got, which is the first question a cost or a behaviour reconciliation asks.
+
+The body is the response **after** the router's own transformations — model alias resolution, the Responses/Chat shape conversion, the cost injection — so the row shows what the client received, not what the provider said. For a streamed request the captured body is the reassembled (non-stream) shape the router produced for it; `is_streaming` records that the client had asked for a stream, so nobody reads the row as a byte-exact transcript.
+
+| Field              | Type              | Description                                                          |
+| ------------------ | ----------------- | -------------------------------------------------------------------- |
+| `request_id`       | string            | The request's id — joins to the spend log and to the raw-bodies row  |
+| `server_router_id` | string            | Which router served it (a chained request has one row per hop)       |
+| `start_time`       | datetime          | When the request started                                             |
+| `end_time`         | datetime          | When it finished                                                     |
+| `http_status`      | number            | The status the client received                                       |
+| `status`           | string            | `success` or `failure` — the same canonical value the spend log uses |
+| `error_class`      | string, omitempty | The failure's class, for a failed request                            |
+| `error_origin`     | string, omitempty | Which code path produced the failure                                 |
+| `model`            | string, omitempty | The client-facing model name                                         |
+| `real_model`       | string, omitempty | The provider-side model name                                         |
+| `credential`       | string, omitempty | The credential that served it                                        |
+| `is_streaming`     | bool              | Whether the client asked for a stream                                |
+| `response_body`    | string, omitempty | The body the client received, masked (see below)                     |
+
+### Redaction
+
+`kafka.router_responses.redact_sensitive_fields` (default `true`) masks the model's **own text** while keeping the response's **structure**: the content fields become `[REDACTED]`, while the model, the usage, the ids, the finish reasons and the tool calls' shape survive.
+
+```json
+{
+  "choices": [{"finish_reason": "stop", "index": 0, "message": {"content": "[REDACTED]", "role": "assistant"}}],
+  "created": 1794422795,
+  "id": "chatcmpl-msg_0140m0Ta3fVULjc3iSmSEOiN",
+  "model": "anthropic/claude-opus-4.8",
+  "object": "chat.completion",
+  "usage": {"completion_tokens": 1, "prompt_tokens": 75410, "total_tokens": 75411}
+}
+```
+
+That is the point of the feature: with the text gone, the row still says which model answered, how many tokens it used and how it ended — which is what an error analysis or a cost reconciliation needs. The redaction covers the model's answer, its reasoning, a tool call's arguments and a refusal; it does not cover the request's own fields, which live in the raw-bodies stream.
+
+The redaction is *selective*, unlike the raw-bodies redaction, which replaces the whole body with a `[REDACTED body bytes=N]` placeholder. That placeholder is right for a provider's error text, whose only value is in its message, and wrong for a response: the whole point of capturing it is its shape, and a placeholder for the whole body leaves nothing to read. A body that is not valid JSON fails closed — it is published as a placeholder rather than as the original text, since an unparseable body might be a plain-text answer.
+
+Setting `redact_sensitive_fields: false` publishes the bodies verbatim. That is a deliberate, explicit escape hatch for a short-lived, access-controlled debugging session: it ships the model's output — the customer's data — off-box. It requires restricted readers and retention.
+
+### Scope
+
+`kafka.router_responses.enabled` (default `false`) turns the whole path on. It is independently toggleable so it can be turned on for a debugging window without touching the always-on spend-log path, and turned back off without affecting spend/billing at all.
+
+Two things it deliberately does NOT depend on:
+
+- **The spend log.** The response is published *before* the cost is resolved. The cost resolution fails closed when a model's price is missing (the spend row is dropped), and a router that cannot price a model must still be able to say what that model answered.
+- **The request being billable.** A failed request's body is captured too — the client got a body, and that body is what an operator needs to see.
+
+The proxy/chain-audit traffic is excluded, exactly as it is for the raw bodies.
 
 ## Implementation notes
 

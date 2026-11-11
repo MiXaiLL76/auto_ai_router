@@ -218,7 +218,14 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	litellmEnabled := p.postgresSpendTrackingEnabled()
 	kafkaEnabled := p.kafkaLog != nil && p.kafkaLog.IsEnabled()
 	rawBodyLogEnabled := p.rawBodyLog != nil && p.rawBodyLog.IsEnabled()
-	if !litellmEnabled && !kafkaEnabled {
+	// The router-response path is independent of the spend log: it answers
+	// "what did this key get", not "what did it cost", and an operator may
+	// want it on a router that publishes no spend log at all (a
+	// non-billing deployment, or one whose spend log is disabled). So it
+	// keeps the function alive on its own -- otherwise it would silently
+	// publish nothing whenever the spend path happens to be off.
+	routerResponseEnabled := p.routerResponsesEnabled
+	if !litellmEnabled && !kafkaEnabled && !routerResponseEnabled {
 		return nil
 	}
 	if logCtx == nil || logCtx.Credential == nil || logCtx.Request == nil {
@@ -302,6 +309,26 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	logCtx.finalizeImageUsage(status)
 	logCtx.applyWebSearchUsageDefaults(status)
 	logCtx.TokenUsage.Normalize()
+
+	// What the router ANSWERED, published to its own topic (see
+	// KafkaRouterResponsesConfig). Unlike the raw bodies above, this is not
+	// failures-only and not an error-debugging aid: it is the answer the
+	// client received, kept so an operator can reconcile what a key got
+	// against what it was billed for.
+	//
+	// It is published BEFORE the cost is resolved, deliberately. The cost
+	// resolution below fails closed when a model's price is missing (it
+	// returns an error and the spend row is dropped) -- and a router that
+	// cannot price a model must still be able to say what that model
+	// answered. Publishing after would make this stream depend on the
+	// billing configuration, which has nothing to do with it.
+	//
+	// The body itself was captured (and masked) at the point the response
+	// was produced -- see captureRouterResponse -- so nothing here has to
+	// parse it again.
+	if p.routerResponsesEnabled && !logCtx.IsProxyRequest && logCtx.RouterResponseBody != "" {
+		p.logRouterResponseToKafka(logCtx, status, utils.NowUTC())
+	}
 
 	logSpendCtx := logCtx.Context()
 	modelPrice := logCtx.ModelPrice
