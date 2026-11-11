@@ -290,6 +290,14 @@ const (
 	// once the window rolls over, so reporting it as an outage misstates the
 	// cause and leaves the client retrying blindly.
 	ErrorOriginProviderRateLimited ErrorOrigin = "provider_rate_limited"
+	// ErrorOriginProviderRequestRejected: an attempt got a 4xx from the
+	// provider that describes the REQUEST (a bad prompt, a content-policy
+	// refusal, an unknown model) and a later attempt failed on the transport,
+	// so no response was left to relay. The provider's status is relayed as
+	// it is, instead of a 502 that blames the provider for being broken:
+	// every credential would refuse the same request the same way, so
+	// telling the client to retry only sends it around the pool again.
+	ErrorOriginProviderRequestRejected ErrorOrigin = "provider_request_rejected"
 	// ErrorOriginClientCanceled: the client disconnected (closed the
 	// connection, or its own request timeout fired) before any credential
 	// attempt produced a response — see isClientContextCanceled. Distinct

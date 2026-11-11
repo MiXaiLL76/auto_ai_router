@@ -52,6 +52,23 @@ var ContentPolicyMarkers = []string{
 	"content management policy",
 	"policy violation",
 	"data_inspection_failed",
+	// Azure's content filter. It reports the refusal under a code of its own
+	// and a message that names no content at all -- "The model was unable to
+	// complete inference due to an internal error." -- so without these
+	// markers the refusal was classified as a generic error, stayed retryable
+	// across the whole credential pool, and reached the client as a 502.
+	//
+	// The wording is specific enough to stand on its own: a provider-side
+	// failure says "inference generation failed", not "unable to complete
+	// inference". Azure's own codes are listed too, for the shapes that
+	// carry no message at all.
+	//
+	// "invalid_prompt" is deliberately NOT here: Azure uses it for ordinary
+	// prompt problems too, so treating it as a refusal would turn every bad
+	// prompt into a content-policy one.
+	"unable to complete inference",
+	"responsibleaipolicyviolation",
+	"responsible ai policy violation",
 }
 
 // IsContentPolicySignal reports whether a provider signal describes a

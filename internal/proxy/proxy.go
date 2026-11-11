@@ -2452,6 +2452,22 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		// with a Retry-After instead of a 502 that blames the provider for
 		// being broken.
 		providerRateLimited bool
+		// providerRequestRejected: an attempt got a 4xx from the provider
+		// that describes the REQUEST rather than the credential -- a bad
+		// prompt, a content-policy refusal, an unknown model. It matters for
+		// the same reason providerRateLimited does: when a later attempt
+		// fails on the transport there is no response left to relay, and the
+		// provider's own 4xx is the truth about why the request could not be
+		// served. Answering 502 there blames the provider for being broken
+		// and tells the client to retry something that will fail identically
+		// on every credential.
+		//
+		// The status AND the body are remembered: the body is what lets the
+		// client-facing message be the classified one ("the prompt was blocked
+		// by the provider's content policy") instead of a bare status text. It
+		// is masked for the client like any other provider error.
+		providerRequestRejected     int
+		providerRequestRejectedBody []byte
 		// Replies of a fanned-out embeddings request kept across attempts, so
 		// a retry only re-sends the inputs that did not get one.
 		embedFanOutReplies embedContentFanOutReplies
@@ -2709,6 +2725,23 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		if resp.StatusCode == http.StatusTooManyRequests {
 			providerRateLimited = true
 		}
+		// The same for a status that describes the REQUEST (a bad prompt, a
+		// content-policy refusal, a model that does not exist): it stays the
+		// real reason the request could not be served when a later attempt
+		// fails on the transport. The LAST such status wins, because it is
+		// the one closest to the final attempt -- the same credential the
+		// client would have been told about had the cascade stopped there.
+		//
+		// Credential-scoped statuses (401/402/403) are NOT kept: they say
+		// something about the one credential that answered, and the next one
+		// may serve the same request fine -- relaying them after an
+		// unrelated transport failure would tell the client its own key was
+		// rejected. 429 is excluded too: providerRateLimited carries it, and
+		// it needs its own Retry-After.
+		if isRequestScopedStatus(resp.StatusCode) {
+			providerRequestRejected = resp.StatusCode
+			providerRequestRejectedBody = responseBody
+		}
 
 		p.recordProviderResponse(r.Context(), cred, modelID, realModelID, resp.StatusCode, resp.Header, responseBody)
 
@@ -2820,6 +2853,19 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			statusMessage = "Rate limit exceeded"
 			errorMsg = "All provider attempts were rate limited"
 			errorOrigin = ErrorOriginProviderRateLimited
+		case providerRequestRejected != 0:
+			// An earlier attempt got a 4xx from the provider and a later one
+			// failed on the transport, so there is nothing left to relay. The
+			// provider's own status is the truth about the request: it says
+			// what was wrong with the request itself (a bad prompt, a
+			// content-policy refusal, an unknown model), and every credential
+			// would answer the same way. Answering 502 would blame the
+			// provider for being broken and send the client off to retry
+			// something that cannot succeed.
+			statusCode = providerRequestRejected
+			statusMessage = http.StatusText(statusCode)
+			errorMsg = fmt.Sprintf("Provider rejected the request with %d", statusCode)
+			errorOrigin = ErrorOriginProviderRequestRejected
 		case cascadeRateLimited:
 			statusCode = http.StatusTooManyRequests
 			statusMessage = "Rate limit exceeded"
@@ -2851,6 +2897,11 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				"error_code", statusCode, "credential", cred.Name, "provider", string(cred.Type), "model", modelID,
 				"error", upstreamErrorForLog(transportErr, targetURL),
 				"request_id", logCtx.RequestID)
+		case providerRequestRejected != 0:
+			p.logger.WarnContext(r.Context(), "Provider rejected the request; a later attempt failed on the transport",
+				"error_code", statusCode, "credential", cred.Name, "provider", string(cred.Type), "model", modelID,
+				"error", upstreamErrorForLog(transportErr, targetURL),
+				"request_id", logCtx.RequestID)
 		default:
 			p.logUpstreamError(r.Context(), "All provider attempts failed: no upstream response", statusCode, cred, modelID, nil,
 				"error", upstreamErrorForLog(transportErr, targetURL),
@@ -2878,6 +2929,22 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			p.setRetryAfterFromBan(w, modelID, nil, logCtx.Scope)
 			WriteErrorRateLimit(w, statusMessage)
 		default:
+			if providerRequestRejected != 0 && statusCode == providerRequestRejected {
+				// The provider's own status, relayed as it is: the client
+				// learns what was actually wrong with the request instead of
+				// a generic "Bad Gateway" that blames the provider for being
+				// broken. The body is masked like any other provider error --
+				// the provider's free text does not reach the client, but the
+				// classification does, so a content-policy refusal arrives as
+				// the content-policy message and not as a bare "Bad Request".
+				clientBody, _, _ := clientResponseBodyForCredential(
+					statusCode, providerRequestRejectedBody, cred, modelID, logCtx.RequestID)
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Content-Length", fmt.Sprintf("%d", len(clientBody)))
+				w.WriteHeader(statusCode)
+				_, _ = w.Write(clientBody) //nolint:gosec // G705: clientBody is our own masked application/json (clientResponseBodyForCredential), not attacker-controlled HTML
+				break
+			}
 			WriteErrorBadGateway(w, statusMessage)
 		}
 		return
