@@ -160,7 +160,13 @@ func NormalizeCacheCreationUsage(body []byte) ([]byte, bool) {
 	}
 	if total > 0 {
 		details["cache_creation_tokens"] = json.RawMessage(strconv.FormatInt(int64(total), 10))
-		if converterutil.MirrorCacheWriteTokensEnabled() {
+		// Mirror into cache_write_tokens too, but only when the response does
+		// not already carry one: cache_write_tokens is also a provider-native
+		// name in its own right (OpenRouter's, for one), so a value already
+		// there is that provider's own count, not Requesty's — overwriting it
+		// would replace a real number with a different provider's, which
+		// prices the write at whichever rate the wrong count happens to imply.
+		if _, exists := details["cache_write_tokens"]; converterutil.MirrorCacheWriteTokensEnabled() && !exists {
 			details["cache_write_tokens"] = json.RawMessage(strconv.FormatInt(int64(total), 10))
 		}
 	}
@@ -183,7 +189,13 @@ func NormalizeCacheCreationUsage(body []byte) ([]byte, bool) {
 		// cache_creation_token_details. Same flag as cache_write_tokens above;
 		// TokenDetails.CacheWrite() already prefers cache_creation_token_details
 		// over this one, so it is never summed twice internally.
-		if converterutil.MirrorCacheWriteTokensEnabled() {
+		//
+		// Guarded the same way: cache_creation is also Alibaba/Qwen's own
+		// native field for a Qwen response passed through Requesty, so a
+		// value already there is Qwen's own TTL split, not a rewrite of
+		// Requesty's — overwriting it would silently re-price the write
+		// under the wrong TTL tier (1h writes cost more than 5m ones).
+		if _, exists := details["cache_creation"]; converterutil.MirrorCacheWriteTokensEnabled() && !exists {
 			details["cache_creation"] = encCTD
 		}
 	}

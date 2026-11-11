@@ -763,10 +763,12 @@ type ServerConfig struct {
 	ResponseHeaders            ResponseHeadersConfig `yaml:"response_headers"`
 	// MirrorCacheWriteTokens mirrors a cache write reported only under a
 	// provider's own naming (Anthropic-type credentials' cache_creation_tokens,
-	// Requesty's caching_tokens) into cache_write_tokens too, so a client whose
-	// own accounting reads only that name sees the write (default: false —
-	// both names already exist on the two readers this router has today;
-	// enable only for a client confirmed to read cache_write_tokens only).
+	// Requesty's caching_tokens) into cache_write_tokens and the Alibaba-spelled
+	// cache_creation too, so a client whose own accounting reads only one of
+	// those names still sees the write (default: true — this is the behavior
+	// PR #355 already shipped unconditionally for Anthropic-type credentials;
+	// this flag only adds Requesty to it and gives deployments a way to turn
+	// the whole thing off, not a way to opt in from a stricter default).
 	MirrorCacheWriteTokens bool `yaml:"mirror_cache_write_tokens"`
 }
 
@@ -959,7 +961,7 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 	if s.SessionStickyAutoCacheCtrl, err = parseField(temp.SessionStickyAutoCacheCtrl, true, strconv.ParseBool, "session_sticky_auto_cache_control"); err != nil {
 		return err
 	}
-	if s.MirrorCacheWriteTokens, err = parseField(temp.MirrorCacheWriteTokens, false, strconv.ParseBool, "mirror_cache_write_tokens"); err != nil {
+	if s.MirrorCacheWriteTokens, err = parseField(temp.MirrorCacheWriteTokens, true, strconv.ParseBool, "mirror_cache_write_tokens"); err != nil {
 		return err
 	}
 	if s.StdoutLogsEnabled, err = parseField(temp.StdoutLogsEnabled, true, strconv.ParseBool, "stdout_logs_enabled"); err != nil {

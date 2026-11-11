@@ -196,6 +196,35 @@ func TestNormalizeCacheCreationUsageMirrorsCacheWriteTokensWhenEnabled(t *testin
 	assert.Equal(t, float64(2755), details["caching_tokens"])
 }
 
+// A response that already carries its own cache_write_tokens (OpenRouter's
+// own naming, say) or its own Alibaba-spelled cache_creation (a Qwen model
+// passed through Requesty, with Requesty's own caching_tokens wrapper added
+// on top) must keep that provider's own numbers — mirroring must not
+// overwrite a name that is already someone else's real count.
+func TestNormalizeCacheCreationUsageDoesNotOverwriteExistingAlternateNames(t *testing.T) {
+	enableMirrorCacheWriteTokens(t)
+	body := []byte(`{"usage":{"prompt_tokens_details":{` +
+		`"caching_tokens":100,"caching_token_details":{"caching_5m_tokens":60,"caching_1h_tokens":40},` +
+		`"cache_write_tokens":999,` +
+		`"cache_creation":{"ephemeral_5m_input_tokens":77,"ephemeral_1h_input_tokens":0}` +
+		`}}}`)
+
+	normalized, changed := NormalizeCacheCreationUsage(body)
+
+	require.True(t, changed) // cache_creation_tokens/cache_creation_token_details are still synthesized
+	var response map[string]any
+	require.NoError(t, json.Unmarshal(normalized, &response))
+	details := response["usage"].(map[string]any)["prompt_tokens_details"].(map[string]any)
+	// The pre-existing alternate-name values are untouched.
+	assert.Equal(t, float64(999), details["cache_write_tokens"])
+	cc := details["cache_creation"].(map[string]any)
+	assert.Equal(t, float64(77), cc["ephemeral_5m_input_tokens"])
+	assert.Equal(t, float64(0), cc["ephemeral_1h_input_tokens"])
+	// The standard name is still synthesized from Requesty's own fields, as
+	// always.
+	assert.Equal(t, float64(100), details["cache_creation_tokens"])
+}
+
 func TestNormalizeCacheCreationUsageOmitsCacheWriteTokensWhenMirroringDisabled(t *testing.T) {
 	// MirrorCacheWriteTokens defaults to false: cache_write_tokens must not
 	// appear at all, as before the Requesty mirroring was added.
