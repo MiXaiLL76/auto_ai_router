@@ -117,6 +117,7 @@ type TestProxyConfig struct {
 	CredentialNameAsTeamID bool
 	OrganizationPolicies   *models.OrganizationPolicyRegistry
 	VisionFallback         config.VisionFallbackConfig
+	LoopGate               config.LoopGateConfig
 	RouterResponseLog      kafkalog.RouterResponseManager
 	RouterResponseRedact   bool
 }
@@ -356,6 +357,7 @@ func (b *TestProxyBuilder) Build() *Proxy {
 		CredentialNameAsTeamID: b.config.CredentialNameAsTeamID,
 		OrganizationPolicies:   b.config.OrganizationPolicies,
 		VisionFallback:         b.config.VisionFallback,
+		LoopGate:               b.config.LoopGate,
 		RouterResponseLog:      b.config.RouterResponseLog,
 		RouterResponseRedact:   b.config.RouterResponseRedact,
 	})

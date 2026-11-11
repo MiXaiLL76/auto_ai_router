@@ -203,6 +203,52 @@ func BuildReasoningSummaryPartDoneEvent(itemID string, outputIndex, summaryIndex
 	}
 }
 
+// BuildRefusalDoneEvent builds the response.refusal.done event closing a
+// streamed refusal part.
+func BuildRefusalDoneEvent(itemID string, outputIndex, contentIndex int, refusal string) map[string]interface{} {
+	return map[string]interface{}{
+		"type":          "response.refusal.done",
+		"item_id":       itemID,
+		"output_index":  outputIndex,
+		"content_index": contentIndex,
+		"refusal":       refusal,
+	}
+}
+
+// BuildReasoningTextDoneEvent builds the response.reasoning_text.done event
+// closing a streamed reasoning_text part.
+func BuildReasoningTextDoneEvent(itemID string, outputIndex, contentIndex int, text string) map[string]interface{} {
+	return map[string]interface{}{
+		"type":          "response.reasoning_text.done",
+		"item_id":       itemID,
+		"output_index":  outputIndex,
+		"content_index": contentIndex,
+		"text":          text,
+	}
+}
+
+// BuildFunctionCallArgumentsDoneEvent builds the
+// response.function_call_arguments.done event closing a streamed function call's
+// arguments.
+func BuildFunctionCallArgumentsDoneEvent(itemID string, outputIndex int, arguments string) map[string]interface{} {
+	return map[string]interface{}{
+		"type":         "response.function_call_arguments.done",
+		"item_id":      itemID,
+		"output_index": outputIndex,
+		"arguments":    arguments,
+	}
+}
+
+// BuildOutputItemDoneEvent builds the response.output_item.done event closing
+// the output item at outputIndex with its final state.
+func BuildOutputItemDoneEvent(outputIndex int, item interface{}) map[string]interface{} {
+	return map[string]interface{}{
+		"type":         "response.output_item.done",
+		"output_index": outputIndex,
+		"item":         item,
+	}
+}
+
 // BuildFunctionCallItemAddedEvent builds the output_item.added event opening a
 // streamed function_call item.
 func BuildFunctionCallItemAddedEvent(outputIndex int, itemID, callID, name string) map[string]interface{} {
