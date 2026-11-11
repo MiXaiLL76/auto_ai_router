@@ -761,6 +761,15 @@ type ServerConfig struct {
 	CredentialNameAsTeamID     bool                  `yaml:"credential_name_as_team_id"`        // Use provider credential name as team_id when auth has no team_id (default: false)
 	ProxyHealthTimeout         time.Duration         `yaml:"proxy_health_timeout"`              // Timeout for fetching /health from remote proxy credentials (default: 15s)
 	ResponseHeaders            ResponseHeadersConfig `yaml:"response_headers"`
+	// MirrorCacheWriteTokens mirrors a cache write reported only under a
+	// provider's own naming (Anthropic-type credentials' cache_creation_tokens,
+	// Requesty's caching_tokens) into cache_write_tokens and the Alibaba-spelled
+	// cache_creation too, so a client whose own accounting reads only one of
+	// those names still sees the write (default: true — this is the behavior
+	// PR #355 already shipped unconditionally for Anthropic-type credentials;
+	// this flag only adds Requesty to it and gives deployments a way to turn
+	// the whole thing off, not a way to opt in from a stricter default).
+	MirrorCacheWriteTokens bool `yaml:"mirror_cache_write_tokens"`
 }
 
 type ResponseHeaderMode string
@@ -870,6 +879,7 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		CredentialNameAsTeamID     string                `yaml:"credential_name_as_team_id"`
 		ProxyHealthTimeout         string                `yaml:"proxy_health_timeout"`
 		ResponseHeaders            ResponseHeadersConfig `yaml:"response_headers"`
+		MirrorCacheWriteTokens     string                `yaml:"mirror_cache_write_tokens"`
 	}
 
 	var temp tempConfig
@@ -949,6 +959,9 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if s.SessionStickyAutoCacheCtrl, err = parseField(temp.SessionStickyAutoCacheCtrl, true, strconv.ParseBool, "session_sticky_auto_cache_control"); err != nil {
+		return err
+	}
+	if s.MirrorCacheWriteTokens, err = parseField(temp.MirrorCacheWriteTokens, true, strconv.ParseBool, "mirror_cache_write_tokens"); err != nil {
 		return err
 	}
 	if s.StdoutLogsEnabled, err = parseField(temp.StdoutLogsEnabled, true, strconv.ParseBool, "stdout_logs_enabled"); err != nil {
