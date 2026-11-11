@@ -10,6 +10,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/fail2ban"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
+	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
@@ -116,6 +117,8 @@ type TestProxyConfig struct {
 	CredentialNameAsTeamID bool
 	OrganizationPolicies   *models.OrganizationPolicyRegistry
 	VisionFallback         config.VisionFallbackConfig
+	RouterResponseLog      kafkalog.RouterResponseManager
+	RouterResponseRedact   bool
 }
 
 // NewTestProxyBuilder creates a builder with default configuration.
@@ -306,6 +309,14 @@ func (b *TestProxyBuilder) WithCredentialNameAsTeamID(enabled bool) *TestProxyBu
 	return b
 }
 
+// WithRouterResponseLog sets the router-response write-path for the proxy
+// under test, so a test can assert on what the router would publish.
+func (b *TestProxyBuilder) WithRouterResponseLog(mgr kafkalog.RouterResponseManager, redact bool) *TestProxyBuilder {
+	b.config.RouterResponseLog = mgr
+	b.config.RouterResponseRedact = redact
+	return b
+}
+
 // Build creates and returns a Proxy instance with the configured settings.
 func (b *TestProxyBuilder) Build() *Proxy {
 	if b.config.RateLimiter == nil {
@@ -345,6 +356,8 @@ func (b *TestProxyBuilder) Build() *Proxy {
 		CredentialNameAsTeamID: b.config.CredentialNameAsTeamID,
 		OrganizationPolicies:   b.config.OrganizationPolicies,
 		VisionFallback:         b.config.VisionFallback,
+		RouterResponseLog:      b.config.RouterResponseLog,
+		RouterResponseRedact:   b.config.RouterResponseRedact,
 	})
 	// No streamingClient collapse needed here (unlike before streamingClients
 	// became a lazily-built per-timeout map): attemptClient already returns

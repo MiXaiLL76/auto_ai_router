@@ -243,3 +243,65 @@ func (e *RawBodyEvent) Key() []byte {
 	}
 	return []byte(e.RequestID)
 }
+
+// RouterResponseEvent is what the router ANSWERED to the client, published
+// to its own Kafka topic (default "router-responses", see
+// KafkaRouterResponsesConfig) and its own ClickHouse table.
+//
+// It is deliberately a separate event type from RawBodyEvent rather than
+// another field on it: the two carry different streams with different
+// volumes and different retentions. Raw-body events are the rare error path
+// (a failed request's bodies); these are every request's answer, which is a
+// high-volume stream an operator usually enables only for a debugging
+// window. Keeping them apart lets the retention of each be sized on its own
+// and keeps the spend log -- billed on, kept for years -- free of response
+// bodies.
+//
+// The body is the response AFTER the router's own transformations: model
+// alias resolution, the Responses/Chat shape conversion, the cost injection.
+// That is the point of the event -- it answers "what did this key actually
+// get", which neither the spend log nor the request body can.
+type RouterResponseEvent struct {
+	RequestID      string    `json:"request_id"`
+	ServerRouterID string    `json:"server_router_id"`
+	StartTime      time.Time `json:"start_time"`
+	EndTime        time.Time `json:"end_time"`
+	HTTPStatus     int       `json:"http_status"`
+	// Status is the canonical "success"/"failure" the spend log uses for
+	// the same request, so the two can be joined and compared without
+	// inferring the outcome from the HTTP status (a mid-stream error is a
+	// failure with a 2xx HTTP status).
+	Status string `json:"status"`
+	// ErrorClass and ErrorOrigin carry the same values the spend log's
+	// failure rows carry, for the failed requests -- so a response body can
+	// be read next to why it failed.
+	ErrorClass  string `json:"error_class,omitempty"`
+	ErrorOrigin string `json:"error_origin,omitempty"`
+	// Model is the client-facing model name (the one the client asked
+	// for), and RealModel the provider-side one, so a row explains which
+	// alias produced which answer.
+	Model     string `json:"model,omitempty"`
+	RealModel string `json:"real_model,omitempty"`
+	// Credential is the credential that served the request.
+	Credential string `json:"credential,omitempty"`
+	// ResponseBody is the body the client received, capped at
+	// maxRouterResponseBodyBytes. Masked per
+	// KafkaRouterResponsesConfig.RedactSensitiveFields: the model's own
+	// text becomes "REDACTED" while the structure survives.
+	ResponseBody string `json:"response_body,omitempty"`
+	// IsStreaming is true when the client asked for a stream. The captured
+	// body for a streamed request is the reassembled (non-stream) shape the
+	// router produced for it -- for a client that asked for a stream, that is
+	// NOT what the client received, and the field says so.
+	IsStreaming bool `json:"is_streaming,omitempty"`
+}
+
+// Key returns the Kafka record key (request_id), matching the other event
+// types' partitioning so a request's spend, raw-body and response events
+// land on the same partition and stay orderable.
+func (e *RouterResponseEvent) Key() []byte {
+	if e == nil {
+		return nil
+	}
+	return []byte(e.RequestID)
+}
