@@ -262,6 +262,51 @@ func (p *Proxy) logRawBodyToKafka(logCtx *RequestLogContext, status string, endT
 	}
 }
 
+// logRouterResponseToKafka publishes what the router answered to the
+// client, on its own topic.
+func (p *Proxy) logRouterResponseToKafka(logCtx *RequestLogContext, status string, endTime time.Time) {
+	event := p.buildRouterResponseEvent(logCtx, status, endTime)
+	if err := p.routerResponseLog.LogRouterResponse(event); err != nil {
+		p.logger.WarnContext(logCtx.Context(), "Failed to queue Kafka router-response event",
+			"error", err,
+			"request_id", logCtx.RequestID,
+		)
+	}
+}
+
+// buildRouterResponseEvent maps a RequestLogContext onto
+// kafkalog.RouterResponseEvent.
+//
+// The body was already captured -- and masked -- when the response was
+// produced (see captureRouterResponse), so this only carries it over: it
+// is not re-read from the response, which is gone by now.
+func (p *Proxy) buildRouterResponseEvent(logCtx *RequestLogContext, status string, endTime time.Time) *kafkalog.RouterResponseEvent {
+	event := &kafkalog.RouterResponseEvent{
+		RequestID:      logCtx.spendRequestID(),
+		ServerRouterID: p.routerID,
+		StartTime:      logCtx.StartTime,
+		EndTime:        endTime,
+		HTTPStatus:     logCtx.HTTPStatus,
+		Status:         status,
+		ResponseBody:   logCtx.RouterResponseBody,
+		IsStreaming:    logCtx.RouterResponseIsStreaming,
+	}
+	if logCtx.Credential != nil {
+		event.Credential = logCtx.Credential.Name
+	}
+	if logCtx.ModelID != "" {
+		event.Model = logCtx.ModelID
+	}
+	if logCtx.RealModelID != "" {
+		event.RealModel = logCtx.RealModelID
+	}
+	if status == "failure" {
+		event.ErrorClass = mapHTTPStatusToErrorClass(logCtx.HTTPStatus)
+		event.ErrorOrigin = string(logCtx.ErrorOrigin)
+	}
+	return event
+}
+
 // buildRawBodyEvent maps a RequestLogContext onto kafkalog.RawBodyEvent.
 // Caller (logSpendToLiteLLMDB) calls this for every failure, and additionally
 // for successes when StoreOnlyErrors is disabled -- so, unlike

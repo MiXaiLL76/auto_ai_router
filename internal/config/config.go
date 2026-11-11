@@ -1516,6 +1516,10 @@ type KafkaConfig struct {
 	// field on the spend event, precisely so it can be enabled/disabled and
 	// retained independently of spend-log analytics.
 	RawBodies KafkaRawBodiesConfig `yaml:"raw_bodies,omitempty"`
+
+	// RouterResponses configures the separate, independently-toggleable
+	// write-path for the bodies the router sent back to the client.
+	RouterResponses KafkaRouterResponsesConfig `yaml:"router_responses,omitempty"`
 }
 
 // KafkaRawBodiesConfig configures the raw-body Kafka write-path
@@ -1557,6 +1561,45 @@ type KafkaRawBodiesConfig struct {
 	// actual prompt is genuinely needed. This is a deliberate, explicit
 	// escape hatch, not a recommended default: turning it off reintroduces
 	// exactly the privacy exposure StoreRawBody's redaction exists to avoid.
+	RedactSensitiveFields bool `yaml:"redact_sensitive_fields"` // default: true
+}
+
+// KafkaRouterResponsesConfig configures the router-response write-path: the
+// bodies the router sends back to the client, published to their own Kafka
+// topic (default "router-responses") and their own ClickHouse table.
+//
+// It is a separate path from raw_bodies for a reason: raw-bodies carries
+// the bodies of FAILED requests, and this one carries what the router
+// ANSWERED. Mixing them would put a heavy, high-volume stream (every
+// successful request) into a topic whose consumers -- and retention -- are
+// sized for the rare error path. Keeping them apart also lets an operator
+// enable the response capture without touching the debugging path they
+// already rely on, and vice versa.
+//
+// The captured body is the response the CLIENT received, after the router's
+// own transformations (model alias resolution, the Responses/Chat shape
+// conversion, the cost injection). It is what an operator needs to answer
+// "what did this key actually get", which the request body alone cannot.
+type KafkaRouterResponsesConfig struct {
+	// Enabled turns the write-path on. Off by default: the bodies are bulky
+	// and they carry the model's own output, which for many providers is
+	// the customer's data.
+	Enabled bool `yaml:"enabled"`
+
+	// Topic is the Kafka topic the response events are published to.
+	Topic string `yaml:"topic"` // default: "router-responses"
+
+	// RedactSensitiveFields masks the model's own text before publishing,
+	// keeping the response's STRUCTURE (shape, model, usage, ids, finish
+	// reasons) intact: the content fields become "REDACTED", everything the
+	// provider reported about the exchange survives. That is the difference
+	// from raw-bodies' redaction, which replaces the whole body with a
+	// "[REDACTED body bytes=N]" placeholder -- fine for a provider's error
+	// text, useless for a response whose whole point is its shape.
+	//
+	// Set to false to capture the bodies verbatim. That is a deliberate,
+	// explicit escape hatch for a short-lived, access-controlled debugging
+	// session: it ships the model's output -- the customer's data -- off-box.
 	RedactSensitiveFields bool `yaml:"redact_sensitive_fields"` // default: true
 }
 
@@ -1859,6 +1902,15 @@ type tempKafkaRawBodiesConfig struct {
 	RedactSensitiveFields string `yaml:"redact_sensitive_fields"`
 }
 
+// tempKafkaRouterResponsesConfig mirrors KafkaRouterResponsesConfig with
+// string fields, the same env-variable-resolution convention as KafkaConfig
+// itself.
+type tempKafkaRouterResponsesConfig struct {
+	Enabled               string `yaml:"enabled"`
+	Topic                 string `yaml:"topic"`
+	RedactSensitiveFields string `yaml:"redact_sensitive_fields"`
+}
+
 // UnmarshalYAML implements custom unmarshaling for KafkaConfig with env variable support.
 func (k *KafkaConfig) UnmarshalYAML(value *yaml.Node) error {
 	type tempConfig struct {
@@ -1876,6 +1928,8 @@ func (k *KafkaConfig) UnmarshalYAML(value *yaml.Node) error {
 		SASLPassword     string                   `yaml:"sasl_password,omitempty"`
 		TLSCACert        string                   `yaml:"tls_ca_cert,omitempty"`
 		RawBodies        tempKafkaRawBodiesConfig `yaml:"raw_bodies,omitempty"`
+
+		RouterResponses tempKafkaRouterResponsesConfig `yaml:"router_responses,omitempty"`
 	}
 
 	var temp tempConfig
@@ -1947,6 +2001,21 @@ func (k *KafkaConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if k.RawBodies.RedactSensitiveFields, err = parseField(temp.RawBodies.RedactSensitiveFields, true, strconv.ParseBool, "kafka.raw_bodies.redact_sensitive_fields"); err != nil {
+		return err
+	}
+
+	if k.RouterResponses.Enabled, err = parseField(temp.RouterResponses.Enabled, false, strconv.ParseBool, "kafka.router_responses.enabled"); err != nil {
+		return err
+	}
+	// Same as RawBodies.Topic: the default is applied here, not in a later
+	// ApplyDefaults pass -- Validate runs against this struct directly, so
+	// an unresolved empty topic must fall back to the documented default
+	// rather than fail "topic is required" at startup.
+	k.RouterResponses.Topic = resolveEnvString(temp.RouterResponses.Topic)
+	if k.RouterResponses.Topic == "" {
+		k.RouterResponses.Topic = "router-responses"
+	}
+	if k.RouterResponses.RedactSensitiveFields, err = parseField(temp.RouterResponses.RedactSensitiveFields, true, strconv.ParseBool, "kafka.router_responses.redact_sensitive_fields"); err != nil {
 		return err
 	}
 	return nil
@@ -2680,6 +2749,25 @@ func (c *Config) Validate() error {
 		}
 		if c.Kafka.RawBodies.Topic == c.Kafka.Topic {
 			return fmt.Errorf("kafka.raw_bodies.topic must differ from kafka.topic")
+		}
+	}
+
+	if c.Kafka.RouterResponses.Enabled {
+		if !c.Kafka.Enabled {
+			return fmt.Errorf("kafka.router_responses.enabled requires kafka.enabled=true")
+		}
+		if c.Kafka.RouterResponses.Topic == "" {
+			return fmt.Errorf("kafka.router_responses.topic is required when kafka.router_responses is enabled")
+		}
+		// Its own topic, distinct from the spend-log topic and from the
+		// raw-bodies topic: the three carry different streams with different
+		// retention, and a shared topic would mix a response body into the
+		// spend log (which is billed on and kept for years).
+		if c.Kafka.RouterResponses.Topic == c.Kafka.Topic {
+			return fmt.Errorf("kafka.router_responses.topic must differ from kafka.topic")
+		}
+		if c.Kafka.RouterResponses.Topic == c.Kafka.RawBodies.Topic {
+			return fmt.Errorf("kafka.router_responses.topic must differ from kafka.raw_bodies.topic")
 		}
 	}
 

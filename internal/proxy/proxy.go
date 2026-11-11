@@ -313,52 +313,67 @@ type RequestLogContext struct {
 	// request's usage after the streaming log has written its figures, so the
 	// loop's steps are billed (the log reads the last chunk's usage, which
 	// carries only the last step's).
-	DeepSeekToolUsage     *converter.TokenUsage
-	PublicModelID         string                   // Client-facing model before alias resolution
-	CanonicalModelID      string                   // Organization canonical public model after scoped admission
-	ModelID               string                   // Model alias name (what client requested)
-	PublicAliasID         string                   // Client-requested name when it was a public model alias (LiteLLM model_group_alias); ModelID then holds its target
-	RealModelID           string                   // Real model name sent to provider (for price lookup; equals ModelID if no alias)
-	Status                string                   // "success" or "failure"
-	HTTPStatus            int                      // HTTP response status code
-	ErrorMsg              string                   // Error message (added to metadata on failure)
-	ErrorBodyRaw          string                   // Untruncated upstream provider error body, captured BEFORE any client-facing masking (maskedUpstreamErrorBody/clientResponseBodyForCredential) is applied. Only ever set on failure paths. Feeds kafkalog.RawBodyEvent.ResponseBody, not SpendEvent.
-	ClientResponseBody    string                   // What the client actually received for this failure, AFTER masking (identical to ErrorBodyRaw when nothing was masked, e.g. mid-stream errors detected after the response already committed -- see markProxyProviderStreamError's clientSaw param). Feeds kafkalog.RawBodyEvent.ClientResponseBody.
-	ErrorOrigin           ErrorOrigin              // Which code path produced this failure (see ErrorOrigin's doc comment) -- a fixed, filterable tag distinct from ErrorMsg's free text. Empty when the cause is already self-evident from HTTPStatus/ErrorBodyRaw alone. Feeds kafkalog SpendEvent.ErrorOrigin/RawBodyEvent.ErrorOrigin and LiteLLM_SpendLogs.metadata.error_information.error_origin.
-	RequestBodyRaw        string                   // Untruncated client request body, captured only when kafka.raw_bodies.store_raw_body is enabled (see readRequestBodyAndSelectModel). Feeds kafkalog.RawBodyEvent.RequestBody. Empty whenever the toggle is off, so it never holds prompt content by default.
-	TokenUsage            *converter.TokenUsage    // Token usage with detailed breakdown
-	ModelPrice            *models.ModelPrice       // Price resolved before the provider request
-	PriceModelID          string                   // Model identifier used for price lookup
-	UsageSource           string                   // provider, estimated, request_parameters, or missing
-	StreamOutcome         string                   // completed, client_aborted, or stream_error
-	Credential            *config.CredentialConfig // Credential used
-	SessionID             string                   // Session ID
-	StickyHeldCredential  string                   // Credential the session stays bound to although it could not take this request (busy or excluded for it)
-	stickyExclude         map[string]bool          // Credentials excluded for this request (denylist, reasoning, tried); used to find the model's best tier
-	stickyRequestExcluded map[string]bool          // Subset excluded only because of this request's shape (reasoning-only credentials)
-	clientServiceTiers    []string                 // service_tier values the client sent, stripped from the body at ingress; checked per credential (see withClientServiceTiers)
-	TargetURL             string                   // Target URL (for APIBase extraction)
-	TokenInfo             *litellmdb.TokenInfo     // User/team/org info
-	IsImageGeneration     bool                     // True if this is an image generation request
-	ImageCount            int                      // Number of images requested ('n' param, at least 1)
-	WebSearchRequested    bool                     // True when the request enabled the built-in web search tool
-	WebSearchContextSize  string                   // low|medium|high from web_search_options/tool config
-	HideWebSearchResults  bool                     // Z.AI web_search tool without search_result: results are still fetched to bill the search, then stripped from the client response
-	ReasoningRequested    bool
-	ReasoningSource       string
-	ThinkingMode          string
-	RequestEndpoint       string
-	Logged                bool   // True if already logged (prevents duplicate logging)
-	IsResponsesAPI        bool   // True if this is a Responses API request (converted to Chat Completions)
-	IsSystemOne           bool   // True for a /v1/systemone request (native System One API, see systemone.go)
-	RequestCompleted      bool   // True only after the response was fully and successfully delivered
-	ActualCredentialName  string // Real credential name from upstream when Credential.Type == ProviderTypeProxy
-	IsProxyRequest        bool   // True when this request came from another auto_ai_router (HeaderAIRProxyClient)
-	Scope                 scope.Context
-	OrganizationPolicy    *models.OrganizationPolicy
-	BillingProfileID      string
-	BillingProfileSHA256  string
-	BillingOrganizationID string
+	DeepSeekToolUsage  *converter.TokenUsage
+	PublicModelID      string      // Client-facing model before alias resolution
+	CanonicalModelID   string      // Organization canonical public model after scoped admission
+	ModelID            string      // Model alias name (what client requested)
+	PublicAliasID      string      // Client-requested name when it was a public model alias (LiteLLM model_group_alias); ModelID then holds its target
+	RealModelID        string      // Real model name sent to provider (for price lookup; equals ModelID if no alias)
+	Status             string      // "success" or "failure"
+	HTTPStatus         int         // HTTP response status code
+	ErrorMsg           string      // Error message (added to metadata on failure)
+	ErrorBodyRaw       string      // Untruncated upstream provider error body, captured BEFORE any client-facing masking (maskedUpstreamErrorBody/clientResponseBodyForCredential) is applied. Only ever set on failure paths. Feeds kafkalog.RawBodyEvent.ResponseBody, not SpendEvent.
+	ClientResponseBody string      // What the client actually received for this failure, AFTER masking (identical to ErrorBodyRaw when nothing was masked, e.g. mid-stream errors detected after the response already committed -- see markProxyProviderStreamError's clientSaw param). Feeds kafkalog.RawBodyEvent.ClientResponseBody.
+	ErrorOrigin        ErrorOrigin // Which code path produced this failure (see ErrorOrigin's doc comment) -- a fixed, filterable tag distinct from ErrorMsg's free text. Empty when the cause is already self-evident from HTTPStatus/ErrorBodyRaw alone. Feeds kafkalog SpendEvent.ErrorOrigin/RawBodyEvent.ErrorOrigin and LiteLLM_SpendLogs.metadata.error_information.error_origin.
+	RequestBodyRaw     string      // Untruncated client request body, captured only when kafka.raw_bodies.store_raw_body is enabled (see readRequestBodyAndSelectModel). Feeds kafkalog.RawBodyEvent.RequestBody. Empty whenever the toggle is off, so it never holds prompt content by default.
+	// RouterResponseBody is the body the router sent back to the client,
+	// captured only when kafka.router_responses is enabled (see
+	// captureRouterResponseBody). It is the response AFTER the router's own
+	// transformations -- model alias resolution, the Responses/Chat shape
+	// conversion, the cost injection -- so it answers "what did this key
+	// actually get". Masked per the config's redact_sensitive_fields: the
+	// model's own text becomes a placeholder, the structure survives.
+	// Feeds kafkalog.RouterResponseEvent.ResponseBody.
+	RouterResponseBody string
+	// RouterResponseIsStreaming is true when the client asked for a stream.
+	// The captured body for such a request is the reassembled (non-stream)
+	// shape the router produced -- not the SSE the client received -- and
+	// this flag says so, so nobody reads the row as a byte-exact transcript
+	// of what the client got.
+	RouterResponseIsStreaming bool
+	TokenUsage                *converter.TokenUsage    // Token usage with detailed breakdown
+	ModelPrice                *models.ModelPrice       // Price resolved before the provider request
+	PriceModelID              string                   // Model identifier used for price lookup
+	UsageSource               string                   // provider, estimated, request_parameters, or missing
+	StreamOutcome             string                   // completed, client_aborted, or stream_error
+	Credential                *config.CredentialConfig // Credential used
+	SessionID                 string                   // Session ID
+	StickyHeldCredential      string                   // Credential the session stays bound to although it could not take this request (busy or excluded for it)
+	stickyExclude             map[string]bool          // Credentials excluded for this request (denylist, reasoning, tried); used to find the model's best tier
+	stickyRequestExcluded     map[string]bool          // Subset excluded only because of this request's shape (reasoning-only credentials)
+	clientServiceTiers        []string                 // service_tier values the client sent, stripped from the body at ingress; checked per credential (see withClientServiceTiers)
+	TargetURL                 string                   // Target URL (for APIBase extraction)
+	TokenInfo                 *litellmdb.TokenInfo     // User/team/org info
+	IsImageGeneration         bool                     // True if this is an image generation request
+	ImageCount                int                      // Number of images requested ('n' param, at least 1)
+	WebSearchRequested        bool                     // True when the request enabled the built-in web search tool
+	WebSearchContextSize      string                   // low|medium|high from web_search_options/tool config
+	HideWebSearchResults      bool                     // Z.AI web_search tool without search_result: results are still fetched to bill the search, then stripped from the client response
+	ReasoningRequested        bool
+	ReasoningSource           string
+	ThinkingMode              string
+	RequestEndpoint           string
+	Logged                    bool   // True if already logged (prevents duplicate logging)
+	IsResponsesAPI            bool   // True if this is a Responses API request (converted to Chat Completions)
+	IsSystemOne               bool   // True for a /v1/systemone request (native System One API, see systemone.go)
+	RequestCompleted          bool   // True only after the response was fully and successfully delivered
+	ActualCredentialName      string // Real credential name from upstream when Credential.Type == ProviderTypeProxy
+	IsProxyRequest            bool   // True when this request came from another auto_ai_router (HeaderAIRProxyClient)
+	Scope                     scope.Context
+	OrganizationPolicy        *models.OrganizationPolicy
+	BillingProfileID          string
+	BillingProfileSHA256      string
+	BillingOrganizationID     string
 
 	// visionInject holds image descriptions of this request to prepend to the answer
 	// (vision fallback, describe mode); nil when there is nothing to write.
@@ -465,15 +480,17 @@ type Config struct {
 	ModelManager                 *models.Manager
 	Version                      string
 	Commit                       string
-	ServiceName                  string                   // otel.service_name: the deployment's name on every spend event (service_name)
-	LiteLLMDB                    litellmdb.Manager        // LiteLLM database integration (optional)
-	KafkaLog                     kafkalog.Manager         // Kafka spend-log publishing (optional, analytics write-path)
-	RawBodyLog                   kafkalog.RawBodyManager  // Kafka raw-body publishing (optional, separate topic, failure-only)
-	RawBodyStoreRawBody          bool                     // Mirrors KafkaRawBodiesConfig.StoreRawBody
-	RawBodyStoreOnlyErrors       bool                     // Mirrors KafkaRawBodiesConfig.StoreOnlyErrors
-	RawBodyRedactSensitiveFields bool                     // Mirrors KafkaRawBodiesConfig.RedactSensitiveFields
-	HealthChecker                HealthChecker            // Optional: cached DB health status (updated by health monitor)
-	Events                       *accountevents.Publisher // Optional: outcome events -> health worker (kafka)
+	ServiceName                  string                         // otel.service_name: the deployment's name on every spend event (service_name)
+	LiteLLMDB                    litellmdb.Manager              // LiteLLM database integration (optional)
+	KafkaLog                     kafkalog.Manager               // Kafka spend-log publishing (optional, analytics write-path)
+	RawBodyLog                   kafkalog.RawBodyManager        // Kafka raw-body publishing (optional, separate topic, failure-only)
+	RawBodyStoreRawBody          bool                           // Mirrors KafkaRawBodiesConfig.StoreRawBody
+	RawBodyStoreOnlyErrors       bool                           // Mirrors KafkaRawBodiesConfig.StoreOnlyErrors
+	RawBodyRedactSensitiveFields bool                           // Mirrors KafkaRawBodiesConfig.RedactSensitiveFields
+	RouterResponseLog            kafkalog.RouterResponseManager // Kafka router-response publishing (optional, separate topic, every request)
+	RouterResponseRedact         bool                           // Mirrors KafkaRouterResponsesConfig.RedactSensitiveFields
+	HealthChecker                HealthChecker                  // Optional: cached DB health status (updated by health monitor)
+	Events                       *accountevents.Publisher       // Optional: outcome events -> health worker (kafka)
 	// BanDecisionsExternal gates the local fail2ban counters: true only
 	// when an external ban source (the worker's reader) is actually wired,
 	// so a misconfigured publisher alone never disables local bans.
@@ -560,18 +577,21 @@ type Proxy struct {
 	masterKey                        string
 	rateLimiter                      *ratelimit.RPMLimiter
 	tokenManager                     *auth.VertexTokenManager
-	routerID                         string                     // Identifier for this router used in /trace responses
-	modelManager                     *models.Manager            // Model manager for getting configured models
-	LiteLLMDB                        litellmdb.Manager          // LiteLLM database integration
-	kafkaLog                         kafkalog.Manager           // Kafka spend-log publishing (optional, analytics write-path)
-	rawBodyLog                       kafkalog.RawBodyManager    // Kafka raw-body publishing (optional, separate topic, failure-only)
-	rawBodyStoreRawBody              bool                       // Mirrors KafkaRawBodiesConfig.StoreRawBody
-	rawBodyStoreOnlyErrors           bool                       // Mirrors KafkaRawBodiesConfig.StoreOnlyErrors
-	rawBodyRedactSensitiveFields     bool                       // Mirrors KafkaRawBodiesConfig.RedactSensitiveFields
-	healthChecker                    HealthChecker              // Cached DB health status (optional)
-	events                           *accountevents.Publisher   // Account outcome events publisher (kafka; nil when disabled)
-	banDecisionsExternal             bool                       // external ban source wired (see recordBanSignal)
-	priceRegistry                    *models.ModelPriceRegistry // Model pricing information (optional)
+	routerID                         string                         // Identifier for this router used in /trace responses
+	modelManager                     *models.Manager                // Model manager for getting configured models
+	LiteLLMDB                        litellmdb.Manager              // LiteLLM database integration
+	kafkaLog                         kafkalog.Manager               // Kafka spend-log publishing (optional, analytics write-path)
+	rawBodyLog                       kafkalog.RawBodyManager        // Kafka raw-body publishing (optional, separate topic, failure-only)
+	routerResponseLog                kafkalog.RouterResponseManager // Kafka router-response publishing (optional, separate topic, every request)
+	routerResponsesEnabled           bool                           // Whether the router-response write-path is on (the manager says so too; this is the cheap check on the hot path)
+	routerResponsesRedact            bool                           // Mirrors KafkaRouterResponsesConfig.RedactSensitiveFields
+	rawBodyStoreRawBody              bool                           // Mirrors KafkaRawBodiesConfig.StoreRawBody
+	rawBodyStoreOnlyErrors           bool                           // Mirrors KafkaRawBodiesConfig.StoreOnlyErrors
+	rawBodyRedactSensitiveFields     bool                           // Mirrors KafkaRawBodiesConfig.RedactSensitiveFields
+	healthChecker                    HealthChecker                  // Cached DB health status (optional)
+	events                           *accountevents.Publisher       // Account outcome events publisher (kafka; nil when disabled)
+	banDecisionsExternal             bool                           // external ban source wired (see recordBanSignal)
+	priceRegistry                    *models.ModelPriceRegistry     // Model pricing information (optional)
 	organizationPolicies             *models.OrganizationPolicyRegistry
 	maxProviderRetries               int                  // Max same-type credential retries on provider errors
 	retryPolicy                      *retryPolicy         // compiled Config.Retry
@@ -692,6 +712,9 @@ func New(cfg *Config) *Proxy {
 		rawBodyStoreRawBody:              cfg.RawBodyStoreRawBody,
 		rawBodyStoreOnlyErrors:           cfg.RawBodyStoreOnlyErrors,
 		rawBodyRedactSensitiveFields:     cfg.RawBodyRedactSensitiveFields,
+		routerResponseLog:                cfg.RouterResponseLog,
+		routerResponsesEnabled:           cfg.RouterResponseLog != nil && cfg.RouterResponseLog.IsEnabled(),
+		routerResponsesRedact:            cfg.RouterResponseRedact,
 		healthChecker:                    cfg.HealthChecker,
 		events:                           cfg.Events,
 		banDecisionsExternal:             cfg.BanDecisionsExternal,
@@ -3275,6 +3298,14 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			resp.Header.Set("Content-Type", "application/json")
 		}
 		logCtx.captureClientResponseID(finalResponseBody)
+		// The body the client is about to receive, captured for the
+		// router-response write-path. Taken here, AFTER the transformations
+		// and BEFORE the cost injection below, so the row shows what the
+		// client got for the content -- the cost fields are re-derived from
+		// the spend log and the row's own usage, and injecting them here
+		// would make the body depend on a toggle that is off in most
+		// deployments.
+		p.captureRouterResponse(logCtx, finalResponseBody, isStreamingResp)
 
 		// Single shared decode of bodyForTokenExtraction for both token-accounting
 		// consumers (plan item G) — the rate-limiter's total-tokens count
