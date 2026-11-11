@@ -8,13 +8,14 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
-	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/propagation"
 )
 
 const (
@@ -51,10 +52,19 @@ func (e *ProxyStatusError) Error() string {
 
 // HTTPClientConfig holds configuration for HTTP client creation
 type HTTPClientConfig struct {
-	Timeout             time.Duration
-	MaxIdleConns        int
-	MaxIdleConnsPerHost int
-	IdleConnTimeout     time.Duration
+	Timeout time.Duration
+	// ResponseHeaderTimeout bounds only the connect+send+wait-for-headers phase
+	// of one upstream attempt — independent of Timeout, which also feeds
+	// TLSHandshakeTimeout. Left at zero it falls back to Timeout (previous
+	// behavior); callers that want a short, dedicated per-attempt deadline
+	// (e.g. config.ServerConfig.ResponseHeaderTimeout) should set this
+	// explicitly instead of lowering Timeout, which would also shrink the TLS
+	// handshake budget and have no effect on a credential that never responds
+	// at all.
+	ResponseHeaderTimeout time.Duration
+	MaxIdleConns          int
+	MaxIdleConnsPerHost   int
+	IdleConnTimeout       time.Duration
 	// HTTP2IdlePingTimeout and HTTP2PingTimeout configure HTTP/2 keepalive pings
 	// (http.HTTP2Config.SendPingTimeout / .PingTimeout) so a pooled connection that
 	// has gone silent — not idle, just unresponsive — gets probed and, if it
@@ -148,14 +158,31 @@ func newTransport(cfg *HTTPClientConfig) *http.Transport {
 		http2PingTimeout = defaultHTTP2PingTimeout
 	}
 
+	// ResponseHeaderTimeout defaults to the shared Timeout (previous behavior)
+	// when not set; a negative value is an explicit opt-out (0 at the
+	// Transport level, matching Go's own "no timeout" meaning), same
+	// convention as the HTTP2 ping fields above.
+	responseHeaderTimeout := cfg.ResponseHeaderTimeout
+	switch {
+	case responseHeaderTimeout < 0:
+		responseHeaderTimeout = 0
+	case responseHeaderTimeout == 0:
+		responseHeaderTimeout = timeout
+	}
+
 	return &http.Transport{
-		Proxy:                 proxyFromRequest,
-		TLSHandshakeTimeout:   timeout, // Timeout for TLS handshake phase
-		ResponseHeaderTimeout: timeout, // Timeout for connect + response headers only
-		MaxIdleConns:          maxIdleConns,
-		MaxIdleConnsPerHost:   maxIdleConnsPerHost,
-		IdleConnTimeout:       idleConnTimeout,
-		DisableKeepAlives:     false,
+		Proxy: proxyFromRequest,
+		// A Transport with its own dial tries HTTP/2 only when told to.
+		DialContext:            dialContext,
+		ForceAttemptHTTP2:      true,
+		GetProxyConnectHeader:  proxyConnectHeader,
+		OnProxyConnectResponse: onProxyConnectResponse,
+		TLSHandshakeTimeout:    timeout,               // Timeout for TLS handshake phase
+		ResponseHeaderTimeout:  responseHeaderTimeout, // Timeout for connect + response headers only — independent per-attempt budget, see HTTPClientConfig.ResponseHeaderTimeout
+		MaxIdleConns:           maxIdleConns,
+		MaxIdleConnsPerHost:    maxIdleConnsPerHost,
+		IdleConnTimeout:        idleConnTimeout,
+		DisableKeepAlives:      false,
 		// Detects a connection that has gone silent (no HTTP/2 frames at all,
 		// including on in-flight streams) and closes it if it doesn't answer a
 		// PING, instead of leaving a dead connection in the pool for up to
@@ -181,6 +208,14 @@ func newTransport(cfg *HTTPClientConfig) *http.Transport {
 	}
 }
 
+func proxyConnectHeader(ctx context.Context, _ *url.URL, _ string) (http.Header, error) {
+	// The CONNECT is written next: its round trip begins here.
+	roundTripFrom(ctx).connectAsked(ctx)
+	header := http.Header{}
+	propagation.TraceContext{}.Inject(ctx, propagation.HeaderCarrier(header))
+	return header, nil
+}
+
 // newRoundTripper is newTransport's transport, or, when cfg.MaxConnectionLifetime
 // is set, one replaced by a new one every MaxConnectionLifetime.
 func newRoundTripper(cfg *HTTPClientConfig) http.RoundTripper {
@@ -202,7 +237,7 @@ func NewHTTPClient(cfg *HTTPClientConfig) *http.Client {
 		// otelhttp creates client spans and injects traceparent into outgoing
 		// requests (providers and chained routers). It uses the global
 		// TracerProvider, which is a no-op unless OTEL is enabled in config.
-		Transport: otelhttp.NewTransport(transport),
+		Transport: instrument(transport),
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 			return http.ErrUseLastResponse
 		},

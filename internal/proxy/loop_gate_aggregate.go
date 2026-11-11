@@ -61,6 +61,7 @@ type aggChoice struct {
 	images          []json.RawMessage
 	annotations     []json.RawMessage
 	toolCalls       map[int]*aggToolCall
+	callByIndex     map[int]int
 	finishReason    *string
 	stopReason      json.RawMessage
 	logprobs        []json.RawMessage
@@ -231,7 +232,7 @@ func (a *chatStreamAggregator) addChunk(chunk *aggStreamChunk, payload []byte) {
 		in := &chunk.Choices[i]
 		c := a.choices[in.Index]
 		if c == nil {
-			c = &aggChoice{index: in.Index, role: "assistant", toolCalls: make(map[int]*aggToolCall)}
+			c = &aggChoice{index: in.Index, role: "assistant", toolCalls: make(map[int]*aggToolCall), callByIndex: make(map[int]int)}
 			a.choices[in.Index] = c
 		}
 		d := &in.Delta
@@ -269,10 +270,23 @@ func (a *chatStreamAggregator) addChunk(chunk *aggStreamChunk, payload []byte) {
 			}
 		}
 		for _, tc := range d.ToolCalls {
-			call := c.toolCalls[tc.Index]
+			slot, ok := c.callByIndex[tc.Index]
+			if !ok {
+				slot = tc.Index
+				c.callByIndex[tc.Index] = slot
+			}
+			call := c.toolCalls[slot]
+			if call != nil && tc.ID != "" && call.id != "" && call.id != tc.ID {
+				slot = tc.Index
+				for c.toolCalls[slot] != nil {
+					slot++
+				}
+				c.callByIndex[tc.Index] = slot
+				call = nil
+			}
 			if call == nil {
-				call = &aggToolCall{index: tc.Index, typ: "function"}
-				c.toolCalls[tc.Index] = call
+				call = &aggToolCall{index: slot, typ: "function"}
+				c.toolCalls[slot] = call
 			}
 			if tc.ID != "" {
 				call.id = tc.ID

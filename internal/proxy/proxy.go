@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mixaill76/auto_ai_router/internal/accountevents"
 	"github.com/mixaill76/auto_ai_router/internal/auth"
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
@@ -28,11 +29,11 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	promanutils "github.com/mixaill76/auto_ai_router/internal/converter/proman/utils"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
+	"github.com/mixaill76/auto_ai_router/internal/deepseektools"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/budget"
-	"github.com/mixaill76/auto_ai_router/internal/logger"
 	"github.com/mixaill76/auto_ai_router/internal/loopgate"
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
@@ -54,6 +55,30 @@ import (
 // Can be overridden via Config.ResponseBodyMultiplier.
 const DefaultResponseBodyMultiplier = 10
 
+// timeoutAttemptBanDuration is how long a credential is banned (for the model
+// that just missed ResponseHeaderTimeout on a real streaming attempt) after
+// one attempt never got a response at all. Short on purpose: this steers the
+// *next* few requests away from a credential that's currently dead/
+// unreachable, not a punishment on the scale of a real provider error
+// (429/5xx) — see fail2ban's own thresholds for those.
+//
+// Also used as the retryAfterSeconds hint sent to the health worker via
+// reportHealth — when ban decisions are external (banDecisionsExternal),
+// this is the only place the ban actually gets decided; this replica picks
+// it back up through the normal Redis/banreader round trip like every other
+// ban reason. The health worker's own error_code_rules must recognize this
+// status code (currently reported as 408) with max_attempts small enough to
+// act on a single occurrence, or the ban effectively never happens anywhere.
+const timeoutAttemptBanDuration = 30 * time.Second
+
+// attemptTimeoutReason is the marker the router puts in an outcome event's
+// "error" field when the failure was an attempt timeout -- an upstream that
+// never sent response headers within the per-attempt budget. The health
+// worker reads it to tell this 408 apart from the other ones (a provider
+// that was merely slow, and which must keep counting towards the
+// soft-failure threshold instead of being banned on the first occurrence).
+const attemptTimeoutReason = "attempt_timeout"
+
 // respCtx returns the context of the request that produced this upstream
 // response (it carries the OTEL span for log/trace correlation), or
 // context.Background() when unavailable (e.g. in unit tests).
@@ -71,6 +96,16 @@ func requestWithPath(r *http.Request, path string) *http.Request {
 	clone := r.Clone(r.Context())
 	clone.URL.Path = path
 	return clone
+}
+
+func upstreamErrorForLog(err error, targetURL string) string {
+	if err == nil {
+		return ""
+	}
+	if targetURL == "" {
+		return err.Error()
+	}
+	return strings.ReplaceAll(err.Error(), targetURL, security.RedactURLForLog(targetURL))
 }
 
 const unsupportedCredentialRequestMessage = "request parameters are not supported by available providers"
@@ -266,14 +301,20 @@ func (logCtx *RequestLogContext) spendModelGroup() string {
 // RequestLogContext holds all data needed for logging a request to LiteLLM DB
 // Filled throughout request processing and logged at the end via defer
 type RequestLogContext struct {
-	RequestID             string                   // Internal request UUID; may be adopted from a trusted inbound traceparent (see requestid.Middleware), so two distinct requests can share this value
-	EventID               string                   // Always server-minted, never client-influenced; used as AirEventID so spend-log collision resolution stays meaningful even when RequestID collides
-	ClientResponseID      string                   // ID returned to the client
-	StartTime             time.Time                // Request start time
-	CompletionStartTime   time.Time                // Timestamp of the first real content/tool/reasoning delta (TTFT), not just the first byte/chunk; zero if not streamed or never reached
-	UpstreamSendTime      time.Time                // Timestamp of the first request handed to an upstream provider (first attempt only; retries do not overwrite). Zero when the request never reached a provider (e.g. all credentials exhausted before send). Together with StartTime this breaks duration_ms into router processing time and upstream time.
-	Request               *http.Request            // HTTP request
-	Token                 string                   // Auth token (raw, will be hashed)
+	RequestID           string        // Internal request UUID; may be adopted from a trusted inbound traceparent (see requestid.Middleware), so two distinct requests can share this value
+	EventID             string        // Always server-minted, never client-influenced; used as AirEventID so spend-log collision resolution stays meaningful even when RequestID collides
+	ClientResponseID    string        // ID returned to the client
+	StartTime           time.Time     // Request start time
+	CompletionStartTime time.Time     // Timestamp of the first real content/tool/reasoning delta (TTFT), not just the first byte/chunk; zero if not streamed or never reached
+	UpstreamSendTime    time.Time     // Timestamp of the first request handed to an upstream provider (first attempt only; retries do not overwrite). Zero when the request never reached a provider (e.g. all credentials exhausted before send). Together with StartTime this breaks duration_ms into router processing time and upstream time.
+	Request             *http.Request // HTTP request
+	Token               string        // Auth token (raw, will be hashed)
+	// DeepSeekToolUsage is the router-run search/fetch loop's own usage: the
+	// summed tokens of its steps and its tool counters. It is applied to the
+	// request's usage after the streaming log has written its figures, so the
+	// loop's steps are billed (the log reads the last chunk's usage, which
+	// carries only the last step's).
+	DeepSeekToolUsage     *converter.TokenUsage
 	PublicModelID         string                   // Client-facing model before alias resolution
 	CanonicalModelID      string                   // Organization canonical public model after scoped admission
 	ModelID               string                   // Model alias name (what client requested)
@@ -296,6 +337,7 @@ type RequestLogContext struct {
 	StickyHeldCredential  string                   // Credential the session stays bound to although it could not take this request (busy or excluded for it)
 	stickyExclude         map[string]bool          // Credentials excluded for this request (denylist, reasoning, tried); used to find the model's best tier
 	stickyRequestExcluded map[string]bool          // Subset excluded only because of this request's shape (reasoning-only credentials)
+	clientServiceTiers    []string                 // service_tier values the client sent, stripped from the body at ingress; checked per credential (see withClientServiceTiers)
 	TargetURL             string                   // Target URL (for APIBase extraction)
 	TokenInfo             *litellmdb.TokenInfo     // User/team/org info
 	IsImageGeneration     bool                     // True if this is an image generation request
@@ -309,6 +351,7 @@ type RequestLogContext struct {
 	RequestEndpoint       string
 	Logged                bool   // True if already logged (prevents duplicate logging)
 	IsResponsesAPI        bool   // True if this is a Responses API request (converted to Chat Completions)
+	IsSystemOne           bool   // True for a /v1/systemone request (native System One API, see systemone.go)
 	RequestCompleted      bool   // True only after the response was fully and successfully delivered
 	ActualCredentialName  string // Real credential name from upstream when Credential.Type == ProviderTypeProxy
 	IsProxyRequest        bool   // True when this request came from another auto_ai_router (HeaderAIRProxyClient)
@@ -378,6 +421,21 @@ type RequestLogContext struct {
 	promptTokensEstimateFn    func() int
 	promptTokensEstimateVal   int
 	promptTokensEstimateReady bool
+
+	// responseCostUSD/responseCostKnown carry the request's final billed cost out
+	// of the spend-log path so the response path can surface it as X-Total-Cost —
+	// but only for organizations that opted in via response_cost_mode (see
+	// setResponseCostHeader). Only the paths whose body is written after that
+	// computation can use it (non-streaming and the reassembled
+	// force_stream_for_ttft paths); a truly streaming response has already sent
+	// its headers. The separate known flag distinguishes a priced $0 request from
+	// one that was never priced.
+	responseCostUSD   float64
+	responseCostKnown bool
+	// responseCostBreakdown is the per-component cost breakdown (JSON), recorded
+	// alongside the total and emitted as X-Cost-Breakdown for organizations whose
+	// response_cost_mode is breakdown. Nil until the cost is computed.
+	responseCostBreakdown []byte
 }
 
 // promptTokensEstimate returns the memoized local tiktoken-based prompt-token estimate,
@@ -410,6 +468,7 @@ type Config struct {
 	MaxIdleConns                 int
 	MaxIdleConnsPerHost          int
 	IdleConnTimeout              time.Duration
+	ResponseHeaderTimeout        time.Duration // Per-attempt budget for connect+response-headers only; only applied when an attempt is sent upstream with "stream": true (default: 4s)
 	HTTP2IdlePingTimeout         time.Duration // See httputil.HTTPClientConfig.HTTP2IdlePingTimeout (default: 15s)
 	HTTP2PingTimeout             time.Duration // See httputil.HTTPClientConfig.HTTP2PingTimeout (default: 10s)
 	MaxConnectionLifetime        time.Duration // See httputil.HTTPClientConfig.MaxConnectionLifetime (default: 0, connections are kept while reused)
@@ -420,32 +479,46 @@ type Config struct {
 	ModelManager                 *models.Manager
 	Version                      string
 	Commit                       string
-	LiteLLMDB                    litellmdb.Manager          // LiteLLM database integration (optional)
-	KafkaLog                     kafkalog.Manager           // Kafka spend-log publishing (optional, analytics write-path)
-	RawBodyLog                   kafkalog.RawBodyManager    // Kafka raw-body publishing (optional, separate topic, failure-only)
-	RawBodyStoreRawBody          bool                       // Mirrors KafkaRawBodiesConfig.StoreRawBody
-	RawBodyStoreOnlyErrors       bool                       // Mirrors KafkaRawBodiesConfig.StoreOnlyErrors
-	RawBodyRedactSensitiveFields bool                       // Mirrors KafkaRawBodiesConfig.RedactSensitiveFields
-	HealthChecker                HealthChecker              // Optional: cached DB health status (updated by health monitor)
-	PriceRegistry                *models.ModelPriceRegistry // Model pricing information (optional)
-	OrganizationPolicies         *models.OrganizationPolicyRegistry
-	MaxProviderRetries           int                 // Max same-type credential retries (default: 2)
-	MaxFallbackAttempts          int                 // Max fallback proxy hops per request chain (default: 5)
-	Retry                        config.RetryConfig  // Which upstream errors are replayed on another credential (zero value = built-in policy)
-	ResponseStore                responsestore.Store // Optional: Responses API store (bbolt or Redis)
-	SessionStickyEnabled         bool
-	SessionStickyAutoCacheCtrl   bool // Auto-inject Anthropic cache_control markers when session is active (default: true)
-	SessionStoreTTL              time.Duration
-	SessionStoreRedis            valkey.Client // Optional: share session bindings between replicas (nil = replica-local)
-	SessionStoreKeyPrefix        string        // Redis key prefix for session bindings (the deployment's redis.key_prefix)
-	RouterID                     string        // Human-readable name for this router (shown in /trace); defaults to hostname
-	DrainUpstreamOnAbort         bool          // When true, keep reading upstream after client disconnect to get real usage (default: false)
-	ForceStreamForTTFT           bool          // When true, force stream:true upstream for non-streaming chat requests and reassemble the response back to non-stream JSON (default: false)
-	ResponseCompatibility        string
-	TiktokenEnabled              bool // Local tiktoken-based prompt/completion token fallback estimation (default: true)
-	StrictAllTeamModelsACL       bool
-	ResponseHeaderMode           config.ResponseHeaderMode
-	CredentialNameAsTeamID       bool
+	ServiceName                  string                   // otel.service_name: the deployment's name on every spend event (service_name)
+	LiteLLMDB                    litellmdb.Manager        // LiteLLM database integration (optional)
+	KafkaLog                     kafkalog.Manager         // Kafka spend-log publishing (optional, analytics write-path)
+	RawBodyLog                   kafkalog.RawBodyManager  // Kafka raw-body publishing (optional, separate topic, failure-only)
+	RawBodyStoreRawBody          bool                     // Mirrors KafkaRawBodiesConfig.StoreRawBody
+	RawBodyStoreOnlyErrors       bool                     // Mirrors KafkaRawBodiesConfig.StoreOnlyErrors
+	RawBodyRedactSensitiveFields bool                     // Mirrors KafkaRawBodiesConfig.RedactSensitiveFields
+	HealthChecker                HealthChecker            // Optional: cached DB health status (updated by health monitor)
+	Events                       *accountevents.Publisher // Optional: outcome events -> health worker (kafka)
+	// BanDecisionsExternal gates the local fail2ban counters: true only
+	// when an external ban source (the worker's reader) is actually wired,
+	// so a misconfigured publisher alone never disables local bans.
+	BanDecisionsExternal      bool
+	PriceRegistry             *models.ModelPriceRegistry // Model pricing information (optional)
+	OrganizationPolicies      *models.OrganizationPolicyRegistry
+	MaxProviderRetries        int                        // Max same-type credential retries (default: 2)
+	MaxFallbackAttempts       int                        // Max fallback proxy hops per request chain (default: 5)
+	AnthropicDefaultMaxTokens int                        // max_tokens sent to a Claude model when the client sends none (default: 32000)
+	DeepSeekTools             config.DeepSeekToolsConfig // The router-run DeepSeek Search/Fetch adapter's settings
+	// DeepSeekToolsRedisClient, when set, backs the adapter's per-account QPS
+	// pools so the limit is shared by the router's replicas and platforms. A
+	// nil client keeps the pools in-process.
+	DeepSeekToolsRedisClient valkey.Client
+	// DeepSeekToolsKeyPrefix namespaces the adapter's Redis keys.
+	DeepSeekToolsKeyPrefix     string
+	Retry                      config.RetryConfig  // Which upstream errors are replayed on another credential (zero value = built-in policy)
+	ResponseStore              responsestore.Store // Optional: Responses API store (bbolt or Redis)
+	SessionStickyEnabled       bool
+	SessionStickyAutoCacheCtrl bool // Auto-inject Anthropic cache_control markers when session is active (default: true)
+	SessionStoreTTL            time.Duration
+	SessionStoreRedis          valkey.Client // Optional: share session bindings between replicas (nil = replica-local)
+	SessionStoreKeyPrefix      string        // Redis key prefix for session bindings (the deployment's redis.key_prefix)
+	RouterID                   string        // Human-readable name for this router (shown in /trace); defaults to hostname
+	DrainUpstreamOnAbort       bool          // When true, keep reading upstream after client disconnect to get real usage (default: false)
+	ForceStreamForTTFT         bool          // When true, force stream:true upstream for non-streaming chat requests and reassemble the response back to non-stream JSON (default: false)
+	ResponseCompatibility      string
+	TiktokenEnabled            bool // Local tiktoken-based prompt/completion token fallback estimation (default: true)
+	StrictAllTeamModelsACL     bool
+	ResponseHeaderMode         config.ResponseHeaderMode
+	CredentialNameAsTeamID     bool
 
 	BudgetReserver                   *budget.Reserver      // Atomic Redis budget reservation (nil if Redis disabled — feature is a no-op)
 	KeyRateLimiter                   *ratelimit.RPMLimiter // Key/user/team/org RPM/TPM enforcement (nil if Redis disabled)
@@ -460,8 +533,40 @@ type Config struct {
 }
 
 type Proxy struct {
-	balancer                         *balancer.RoundRobin
-	client                           *http.Client
+	balancer *balancer.RoundRobin
+	client   *http.Client
+	// streamingClients holds one *http.Client per distinct positive
+	// ResponseHeaderTimeout actually in effect (the server-level default
+	// and/or individual credentials' own overrides -- see
+	// config.CredentialConfig.ResponseHeaderTimeout), keyed by that
+	// time.Duration. Built lazily by attemptClient: credentials can arrive
+	// after New() (DB-sourced, balancer.UpdateDBCredentials), so there is no
+	// fixed set to pre-build from at startup. Shared across every credential
+	// that resolves to the same value, not one *http.Client per credential:
+	// a distinct ResponseHeaderTimeout needs a distinct *http.Transport
+	// (Go enforces it per-Transport), which means a distinct connection
+	// pool, and handing those out more liberally than "one per distinct
+	// value actually configured" is exactly what caused the 2026-11-06
+	// gpt-6-luna incident.
+	//
+	// The map's size is bounded today only by how many distinct values an
+	// operator actually writes into static config -- DB-sourced credentials
+	// (balancer.UpdateDBCredentials) never carry their own
+	// ResponseHeaderTimeout, so they always resolve to the one server-level
+	// default. If that ever changes, a distinct value per DB-sourced
+	// credential would need capping or deduplicating before it reaches here,
+	// since each one still buys a full connection pool (MaxIdleConns).
+	streamingClients sync.Map
+	// streamingClientBaseCfg is httpClientCfg's settings minus
+	// ResponseHeaderTimeout -- the template attemptClient clones and sets
+	// ResponseHeaderTimeout on when it needs to build a new entry in
+	// streamingClients.
+	streamingClientBaseCfg httputil.HTTPClientConfig
+	// globalResponseHeaderTimeout mirrors Config.ResponseHeaderTimeout (the
+	// server-level default): a credential without its own override falls
+	// back to this. <= 0 means off, same convention as the per-credential
+	// field.
+	globalResponseHeaderTimeout      time.Duration
 	logger                           *slog.Logger
 	maxBodySizeMB                    int
 	maxResponseBodySize              int64 // Pre-computed max response body size in bytes
@@ -479,17 +584,25 @@ type Proxy struct {
 	rawBodyStoreOnlyErrors           bool                       // Mirrors KafkaRawBodiesConfig.StoreOnlyErrors
 	rawBodyRedactSensitiveFields     bool                       // Mirrors KafkaRawBodiesConfig.RedactSensitiveFields
 	healthChecker                    HealthChecker              // Cached DB health status (optional)
+	events                           *accountevents.Publisher   // Account outcome events publisher (kafka; nil when disabled)
+	banDecisionsExternal             bool                       // external ban source wired (see recordBanSignal)
 	priceRegistry                    *models.ModelPriceRegistry // Model pricing information (optional)
 	organizationPolicies             *models.OrganizationPolicyRegistry
-	maxProviderRetries               int                 // Max same-type credential retries on provider errors
-	retryPolicy                      *retryPolicy        // compiled Config.Retry
-	maxFallbackAttempts              int                 // Max fallback proxy hops per request chain
-	responseStore                    responsestore.Store // Optional: Responses API store (bbolt or Redis)
-	sessionStore                     sessionBindingStore // Optional: session-sticky credential routing
-	stickyAutoCacheCtrl              bool                // Auto-inject Anthropic cache_control when session is active
-	drainUpstreamOnAbort             bool                // Keep reading upstream after client disconnect to get real usage chunk
-	forceStreamForTTFT               bool                // Force stream:true upstream for non-streaming chat requests and reassemble the response back to non-stream JSON (TTFT on every request)
-	tiktokenEnabled                  bool                // Local tiktoken-based prompt/completion token fallback estimation
+	maxProviderRetries               int                  // Max same-type credential retries on provider errors
+	retryPolicy                      *retryPolicy         // compiled Config.Retry
+	maxFallbackAttempts              int                  // Max fallback proxy hops per request chain
+	anthropicDefaultMaxTokens        int                  // max_tokens sent to a Claude model when the client sends none (0 = config.AnthropicDefaultMaxTokens)
+	deepSeekToolsEnabled             bool                 // the router runs DeepSeek's own Search/Fetch tools for models that cannot
+	deepSeekToolsTimeout             time.Duration        // timeout of one Search/Fetch call
+	deepSeekToolsMaxSteps            int                  // bound of the router-run tool loop
+	deepSeekToolsMaxRetries          int                  // retries of a Search/Fetch call after a 429 or 5xx
+	deepSeekToolsQuota               *deepseektools.Quota // per-account QPS pools for Search and Fetch
+	responseStore                    responsestore.Store  // Optional: Responses API store (bbolt or Redis)
+	sessionStore                     sessionBindingStore  // Optional: session-sticky credential routing
+	stickyAutoCacheCtrl              bool                 // Auto-inject Anthropic cache_control when session is active
+	drainUpstreamOnAbort             bool                 // Keep reading upstream after client disconnect to get real usage chunk
+	forceStreamForTTFT               bool                 // Force stream:true upstream for non-streaming chat requests and reassemble the response back to non-stream JSON (TTFT on every request)
+	tiktokenEnabled                  bool                 // Local tiktoken-based prompt/completion token fallback estimation
 	strictAllTeamModelsACL           bool
 	responseHeaderMode               config.ResponseHeaderMode
 	credentialNameAsTeamID           bool
@@ -508,6 +621,7 @@ type Proxy struct {
 	responseCompat                   *compatlitellm.Transformer
 	version                          string
 	commit                           string
+	serviceName                      string // Config.ServiceName
 }
 
 func New(cfg *Config) *Proxy {
@@ -516,6 +630,12 @@ func New(cfg *Config) *Proxy {
 	}
 
 	// Create HTTP client using centralized factory with request-specific timeout
+	// Deliberately NOT setting ResponseHeaderTimeout here: this is the client used
+	// for any attempt that isn't known to be a real streaming call upstream (image
+	// generation, embeddings, non-streaming Responses API, etc.) — those providers
+	// hold back headers until the whole answer is ready, so a short header timeout
+	// would time out the entire generation, not just a dead connection. See
+	// streamingClientCfg below for the short-timeout path.
 	httpClientCfg := httputil.DefaultHTTPClientConfig()
 	httpClientCfg.Timeout = cfg.RequestTimeout
 	httpClientCfg.MaxIdleConns = cfg.MaxIdleConns
@@ -524,6 +644,17 @@ func New(cfg *Config) *Proxy {
 	httpClientCfg.HTTP2IdlePingTimeout = cfg.HTTP2IdlePingTimeout
 	httpClientCfg.HTTP2PingTimeout = cfg.HTTP2PingTimeout
 	httpClientCfg.MaxConnectionLifetime = cfg.MaxConnectionLifetime
+
+	client := httputil.NewHTTPClient(httpClientCfg)
+	// streamingClientBaseCfg is the template attemptClient clones per distinct
+	// ResponseHeaderTimeout it needs to build a client for -- see the field's
+	// doc comment on Proxy for why this is lazy and shared, not one client
+	// per credential or one shared split pool: both of those are exactly what
+	// caused the 2026-11-06 gpt-6-luna incident (see git history of this
+	// file). No idle-conn budget split here: a credential opting into this is
+	// expected to be the exception, not nearly all traffic, so its pool is
+	// sized the same as the default client's rather than carved out of it.
+	streamingClientBaseCfg := *httpClientCfg
 
 	// Compute max response body size from multiplier
 	multiplier := cfg.ResponseBodyMultiplier
@@ -567,7 +698,7 @@ func New(cfg *Config) *Proxy {
 		responseCompat = compatlitellm.New()
 	}
 
-	return &Proxy{
+	p := &Proxy{
 		routerID:                         routerID,
 		balancer:                         cfg.Balancer,
 		logger:                           cfg.Logger,
@@ -586,10 +717,17 @@ func New(cfg *Config) *Proxy {
 		rawBodyStoreOnlyErrors:           cfg.RawBodyStoreOnlyErrors,
 		rawBodyRedactSensitiveFields:     cfg.RawBodyRedactSensitiveFields,
 		healthChecker:                    cfg.HealthChecker,
+		events:                           cfg.Events,
+		banDecisionsExternal:             cfg.BanDecisionsExternal,
 		priceRegistry:                    cfg.PriceRegistry,
 		organizationPolicies:             cfg.OrganizationPolicies,
 		maxProviderRetries:               cfg.MaxProviderRetries,
 		maxFallbackAttempts:              cfg.MaxFallbackAttempts,
+		anthropicDefaultMaxTokens:        cfg.AnthropicDefaultMaxTokens,
+		deepSeekToolsEnabled:             cfg.DeepSeekTools.Enabled,
+		deepSeekToolsTimeout:             cfg.DeepSeekTools.RequestTimeout,
+		deepSeekToolsMaxSteps:            cfg.DeepSeekTools.MaxSteps,
+		deepSeekToolsMaxRetries:          cfg.DeepSeekTools.MaxRetries,
 		retryPolicy:                      newRetryPolicy(cfg.Retry),
 		responseStore:                    cfg.ResponseStore,
 		sessionStore:                     sessionStore,
@@ -611,10 +749,90 @@ func New(cfg *Config) *Proxy {
 		serverWriteTimeout:               cfg.ServerWriteTimeout,
 		keyMetrics:                       cfg.KeyMetrics,
 		responseCompat:                   responseCompat,
-		client:                           httputil.NewHTTPClient(httpClientCfg),
+		client:                           client,
+		streamingClientBaseCfg:           streamingClientBaseCfg,
+		globalResponseHeaderTimeout:      cfg.ResponseHeaderTimeout,
 		version:                          cfg.Version,
 		commit:                           cfg.Commit,
+		serviceName:                      cfg.ServiceName,
 	}
+	// The adapter's own settings fall back to their defaults, so an absent
+	// section still gives a working adapter with the provider's own limits.
+	// The adapter is on unless the configuration turns it off: it only ever
+	// engages for a credential that asked for it (the deepseek_tools opt-in)
+	// and a request that asked for one of the built-in tools, so leaving it
+	// on by default costs nothing on every other request.
+	p.deepSeekToolsEnabled = true
+	if p.deepSeekToolsTimeout <= 0 {
+		p.deepSeekToolsTimeout = config.DefaultDeepSeekToolsRequestTimeout
+	}
+	if p.deepSeekToolsMaxSteps <= 0 {
+		p.deepSeekToolsMaxSteps = config.DefaultDeepSeekToolsMaxSteps
+	}
+	if p.deepSeekToolsMaxRetries < 0 {
+		p.deepSeekToolsMaxRetries = config.DefaultDeepSeekToolsMaxRetries
+	}
+	// The QPS pools are per DeepSeek account, so they have to be shared by
+	// the router's replicas: a Redis-backed pool does that, an in-process one
+	// does not (it is the fallback when Redis is unavailable).
+	p.deepSeekToolsQuota = deepseektools.NewQuota(
+		cfg.DeepSeekToolsRedisClient,
+		cfg.DeepSeekToolsKeyPrefix,
+		cfg.DeepSeekTools.SearchQPS,
+		cfg.DeepSeekTools.FetchQPS,
+	)
+	return p
+}
+
+// effectiveResponseHeaderTimeout resolves the ResponseHeaderTimeout budget
+// that applies to cred: its own override (config.CredentialConfig.
+// ResponseHeaderTimeout), if that is anything other than zero, otherwise the
+// server-level default (server.response_header_timeout). The two zero-ish
+// inputs are never conflated: a cred left unset (0) always inherits the
+// server default, including a positive one, while a cred explicitly set
+// negative always disables the budget for itself, including when the server
+// default is positive. See attemptClient for the one place this distinction
+// stops mattering.
+func (p *Proxy) effectiveResponseHeaderTimeout(cred *config.CredentialConfig) time.Duration {
+	if cred != nil && cred.ResponseHeaderTimeout != 0 {
+		return cred.ResponseHeaderTimeout
+	}
+	return p.globalResponseHeaderTimeout
+}
+
+// attemptClient returns the *http.Client to send cred's attempt on, and
+// whether the attempt-timeout ban applies to it. useFastHeaderClient must
+// already reflect that this specific attempt is sent upstream with
+// "stream": true (see its own doc comment at the call site) -- a credential
+// whose own override or the server default is positive still gets the plain
+// client when that is not the case (image generation, embeddings,
+// non-streaming Responses API: see the client field's doc comment for why).
+func (p *Proxy) attemptClient(cred *config.CredentialConfig, useFastHeaderClient bool) (client *http.Client, timeoutEnabled bool) {
+	if !useFastHeaderClient {
+		return p.client, false
+	}
+	timeout := p.effectiveResponseHeaderTimeout(cred)
+	if timeout <= 0 {
+		// <= 0 collapses two different sources back into one outcome: cred
+		// never had a budget to begin with (its own override and the server
+		// default both zero), or cred explicitly opted out of a positive
+		// server default (a negative override). effectiveResponseHeaderTimeout
+		// tells those apart; past this point there is nothing left to tell
+		// apart -- neither case has a budget to enforce or a ban to apply.
+		return p.client, false
+	}
+	if v, ok := p.streamingClients.Load(timeout); ok {
+		return v.(*http.Client), true
+	}
+	cfg := p.streamingClientBaseCfg
+	cfg.ResponseHeaderTimeout = timeout
+	built := httputil.NewHTTPClient(&cfg)
+	// LoadOrStore, not Store: two goroutines racing to build the same new
+	// timeout's client both succeed, but only one's result survives -- the
+	// loser's client is simply unused and garbage-collected, never a leak
+	// (no background goroutines, no open connections yet).
+	actual, _ := p.streamingClients.LoadOrStore(timeout, built)
+	return actual.(*http.Client), true
 }
 
 // Start launches background workers owned by Proxy.
@@ -726,6 +944,14 @@ func (p *Proxy) GetVersion() string {
 // GetCommit returns the build commit hash.
 func (p *Proxy) GetCommit() string {
 	return p.commit
+}
+
+// GetRouterID returns this router's identity, the same value the proxy writes
+// as kafkalog.SpendEvent.ServerRouterID. Non-LLM handlers that publish their
+// own spend events (internal/yandexsearch) read it through this accessor
+// rather than duplicating the hostname-fallback logic.
+func (p *Proxy) GetRouterID() string {
+	return p.routerID
 }
 
 // ProxyResponse holds response details from a proxy credential
@@ -853,7 +1079,7 @@ func (p *Proxy) executeProxyRequest(
 	body = forceWebSearchResultsForPath(r.URL.Path, body)
 	proxyReq, err := http.NewRequestWithContext(httputil.WithProxyURL(upstreamCtx, cred.ProxyURL), r.Method, targetURL, bytes.NewReader(body)) //nolint:gosec // G704: targetURL's host is proxyBaseURL from a configured credential, not attacker-controlled — only the path/query comes from the incoming request
 	if err != nil {
-		p.logger.ErrorContext(r.Context(), "Failed to create proxy request", "error", err, "url", targetURL)
+		p.logger.ErrorContext(r.Context(), "Failed to create proxy request", "error", upstreamErrorForLog(err, targetURL), "url", security.RedactURLForLog(targetURL))
 		return nil, err
 	}
 
@@ -872,6 +1098,7 @@ func (p *Proxy) executeProxyRequest(
 
 	// Send request
 	p.stampFirstUpstreamSend(logCtx)
+	httputil.AttemptsFrom(proxyReq.Context()).Begin(cred.Name)
 	resp, err := p.client.Do(proxyReq) //nolint:gosec // G704: same targetURL as above, host isn't attacker-controlled
 	if err != nil {
 		if isClientCanceledTransportError(r, err) {
@@ -882,8 +1109,8 @@ func (p *Proxy) executeProxyRequest(
 			p.logger.DebugContext(r.Context(), "Proxy request aborted: client disconnected",
 				"credential", cred.Name,
 				"model", modelID,
-				"error", err,
-				"url", targetURL,
+				"error", upstreamErrorForLog(err, targetURL),
+				"url", security.RedactURLForLog(targetURL),
 			)
 			return nil, err
 		}
@@ -896,21 +1123,22 @@ func (p *Proxy) executeProxyRequest(
 			p.logger.WarnContext(r.Context(), "Proxy request timeout",
 				"credential", cred.Name,
 				"model", modelID,
-				"error", err,
-				"url", targetURL,
+				"error", upstreamErrorForLog(err, targetURL),
+				"url", security.RedactURLForLog(targetURL),
 			)
 		} else {
 			p.logger.WarnContext(r.Context(), "Failed to proxy request",
 				"credential", cred.Name,
 				"model", modelID,
-				"error", err,
-				"url", targetURL,
+				"error", upstreamErrorForLog(err, targetURL),
+				"url", security.RedactURLForLog(targetURL),
 			)
 		}
 		// Proxy/AIR credentials are dynamic relays — don't record them in fail2ban.
 		// Their 429/5xx reflect downstream capacity, not a permanent credential failure.
 		if !cred.IsProxyLike() {
-			p.balancer.RecordResponse(cred.Name, modelID, statusCode)
+			p.recordBanSignal(cred, modelID, statusCode)
+			p.reportHealth(string(cred.Type), cred.Name, modelID, statusCode, 0)
 		}
 		// Per-attempt failure — tracked separately from the client-facing
 		// RequestsTotal/RequestDuration metrics, which the caller records exactly
@@ -920,7 +1148,9 @@ func (p *Proxy) executeProxyRequest(
 	}
 	// Proxy/AIR credentials are dynamic relays — don't record them in fail2ban.
 	if !cred.IsProxyLike() {
-		p.balancer.RecordResponse(cred.Name, modelID, resp.StatusCode)
+		p.recordBanSignal(cred, modelID, resp.StatusCode)
+		p.reportHealth(string(cred.Type), cred.Name, modelID, resp.StatusCode,
+			httputil.RetryAfterSeconds(resp.Header.Get("Retry-After")))
 	}
 	if resp.StatusCode != http.StatusOK {
 		p.metrics.RecordCredentialAttemptError(cred.Name)
@@ -928,7 +1158,7 @@ func (p *Proxy) executeProxyRequest(
 
 	p.logger.DebugContext(r.Context(), "Proxy request forwarded",
 		"credential", cred.Name,
-		"target_url", targetURL,
+		"target_url", security.RedactURLForLog(targetURL),
 		"status_code", resp.StatusCode,
 		"duration", time.Since(start),
 	)
@@ -1023,7 +1253,9 @@ func (p *Proxy) WithResponseCompatibility(
 	r *http.Request,
 	next func(http.ResponseWriter, *http.Request),
 ) {
-	if p.responseCompat == nil || r.URL.Path == "/v1/messages" {
+	// Native Anthropic Messages and System One replies are not OpenAI-shaped:
+	// the LiteLLM layer would rewrite and drop fields of them (nulls included).
+	if p.responseCompat == nil || r.URL.Path == "/v1/messages" || isSystemOnePath(r.URL.Path) {
 		next(w, r)
 		return
 	}
@@ -1035,6 +1267,562 @@ func (p *Proxy) WithResponseCompatibility(
 	if err := writer.Close(); err != nil {
 		p.logger.DebugContext(r.Context(), "Failed to write LiteLLM-compatible response", "error", err)
 	}
+}
+
+// nextRetryCredential picks the next untried credential for modelID via the
+// balancer (respecting triedCreds/attemptedCreds/logCtx.Scope exactly as
+// proxyRequest's main retry loop does), prepares the request for it, and
+// resolves its billing price -- skipping (and marking tried) any candidate
+// that fails preparation or has no resolvable price. ready=false means no
+// usable candidate was found; the caller stops retrying. Shared by
+// proxyRequest's own loop and handleSimulatedNonStream's retry
+// (stream_simulated.go) -- the only reason this exists as its own method
+// rather than staying inlined.
+//
+// rateLimited reports that the balancer refused because every candidate was
+// rate-limited (RPM/TPM saturated or a full tier), as opposed to there being
+// no candidate at all. The two are different failures for the client: the
+// first is a 429 with a Retry-After ("come back later"), the second a 503
+// ("this model has no capacity right now"). The balancer already
+// distinguishes them (ErrRateLimitExceeded vs ErrNoCredentialsAvailable);
+// without this flag that distinction dies here, and a request whose only
+// credential was momentarily over its limit surfaces as a generic 502
+// ("All provider attempts failed") instead.
+func (p *Proxy) nextRetryCredential(
+	r *http.Request,
+	logCtx *RequestLogContext,
+	modelID string,
+	cred *config.CredentialConfig,
+	prepared *orchestratedRequest,
+	streaming bool,
+	attempt int,
+	triedCreds, attemptedCreds map[string]bool,
+) (nextCred *config.CredentialConfig, nextReq credentialPreparedRequest, ready bool, rateLimited bool) {
+	for {
+		candidate, err := p.balancer.NextRetryForModelExcludingScoped(modelID, cred, triedCreds, attemptedCreds, logCtx.Scope)
+		if err != nil {
+			p.logger.DebugContext(r.Context(), "No more retry credentials available",
+				"model", modelID, "attempt", attempt, "error", err)
+			return nil, credentialPreparedRequest{}, false, errors.Is(err, balancer.ErrRateLimitExceeded)
+		}
+		preparedRetry, prepErr := p.prepareRequestForCredential(
+			r,
+			prepared.baseBody,
+			prepared.baseProxyBody,
+			modelID,
+			prepared.baseRealModelID,
+			prepared.basePath,
+			streaming,
+			candidate,
+			prepared.isResponsesAPI,
+			prepared.responsesPrevHandled,
+			prepared.stickyCacheEligible,
+		)
+		if prepErr == nil {
+			publicModelID := logCtx.PublicModelID
+			if publicModelID == "" {
+				publicModelID = modelID
+			}
+			retryPriceModelID, retryPrice := p.resolveRetryBillingPrice(
+				logCtx, publicModelID, modelID, preparedRetry.realModelID,
+			)
+			if retryPrice == nil && p.spendTrackingEnabled() {
+				triedCreds[candidate.Name] = true
+				p.logger.ErrorContext(r.Context(), "Retry credential skipped: model price unavailable",
+					"credential", candidate.Name,
+					"model", modelID,
+					"real_model", preparedRetry.realModelID,
+					"request_id", logCtx.RequestID)
+				continue
+			}
+			logCtx.ModelPrice = retryPrice
+			logCtx.PriceModelID = retryPriceModelID
+			logCtx.billingPriceResolved = true
+			logCtx.billingPriceModelID = retryPriceModelID
+			logCtx.billingPrice = retryPrice
+			return candidate, preparedRetry, true, false
+		}
+		triedCreds[candidate.Name] = true
+		p.logger.WarnContext(r.Context(), "Failed to prepare retry request for credential",
+			"credential", candidate.Name,
+			"provider", string(candidate.Type),
+			"model", modelID,
+			"attempt", attempt,
+			"error", prepErr)
+	}
+}
+
+// credentialSendOutcome bundles everything proxyRequest needs from a
+// successful sendToCredential call to continue processing the response:
+// closing the body, classifying isStreamingResp, and the later
+// Gemini-continuation / response-conversion code that reads
+// conv/provResponses/requestBody/proxyReq, all built inside sendToCredential.
+type credentialSendOutcome struct {
+	resp             *http.Response
+	conv             *converter.ProviderConverter
+	provResponses    responses.ProviderResponses
+	targetURL        string
+	requestBody      []byte
+	proxyReq         *http.Request
+	loopGateForced   *loopGateForcedStream
+	fanOutInputFault bool
+	fannedOut        bool
+}
+
+// sendToCredential builds and sends the actual upstream request for cred --
+// the shared implementation behind proxyRequest's main retry loop and
+// handleSimulatedNonStream's retry (stream_simulated.go). On a fatal,
+// non-retryable failure (conversion/validation error, request-build failure,
+// an oversized fanned-out reply) it writes the client response itself
+// (exactly as proxyRequest's inline code did) and returns done=true -- the
+// caller must return immediately without writing anything else.
+// isClientGone=true means the client already left: stop retrying entirely
+// (not a credential failure); transportErr is still set the same way the
+// original inline code set it (for the final "no response" tail's
+// classification) but shouldRetry is always false here. Otherwise
+// shouldRetry=true means a retryable failure the caller should try the next
+// credential for, with retryReason and transportErr set exactly the way
+// proxyRequest's inline code set them (including its one asymmetry: a Vertex
+// token failure sets retryReason but leaves transportErr nil, same as
+// today). p.balancer.RecordResponse and p.metrics.RecordCredentialAttemptError
+// are already called internally for every retryable case -- the caller must
+// not call them again for the same attempt. attemptedCreds is mutated here
+// exactly where the original inline code mutated it (marking cred attempted
+// right before the actual send).
+func (p *Proxy) sendToCredential(
+	r *http.Request,
+	w http.ResponseWriter,
+	logCtx *RequestLogContext,
+	cred *config.CredentialConfig,
+	prepared *orchestratedRequest,
+	modelID, realModelID string,
+	body []byte,
+	streaming, isEmbeddings, isImageEdit bool,
+	attempt int,
+	start time.Time,
+	attemptedCreds map[string]bool,
+	embedFanOutReplies *embedContentFanOutReplies,
+) (outcome credentialSendOutcome, done bool, isClientGone bool, shouldRetry bool, retryReason RetryReason, transportErr error) {
+	body = p.applyAnthropicDefaultMaxTokens(cred, prepared, realModelID, body)
+
+	// Create converter and build request body / target URL.
+	// nativeResponses path uses ProviderResponses (Vertex AI, Anthropic) directly.
+	// All other paths use the Chat Completions ProviderConverter.
+	var requestBody []byte
+	var conv *converter.ProviderConverter
+	var provResponses responses.ProviderResponses
+	var targetURL string
+	if prepared.nativeResponses {
+		// force_stream_for_ttft: when the toggle forced a non-streaming
+		// client request to stream upstream, the provider converter must
+		// build the streaming request (Vertex's stream switch lives in the
+		// URL, driven by IsStreaming). The response path then reassembles
+		// the SSE back into non-stream JSON.
+		nativeStreaming := streaming || prepared.forcedNativeNonStream
+		mode := responses.ResponsesRequestMode{
+			ModelID:        realModelID,
+			DisplayModelID: modelID,
+			IsStreaming:    nativeStreaming,
+		}
+		provResponses = responses.NewProviderResponses(cred.EffectiveProviderType(), mode)
+		if provResponses == nil {
+			p.logger.ErrorContext(r.Context(), "Native Responses converter unavailable",
+				"error_code", http.StatusInternalServerError,
+				"credential", cred.Name, "provider", string(cred.Type),
+				"model", modelID,
+				"request_id", logCtx.RequestID)
+			logCtx.Status = "failure"
+			logCtx.HTTPStatus = http.StatusInternalServerError
+			logCtx.ErrorMsg = "Native Responses converter unavailable"
+			logCtx.TargetURL = cred.BaseURL
+			WriteErrorInternal(w, "Failed to convert request")
+			return credentialSendOutcome{}, true, false, false, "", nil
+		}
+		var convErr error
+		requestBody, _, convErr = provResponses.RequestFrom(body)
+		if convErr != nil {
+			var validationErr *converterutil.RequestValidationError
+			if errors.As(convErr, &validationErr) {
+				status := statusForValidationError(validationErr)
+				p.logger.WarnContext(r.Context(), "Invalid Responses API request for provider format",
+					"error_code", status,
+					"credential", cred.Name, "provider", string(cred.Type),
+					"model", modelID, "error", convErr,
+					"request_id", logCtx.RequestID)
+				logCtx.Status = "failure"
+				logCtx.HTTPStatus = status
+				logCtx.ErrorMsg = convErr.Error()
+				logCtx.TargetURL = cred.BaseURL
+				writeValidationError(w, validationErr, convErr.Error())
+				return credentialSendOutcome{}, true, false, false, "", nil
+			}
+			p.logger.ErrorContext(r.Context(), "Failed to convert Responses API request to provider format",
+				"error_code", http.StatusInternalServerError,
+				"credential", cred.Name, "provider", string(cred.Type),
+				"model", modelID, "error", convErr,
+				"request_id", logCtx.RequestID)
+			logCtx.Status = "failure"
+			logCtx.HTTPStatus = http.StatusInternalServerError
+			logCtx.ErrorMsg = fmt.Sprintf("Request conversion failed: %v", convErr)
+			logCtx.TargetURL = cred.BaseURL
+			WriteErrorInternal(w, "Failed to convert request")
+			return credentialSendOutcome{}, true, false, false, "", nil
+		}
+		targetURL = provResponses.BuildURL(cred)
+	} else {
+		// Use realModelID for URL construction and body conversion (provider-facing name).
+		// modelID (alias) is used for credential selection and rate limiting.
+		conv = converter.New(cred.EffectiveProviderType(), converter.RequestMode{
+			IsImageGeneration: logCtx.IsImageGeneration,
+			IsImageEdit:       isImageEdit,
+			IsEmbeddings:      isEmbeddings,
+			// forcedChatNonStream: force_stream_for_ttft forced a non-streaming
+			// chat request to stream upstream. For Vertex/Gemini the streaming
+			// switch lives in the URL, not the body, so IsStreaming must be true
+			// here or the upstream stays non-streaming and TTFT goes unmeasured
+			// (see applyForceStream).
+			IsStreaming: streaming || prepared.forcedChatNonStream,
+			// prepared.convertedToResponses means body is already
+			// Responses-shaped here too (orchestrator.go's
+			// ChatRequestToResponses, for a responses_only model) -- not
+			// just the passthrough case. Without it, the default-provider
+			// branch's `!c.mode.IsResponsesAPI` check (converter.go)
+			// mistakes it for a Chat-shaped body and runs
+			// ConvertWebSearchTools/ForceWebSearchResults on it, which
+			// silently drops every non-function/non-web_search hosted
+			// tool (code_interpreter, file_search, image_generation, mcp,
+			// custom, ...) and its tool_choice -- tools the Responses API
+			// (unlike Chat Completions) actually supports.
+			IsResponsesAPI:      prepared.passthroughResponses || prepared.convertedToResponses,
+			IsSystemOne:         logCtx.IsSystemOne,
+			MessagesPassthrough: prepared.passthroughMessages,
+			ModelID:             realModelID,
+			DisplayModelID:      modelID,
+			ContentType:         r.Header.Get("Content-Type"),
+			BaseURL:             cred.BaseURL,
+			IsVLLM:              cred.Type == config.ProviderTypeVLLM,
+		})
+		var convErr error
+		requestBody, convErr = conv.RequestFrom(body)
+		if convErr != nil {
+			var validationErr *converterutil.RequestValidationError
+			if errors.As(convErr, &validationErr) {
+				status := statusForValidationError(validationErr)
+				p.logger.WarnContext(r.Context(), "Invalid request for provider format",
+					"error_code", status,
+					"credential", cred.Name, "provider", string(cred.Type),
+					"model", modelID, "error", convErr,
+					"request_id", logCtx.RequestID)
+				logCtx.Status = "failure"
+				logCtx.HTTPStatus = status
+				logCtx.ErrorMsg = convErr.Error()
+				logCtx.TargetURL = cred.BaseURL
+				writeValidationError(w, validationErr, convErr.Error())
+				return credentialSendOutcome{}, true, false, false, "", nil
+			}
+			// Fatal: conversion error won't be fixed by another credential
+			p.logger.ErrorContext(r.Context(), "Failed to convert request to provider format",
+				"error_code", http.StatusInternalServerError,
+				"credential", cred.Name, "provider", string(cred.Type),
+				"model", modelID, "error", convErr,
+				"request_id", logCtx.RequestID)
+			logCtx.Status = "failure"
+			logCtx.HTTPStatus = http.StatusInternalServerError
+			logCtx.ErrorMsg = fmt.Sprintf("Request conversion failed: %v", convErr)
+			logCtx.TargetURL = cred.BaseURL
+			WriteErrorInternal(w, "Failed to convert request")
+			return credentialSendOutcome{}, true, false, false, "", nil
+		}
+		targetURL = conv.BuildURL(cred)
+	}
+	if targetURL == "" {
+		baseURL := strings.TrimSuffix(cred.BaseURL, "/")
+		urlPath := r.URL.Path
+
+		// Strip version prefix from urlPath if baseURL already ends with a version.
+		// This prevents double-versioning like /v4/v1/... when baseURL contains /v4
+		// and the incoming request path starts with /v1.
+		if versionPrefix := extractVersionSuffix(baseURL); versionPrefix != "" {
+			if pathVersion := extractVersionPrefix(urlPath); pathVersion != "" {
+				urlPath = strings.TrimPrefix(urlPath, pathVersion)
+			}
+		}
+
+		targetURL = baseURL + urlPath
+		if r.URL.RawQuery != "" {
+			targetURL += "?" + r.URL.RawQuery
+		}
+	}
+	anthropicBetas := append([]string(nil), prepared.messagesMetadata.AnthropicBetas...)
+	// The real Anthropic API (and ProMan/CometAPI's own Anthropic-compatible backends)
+	// reject "anthropic_beta" as a body field outright ("Extra inputs are not
+	// permitted") — it must travel as the anthropic-beta HTTP header instead. This
+	// mirrors the unconditional strip forwardToProxy already does for proxy-like
+	// credentials on /v1/messages (see ExtractBetaHeader call there).
+	switch cred.EffectiveProviderType() {
+	case config.ProviderTypeAnthropic, config.ProviderTypeProMan, config.ProviderTypeCometAPI:
+		var generatedBetas []string
+		requestBody, generatedBetas = anthropicconv.ExtractBetaHeader(requestBody)
+		anthropicBetas = append(anthropicBetas, generatedBetas...)
+	}
+	logCtx.loopGateFormat, logCtx.loopGateSettings = p.loopGateAttemptFormat(r.Context(), cred, modelID,
+		loopGateUpstreamFormat(cred, r.URL.Path, prepared.passthroughResponses, prepared.passthroughMessages))
+	var loopGateForced *loopGateForcedStream
+	requestBody, loopGateForced = p.loopGateUpstreamBody(r.Context(), logCtx, cred, modelID, streaming, requestBody)
+
+	// For Vertex AI, obtain OAuth2 token
+	var vertexToken string
+	if cred.Type == config.ProviderTypeVertexAI {
+		var tokenErr error
+		vertexToken, tokenErr = p.tokenManager.GetToken(cred.Name, cred.CredentialsFile, cred.CredentialsJSON, cred.ProxyURL)
+		if tokenErr != nil {
+			p.logger.ErrorContext(r.Context(), "Failed to get Vertex AI token",
+				"error_code", http.StatusInternalServerError,
+				"credential", cred.Name, "provider", string(cred.Type),
+				"model", modelID, "error", tokenErr)
+			// Token error is retryable (different credential may have valid token)
+			p.recordBanSignal(cred, modelID, http.StatusInternalServerError)
+			p.reportHealth(string(cred.Type), cred.Name, modelID, http.StatusInternalServerError, 0)
+			// Per-attempt failure only — the client-facing RequestsTotal/RequestDuration
+			// metrics are recorded exactly once at the final outcome below.
+			p.metrics.RecordCredentialAttemptError(cred.Name)
+			return credentialSendOutcome{}, false, false, true, RetryReasonAuthErr, nil
+		}
+	}
+
+	upstreamCtx, cancelUpstream := p.upstreamRequestContext(r)
+	defer cancelUpstream()
+	proxyReq, reqErr := http.NewRequestWithContext(httputil.WithProxyURL(upstreamCtx, cred.ProxyURL), r.Method, targetURL, bytes.NewReader(requestBody)) //nolint:gosec // G704: targetURL's host comes from the matched credential's base URL, not the incoming request
+	if reqErr != nil {
+		// Fatal: request creation error
+		p.logger.ErrorContext(r.Context(), "Failed to create proxy request", "error", upstreamErrorForLog(reqErr, targetURL), "url", security.RedactURLForLog(targetURL))
+		logCtx.Status = "failure"
+		logCtx.HTTPStatus = http.StatusInternalServerError
+		logCtx.ErrorMsg = fmt.Sprintf("Failed to create request: %v", reqErr)
+		logCtx.TargetURL = targetURL
+		WriteErrorInternal(w, "Internal Server Error")
+		return credentialSendOutcome{}, true, false, false, "", nil
+	}
+
+	// Copy headers and set auth
+	copyHeadersSkipAuth(proxyReq, r)
+	if cred.Type == config.ProviderTypeAnthropic {
+		// Client Origin would trigger Anthropic browser CORS authentication.
+		proxyReq.Header.Del("Origin")
+	}
+	mergeAnthropicBetaHeader(proxyReq.Header, anthropicBetas)
+	// For passthrough providers (OpenAI/Proxy) with multipart/form-data requests
+	// (e.g. /v1/images/edits), preserve the original Content-Type so the boundary
+	// parameter is forwarded intact. All other paths (Vertex, Anthropic, Bedrock,
+	// and non-multipart OpenAI) always send JSON.
+	originalContentType := r.Header.Get("Content-Type")
+	isMultipartPassthrough := conv != nil && conv.IsPassthrough() &&
+		strings.HasPrefix(strings.ToLower(originalContentType), "multipart/form-data")
+	if !isMultipartPassthrough {
+		proxyReq.Header.Set("Content-Type", "application/json")
+	} else if rewrittenCT := conv.RewrittenContentType(); rewrittenCT != "" {
+		// RequestFrom rewrote the multipart body (e.g. fixed image MIME types or
+		// stripped response_format).  The boundary has changed so we must update the
+		// Content-Type header to match the new boundary.
+		proxyReq.Header.Set("Content-Type", rewrittenCT)
+	}
+	switch cred.EffectiveProviderType() {
+	case config.ProviderTypeVertexAI:
+		proxyReq.Header.Set("Authorization", "Bearer "+vertexToken)
+	case config.ProviderTypeGemini:
+		proxyReq.Header.Set("x-goog-api-key", cred.APIKey)
+	case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI, config.ProviderTypeProMan:
+		if cred.AuthType == "bearer" {
+			proxyReq.Header.Set("Authorization", "Bearer "+cred.APIKey)
+		} else {
+			proxyReq.Header.Set("X-Api-Key", cred.APIKey)
+		}
+		proxyReq.Header.Set("anthropic-version", "2023-06-01")
+	case config.ProviderTypeBedrock:
+		proxyReq.Header.Set("Authorization", "Bearer "+cred.APIKey)
+	default:
+		// A self-hosted vLLM commonly runs without --api-key: send no
+		// Authorization header at all rather than a dangling "Bearer ".
+		if cred.Type != config.ProviderTypeVLLM || cred.APIKey != "" {
+			proxyReq.Header.Set("Authorization", "Bearer "+cred.APIKey)
+		}
+	}
+	// Last, so per-credential request_headers override what the client sent
+	// (e.g. a User-Agent the provider's WAF rejects).
+	httputil.ApplyCredentialRequestHeaders(proxyReq.Header, cred)
+	logCtx.loopGateRespawn = nil
+	if streaming && logCtx.loopGateFormat == loopgate.FormatChat && logCtx.loopGateSettings.Mode == config.LoopGateEnforce {
+		logCtx.loopGateRespawn = p.loopGateRespawner(r, proxyReq, requestBody, cred, modelID)
+	}
+	if loopGateForced != nil {
+		loopGateForced.respawn = p.loopGateRespawner(r, proxyReq, requestBody, cred, modelID)
+		p.setPromptTokensEstimate(logCtx, body, realModelID)
+	}
+
+	if p.logger.Enabled(context.Background(), slog.LevelDebug) {
+		p.logger.DebugContext(r.Context(), "Proxy request details",
+			"target_url", security.RedactURLForLog(targetURL), "credential", cred.Name,
+			"request_body", security.RedactBodyForLog(string(requestBody)))
+	}
+
+	var configuredHeaders map[string]bool
+	if len(cred.RequestHeaders) > 0 {
+		configuredHeaders = make(map[string]bool, len(cred.RequestHeaders))
+		for name := range cred.RequestHeaders {
+			configuredHeaders[http.CanonicalHeaderKey(name)] = true
+		}
+	}
+	debugHeaders := make(map[string]string)
+	for key, values := range security.MaskSensitiveHeaders(proxyReq.Header) {
+		if configuredHeaders[key] {
+			// request_headers values may come from os.environ/ secrets.
+			debugHeaders[key] = "[credential request_headers]"
+			continue
+		}
+		debugHeaders[key] = strings.Join(values, ", ")
+	}
+	p.logger.DebugContext(r.Context(), "Proxy request headers", "headers", debugHeaders)
+
+	// Execute HTTP request
+	var doErr error
+	var resp *http.Response
+	fanOutInputFault := false
+	fannedOut := false
+	attemptedCreds[cred.Name] = true
+	p.stampFirstUpstreamSend(logCtx)
+	httputil.AttemptsFrom(proxyReq.Context()).Begin(cred.Name)
+	// useFastHeaderClient: true only when this attempt's body actually carries
+	// "stream": true to the provider — the client asked for it, or
+	// force_stream_for_ttft injected it (forcedChatNonStream/forcedNativeNonStream).
+	// A provider that sees stream:true sends response headers almost
+	// immediately regardless of how long the generation itself takes, which is
+	// what makes a short ResponseHeaderTimeout safe here. Image/embeddings
+	// endpoints never emit early headers regardless of what we send upstream
+	// (there's no streaming API for them here), so they're excluded even if
+	// something upstream of this call mistakenly set the streaming flags.
+	useFastHeaderClient := (streaming || prepared.forcedChatNonStream || prepared.forcedNativeNonStream) &&
+		!logCtx.IsImageGeneration && !isImageEdit && !isEmbeddings
+	// sendClient/responseHeaderTimeoutEnabled: per-credential, not a single
+	// fleet-wide choice -- see attemptClient and config.CredentialConfig.
+	// ResponseHeaderTimeout's own doc comments for why (a 20-30x spread in
+	// normal time-to-first-token between credentials is common here, so one
+	// value is never safe for all of them at once).
+	sendClient, responseHeaderTimeoutEnabled := p.attemptClient(cred, useFastHeaderClient)
+	if fanOut := embeddingFanOutBodies(conv); len(fanOut) > 1 {
+		// Vertex AI embedContent takes one content per call: one call per
+		// input, each within cred's rate limits, answered as a single
+		// merged response.
+		fannedOut = true
+		resp, fanOutInputFault, doErr = p.doEmbedContentFanOut(embedContentFanOut{ //nolint:bodyclose // resp.Body is closed by sendToCredential's caller (closeBody), once returned here via credentialSendOutcome
+			template:   proxyReq,
+			model:      realModelID,
+			bodies:     fanOut,
+			request:    body,
+			credential: cred.Name,
+			limitModel: modelID,
+		}, embedFanOutReplies)
+	} else {
+		resp, doErr = sendClient.Do(proxyReq) //nolint:gosec,bodyclose // G704: same targetURL as the request built above, host isn't attacker-controlled; resp.Body is closed by sendToCredential's caller (closeBody), once returned here via credentialSendOutcome
+	}
+	if doErr != nil {
+		if isClientCanceledTransportError(r, doErr) {
+			// The client is already gone -- trying another credential
+			// would just fail the same way against a dead context, and
+			// counting this attempt against cred's fail2ban/error-rate
+			// accounting would blame the credential for the client's own
+			// behavior. Stop retrying immediately; the final "no
+			// response" block below handles the classification/logging.
+			p.logger.DebugContext(r.Context(), "Upstream request aborted: client disconnected",
+				"credential", cred.Name, "model", modelID, "error", upstreamErrorForLog(doErr, targetURL), "url", security.RedactURLForLog(targetURL))
+			return credentialSendOutcome{}, false, true, false, "", doErr
+		}
+		if errors.Is(doErr, ErrResponseBodyTooLarge) {
+			// A fanned-out embeddings reply over the size limit: fatal, as
+			// on the single-call path below.
+			p.metrics.RecordCredentialAttemptError(cred.Name)
+			p.failResponseTooLarge(w, r, logCtx, cred, modelID, targetURL, doErr, start)
+			return credentialSendOutcome{}, true, false, false, "", nil
+		}
+		if errors.Is(doErr, errEmbedFanOutRateLimited) {
+			// cred's own RPM/TPM in this router ran out partway through a
+			// fanned-out embeddings request. Nothing failed upstream, so no
+			// fail2ban or attempt-error accounting: the next credential gets
+			// the inputs still missing.
+			p.logger.InfoContext(r.Context(), "Embeddings fan-out reached the credential rate limit, continuing on the next credential",
+				"credential", cred.Name, "model", modelID, "detail", doErr,
+				"attempt", attempt+1, "max_attempts", p.maxProviderRetries+1,
+				"request_id", logCtx.RequestID)
+			return credentialSendOutcome{}, false, false, true, RetryReasonRateLimit, doErr
+		}
+		// Transport failure on one credential — retried with the next one;
+		// the final failure is logged at ERROR after the retry loop.
+		statusCode := http.StatusBadGateway
+		retryAfterSeconds := 0
+		reason := ""
+		if isTimeoutError(doErr) {
+			statusCode = http.StatusRequestTimeout
+			p.logger.WarnContext(r.Context(), "Upstream request timeout, will retry",
+				"credential", cred.Name, "model", modelID, "error", upstreamErrorForLog(doErr, targetURL), "url", security.RedactURLForLog(targetURL))
+			// cred is never proxy-like here (those are diverted to
+			// executeProxyRequest before this retry loop, see proxyRequest's
+			// "Handle proxy/AIR credential types" branch above -- no separate
+			// check needed). isAttemptTimeoutError, not the broader
+			// isTimeoutError: excludes Go's HTTP/2 idle-ping teardown
+			// ("http2: client connection lost"), which isTimeoutError also
+			// classifies as a timeout for the 408/502 split but which means a
+			// pooled connection went silent and got pinged out, not that this
+			// credential is currently unresponsive.
+			//
+			// responseHeaderTimeoutEnabled (from attemptClient, above): opt-in
+			// per credential. Without a budget actually in effect for THIS
+			// credential, the transport fell back to request_timeout, so a
+			// timeout then means "the provider needed longer than that" -- a
+			// healthy-but-slow credential, which must not be banned.
+			if responseHeaderTimeoutEnabled && isAttemptTimeoutError(doErr) {
+				// Never got a response at all within ResponseHeaderTimeout on an
+				// attempt we expected fast headers from (we sent stream:true) --
+				// likely dead/unreachable right now.
+				//
+				// Same convention as recordBanSignal: when ban decisions are
+				// external (account_events wired), this replica must not make
+				// its own local ban call -- the health worker is the single
+				// source of truth, and this replica picks the ban back up via
+				// the normal Redis/banreader round trip like every other ban
+				// reason already does. Only ban locally when that pipeline
+				// isn't wired at all. reportHealth below always fires either
+				// way, so the health worker learns about this outcome
+				// regardless (its own error_code_rules decide whether/how
+				// long to ban on it).
+				if !p.banDecisionsExternal {
+					p.balancer.BanUntil(cred.Name, modelID, statusCode,
+						time.Now().Add(timeoutAttemptBanDuration), "attempt_timeout")
+				}
+				retryAfterSeconds = int(timeoutAttemptBanDuration.Seconds())
+				reason = attemptTimeoutReason
+			}
+		} else {
+			p.logger.WarnContext(r.Context(), "Upstream request failed, will retry",
+				"credential", cred.Name, "model", modelID, "error", upstreamErrorForLog(doErr, targetURL), "url", security.RedactURLForLog(targetURL))
+		}
+		p.recordBanSignal(cred, modelID, statusCode)
+		p.reportHealth(string(cred.Type), cred.Name, modelID, statusCode, retryAfterSeconds, reason)
+		// Per-attempt failure only — the client-facing RequestsTotal/RequestDuration
+		// metrics are recorded exactly once at the final outcome below.
+		p.metrics.RecordCredentialAttemptError(cred.Name)
+		return credentialSendOutcome{}, false, false, true, RetryReasonNetErr, doErr
+	}
+
+	return credentialSendOutcome{
+		resp:             resp,
+		conv:             conv,
+		provResponses:    provResponses,
+		targetURL:        targetURL,
+		requestBody:      requestBody,
+		proxyReq:         proxyReq,
+		loopGateForced:   loopGateForced,
+		fanOutInputFault: fanOutInputFault,
+		fannedOut:        fannedOut,
+	}, false, false, false, "", nil
 }
 
 func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
@@ -1068,6 +1856,8 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 	r.Header.Del(HeaderAIRProxyClient)
 	r.Header.Del(HeaderLegacyAIRProxyClient)
 	r = captureCredentialDenylist(r, proxyMarkerPresent)
+	// The request's upstream attempts, for its trace and its spend event.
+	r = r.WithContext(httputil.WithAttempts(r.Context()))
 
 	// Create logging context that will be filled throughout request processing
 	// and logged at the end via defer to ensure all requests are logged
@@ -1079,6 +1869,12 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		Status:         "unknown",
 		IsProxyRequest: false,
 	}
+	// Arms w, if it is the LiteLLM response-compatibility writer, to re-add
+	// the router's own cost after that writer's transform has already run --
+	// see wireCostInjectionForCompatWriter. Safe to call unconditionally and
+	// this early: whether to actually act is re-checked lazily against
+	// logCtx.OrganizationPolicy, which isn't resolved yet at this point.
+	wireCostInjectionForCompatWriter(w, p, logCtx)
 
 	// Ensure request is logged at the end regardless of which path is taken
 	defer func() {
@@ -1102,6 +1898,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		if !logCtx.RequestCompleted && shouldClearSessionBindingOnFailure(r.Context(), logCtx) {
 			p.clearSessionBinding(p.stickySessionKey(logCtx), logCtx.ModelID)
 		}
+		annotateRequestSpan(logCtx)
 	}()
 
 	prepared, ok := p.orchestrateRequest(w, r, logCtx)
@@ -1188,6 +1985,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 	if !p.enforceBudgetAndRateLimits(w, r, logCtx, modelID, realModelID, body) {
 		return
 	}
+	logCtx.mark(markAdmitted)
 
 	// Handle proxy/AIR credential types with exact same-type retry + fallback.
 	if cred.IsProxyLike() {
@@ -1217,6 +2015,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				cred = nextCred
 				triedCreds[cred.Name] = true
 				logCtx.Credential = cred
+				httputil.AttemptsFrom(r.Context()).Next(httputil.AttemptRetry, string(retryReason))
 				p.logger.WarnContext(r.Context(), "Retrying with next same-type proxy credential",
 					"credential", cred.Name, "model", modelID,
 					"attempt", attempt+1, "max_attempts", p.maxProviderRetries+1,
@@ -1266,7 +2065,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				"reason", retryReason, "model", modelID,
 				"attempt", attempt + 1, "max_attempts", p.maxProviderRetries + 1,
 			}
-			retryLogArgs = appendResponseBodyForLogs(retryLogArgs, cred, string(proxyResp.Body))
+			retryLogArgs = appendResponseBodyForLogs(retryLogArgs, string(proxyResp.Body))
 			p.logger.WarnContext(r.Context(), "Proxy credential returned retryable error, will retry", retryLogArgs...)
 		}
 
@@ -1582,6 +2381,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			p.setCredentialResponseHeader(w, logCtx, logCtx.ActualCredentialName)
 			p.writeProxyResponse(w, proxyResp, r, cred, modelID, logCtx, tokenUsageOptions)
 			tokens, usage := extractOpenAITokensAndUsage(proxyResp.Body, tokenUsageOptions)
+			tokens, usage = p.systemOneUsage(r.Context(), logCtx, cred.Name, proxyResp.StatusCode, proxyBody, realModelID, tokens, usage)
 			nonStreamingTokenUsage = usage
 			if tokens > 0 {
 				p.rateLimiter.ConsumeTokens(cred.Name, tokens)
@@ -1675,6 +2475,38 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		shouldRetry     bool
 		retryReason     RetryReason
 		transportErr    error
+		// rateLimitExhausted: the credential cascade ran out because every
+		// candidate was rate-limited (RPM/TPM saturated), not because there
+		// was no candidate. It only matters when no response was obtained at
+		// all: then the outcome is a 429 with a Retry-After (the model is
+		// momentarily over its limit), not a 502 that blames the provider.
+		rateLimitExhausted bool
+		// providerRateLimited: an attempt got a 429 from the provider (the
+		// upstream account is over its own rate limit), as opposed to the
+		// router's own limiter refusing the candidate. It matters when the
+		// later attempts fail on the transport and no response is left to
+		// relay: the provider's 429 is the real reason the request could not
+		// be served -- the model is momentarily over its limit and answers
+		// normally once the window rolls over -- so the client gets a 429
+		// with a Retry-After instead of a 502 that blames the provider for
+		// being broken.
+		providerRateLimited bool
+		// providerRequestRejected: an attempt got a 4xx from the provider
+		// that describes the REQUEST rather than the credential -- a bad
+		// prompt, a content-policy refusal, an unknown model. It matters for
+		// the same reason providerRateLimited does: when a later attempt
+		// fails on the transport there is no response left to relay, and the
+		// provider's own 4xx is the truth about why the request could not be
+		// served. Answering 502 there blames the provider for being broken
+		// and tells the client to retry something that will fail identically
+		// on every credential.
+		//
+		// The status AND the body are remembered: the body is what lets the
+		// client-facing message be the classified one ("the prompt was blocked
+		// by the provider's content policy") instead of a bare status text. It
+		// is masked for the client like any other provider error.
+		providerRequestRejected     int
+		providerRequestRejectedBody []byte
 		// Replies of a fanned-out embeddings request kept across attempts, so
 		// a retry only re-sends the inputs that did not get one.
 		embedFanOutReplies embedContentFanOutReplies
@@ -1696,65 +2528,20 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			// Check for next credential BEFORE resetting resp/responseBody.
 			// If no credential is available, break while preserving the last HTTP response
 			// (e.g. a 429 from the provider) so the caller returns it instead of 502.
-			var nextCred *config.CredentialConfig
-			var nextReq credentialPreparedRequest
-			retryReady := false
-			for {
-				candidate, err := p.balancer.NextRetryForModelExcludingScoped(modelID, cred, triedCreds, attemptedCreds, logCtx.Scope)
-				if err != nil {
-					p.logger.DebugContext(r.Context(), "No more retry credentials available",
-						"model", modelID, "attempt", attempt, "error", err)
-					break
-				}
-				preparedRetry, prepErr := p.prepareRequestForCredential(
-					r,
-					prepared.baseBody,
-					prepared.baseProxyBody,
-					modelID,
-					prepared.baseRealModelID,
-					prepared.basePath,
-					streaming,
-					candidate,
-					prepared.isResponsesAPI,
-					prepared.responsesPrevHandled,
-					prepared.stickyCacheEligible,
-				)
-				if prepErr == nil {
-					publicModelID := logCtx.PublicModelID
-					if publicModelID == "" {
-						publicModelID = modelID
-					}
-					retryPriceModelID, retryPrice := p.resolveRetryBillingPrice(
-						logCtx, publicModelID, modelID, preparedRetry.realModelID,
-					)
-					if retryPrice == nil && p.spendTrackingEnabled() {
-						triedCreds[candidate.Name] = true
-						p.logger.ErrorContext(r.Context(), "Retry credential skipped: model price unavailable",
-							"credential", candidate.Name,
-							"model", modelID,
-							"real_model", preparedRetry.realModelID,
-							"request_id", logCtx.RequestID)
-						continue
-					}
-					nextCred = candidate
-					nextReq = preparedRetry
-					logCtx.ModelPrice = retryPrice
-					logCtx.PriceModelID = retryPriceModelID
-					logCtx.billingPriceResolved = true
-					logCtx.billingPriceModelID = retryPriceModelID
-					logCtx.billingPrice = retryPrice
-					retryReady = true
-					break
-				}
-				triedCreds[candidate.Name] = true
-				p.logger.WarnContext(r.Context(), "Failed to prepare retry request for credential",
-					"credential", candidate.Name,
-					"provider", string(candidate.Type),
-					"model", modelID,
-					"attempt", attempt,
-					"error", prepErr)
-			}
+			nextCred, nextReq, retryReady, retryRateLimited := p.nextRetryCredential(
+				r, logCtx, modelID, cred, prepared, streaming, attempt, triedCreds, attemptedCreds,
+			)
 			if !retryReady {
+				// The cascade ran out because every candidate was rate-limited
+				// (RPM/TPM saturated), not because there is no candidate at all.
+				// Remember it: with no response to relay, the outcome below would
+				// otherwise be a generic 502 ("All provider attempts failed")
+				// for what is really a 429 -- a rate-limited model, not a broken
+				// one. The client gets a 429 with a Retry-After and backs off
+				// instead of hammering the pool.
+				if retryRateLimited {
+					rateLimitExhausted = true
+				}
 				break
 			}
 
@@ -1789,6 +2576,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			prepared.completionsPath = nextReq.completionsPath
 			prepared.messagesMetadata = nextReq.messagesMetadata
 			logCtx.RealModelID = realModelID
+			httputil.AttemptsFrom(r.Context()).Next(httputil.AttemptRetry, string(retryReason))
 
 			p.logger.InfoContext(r.Context(), "Retrying with next credential",
 				"credential", cred.Name, "model", modelID,
@@ -1804,367 +2592,40 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		transportErr = nil
 		fannedOut = false
 
-		// Create converter and build request body / target URL.
-		// nativeResponses path uses ProviderResponses (Vertex AI, Anthropic) directly.
-		// All other paths use the Chat Completions ProviderConverter.
-		var requestBody []byte
-		if prepared.nativeResponses {
-			// force_stream_for_ttft: when the toggle forced a non-streaming
-			// client request to stream upstream, the provider converter must
-			// build the streaming request (Vertex's stream switch lives in the
-			// URL, driven by IsStreaming). The response path then reassembles
-			// the SSE back into non-stream JSON.
-			nativeStreaming := streaming || prepared.forcedNativeNonStream
-			mode := responses.ResponsesRequestMode{
-				ModelID:        realModelID,
-				DisplayModelID: modelID,
-				IsStreaming:    nativeStreaming,
-			}
-			provResponses = responses.NewProviderResponses(cred.EffectiveProviderType(), mode)
-			if provResponses == nil {
-				p.logger.ErrorContext(r.Context(), "Native Responses converter unavailable",
-					"error_code", http.StatusInternalServerError,
-					"credential", cred.Name, "provider", string(cred.Type),
-					"model", modelID,
-					"request_id", logCtx.RequestID)
-				logCtx.Status = "failure"
-				logCtx.HTTPStatus = http.StatusInternalServerError
-				logCtx.ErrorMsg = "Native Responses converter unavailable"
-				logCtx.TargetURL = cred.BaseURL
-				WriteErrorInternal(w, "Failed to convert request")
-				return
-			}
-			var convErr error
-			requestBody, _, convErr = provResponses.RequestFrom(body)
-			if convErr != nil {
-				var validationErr *converterutil.RequestValidationError
-				if errors.As(convErr, &validationErr) {
-					status := statusForValidationError(validationErr)
-					p.logger.WarnContext(r.Context(), "Invalid Responses API request for provider format",
-						"error_code", status,
-						"credential", cred.Name, "provider", string(cred.Type),
-						"model", modelID, "error", convErr,
-						"request_id", logCtx.RequestID)
-					logCtx.Status = "failure"
-					logCtx.HTTPStatus = status
-					logCtx.ErrorMsg = convErr.Error()
-					logCtx.TargetURL = cred.BaseURL
-					writeValidationError(w, validationErr, convErr.Error())
-					return
-				}
-				p.logger.ErrorContext(r.Context(), "Failed to convert Responses API request to provider format",
-					"error_code", http.StatusInternalServerError,
-					"credential", cred.Name, "provider", string(cred.Type),
-					"model", modelID, "error", convErr,
-					"request_id", logCtx.RequestID)
-				logCtx.Status = "failure"
-				logCtx.HTTPStatus = http.StatusInternalServerError
-				logCtx.ErrorMsg = fmt.Sprintf("Request conversion failed: %v", convErr)
-				logCtx.TargetURL = cred.BaseURL
-				WriteErrorInternal(w, "Failed to convert request")
-				return
-			}
-			targetURL = provResponses.BuildURL(cred)
-		} else {
-			// Use realModelID for URL construction and body conversion (provider-facing name).
-			// modelID (alias) is used for credential selection and rate limiting.
-			conv = converter.New(cred.EffectiveProviderType(), converter.RequestMode{
-				IsImageGeneration: logCtx.IsImageGeneration,
-				IsImageEdit:       isImageEdit,
-				IsEmbeddings:      isEmbeddings,
-				// forcedChatNonStream: force_stream_for_ttft forced a non-streaming
-				// chat request to stream upstream. For Vertex/Gemini the streaming
-				// switch lives in the URL, not the body, so IsStreaming must be true
-				// here or the upstream stays non-streaming and TTFT goes unmeasured
-				// (see applyForceStream).
-				IsStreaming: streaming || prepared.forcedChatNonStream,
-				// prepared.convertedToResponses means body is already
-				// Responses-shaped here too (orchestrator.go's
-				// ChatRequestToResponses, for a responses_only model) -- not
-				// just the passthrough case. Without it, the default-provider
-				// branch's `!c.mode.IsResponsesAPI` check (converter.go)
-				// mistakes it for a Chat-shaped body and runs
-				// ConvertWebSearchTools/ForceWebSearchResults on it, which
-				// silently drops every non-function/non-web_search hosted
-				// tool (code_interpreter, file_search, image_generation, mcp,
-				// custom, ...) and its tool_choice -- tools the Responses API
-				// (unlike Chat Completions) actually supports.
-				IsResponsesAPI:      prepared.passthroughResponses || prepared.convertedToResponses,
-				MessagesPassthrough: prepared.passthroughMessages,
-				ModelID:             realModelID,
-				DisplayModelID:      modelID,
-				ContentType:         r.Header.Get("Content-Type"),
-				BaseURL:             cred.BaseURL,
-				IsVLLM:              cred.Type == config.ProviderTypeVLLM,
-			})
-			var convErr error
-			requestBody, convErr = conv.RequestFrom(body)
-			if convErr != nil {
-				var validationErr *converterutil.RequestValidationError
-				if errors.As(convErr, &validationErr) {
-					status := statusForValidationError(validationErr)
-					p.logger.WarnContext(r.Context(), "Invalid request for provider format",
-						"error_code", status,
-						"credential", cred.Name, "provider", string(cred.Type),
-						"model", modelID, "error", convErr,
-						"request_id", logCtx.RequestID)
-					logCtx.Status = "failure"
-					logCtx.HTTPStatus = status
-					logCtx.ErrorMsg = convErr.Error()
-					logCtx.TargetURL = cred.BaseURL
-					writeValidationError(w, validationErr, convErr.Error())
-					return
-				}
-				// Fatal: conversion error won't be fixed by another credential
-				p.logger.ErrorContext(r.Context(), "Failed to convert request to provider format",
-					"error_code", http.StatusInternalServerError,
-					"credential", cred.Name, "provider", string(cred.Type),
-					"model", modelID, "error", convErr,
-					"request_id", logCtx.RequestID)
-				logCtx.Status = "failure"
-				logCtx.HTTPStatus = http.StatusInternalServerError
-				logCtx.ErrorMsg = fmt.Sprintf("Request conversion failed: %v", convErr)
-				logCtx.TargetURL = cred.BaseURL
-				WriteErrorInternal(w, "Failed to convert request")
-				return
-			}
-			targetURL = conv.BuildURL(cred)
-		}
-		if targetURL == "" {
-			baseURL := strings.TrimSuffix(cred.BaseURL, "/")
-			urlPath := r.URL.Path
-
-			// Strip version prefix from urlPath if baseURL already ends with a version.
-			// This prevents double-versioning like /v4/v1/... when baseURL contains /v4
-			// and the incoming request path starts with /v1.
-			if versionPrefix := extractVersionSuffix(baseURL); versionPrefix != "" {
-				if pathVersion := extractVersionPrefix(urlPath); pathVersion != "" {
-					urlPath = strings.TrimPrefix(urlPath, pathVersion)
-				}
-			}
-
-			targetURL = baseURL + urlPath
-			if r.URL.RawQuery != "" {
-				targetURL += "?" + r.URL.RawQuery
-			}
-		}
-		anthropicBetas := append([]string(nil), prepared.messagesMetadata.AnthropicBetas...)
-		// The real Anthropic API (and ProMan/CometAPI's own Anthropic-compatible backends)
-		// reject "anthropic_beta" as a body field outright ("Extra inputs are not
-		// permitted") — it must travel as the anthropic-beta HTTP header instead. This
-		// mirrors the unconditional strip forwardToProxy already does for proxy-like
-		// credentials on /v1/messages (see ExtractBetaHeader call there).
-		switch cred.EffectiveProviderType() {
-		case config.ProviderTypeAnthropic, config.ProviderTypeProMan, config.ProviderTypeCometAPI:
-			var generatedBetas []string
-			requestBody, generatedBetas = anthropicconv.ExtractBetaHeader(requestBody)
-			anthropicBetas = append(anthropicBetas, generatedBetas...)
-		}
-
-		// For Vertex AI, obtain OAuth2 token
-		var vertexToken string
-		if cred.Type == config.ProviderTypeVertexAI {
-			var tokenErr error
-			vertexToken, tokenErr = p.tokenManager.GetToken(cred.Name, cred.CredentialsFile, cred.CredentialsJSON, cred.ProxyURL)
-			if tokenErr != nil {
-				p.logger.ErrorContext(r.Context(), "Failed to get Vertex AI token",
-					"error_code", http.StatusInternalServerError,
-					"credential", cred.Name, "provider", string(cred.Type),
-					"model", modelID, "error", tokenErr)
-				// Token error is retryable (different credential may have valid token)
-				shouldRetry = true
-				retryReason = RetryReasonAuthErr
-				p.balancer.RecordResponse(cred.Name, modelID, http.StatusInternalServerError)
-				// Per-attempt failure only — the client-facing RequestsTotal/RequestDuration
-				// metrics are recorded exactly once at the final outcome below.
-				p.metrics.RecordCredentialAttemptError(cred.Name)
-				continue
-			}
-		}
-
-		// Loop gate (enforce): a streamed vLLM chat completion asks for the
-		// running usage; with force_stream, a non-streamed one goes upstream as
-		// a stream so a loop can be stopped before the client gets anything
-		// (collectLoopGateStream rebuilds the chat.completion below).
-		logCtx.loopGateFormat, logCtx.loopGateSettings = p.loopGateAttemptFormat(r.Context(), cred, modelID,
-			loopGateUpstreamFormat(cred, r.URL.Path, prepared.passthroughResponses, prepared.passthroughMessages))
-		var loopGateForced *loopGateForcedStream
-		requestBody, loopGateForced = p.loopGateUpstreamBody(r.Context(), logCtx, cred, modelID, streaming, requestBody)
-
-		upstreamCtx, cancelUpstream := p.upstreamRequestContext(r)
-		defer cancelUpstream()
-		proxyReq, reqErr := http.NewRequestWithContext(httputil.WithProxyURL(upstreamCtx, cred.ProxyURL), r.Method, targetURL, bytes.NewReader(requestBody)) //nolint:gosec // G704: targetURL's host comes from the matched credential's base URL, not the incoming request
-		if reqErr != nil {
-			// Fatal: request creation error
-			p.logger.ErrorContext(r.Context(), "Failed to create proxy request", "error", reqErr, "url", targetURL)
-			logCtx.Status = "failure"
-			logCtx.HTTPStatus = http.StatusInternalServerError
-			logCtx.ErrorMsg = fmt.Sprintf("Failed to create request: %v", reqErr)
-			logCtx.TargetURL = targetURL
-			WriteErrorInternal(w, "Internal Server Error")
+		// Build and send the actual upstream request for cred -- shared with
+		// handleSimulatedNonStream's own retry (stream_simulated.go); see
+		// sendToCredential's doc comment for the outcome contract.
+		var sendOutcome credentialSendOutcome
+		var sendDone, sendClientGone, sendShouldRetry bool
+		var sendRetryReason RetryReason
+		var sendTransportErr error
+		sendOutcome, sendDone, sendClientGone, sendShouldRetry, sendRetryReason, sendTransportErr = p.sendToCredential(
+			r, w, logCtx, cred, prepared, modelID, realModelID, body, streaming, isEmbeddings, isImageEdit,
+			attempt, start, attemptedCreds, &embedFanOutReplies,
+		)
+		if sendDone {
 			return
 		}
-
-		// Copy headers and set auth
-		copyHeadersSkipAuth(proxyReq, r)
-		if cred.Type == config.ProviderTypeAnthropic {
-			// Client Origin would trigger Anthropic browser CORS authentication.
-			proxyReq.Header.Del("Origin")
+		if sendClientGone {
+			transportErr = sendTransportErr
+			shouldRetry = false
+			break
 		}
-		mergeAnthropicBetaHeader(proxyReq.Header, anthropicBetas)
-		// For passthrough providers (OpenAI/Proxy) with multipart/form-data requests
-		// (e.g. /v1/images/edits), preserve the original Content-Type so the boundary
-		// parameter is forwarded intact. All other paths (Vertex, Anthropic, Bedrock,
-		// and non-multipart OpenAI) always send JSON.
-		originalContentType := r.Header.Get("Content-Type")
-		isMultipartPassthrough := conv != nil && conv.IsPassthrough() &&
-			strings.HasPrefix(strings.ToLower(originalContentType), "multipart/form-data")
-		if !isMultipartPassthrough {
-			proxyReq.Header.Set("Content-Type", "application/json")
-		} else if rewrittenCT := conv.RewrittenContentType(); rewrittenCT != "" {
-			// RequestFrom rewrote the multipart body (e.g. fixed image MIME types or
-			// stripped response_format).  The boundary has changed so we must update the
-			// Content-Type header to match the new boundary.
-			proxyReq.Header.Set("Content-Type", rewrittenCT)
-		}
-		switch cred.EffectiveProviderType() {
-		case config.ProviderTypeVertexAI:
-			proxyReq.Header.Set("Authorization", "Bearer "+vertexToken)
-		case config.ProviderTypeGemini:
-			proxyReq.Header.Set("x-goog-api-key", cred.APIKey)
-		case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI, config.ProviderTypeProMan:
-			if cred.AuthType == "bearer" {
-				proxyReq.Header.Set("Authorization", "Bearer "+cred.APIKey)
-			} else {
-				proxyReq.Header.Set("X-Api-Key", cred.APIKey)
-			}
-			proxyReq.Header.Set("anthropic-version", "2023-06-01")
-		case config.ProviderTypeBedrock:
-			proxyReq.Header.Set("Authorization", "Bearer "+cred.APIKey)
-		default:
-			// A self-hosted vLLM commonly runs without --api-key: send no
-			// Authorization header at all rather than a dangling "Bearer ".
-			if cred.Type != config.ProviderTypeVLLM || cred.APIKey != "" {
-				proxyReq.Header.Set("Authorization", "Bearer "+cred.APIKey)
-			}
-		}
-		// Last, so per-credential request_headers override what the client sent
-		// (e.g. a User-Agent the provider's WAF rejects).
-		httputil.ApplyCredentialRequestHeaders(proxyReq.Header, cred)
-
-		logCtx.loopGateRespawn = nil
-		if streaming && logCtx.loopGateFormat == loopgate.FormatChat && logCtx.loopGateSettings.Mode == config.LoopGateEnforce {
-			logCtx.loopGateRespawn = p.loopGateRespawner(r, proxyReq, requestBody, cred, modelID)
-		}
-		if loopGateForced != nil {
-			loopGateForced.respawn = p.loopGateRespawner(r, proxyReq, requestBody, cred, modelID)
-			// The prompt estimate of a cut attempt without upstream usage.
-			p.setPromptTokensEstimate(logCtx, body, realModelID)
-		}
-
-		if p.logger.Enabled(context.Background(), slog.LevelDebug) {
-			p.logger.DebugContext(r.Context(), "Proxy request details",
-				"target_url", targetURL, "credential", cred.Name,
-				"request_body", logger.SanitizeRequestBodyForLog(requestBody, 500))
-		}
-
-		var configuredHeaders map[string]bool
-		if len(cred.RequestHeaders) > 0 {
-			configuredHeaders = make(map[string]bool, len(cred.RequestHeaders))
-			for name := range cred.RequestHeaders {
-				configuredHeaders[http.CanonicalHeaderKey(name)] = true
-			}
-		}
-		debugHeaders := make(map[string]string)
-		for key, values := range proxyReq.Header {
-			if key == "Authorization" || key == "X-Api-Key" || key == "X-Goog-Api-Key" {
-				continue
-			}
-			if configuredHeaders[key] {
-				// request_headers values may come from os.environ/ secrets.
-				debugHeaders[key] = "[credential request_headers]"
-				continue
-			}
-			debugHeaders[key] = strings.Join(values, ", ")
-		}
-		p.logger.DebugContext(r.Context(), "Proxy request headers", "headers", debugHeaders)
-
-		// Execute HTTP request
-		var doErr error
-		fanOutInputFault := false
-		attemptedCreds[cred.Name] = true
-		p.stampFirstUpstreamSend(logCtx)
-		if fanOut := embeddingFanOutBodies(conv); len(fanOut) > 1 {
-			// Vertex AI embedContent takes one content per call: one call per
-			// input, each within cred's rate limits, answered as a single
-			// merged response.
-			fannedOut = true
-			resp, fanOutInputFault, doErr = p.doEmbedContentFanOut(embedContentFanOut{
-				template:   proxyReq,
-				model:      realModelID,
-				bodies:     fanOut,
-				request:    body,
-				credential: cred.Name,
-				limitModel: modelID,
-			}, &embedFanOutReplies)
-		} else {
-			resp, doErr = p.client.Do(proxyReq) //nolint:gosec // G704: same targetURL as the request built above, host isn't attacker-controlled
-		}
-		if doErr != nil {
-			if isClientCanceledTransportError(r, doErr) {
-				// The client is already gone -- trying another credential
-				// would just fail the same way against a dead context, and
-				// counting this attempt against cred's fail2ban/error-rate
-				// accounting would blame the credential for the client's own
-				// behavior. Stop retrying immediately; the final "no
-				// response" block below handles the classification/logging.
-				p.logger.DebugContext(r.Context(), "Upstream request aborted: client disconnected",
-					"credential", cred.Name, "model", modelID, "error", doErr, "url", targetURL)
-				transportErr = doErr
-				shouldRetry = false
-				break
-			}
-			if errors.Is(doErr, ErrResponseBodyTooLarge) {
-				// A fanned-out embeddings reply over the size limit: fatal, as
-				// on the single-call path below.
-				p.metrics.RecordCredentialAttemptError(cred.Name)
-				p.failResponseTooLarge(w, r, logCtx, cred, modelID, targetURL, doErr, start)
-				return
-			}
-			if errors.Is(doErr, errEmbedFanOutRateLimited) {
-				// cred's own RPM/TPM in this router ran out partway through a
-				// fanned-out embeddings request. Nothing failed upstream, so no
-				// fail2ban or attempt-error accounting: the next credential gets
-				// the inputs still missing.
-				p.logger.InfoContext(r.Context(), "Embeddings fan-out reached the credential rate limit, continuing on the next credential",
-					"credential", cred.Name, "model", modelID, "detail", doErr,
-					"attempt", attempt+1, "max_attempts", p.maxProviderRetries+1,
-					"request_id", logCtx.RequestID)
-				shouldRetry = true
-				retryReason = RetryReasonRateLimit
-				transportErr = doErr
-				continue
-			}
-			// Transport failure on one credential — retried with the next one;
-			// the final failure is logged at ERROR after the retry loop.
-			statusCode := http.StatusBadGateway
-			if isTimeoutError(doErr) {
-				statusCode = http.StatusRequestTimeout
-				p.logger.WarnContext(r.Context(), "Upstream request timeout, will retry",
-					"credential", cred.Name, "model", modelID, "error", doErr, "url", targetURL)
-			} else {
-				p.logger.WarnContext(r.Context(), "Upstream request failed, will retry",
-					"credential", cred.Name, "model", modelID, "error", doErr, "url", targetURL)
-			}
-			p.balancer.RecordResponse(cred.Name, modelID, statusCode)
-			// Per-attempt failure only — the client-facing RequestsTotal/RequestDuration
-			// metrics are recorded exactly once at the final outcome below.
-			p.metrics.RecordCredentialAttemptError(cred.Name)
+		if sendShouldRetry {
 			shouldRetry = true
-			retryReason = RetryReasonNetErr
-			transportErr = doErr
+			retryReason = sendRetryReason
+			transportErr = sendTransportErr
 			continue
 		}
+		resp = sendOutcome.resp
+		conv = sendOutcome.conv
+		provResponses = sendOutcome.provResponses
+		targetURL = sendOutcome.targetURL
+		requestBody := sendOutcome.requestBody
+		proxyReq := sendOutcome.proxyReq
+		fanOutInputFault := sendOutcome.fanOutInputFault
+		fannedOut = sendOutcome.fannedOut
+		loopGateForced := sendOutcome.loopGateForced
 		if loopGateForced != nil {
 			resp = p.collectLoopGateStream(r.Context(), logCtx, resp, loopGateForced)
 		}
@@ -2196,9 +2657,18 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			"headers", debugRespHeaders)
 
 		isStreamingResp = IsStreamingResponse(resp)
-		// Bedrock HTTP errors must be buffered even when the content type is an
-		// event stream so the provider-specific error body can be classified.
-		if cred.Type == config.ProviderTypeBedrock && resp.StatusCode >= http.StatusBadRequest {
+		// An HTTP error status is an error, not a stream, even when the provider
+		// labels it event-stream: Google's SSE endpoints (Vertex's
+		// streamGenerateContent?alt=sse) answer an early 4xx/5xx with the error
+		// JSON under a text/event-stream Content-Type. Reading it as
+		// non-streaming lets the error be classified and, when retryable,
+		// replayed on the next credential; left streaming it hits the "Cannot
+		// retry streaming responses" break below, and a force_stream_for_ttft
+		// request (whose upstream is now the SSE endpoint) returns the
+		// provider's first 400 to the client with no retry at all. Bedrock's
+		// HTTP errors were already buffered for the same classification reason;
+		// this is the general case.
+		if resp.StatusCode >= http.StatusBadRequest {
 			isStreamingResp = false
 		}
 		// Some providers reject a streaming request with HTTP 200 and a stream whose
@@ -2230,7 +2700,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 						"reason", retryReason, "model", modelID,
 						"attempt", attempt + 1, "max_attempts", p.maxProviderRetries + 1,
 					}
-					retryLogArgs = appendResponseBodyForLogs(retryLogArgs, cred, payload)
+					retryLogArgs = appendResponseBodyForLogs(retryLogArgs, payload)
 					p.logger.WarnContext(r.Context(), "Provider stream started with a retryable error event, will retry", retryLogArgs...)
 					continue
 				}
@@ -2260,7 +2730,9 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		bodyReadTimer.Stop()
 		if readErr != nil {
 			closeBody()
-			p.balancer.RecordResponse(cred.Name, modelID, resp.StatusCode)
+			p.recordBanSignal(cred, modelID, resp.StatusCode)
+			p.reportHealth(string(cred.Type), cred.Name, modelID, resp.StatusCode,
+				httputil.RetryAfterSeconds(resp.Header.Get("Retry-After")))
 			// This attempt genuinely failed (got a response, then lost the body).
 			// Only record here if the earlier `resp.StatusCode != http.StatusOK`
 			// check didn't already count it — status 200 with a failed body read
@@ -2273,11 +2745,8 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				p.failResponseTooLarge(w, r, logCtx, cred, modelID, targetURL, readErr, start)
 				return
 			}
-			// Transport error reading body — retryable with another credential.
-			// Drop the half-read response: when no credential is left, the
-			// client gets the transport error (502/408), not a 200 with an
-			// empty body.
-			p.logger.WarnContext(r.Context(), "Failed to read response body, will retry", "error", readErr,
+			// Transport error reading body — retryable with another credential
+			p.logger.WarnContext(r.Context(), "Failed to read response body, will retry", "error", upstreamErrorForLog(readErr, targetURL),
 				"credential", cred.Name, "attempt", attempt+1)
 			resp = nil
 			shouldRetry = true
@@ -2291,6 +2760,31 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		if mappedStatus, ok := statusCodeFromProviderBodyError(resp.StatusCode, responseBody); ok {
 			resp.StatusCode = mappedStatus
+		}
+
+		// A 429 from the provider is remembered across attempts: it is the
+		// upstream account's own rate limit, and it stays the real reason the
+		// request could not be served even if a later attempt fails on the
+		// transport and leaves no response to relay (see providerRateLimited).
+		if resp.StatusCode == http.StatusTooManyRequests {
+			providerRateLimited = true
+		}
+		// The same for a status that describes the REQUEST (a bad prompt, a
+		// content-policy refusal, a model that does not exist): it stays the
+		// real reason the request could not be served when a later attempt
+		// fails on the transport. The LAST such status wins, because it is
+		// the one closest to the final attempt -- the same credential the
+		// client would have been told about had the cascade stopped there.
+		//
+		// Credential-scoped statuses (401/402/403) are NOT kept: they say
+		// something about the one credential that answered, and the next one
+		// may serve the same request fine -- relaying them after an
+		// unrelated transport failure would tell the client its own key was
+		// rejected. 429 is excluded too: providerRateLimited carries it, and
+		// it needs its own Retry-After.
+		if isRequestScopedStatus(resp.StatusCode) {
+			providerRequestRejected = resp.StatusCode
+			providerRequestRejectedBody = responseBody
 		}
 
 		p.recordProviderResponse(r.Context(), cred, modelID, realModelID, resp.StatusCode, resp.Header, responseBody)
@@ -2318,7 +2812,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			"reason", retryReason, "model", modelID,
 			"attempt", attempt + 1, "max_attempts", p.maxProviderRetries + 1,
 		}
-		retryLogArgs = appendResponseBodyForLogs(retryLogArgs, cred, string(responseBody))
+		retryLogArgs = appendResponseBodyForLogs(retryLogArgs, string(responseBody))
 		p.logger.WarnContext(r.Context(), "Provider returned retryable error, will retry", retryLogArgs...)
 	}
 
@@ -2370,6 +2864,22 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		errorMsg := "All provider attempts failed"
 		clientCanceled := isClientCanceledTransportError(r, transportErr)
 		rateLimited := errors.Is(transportErr, errEmbedFanOutRateLimited)
+		// The credential cascade ran out because every candidate was over its
+		// rate limit, and no attempt produced a response to relay. That is a
+		// 429 ("this model is momentarily over its limit -- try again in N
+		// seconds"), not a 502 that blames the provider for being broken: the
+		// same model answers normally once the window rolls over. Answering 502
+		// here both misreports the cause and leaves the client without the
+		// Retry-After it needs to back off instead of hammering the pool.
+		cascadeRateLimited := rateLimitExhausted
+		// An earlier attempt got a 429 from the provider (the upstream account
+		// is over its own rate limit) and a later one failed on the transport,
+		// so nothing is left to relay. The provider's 429 is the real reason
+		// the request could not be served: the model answers normally once the
+		// window rolls over. Answering 502 here would blame the provider for
+		// being broken and leave the client without the Retry-After it needs
+		// to back off instead of hammering the pool.
+		providerRateLimit := providerRateLimited
 		switch {
 		case clientCanceled:
 			// The client left before any credential attempt produced a
@@ -2385,6 +2895,29 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			statusMessage = "Rate limit exceeded"
 			errorMsg = "Credential rate limits ran out before every embeddings input was sent"
 			errorOrigin = ErrorOriginFanOutRateLimited
+		case providerRateLimit:
+			statusCode = http.StatusTooManyRequests
+			statusMessage = "Rate limit exceeded"
+			errorMsg = "All provider attempts were rate limited"
+			errorOrigin = ErrorOriginProviderRateLimited
+		case providerRequestRejected != 0:
+			// An earlier attempt got a 4xx from the provider and a later one
+			// failed on the transport, so there is nothing left to relay. The
+			// provider's own status is the truth about the request: it says
+			// what was wrong with the request itself (a bad prompt, a
+			// content-policy refusal, an unknown model), and every credential
+			// would answer the same way. Answering 502 would blame the
+			// provider for being broken and send the client off to retry
+			// something that cannot succeed.
+			statusCode = providerRequestRejected
+			statusMessage = http.StatusText(statusCode)
+			errorMsg = fmt.Sprintf("Provider rejected the request with %d", statusCode)
+			errorOrigin = ErrorOriginProviderRequestRejected
+		case cascadeRateLimited:
+			statusCode = http.StatusTooManyRequests
+			statusMessage = "Rate limit exceeded"
+			errorMsg = "All credentials for this model are currently rate limited"
+			errorOrigin = ErrorOriginAllCredentialsRateLimited
 		case transportErr != nil && isTimeoutError(transportErr):
 			statusCode = http.StatusRequestTimeout
 			statusMessage = "Request Timeout"
@@ -2394,18 +2927,32 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		case clientCanceled:
 			p.logger.DebugContext(r.Context(), "All provider attempts aborted: client disconnected",
 				"error_code", statusCode, "credential", cred.Name, "provider", string(cred.Type), "model", modelID,
-				"error", transportErr,
-				"url", targetURL,
+				"error", upstreamErrorForLog(transportErr, targetURL),
+				"url", security.RedactURLForLog(targetURL),
 				"request_id", logCtx.RequestID)
 		case rateLimited:
 			p.logger.ErrorContext(r.Context(), "Embeddings request ran out of credential rate limits before every input was sent",
 				"error_code", statusCode, "credential", cred.Name, "provider", string(cred.Type), "model", modelID,
-				"error", transportErr,
+				"error", upstreamErrorForLog(transportErr, targetURL),
+				"request_id", logCtx.RequestID)
+		case cascadeRateLimited:
+			p.logger.WarnContext(r.Context(), "All credentials for this model are rate limited",
+				"error_code", statusCode, "credential", cred.Name, "provider", string(cred.Type), "model", modelID,
+				"request_id", logCtx.RequestID)
+		case providerRateLimit:
+			p.logger.WarnContext(r.Context(), "All provider attempts were rate limited; a later attempt failed on the transport",
+				"error_code", statusCode, "credential", cred.Name, "provider", string(cred.Type), "model", modelID,
+				"error", upstreamErrorForLog(transportErr, targetURL),
+				"request_id", logCtx.RequestID)
+		case providerRequestRejected != 0:
+			p.logger.WarnContext(r.Context(), "Provider rejected the request; a later attempt failed on the transport",
+				"error_code", statusCode, "credential", cred.Name, "provider", string(cred.Type), "model", modelID,
+				"error", upstreamErrorForLog(transportErr, targetURL),
 				"request_id", logCtx.RequestID)
 		default:
 			p.logUpstreamError(r.Context(), "All provider attempts failed: no upstream response", statusCode, cred, modelID, nil,
-				"error", transportErr,
-				"url", targetURL,
+				"error", upstreamErrorForLog(transportErr, targetURL),
+				"url", security.RedactURLForLog(targetURL),
 				"request_id", logCtx.RequestID)
 		}
 		logCtx.Status = "failure"
@@ -2422,9 +2969,29 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		case StatusClientClosedRequest:
 			WriteErrorClientClosed(w, statusMessage)
 		case http.StatusTooManyRequests:
+			// A 429 must always carry a Retry-After: the client is told to
+			// back off instead of retrying immediately. For the cascade case
+			// (every credential rate limited) there is no upstream header to
+			// relay, so derive the wait from the credential's own limit window.
 			p.setRetryAfterFromBan(w, modelID, nil, logCtx.Scope)
 			WriteErrorRateLimit(w, statusMessage)
 		default:
+			if providerRequestRejected != 0 && statusCode == providerRequestRejected {
+				// The provider's own status, relayed as it is: the client
+				// learns what was actually wrong with the request instead of
+				// a generic "Bad Gateway" that blames the provider for being
+				// broken. The body is masked like any other provider error --
+				// the provider's free text does not reach the client, but the
+				// classification does, so a content-policy refusal arrives as
+				// the content-policy message and not as a bare "Bad Request".
+				clientBody, _, _ := clientResponseBodyForCredential(
+					statusCode, providerRequestRejectedBody, cred, modelID, logCtx.RequestID)
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Content-Length", fmt.Sprintf("%d", len(clientBody)))
+				w.WriteHeader(statusCode)
+				_, _ = w.Write(clientBody) //nolint:gosec // G705: clientBody is our own masked application/json (clientResponseBodyForCredential), not attacker-controlled HTML
+				break
+			}
 			WriteErrorBadGateway(w, statusMessage)
 		}
 		return
@@ -2468,21 +3035,24 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		// measure TTFT from the first content delta and reassemble the response
 		// into the non-stream JSON the client expects.
 		if p.forceStreamForTTFT && !streaming && resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices && p.simulatedNonStreamSupported(prepared) {
-			p.handleSimulatedNonStream(w, r, resp, prepared, cred, modelID, realModelID, logCtx, saveResponseFn, targetURL, body)
+			p.handleSimulatedNonStream(w, r, resp, prepared, cred, modelID, realModelID, logCtx, saveResponseFn, targetURL, body,
+				streaming, isEmbeddings, isImageEdit, start, triedCreds, attemptedCreds)
 			return
 		}
 		if prepared.forcedNativeNonStream && resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices && provResponses != nil {
 			// Native Responses (Anthropic, Vertex) forced to stream: consume the
 			// provider SSE, fold it back into the single Responses JSON the
 			// client asked for, and record TTFT on the way.
-			p.handleSimulatedNativeNonStream(w, r, resp, prepared, cred, provResponses, modelID, logCtx, saveResponseFn, targetURL)
+			p.handleSimulatedNativeNonStream(w, r, resp, prepared, cred, provResponses, modelID, realModelID, logCtx, saveResponseFn, targetURL, body,
+				streaming, isEmbeddings, isImageEdit, start, triedCreds, attemptedCreds)
 			return
 		}
 		if prepared.forcedPassthroughNonStream && resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
 			// Codex/OpenAI passthrough Responses forced to stream: the upstream
 			// SSE is already Responses-shaped, so the terminal response.completed
 			// event is written back as non-stream JSON, with TTFT recorded.
-			p.handleSimulatedPassthroughNonStream(w, r, resp, prepared, cred, modelID, logCtx, saveResponseFn, targetURL)
+			p.handleSimulatedPassthroughNonStream(w, r, resp, prepared, cred, modelID, realModelID, logCtx, saveResponseFn, targetURL, body,
+				streaming, isEmbeddings, isImageEdit, start, triedCreds, attemptedCreds)
 			return
 		}
 		p.logger.DebugContext(r.Context(), "Response is streaming", "credential", cred.Name)
@@ -2490,6 +3060,44 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		// Decode the response body for logging (handles gzip, etc.)
 		contentEncoding := resp.Header.Get("Content-Encoding")
 		decodedBody := decodeResponseBody(responseBody, contentEncoding)
+		// deepSeekToolUsage carries the tool counters of the router-run
+		// search/fetch loop. They are applied to the request's own usage
+		// below, where the billing path reads it -- not through the body,
+		// because a body that is converted between the API shapes (a
+		// Responses request answered in Chat, or the other way round) loses
+		// the counters on the way.
+		var deepSeekToolUsage *converter.TokenUsage
+
+		// The router-run DeepSeek Search/Fetch loop: the model asked for one of
+		// the tools the router owns, so the router runs it and asks the model
+		// again. The loop's steps are separate upstream requests, so their
+		// usage is summed and carried into the final body -- otherwise the
+		// client would be billed for the last step only.
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			toolRun, toolErr := p.runDeepSeekToolLoop(r, w, logCtx, prepared, cred, modelID, realModelID,
+				body, []byte(decodedBody), start, attemptedCreds)
+			switch {
+			case toolErr != nil:
+				if errors.Is(toolErr, errDeepSeekToolCycleAborted) {
+					return
+				}
+				p.logger.WarnContext(r.Context(), "The router-run search/fetch loop failed",
+					"model", modelID, "credential", cred.Name, "error", toolErr,
+					"request_id", logCtx.RequestID)
+				// A tool that already ran and returned results is billed even
+				// though the model that followed it failed, so the loop's usage
+				// rides along here too.
+				if toolRun != nil {
+					deepSeekToolUsage = toolRun.usage
+				}
+			case toolRun != nil:
+				decodedBody = string(toolRun.body)
+				deepSeekToolUsage = toolRun.usage
+				p.logger.DebugContext(r.Context(), "The router ran the model's search/fetch tools",
+					"model", modelID, "credential", cred.Name,
+					"search_calls", toolRun.searchCalls, "fetch_calls", toolRun.fetchCalls)
+			}
+		}
 
 		// Transform response to OpenAI format (only for successful responses).
 		// For error responses (4xx/5xx) pass the provider body through unchanged.
@@ -2504,7 +3112,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 					"model", modelID, "error", convErr,
 					"request_id", logCtx.RequestID,
 				}
-				args = appendResponseBodyForLogs(args, cred, decodedBody)
+				args = appendResponseBodyForLogs(args, decodedBody)
 				p.logger.ErrorContext(r.Context(), "Failed to transform provider response to OpenAI format", args...)
 				finalResponseBody = []byte(decodedBody)
 			} else {
@@ -2524,6 +3132,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 && conv != nil && conv.IsPassthrough() {
+			p.observeSystemOneReplyModel(r.Context(), logCtx, cred.Name, realModelID, finalResponseBody)
 			finalResponseBody = rewriteResponseModelAlias(finalResponseBody, realModelID, modelID)
 			// Before billing picks its body: the stripped searches are billed from usage.
 			finalResponseBody = openai.StripServerToolCalls(finalResponseBody)
@@ -2571,7 +3180,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 					"model", modelID, "error", convErr,
 					"request_id", logCtx.RequestID,
 				}
-				args = appendResponseBodyForLogs(args, cred, decodedBody)
+				args = appendResponseBodyForLogs(args, decodedBody)
 				p.logger.ErrorContext(r.Context(), "Failed to convert native Responses API response", args...)
 				// finalResponseBody already holds decodedBody — return as-is
 			} else {
@@ -2646,7 +3255,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 					"model", modelID, "error", convErr,
 					"request_id", logCtx.RequestID,
 				}
-				args = appendResponseBodyForLogs(args, cred, decodedBody)
+				args = appendResponseBodyForLogs(args, decodedBody)
 				p.logger.ErrorContext(r.Context(), "Failed to convert Responses API response to Chat Completions format", args...)
 				// finalResponseBody already holds the raw Responses-API body — return as-is.
 			} else {
@@ -2724,6 +3333,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		// bodyForTokenExtraction is not mutated between here and its next use
 		// below.
 		tokens, directProviderTokenUsage := extractOpenAITokensAndUsage(bodyForTokenExtraction, tokenUsageOptions)
+		tokens, directProviderTokenUsage = p.systemOneUsage(r.Context(), logCtx, cred.Name, resp.StatusCode, body, realModelID, tokens, directProviderTokenUsage)
 		// A fan-out consumed its replies' tokens on the credentials that served
 		// them, call by call.
 		if tokens > 0 && !fannedOut {
@@ -2744,7 +3354,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			} else {
 				p.logger.DebugContext(r.Context(), "Proxy response body",
 					"credential", cred.Name, "content_encoding", contentEncoding,
-					"body", logger.TruncateLongFields(string(finalResponseBody), 500))
+					"body", security.RedactBodyForLog(string(finalResponseBody)))
 			}
 		}
 
@@ -2752,6 +3362,16 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		// Log to LiteLLM DB (non-streaming)
 		logCtx.TokenUsage = directProviderTokenUsage
+		// The router-run tool loop's own counters (the billable searches and
+		// fetches) and its summed token counts ride alongside the provider's
+		// usage: the loop made several upstream requests, and the client is
+		// charged for all of them.
+		// The loop's usage is applied to the request's own usage here: the
+		// spend log (written in the deferred call) reads it from there.
+		if logCtx.TokenUsage == nil {
+			logCtx.TokenUsage = &converter.TokenUsage{}
+		}
+		applyDeepSeekToolUsageTo(logCtx.TokenUsage, deepSeekToolUsage)
 		logCtx.Status = "success"
 		logCtx.HTTPStatus = resp.StatusCode
 		logCtx.TargetURL = targetURL
@@ -2778,7 +3398,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			// Final error returned to the client — single unified ERROR record
 			// with everything needed for debugging.
 			p.logUpstreamError(r.Context(), "Upstream request completed with error status", resp.StatusCode, cred, modelID, rawErrorBody,
-				"url", targetURL,
+				"url", security.RedactURLForLog(targetURL),
 				"request_id", logCtx.RequestID)
 			p.billKeptEmbedFanOutReplies(r.Context(), logCtx, &embedFanOutReplies)
 		} else if logCtx.TokenUsage != nil {
@@ -2804,6 +3424,16 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		logCtx.Logged = true
+		// logSpendToLiteLLMDB above just computed logCtx.responseCostUSD --
+		// add it to the client's own usage object before it goes out, for
+		// organizations that opted into response_cost_in_body (see
+		// client_cost.go). Independent of setResponseCostHeader below, which
+		// gates the header form on response_cost_mode instead.
+		if logCtx.responseCostKnown && shouldExposeCostToClient(logCtx) {
+			if withCost, ok := injectCostIntoJSONUsage(finalResponseBody, logCtx.responseCostUSD); ok {
+				finalResponseBody = withCost
+			}
+		}
 	}
 	if isStreamingResp {
 		outgoingAudioUsageContract = directStreamingAudioUsageContract(prepared, cred, resp.StatusCode)
@@ -2819,6 +3449,9 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	// Return credential name only to internal proxy clients, not to end users.
 	p.setCredentialResponseHeader(w, logCtx, cred.Name)
+	// Client-billed cost of this request. Only set when it is already known —
+	// for a plain streaming response it is not, and the header is skipped.
+	p.setResponseCostHeader(w, logCtx)
 
 	rc := http.NewResponseController(w)
 
@@ -2827,7 +3460,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			// Error status on a streaming response — the body is forwarded to the
 			// client as a stream and is not available here for logging.
 			p.logUpstreamError(r.Context(), "Upstream returned error status on streaming response", resp.StatusCode, cred, modelID, nil,
-				"url", targetURL,
+				"url", security.RedactURLForLog(targetURL),
 				"request_id", logCtx.RequestID)
 			body := maskedUpstreamErrorBody(resp.StatusCode, logCtx.RequestID)
 			w.Header().Set("Content-Type", "application/json")
@@ -2972,12 +3605,54 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		} else {
-			err := p.handleProviderStreaming(w, resp, cred, realModelID, modelID, logCtx)
-			if err != nil {
-				p.logStreamHandlerError(r.Context(), "Failed to handle provider streaming response", err,
-					"credential", cred.Name, "provider", cred.Type, "model", modelID, "request_id", logCtx.RequestID)
-			} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-				streamCompleted = true
+			// The router-run DeepSeek Search/Fetch loop, streaming variant: the
+			// model may ask for one of the router's tools mid-stream, and the
+			// client cannot be shown a tool call for a tool it never declared.
+			// The stream is buffered, the tool run, and the model asked again.
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 &&
+				p.deepSeekToolsEnabled && deepSeekToolsEnabledFor(modelID, cred) {
+				streamRun, streamErr := p.runDeepSeekStreamToolLoop(r, w, logCtx, prepared, cred,
+					modelID, realModelID, body, resp, start, attemptedCreds)
+				switch {
+				case errors.Is(streamErr, errDeepSeekToolCycleAborted):
+					return
+				case streamErr != nil:
+					p.logger.WarnContext(r.Context(), "The router-run search/fetch loop failed",
+						"model", modelID, "credential", cred.Name, "error", streamErr,
+						"request_id", logCtx.RequestID)
+					err := p.handleProviderStreaming(w, resp, cred, realModelID, modelID, logCtx)
+					if err != nil {
+						p.logStreamHandlerError(r.Context(), "Failed to handle provider streaming response", err,
+							"credential", cred.Name, "provider", cred.Type, "model", modelID, "request_id", logCtx.RequestID)
+					} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+						streamCompleted = true
+					}
+				default:
+					if streamRun != nil {
+						// The loop buffered the stream itself, so the usual
+						// streaming handler never ran: it neither counted the
+						// tokens nor wrote the spend row. The loop does both
+						// here -- and the streaming log reads its figures from
+						// the last chunk, so the chunk carries the loop's
+						// summed usage rather than the last step's.
+						if logCtx.TokenUsage == nil {
+							logCtx.TokenUsage = &converter.TokenUsage{}
+						}
+						applyDeepSeekToolUsageTo(logCtx.TokenUsage, streamRun.usage)
+						p.finalizeStreamingLog(logCtx, streamRun.totalTokens,
+							withDeepSeekToolUsage(streamRun.lastChunk, streamRun.usage),
+							"openai", resp.StatusCode, false)
+					}
+					streamCompleted = true
+				}
+			} else {
+				err := p.handleProviderStreaming(w, resp, cred, realModelID, modelID, logCtx)
+				if err != nil {
+					p.logStreamHandlerError(r.Context(), "Failed to handle provider streaming response", err,
+						"credential", cred.Name, "provider", cred.Type, "model", modelID, "request_id", logCtx.RequestID)
+				} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+					streamCompleted = true
+				}
 			}
 		}
 		if streamCompleted {
@@ -3029,8 +3704,8 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 // limit. It is fatal: another credential won't help.
 func (p *Proxy) failResponseTooLarge(w http.ResponseWriter, r *http.Request, logCtx *RequestLogContext, cred *config.CredentialConfig, modelID, targetURL string, readErr error, start time.Time) {
 	p.logUpstreamError(r.Context(), "Failed to read response body: too large", http.StatusBadGateway, cred, modelID, nil,
-		"error", readErr,
-		"url", targetURL,
+		"error", upstreamErrorForLog(readErr, targetURL),
+		"url", security.RedactURLForLog(targetURL),
 		"request_id", logCtx.RequestID)
 	logCtx.Status = "failure"
 	logCtx.HTTPStatus = http.StatusBadGateway
@@ -3142,4 +3817,38 @@ func (p *Proxy) HandleGetResponse(w http.ResponseWriter, r *http.Request) {
 	if encErr := json.NewEncoder(w).Encode(resp); encErr != nil {
 		p.logger.ErrorContext(r.Context(), "HandleGetResponse: failed to encode response", "id", responseID, "error", encErr)
 	}
+}
+
+// recordBanSignal forwards the outcome to the ban-decision source. Local
+// fail2ban counters are skipped ONLY when an external ban source is truly
+// wired (banDecisionsExternal, set together with the ban reader): otherwise,
+// even with a kafka publisher running, the router keeps its own bans as a
+// fail-safe — a misconfigured or temporarily unavailable Redis must never
+// leave the balancer without any ban decisions at all.
+func (p *Proxy) recordBanSignal(cred *config.CredentialConfig, modelID string, statusCode int) {
+	if p.banDecisionsExternal {
+		return
+	}
+	p.balancer.RecordResponse(cred.Name, modelID, statusCode)
+}
+
+// reportHealth forwards one outcome observation to the health worker via
+// the kafka events publisher (nil-safe when disabled).
+//
+// reason is a short machine-readable marker for the outcome kind ("" for
+// none); the health worker reads it to tell an attempt timeout apart from
+// the other 408s, so it can ban on the first one instead of waiting for the
+// soft-failure threshold. See attemptTimeoutReason.
+func (p *Proxy) reportHealth(provider, credential, model string, statusCode int, retryAfterSeconds int, reason ...string) {
+	if p.events == nil {
+		return
+	}
+	if provider == "" {
+		provider = "unknown"
+	}
+	marker := ""
+	if len(reason) > 0 {
+		marker = reason[0]
+	}
+	p.events.Report(credential, provider, model, statusCode, retryAfterSeconds, marker)
 }

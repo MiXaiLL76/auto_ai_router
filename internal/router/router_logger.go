@@ -130,7 +130,7 @@ func logErrorResponse(errorsLogPath string, req *http.Request, rc *responseCaptu
 	// Read request body if it exists
 	var reqBodyStr string
 	if len(requestBody) > 0 {
-		reqBodyStr = string(requestBody)
+		reqBodyStr = security.RedactBodyForLog(string(requestBody))
 	}
 
 	// Create request headers map with sensitive data masked
@@ -144,7 +144,7 @@ func logErrorResponse(errorsLogPath string, req *http.Request, rc *responseCaptu
 
 	// Create response headers map
 	respHeaders := make(map[string]string)
-	for key, values := range rc.Header() {
+	for key, values := range security.MaskSensitiveHeaders(rc.Header()) {
 		if len(values) > 0 {
 			respHeaders[key] = values[0]
 		}
@@ -162,7 +162,7 @@ func logErrorResponse(errorsLogPath string, req *http.Request, rc *responseCaptu
 		},
 		Response: ResponseInfo{
 			Headers: respHeaders,
-			Body:    rc.body.String(),
+			Body:    security.RedactBodyForLog(rc.body.String()),
 		},
 	}
 

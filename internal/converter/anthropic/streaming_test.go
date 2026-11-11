@@ -454,3 +454,57 @@ func TestTransformAnthropicStreamToOpenAICountsWebSearchWithoutAnyProviderUsage(
 	require.NotNil(t, gotUsage.ServerToolUse)
 	assert.Equal(t, 1, gotUsage.ServerToolUse.WebSearchRequests)
 }
+
+// TestTransformAnthropicStreamToOpenAI_ToolCallIndexAdvanceWithoutStop is a
+// regression test for a live incident (Avito, 2026-10-29): two parallel
+// tool_use blocks where the provider opened the second content_block_start
+// without a matching content_block_stop for the first. The index was advanced
+// only on content_block_stop, so both calls were emitted with index 0 and a
+// downstream consumer that stitches tool calls by index (the
+// force_stream_for_ttft reassembler) merged them into one call whose name was
+// "bashavito_internal_knowledge_search_tool" and whose arguments held two JSON
+// objects back to back. The index must advance at content_block_start.
+func TestTransformAnthropicStreamToOpenAI_ToolCallIndexAdvanceWithoutStop(t *testing.T) {
+	events := strings.Join([]string{
+		`data: {"type":"message_start","message":{"id":"msg_1","role":"assistant","model":"claude-opus-5.5","usage":{"input_tokens":10,"output_tokens":1}}}`,
+		``,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_bash","name":"bash","input":{}}}`,
+		``,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"ls\"}"}}`,
+		``,
+		// No content_block_stop for index 0 before the next tool_use block.
+		`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_avito","name":"avito_internal_knowledge_search_tool","input":{}}}`,
+		``,
+		`data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"x\"}"}}`,
+		``,
+		`data: {"type":"content_block_stop","index":1}`,
+		``,
+		`data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":20}}`,
+		``,
+		`data: {"type":"message_stop"}`,
+		``,
+	}, "\n")
+
+	var output bytes.Buffer
+	require.NoError(t, TransformAnthropicStreamToOpenAI(strings.NewReader(events), "claude-opus-5.5", &output))
+
+	indexes := map[int]string{}
+	for _, line := range strings.Split(output.String(), "\n") {
+		if !strings.HasPrefix(line, "data: ") || line == "data: [DONE]" {
+			continue
+		}
+		var chunk openai.OpenAIStreamingChunk
+		require.NoError(t, json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &chunk))
+		for _, choice := range chunk.Choices {
+			for _, tc := range choice.Delta.ToolCalls {
+				if tc.Function != nil && tc.Function.Name != "" {
+					indexes[tc.Index] = tc.Function.Name
+				}
+			}
+		}
+	}
+
+	require.Equal(t, "bash", indexes[0], "first tool call keeps index 0")
+	require.Equal(t, "avito_internal_knowledge_search_tool", indexes[1],
+		"a tool_use block opened without the previous block's stop must still get a fresh index")
+}

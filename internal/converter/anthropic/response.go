@@ -214,6 +214,16 @@ func convertAnthropicUsageToOpenAI(usage *AnthropicUsage) *openai.OpenAIUsage {
 		result.PromptTokensDetails = &openai.TokenDetails{
 			CachedTokens:        usage.CacheReadInputTokens,
 			CacheCreationTokens: cacheCreationTokens,
+			// The same cache write under the name the downstream usage
+			// metering reads first: it takes cache_write_tokens in
+			// preference to cache_creation_tokens (cost_calculator.py), and
+			// excludes the latter from the sum when the former is present, so
+			// reporting both is not a double count. An Anthropic-compatible
+			// provider that reports only cache_creation_input_tokens
+			// otherwise lands in the fallback name and, for a customer whose
+			// own accounting reads cache_write_tokens, the write is not
+			// visible at all.
+			CacheWriteTokens: cacheCreationTokens,
 		}
 		if cacheCreation5mTokens > 0 || cacheCreation1hTokens > 0 {
 			result.PromptTokensDetails.CacheCreationTokenDetails = &openai.CacheCreationTokenDetails{
@@ -226,6 +236,11 @@ func convertAnthropicUsageToOpenAI(usage *AnthropicUsage) *openai.OpenAIUsage {
 		result.ServerToolUse = &openai.ServerToolUseDetails{
 			WebSearchRequests: usage.ServerToolUse.WebSearchRequests,
 		}
+	}
+	// Thinking tokens are part of output_tokens, as reasoning_tokens are part of
+	// completion_tokens: a breakdown, not an addition.
+	if reasoningTokens := usage.ReasoningTokens(); reasoningTokens > 0 {
+		result.CompletionTokensDetails = &openai.CompletionTokenDetails{ReasoningTokens: reasoningTokens}
 	}
 	return result
 }

@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/mixaill76/auto_ai_router/internal/upstreamerror"
 )
 
 // RetryConfig controls which upstream error responses make the router replay the
@@ -54,11 +56,21 @@ var DefaultRetryStatusCodes = append([]int{400, 401, 402, 403, 404, 429}, status
 
 // DefaultNonRetryableMarkers are content-policy rejections: the provider refused
 // the content, and every other credential would refuse it too.
-var DefaultNonRetryableMarkers = []string{
-	"content policy",
-	"content management policy",
-	"policy violation",
-}
+//
+// The list is the shared content-policy marker set (upstreamerror.
+// ContentPolicyMarkers) -- the same one the proxy's status classification, the
+// LiteLLM compatibility layer and the client-facing classifier use. It was
+// four separate copies until the drift showed up: three gained a wording and
+// the fourth did not, so a refusal phrased that way was correctly classified
+// as a 400 and treated as non-retryable, yet the client was told the generic
+// "Invalid request" instead of the content-policy message.
+//
+// Missing a wording does not break the classification (the status still comes
+// out as a 400) -- it only leaves the request retryable, so every credential
+// in the pool is asked to refuse the same content, and the client waits for
+// the whole cascade (measured in production: 4 attempts and 55s for one
+// blocked prompt).
+var DefaultNonRetryableMarkers = upstreamerror.ContentPolicyMarkers
 
 // DefaultBadRequestMarkers are upstream 400 texts that fault the request itself —
 // a parameter the target model does not implement, a media part it cannot use —
@@ -68,13 +80,20 @@ var DefaultNonRetryableMarkers = []string{
 // Kept deliberately narrow: anything that could plausibly differ between
 // credentials (a model missing from one account, a disabled API, a quota) must
 // stay retryable, since moving to another credential is exactly what fixes those.
+//
+// A range/limit rejection is deliberately NOT here. "the supported range is
+// from"... reads like a request fault, but the limit belongs to the backend
+// serving the credential, not to the model the client named: the same public
+// model id is served by Vertex (maxOutputTokens <= 65536), by Google AI Studio
+// (higher) and by aggregator accounts, so the identical request succeeds on the
+// next credential type. Marking it non-retryable cut the cascade short on the
+// first Vertex credential and hid the working ones behind it.
 var DefaultBadRequestMarkers = []string{
 	"penalty is not enabled",
 	"thinking level is unsupported",
 	"thinking level minimal is not supported",
 	"unsupported mime type",
 	"required oneof field",
-	"but the supported range is from",
 }
 
 // DefaultRetryProviderExclusions are status codes removed from StatusCodes for

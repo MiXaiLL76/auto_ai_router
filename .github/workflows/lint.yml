@@ -48,7 +48,7 @@ jobs:
     name: Checks
     runs-on: baremetal-mixaill
     container:
-      image: golang:1.27.3
+      image: golang:1.27.4
       # Named Docker volumes live on the host between runs: a warm Go
       # module/build cache without moving an Actions cache tarball around.
       # PRs run untrusted code as root, so they get their own volumes and
@@ -200,8 +200,8 @@ jobs:
         # limit the GC keeps it at ~2.1 GB (slower: ~30s instead of ~10s).
         GOMEMLIMIT: 1500MiB
         # Analyze the same patched standard library used by release builds,
-        # including the crypto/x509 mitigation in Go 1.27.3.
-        GOTOOLCHAIN: go1.27.3
+        # including the net/http fix (GO-2026-6859) in Go 1.27.4.
+        GOTOOLCHAIN: go1.27.4
       run: |
         status=0
         govulncheck ./... > govulncheck.log 2>&1 || status=$?

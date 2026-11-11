@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/httputil"
 )
 
 // credentialStatusError is a resent request the credential answered with a
@@ -73,11 +74,14 @@ func (p *Proxy) resendToCredential(clientCtx context.Context, template *http.Req
 		if isTimeoutError(err) {
 			status = http.StatusRequestTimeout
 		}
-		p.balancer.RecordResponse(cred.Name, modelID, status)
+		p.recordBanSignal(cred, modelID, status)
+		p.reportHealth(string(cred.Type), cred.Name, modelID, status, 0)
 		p.metrics.RecordCredentialAttemptError(cred.Name)
 		return nil, err
 	}
-	p.balancer.RecordResponse(cred.Name, modelID, resp.StatusCode)
+	p.recordBanSignal(cred, modelID, resp.StatusCode)
+	p.reportHealth(string(cred.Type), cred.Name, modelID, resp.StatusCode,
+		httputil.RetryAfterSeconds(resp.Header.Get("Retry-After")))
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxRetryBodyScan))
 		_ = resp.Body.Close()

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -16,7 +17,6 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/spendlog"
-	"github.com/mixaill76/auto_ai_router/internal/logger"
 	"github.com/mixaill76/auto_ai_router/internal/security"
 	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
@@ -36,20 +36,28 @@ func (p *Proxy) logUpstreamError(ctx context.Context, msg string, errorCode int,
 	}
 	args = append(args, "model", modelID)
 	if len(responseBody) > 0 {
-		args = appendResponseBodyForLogs(args, cred, string(responseBody))
+		args = appendResponseBodyForLogs(args, string(responseBody))
 	}
 	args = append(args, extra...)
 	p.logger.ErrorContext(ctx, msg, args...)
 }
 
-func appendResponseBodyForLogs(args []any, cred *config.CredentialConfig, body string) []any {
-	if shouldMaskUpstreamErrors(cred) {
-		return append(args,
-			"response_body_masked", true,
-			"response_body", body,
-		)
+func appendResponseBodyForLogs(args []any, body string) []any {
+	return append(args,
+		"response_body_masked", true,
+		"response_body", security.RedactBodyForLog(body),
+	)
+}
+
+// errorMessageForLog prevents a captured provider body from escaping through
+// the long-lived spend event/metadata's error_message copy. Preserve internal
+// diagnostics when there was no provider body; classify provider failures from
+// the body using the allowlisted classifier so reflected free text never reaches this sink.
+func errorMessageForLog(logCtx *RequestLogContext) string {
+	if logCtx.ErrorBodyRaw != "" {
+		return classifiedErrorMessage(logCtx.HTTPStatus, []byte(logCtx.ErrorBodyRaw))
 	}
-	return append(args, "response_body", logger.TruncateLongFields(body, 500))
+	return logCtx.ErrorMsg
 }
 
 func shouldMaskUpstreamErrors(cred *config.CredentialConfig) bool {
@@ -116,7 +124,7 @@ func (p *Proxy) logTransformedResponse(ctx context.Context, credName, providerNa
 		p.logger.DebugContext(ctx, "Transformed response to OpenAI format",
 			"credential", credName,
 			"provider", providerName,
-			"body", logger.TruncateLongFields(string(body), 500),
+			"body", security.RedactBodyForLog(string(body)),
 		)
 	}
 }
@@ -168,7 +176,7 @@ func (p *Proxy) handleLiteLLMAuthError(ctx context.Context, w http.ResponseWrite
 	for errType, info := range errorMap {
 		if errors.Is(err, errType) {
 			logCtx.HTTPStatus = info.status
-			logCtx.ErrorMsg = "LiteLLM auth validation failed"
+			logCtx.ErrorMsg = "LiteLLM auth validation failed: " + info.logMsg
 			p.logger.WarnContext(ctx, info.logMsg,
 				"error_code", info.status,
 				"token_prefix", security.MaskAPIKey(token))
@@ -285,14 +293,7 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	}
 
 	// Determine final status if not explicitly set
-	status := logCtx.Status
-	if status == "" {
-		if logCtx.HTTPStatus >= 400 {
-			status = "failure"
-		} else {
-			status = "success"
-		}
-	}
+	status := logCtx.finalStatus()
 
 	// Ensure TokenUsage is not nil to prevent nil pointer dereference
 	if logCtx.TokenUsage == nil {
@@ -331,6 +332,19 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 		logCtx.applyCostMargin(tokenCosts)
 	}
 	cost := tokenCosts.TotalCost
+	// Record the client-billed cost so the response path can surface it as
+	// X-Total-Cost — but only for organizations that opted in (see
+	// setResponseCostHeader, which re-checks the mode). Set even for a $0 row: a
+	// free or unpriced-but-zero request is still "known".
+	logCtx.responseCostUSD = cost
+	logCtx.responseCostKnown = true
+	// The full breakdown is only needed for the breakdown mode; marshal it once,
+	// here, from the same map the spend metadata carries so the two never drift.
+	if logCtx.OrganizationPolicy.ReturnsCostBreakdown() {
+		if encoded, err := json.Marshal(costBreakdownMap(tokenCosts)); err == nil {
+			logCtx.responseCostBreakdown = encoded
+		}
+	}
 	p.logger.DebugContext(logSpendCtx, "Calculated cost for model",
 		"model_name", priceModelID,
 		"cost", cost,
@@ -389,7 +403,7 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	if !logCtx.UpstreamSendTime.IsZero() {
 		upstreamSendDelayMs = float64(logCtx.UpstreamSendTime.Sub(logCtx.StartTime).Microseconds()) / 1000.0
 	}
-	metadata := buildMetadata(hashedToken, logCtx.TokenInfo, logCtx.ErrorMsg, logCtx.HTTPStatus, logCtx.TokenUsage, requesterIP, tokenCosts, logCtx.ModelID, overheadMs, upstreamSendDelayMs, kafkaFallbackReason)
+	metadata := buildMetadata(hashedToken, logCtx.TokenInfo, errorMessageForLog(logCtx), logCtx.HTTPStatus, logCtx.TokenUsage, requesterIP, tokenCosts, logCtx.ModelID, overheadMs, upstreamSendDelayMs, kafkaFallbackReason)
 	metadata = addAIRSpendMetadata(metadata, logCtx.RequestID, logCtx.ClientResponseID, logCtx.IsProxyRequest, logCtx.ModelID, logCtx.PublicModelID, logCtx.billingPriceModelID)
 	metadata = addRequestSpendMetadata(metadata, logCtx)
 	metadata = addOrganizationPolicySpendMetadata(metadata, logCtx)

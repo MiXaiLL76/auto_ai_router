@@ -602,7 +602,7 @@ The router provides accurate token counting with modality breakdown:
 - **Completion tokens**: Total output tokens (includes thinking tokens)
 - **Cached tokens**: Reported separately (deducted from base cost to avoid double-charging)
 - **Audio tokens**: Tracked separately for accurate billing
-- **Image and video tokens**: Reported separately (`prompt_tokens_details.image_tokens` / `video_tokens`), each at its own price
+- **Image and video tokens**: Reported separately (`prompt_tokens_details.image_tokens` / `video_tokens`), each at its own price; PDF pages (`DOCUMENT`) count as image tokens, as in embeddings
 - **Thinking tokens**: Included in completion count, tracked in `completion_tokens_details.reasoning_tokens`
 - **Generated image tokens**: Tracked in `completion_tokens_details.image_tokens` and billed at the image output rate, apart from text and thinking
 - **Google Search**: Queries in `server_tool_use.web_search_requests`, a query text repeated in a response once (except on [`gemini-4-argon`](#gemini-4-argon)); search-retrieved context counts as prompt tokens except on `gemini-nano-banana-2.1` (see [Google Search types](#google-search-types))

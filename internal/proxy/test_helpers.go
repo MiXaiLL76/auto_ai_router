@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"log/slog"
+	"net/http"
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/auth"
@@ -99,8 +100,10 @@ type TestProxyConfig struct {
 	MaxBodySizeMB          int
 	ResponseBodyMultiplier int
 	RequestTimeout         time.Duration
+	ResponseHeaderTimeout  time.Duration
 	Version                string
 	Commit                 string
+	ServiceName            string
 	SessionStickyEnabled   bool
 	SessionStoreTTL        time.Duration
 	MaxProviderRetries     int
@@ -130,6 +133,7 @@ func NewTestProxyBuilder() *TestProxyBuilder {
 			RequestTimeout:  30 * time.Second,
 			Version:         "test-version",
 			Commit:          "test-commit",
+			ServiceName:     "test-service",
 			TiktokenEnabled: true, // matches production default (server.tiktoken_enabled: true)
 		},
 	}
@@ -224,6 +228,15 @@ func (b *TestProxyBuilder) WithRequestTimeout(timeout time.Duration) *TestProxyB
 	return b
 }
 
+// WithResponseHeaderTimeout sets the per-attempt response-header budget. A
+// value > 0 also enables the attempt_timeout ban (the feature is opt-in: with
+// it unset the transport falls back to request_timeout, and a timeout then
+// means "the provider needed longer", not "the provider never answered").
+func (b *TestProxyBuilder) WithResponseHeaderTimeout(timeout time.Duration) *TestProxyBuilder {
+	b.config.ResponseHeaderTimeout = timeout
+	return b
+}
+
 // WithSessionSticky enables session-sticky credential routing with the given TTL.
 func (b *TestProxyBuilder) WithSessionSticky(ttl time.Duration) *TestProxyBuilder {
 	b.config.SessionStickyEnabled = true
@@ -306,12 +319,13 @@ func (b *TestProxyBuilder) Build() *Proxy {
 		f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 		b.config.Balancer = balancer.New(b.config.Credentials, f2b, b.config.RateLimiter)
 	}
-	return New(&Config{
+	prx := New(&Config{
 		Balancer:               b.config.Balancer,
 		Logger:                 b.config.Logger,
 		MaxBodySizeMB:          b.config.MaxBodySizeMB,
 		ResponseBodyMultiplier: b.config.ResponseBodyMultiplier,
 		RequestTimeout:         b.config.RequestTimeout,
+		ResponseHeaderTimeout:  b.config.ResponseHeaderTimeout,
 		Metrics:                b.config.Metrics,
 		MasterKey:              b.config.MasterKey,
 		RateLimiter:            b.config.RateLimiter,
@@ -319,6 +333,7 @@ func (b *TestProxyBuilder) Build() *Proxy {
 		ModelManager:           b.config.ModelManager,
 		Version:                b.config.Version,
 		Commit:                 b.config.Commit,
+		ServiceName:            b.config.ServiceName,
 		SessionStickyEnabled:   b.config.SessionStickyEnabled,
 		SessionStoreTTL:        b.config.SessionStoreTTL,
 		MaxProviderRetries:     b.config.MaxProviderRetries,
@@ -333,6 +348,25 @@ func (b *TestProxyBuilder) Build() *Proxy {
 		VisionFallback:         b.config.VisionFallback,
 		LoopGate:               b.config.LoopGate,
 	})
+	// No streamingClient collapse needed here (unlike before streamingClients
+	// became a lazily-built per-timeout map): attemptClient already returns
+	// prx.client itself whenever the effective ResponseHeaderTimeout is <= 0,
+	// which is every credential's default with nothing configured -- exactly
+	// the case most tests mock prx.client.Transport for. A test that wants to
+	// exercise the short-timeout path uses streamingClientForTest below.
+	return prx
+}
+
+// streamingClientForTest returns (building it on first use, exactly like a
+// real request would via attemptClient) the *http.Client a streaming attempt
+// for cred would use. Pass nil for cred to get the client a credential with
+// no override of its own resolves to (the server-level default). Tests use
+// this to install a mock Transport on the client an attempt will actually
+// run on, now that it is not a fixed field but one entry in a lazily-built
+// map keyed by the effective timeout.
+func (p *Proxy) streamingClientForTest(cred *config.CredentialConfig) *http.Client {
+	client, _ := p.attemptClient(cred, true)
+	return client
 }
 
 // ============================================================================

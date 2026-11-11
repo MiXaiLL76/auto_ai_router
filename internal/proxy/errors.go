@@ -23,6 +23,37 @@ type APIError struct {
 	Code    *string `json:"code"`
 }
 
+// isRequestScopedStatus reports whether a provider's status describes the
+// REQUEST rather than the CREDENTIAL that served it -- and may therefore be
+// relayed to the client as-is when no response is left to relay.
+//
+// The distinction decides what the client is told after a cascade ends with
+// a transport failure. A request-scoped status (a bad prompt, a
+// content-policy refusal, a model that does not exist) is the same on every
+// credential: replaying it only multiplies the delay, and a 502 would blame
+// the provider for being broken. A credential-scoped status (401, 402, 403)
+// says something about ONE credential -- its key is wrong, its account is
+// exhausted, it is not allowed to serve this -- and the next credential may
+// answer the very same request fine. Relaying such a status after an
+// unrelated transport failure tells the client its own key was rejected,
+// which it never was: the router's own key is a different thing entirely,
+// and the client cannot act on that answer.
+//
+// 429 is excluded as well: it is credential-scoped too (the upstream
+// ACCOUNT is over its limit), and it carries its own treatment -- a
+// Retry-After, which a plain status relay does not give.
+//
+// 404 is kept: "the model does not exist" is a statement about the request,
+// and the model named is the same for every credential.
+func isRequestScopedStatus(statusCode int) bool {
+	switch statusCode {
+	case http.StatusBadRequest, http.StatusNotFound:
+		return true
+	default:
+		return false
+	}
+}
+
 // errorTypeForStatus maps HTTP status codes to OpenAI error type strings.
 func errorTypeForStatus(statusCode int) string {
 	switch statusCode {

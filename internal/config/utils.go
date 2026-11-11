@@ -115,6 +115,7 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 		"model_prices_sync_interval", cfg.Server.ModelPricesSyncInterval.String(),
 		"max_provider_retries", cfg.Server.MaxProviderRetries,
 		"max_fallback_attempts", cfg.Server.MaxFallbackAttempts,
+		"anthropic_default_max_tokens", cfg.Server.AnthropicDefaultMaxTokens,
 		"response_headers_mode", cfg.Server.ResponseHeaders.Mode,
 		"session_sticky_enabled", cfg.Server.SessionStickyEnabled,
 		"session_sticky_ttl_minutes", cfg.Server.SessionStickyTTL,

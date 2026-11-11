@@ -19,8 +19,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mixaill76/auto_ai_router/internal/accountevents"
 	"github.com/mixaill76/auto_ai_router/internal/auth"
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
+	"github.com/mixaill76/auto_ai_router/internal/banreader"
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/fail2ban"
 	"github.com/mixaill76/auto_ai_router/internal/health"
@@ -134,6 +136,20 @@ func main() {
 	kafkaLogManager := initializeKafkaLog(cfg, log, litellmDBManager)
 	rawBodyLogManager := initializeRawBodyLog(cfg, log)
 
+	// Outcome events for the health worker: kafka-first transport (the
+	// service no longer accepts HTTP reports). Broker/SASL/TLS come from
+	// the kafka section; only the topic is account-events specific.
+	var accountEvents *accountevents.Publisher
+	if cfg.AccountEvents.Enabled {
+		accountEvents, err = accountevents.New(&cfg.AccountEvents, &cfg.Kafka, log)
+		if err != nil {
+			log.Error("Failed to create account events publisher, disabling", "error", err)
+			accountEvents = nil
+		} else {
+			log.Info("Account events publishing enabled", "topic", cfg.AccountEvents.Topic)
+		}
+	}
+
 	// ==================== Budget reservation & key-level RPM/TPM ====================
 	// Both are Redis-backed and reuse the shared valkey client with isolated key
 	// namespaces. When Redis is disabled they stay nil and the proxy falls back to
@@ -174,10 +190,33 @@ func main() {
 	// UpdateDBModels so that the sync loop can correctly add/remove DB-sourced entries.
 
 	priceRegistry := models.NewModelPriceRegistry()
-	_, rateLimiter, bal, hybridBackend := initializeBalancer(cfg, log, redisBackend, metrics)
+	f2b, rateLimiter, bal, hybridBackend := initializeBalancer(cfg, log, redisBackend, metrics)
 	if hybridBackend != nil {
 		defer hybridBackend.Close()
 	}
+
+	// Ban decision source: with account_events enabled (kafka path) the
+	// router reads the worker's bans straight from Redis and materializes
+	// them into the local fail2ban; otherwise no external bans are applied
+	// (the router keeps its fail2ban rules). Unknown/stale state always
+	// fails open (nothing is dead).
+	var banReader *banreader.Reader
+	banDecisionsExternal := false
+	if cfg.AccountEvents.Enabled {
+		if redisBackend != nil {
+			banReader = banreader.New(redisBackend.Client(), cfg.Redis, f2b,
+				credentialProviderTypes(cfg), cfg.AccountEvents.ReaderInterval, log)
+			bal.SetHealthChecker(banReader)
+			// The local fail2ban counters may now step aside: an external
+			// source of bans is really connected. Only then.
+			banDecisionsExternal = true
+			log.Info("Health worker ban reader active",
+				"interval", cfg.AccountEvents.ReaderInterval)
+		} else {
+			log.Warn("account_events enabled but redis disabled: ban reader inactive, local fail2ban stays active")
+		}
+	}
+
 	modelManager := initializeModelManager(log, cfg, rateLimiter, bal)
 
 	// ==================== Apply Initial DB Model Table ====================
@@ -244,6 +283,11 @@ func main() {
 	keyMetrics := initializeKeyMetrics(cfg, log)
 
 	// ==================== Create Proxy ====================
+	var deepSeekToolsRedis valkey.Client
+	if redisBackend != nil {
+		deepSeekToolsRedis = redisBackend.Client()
+	}
+
 	prx := proxy.New(&proxy.Config{
 		Balancer:                     bal,
 		Logger:                       log,
@@ -253,6 +297,7 @@ func main() {
 		MaxIdleConns:                 cfg.Server.MaxIdleConns,
 		MaxIdleConnsPerHost:          cfg.Server.MaxIdleConnsPerHost,
 		IdleConnTimeout:              cfg.Server.IdleConnTimeout,
+		ResponseHeaderTimeout:        cfg.Server.ResponseHeaderTimeout,
 		HTTP2IdlePingTimeout:         cfg.Server.HTTP2IdlePingTimeout,
 		HTTP2PingTimeout:             cfg.Server.HTTP2PingTimeout,
 		MaxConnectionLifetime:        cfg.Server.MaxConnectionLifetime,
@@ -263,6 +308,7 @@ func main() {
 		ModelManager:                 modelManager,
 		Version:                      Version,
 		Commit:                       Commit,
+		ServiceName:                  cfg.OTEL.ServiceName,
 		LiteLLMDB:                    litellmDBManager,
 		KafkaLog:                     kafkaLogManager,
 		RawBodyLog:                   rawBodyLogManager,
@@ -270,11 +316,17 @@ func main() {
 		RawBodyStoreOnlyErrors:       cfg.Kafka.RawBodies.StoreOnlyErrors,
 		RawBodyRedactSensitiveFields: cfg.Kafka.RawBodies.RedactSensitiveFields,
 		HealthChecker:                healthChecker,
+		Events:                       accountEvents,
+		BanDecisionsExternal:         banDecisionsExternal,
 		PriceRegistry:                priceRegistry,
 		OrganizationPolicies:         organizationPolicies,
 		MaxProviderRetries:           cfg.Server.MaxProviderRetries,
 		Retry:                        cfg.Retry,
 		MaxFallbackAttempts:          cfg.Server.MaxFallbackAttempts,
+		AnthropicDefaultMaxTokens:    cfg.Server.AnthropicDefaultMaxTokens,
+		DeepSeekTools:                cfg.Server.DeepSeekTools,
+		DeepSeekToolsKeyPrefix:       cfg.Redis.KeyPrefix + "deepseektools:",
+		DeepSeekToolsRedisClient:     deepSeekToolsRedis,
 		ResponseStore:                respStore,
 		SessionStickyEnabled:         cfg.Server.SessionStickyEnabled,
 		SessionStickyAutoCacheCtrl:   cfg.Server.SessionStickyAutoCacheCtrl,
@@ -301,12 +353,16 @@ func main() {
 	})
 
 	videoRuntime := initializeVideoOrExit(cfg, prx, litellmDBManager, log)
+	yandexSearchHandler := initializeYandexSearchOrExit(cfg, prx, litellmDBManager, kafkaLogManager, redisBackend, budgetReserver, log)
 
 	// ==================== Background Goroutines ====================
 	bgCtx, bgCancel := context.WithCancel(context.Background())
 	defer bgCancel()
 
 	prx.Start(bgCtx)
+	if banReader != nil {
+		go banReader.Start(bgCtx)
+	}
 
 	var wg sync.WaitGroup
 	videoRuntime.start(bgCtx, &wg)
@@ -348,6 +404,9 @@ func main() {
 	rtr := router.New(prx, modelManager, &cfg.Monitoring, log, cfg)
 	if videoRuntime != nil {
 		rtr.SetVideoHandler(videoRuntime.handler)
+	}
+	if yandexSearchHandler != nil {
+		rtr.SetYandexSearchHandler(yandexSearchHandler)
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/", rtr)
@@ -1552,4 +1611,19 @@ func startResponseStoreCleanup(
 		}
 	}()
 	log.Info("Response store cleanup worker started (runs every 1 hour)")
+}
+
+// credentialProviderTypes returns the unique credential types from the
+// static config; the ban reader merges them with the worker's providers set.
+func credentialProviderTypes(cfg *config.Config) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, cred := range cfg.Credentials {
+		t := string(cred.Type)
+		if t != "" && !seen[t] {
+			seen[t] = true
+			out = append(out, t)
+		}
+	}
+	return out
 }

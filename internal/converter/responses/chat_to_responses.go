@@ -589,7 +589,7 @@ func chatVerbosityToText(raw map[string]interface{}) {
 // has independently hit (and designed around) the same assumption this guards against:
 // some non-reasoning models reject the encrypted-content include value outright, which
 // would make every single request to a non-reasoning responses_only model 400
-// unconditionally -- worse than the reasoning-continuity gap in the modelMappings-miss
+// unconditionally -- worse than the reasoning-continuity gap in the reasoningModelFamilies-miss
 // case below, which only degrades one specific unrecognized reasoning family instead of
 // breaking a whole class of models outright.
 func chatForceStatelessResponses(raw map[string]interface{}) {

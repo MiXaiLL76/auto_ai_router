@@ -78,7 +78,7 @@ retry:
 
 ### Built-in markers
 
-`non_retryable_markers` (any status): `content policy`, `content management policy`, `policy violation`.
+`non_retryable_markers` (any status): `content policy`, `content_policy`, `content filter`, `content_filter`, `content moderation`, `inappropriate content`, `safety violation`, `safety_violation`, `prompt_blocked`, `prompt blocked`, `blocked by content`, `content management policy`, `policy violation`, `data_inspection_failed`.
 
 `bad_request_markers` (400 only): `penalty is not enabled`, `thinking level is unsupported`, `thinking level minimal is not supported`, `unsupported mime type`, `required oneof field`, `but the supported range is from`.
 

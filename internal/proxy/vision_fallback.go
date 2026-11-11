@@ -391,8 +391,11 @@ func (p *Proxy) describeVisionImage(r *http.Request, imageURL string) (string, e
 	req.ContentLength = int64(len(payload))
 	req.RemoteAddr = r.RemoteAddr
 
+	// The describe is a request of its own on the trace too.
+	req, describeDone := innerRequestSpan(req)
 	rec := httptest.NewRecorder()
 	p.proxyRequest(rec, req)
+	describeDone(rec.Code)
 	if rec.Code != http.StatusOK {
 		return "", fmt.Errorf("describe model returned status %d: %s", rec.Code, truncateForLog(rec.Body.String(), 300))
 	}

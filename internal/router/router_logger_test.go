@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mixaill76/auto_ai_router/internal/security"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -149,10 +150,12 @@ func TestLogErrorResponse_Success(t *testing.T) {
 
 	req := httptest.NewRequest("POST", "/api/test", nil)
 	req.Header.Set("Authorization", "Bearer secret-token")
+	req.Header.Set("X-API-Key", "synthetic-api-key-secret")
 	req.Header.Set("Content-Type", "application/json")
 
 	w := httptest.NewRecorder()
 	rc := newResponseCapture(w)
+	rc.Header().Set("Set-Cookie", "session=synthetic-cookie-secret")
 	rc.WriteHeader(http.StatusBadRequest)
 	_, _ = rc.Write([]byte("error message"))
 
@@ -174,8 +177,12 @@ func TestLogErrorResponse_Success(t *testing.T) {
 	assert.Equal(t, "POST", entry.Method)
 	assert.Equal(t, http.StatusBadRequest, entry.Status)
 	assert.Equal(t, "Bearer secr...", entry.Request.Headers["Authorization"])
-	assert.Equal(t, string(requestBody), entry.Request.Body)
-	assert.Equal(t, "error message", entry.Response.Body)
+	assert.Equal(t, security.RedactBodyForLog(string(requestBody)), entry.Request.Body)
+	assert.Equal(t, security.RedactBodyForLog("error message"), entry.Response.Body)
+	assert.NotContains(t, string(content), "synthetic-api-key-secret")
+	assert.NotContains(t, string(content), "synthetic-cookie-secret")
+	assert.Equal(t, "error message", w.Body.String(), "logging must preserve the client response")
+	assert.Equal(t, "session=synthetic-cookie-secret", w.Header().Get("Set-Cookie"))
 }
 
 func TestLogErrorResponse_MultipleEntries(t *testing.T) {
