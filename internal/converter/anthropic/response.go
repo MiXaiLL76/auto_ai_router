@@ -234,6 +234,19 @@ func convertAnthropicUsageToOpenAI(usage *AnthropicUsage) *openai.OpenAIUsage {
 				Ephemeral5mInputTokens: cacheCreation5mTokens,
 				Ephemeral1hInputTokens: cacheCreation1hTokens,
 			}
+			// Same TTL split again, under Alibaba/Qwen's unsuffixed spelling
+			// (cache_creation.ephemeral_5m_input_tokens, no _token_details) —
+			// a third name some clients' accounting may read instead of
+			// cache_creation_token_details. Same flag, same non-double-count
+			// reasoning: TokenDetails.CacheWrite() already prefers
+			// CacheCreationTokenDetails over AlibabaCacheCreation, so this
+			// never gets summed twice internally.
+			if converterutil.MirrorCacheWriteTokensEnabled() {
+				result.PromptTokensDetails.AlibabaCacheCreation = &openai.CacheCreationTokenDetails{
+					Ephemeral5mInputTokens: cacheCreation5mTokens,
+					Ephemeral1hInputTokens: cacheCreation1hTokens,
+				}
+			}
 		}
 	}
 	if usage.ServerToolUse != nil && usage.ServerToolUse.WebSearchRequests > 0 {

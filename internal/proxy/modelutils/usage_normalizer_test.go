@@ -187,6 +187,11 @@ func TestNormalizeCacheCreationUsageMirrorsCacheWriteTokensWhenEnabled(t *testin
 	details := response["usage"].(map[string]any)["prompt_tokens_details"].(map[string]any)
 	assert.Equal(t, float64(2755), details["cache_creation_tokens"])
 	assert.Equal(t, float64(2755), details["cache_write_tokens"])
+	// The TTL split is also mirrored under Alibaba/Qwen's unsuffixed spelling
+	// (cache_creation.ephemeral_*), a third name some clients' accounting may
+	// read instead of cache_creation_token_details.
+	alibabaCC := details["cache_creation"].(map[string]any)
+	assert.Equal(t, float64(2755), alibabaCC["ephemeral_5m_input_tokens"])
 	// Alternate naming still preserved.
 	assert.Equal(t, float64(2755), details["caching_tokens"])
 }
@@ -205,6 +210,8 @@ func TestNormalizeCacheCreationUsageOmitsCacheWriteTokensWhenMirroringDisabled(t
 	assert.Equal(t, float64(2755), details["cache_creation_tokens"])
 	_, exists := details["cache_write_tokens"]
 	assert.False(t, exists, "cache_write_tokens must be absent while mirroring is disabled")
+	_, exists = details["cache_creation"]
+	assert.False(t, exists, "cache_creation (Alibaba spelling) must be absent while mirroring is disabled")
 }
 
 func TestNormalizeCacheCreationUsageLeavesStandardNamingUnchanged(t *testing.T) {

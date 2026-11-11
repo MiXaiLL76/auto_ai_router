@@ -106,9 +106,14 @@ func NormalizeCompletionUsage(body []byte, modelID string) ([]byte, bool) {
 // When converterutil.MirrorCacheWriteTokensEnabled() is on, the same write is
 // also mirrored into cache_write_tokens — the name some clients' own
 // accounting reads in preference to cache_creation_tokens (see PR #355's
-// equivalent for Anthropic-type credentials). Off by default: a client
-// reading cache_creation_tokens already sees the write either way, and this
-// only adds the second name for the one that doesn't.
+// equivalent for Anthropic-type credentials) — and, when a TTL split is
+// known, into cache_creation.ephemeral_5m_input_tokens /
+// ephemeral_1h_input_tokens too (Alibaba/Qwen's unsuffixed spelling of the
+// same split, a third name some clients' accounting may read instead of
+// cache_creation_token_details). Off by default: a client reading
+// cache_creation_tokens/cache_creation_token_details already sees the write
+// either way, and this only adds the alternate names for a client that
+// doesn't.
 func NormalizeCacheCreationUsage(body []byte) ([]byte, bool) {
 	// Cheap gate: the only Requesty fields this reads (caching_tokens,
 	// caching_token_details, caching_5m/1h_tokens) all contain the substring
@@ -172,6 +177,15 @@ func NormalizeCacheCreationUsage(body []byte) ([]byte, bool) {
 			return body, false
 		}
 		details["cache_creation_token_details"] = encCTD
+		// Same TTL split again, under Alibaba/Qwen's unsuffixed spelling
+		// (cache_creation.ephemeral_5m_input_tokens, no _token_details) — a
+		// third name some clients' accounting may read instead of
+		// cache_creation_token_details. Same flag as cache_write_tokens above;
+		// TokenDetails.CacheWrite() already prefers cache_creation_token_details
+		// over this one, so it is never summed twice internally.
+		if converterutil.MirrorCacheWriteTokensEnabled() {
+			details["cache_creation"] = encCTD
+		}
 	}
 	encDetails, err := json.Marshal(details)
 	if err != nil {
