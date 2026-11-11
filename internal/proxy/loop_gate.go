@@ -175,6 +175,7 @@ type loopGateObserver struct {
 	abortedTokens  int                    // tokens of restarted attempts, missing from the final usage
 	restarting     chan loopGateRestarted // the next attempt being sent; nil = none
 	restartCut     *loopGateCut           // the loop being restarted, cut with it when the restart fails
+	restartStarted time.Time              // when the current restart was sent; the keepalive interval counts from here
 
 	promptTokens func() int               // local prompt token estimate, 0 = unknown
 	lastUsage    loopGateChatUsage        // chat: the last usage the current attempt reported
@@ -544,6 +545,9 @@ func (o *loopGateObserver) startRestart(cut *loopGateCut) {
 	respawn, normalize, model := o.respawn, o.normalizeUsage, o.publicModel
 	done := make(chan loopGateRestarted, 1)
 	o.restarting, o.restartCut = done, cut
+	// The client has been waiting since the loop was detected: the keepalive
+	// interval counts from here. See awaitRestart.
+	o.restartStarted = o.now()
 	go func() {
 		body, err := respawn(restart, penalty)
 		if err == nil {
@@ -559,8 +563,25 @@ func (o *loopGateObserver) startRestart(cut *loopGateCut) {
 // awaitRestart waits for the restarted attempt, or for one keepalive
 // interval: the keepalive is then queued for the client (or written to
 // o.keepalive). An error means the client is gone.
+//
+// The interval is measured from when the restart was SENT (startRestart), not
+// from when this call was entered. The client has been waiting since the
+// loop was detected, and Read only gets here when it asks for the next
+// bytes -- possibly long after the restart itself. Measuring from here
+// restarted the clock on every call, so a restart that had already finished
+// when this call was entered skipped the heartbeat entirely, although the
+// client had waited out the interval already -- the very case the heartbeat
+// exists for. On a busy machine (a CI runner under parallel packages) that
+// gap is long enough to happen, which is why the keepalive went missing
+// there.
+//
+// The timer still waits a full interval: this call is the client's turn to
+// wait, and the heartbeat it gets is the one it was promised.
 func (o *loopGateObserver) awaitRestart() error {
-	started := time.Now()
+	started := o.restartStarted
+	if started.IsZero() {
+		started = time.Now()
+	}
 	timer := time.NewTimer(loopGateKeepaliveInterval)
 	defer timer.Stop()
 	select {
