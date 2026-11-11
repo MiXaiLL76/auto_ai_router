@@ -212,6 +212,56 @@ func TestLoopGateObserver_KeepaliveWhileRestartIsOnItsWay(t *testing.T) {
 	assert.Contains(t, out.String(), `w29 "`, "the new attempt follows the keepalives")
 }
 
+func TestLoopGateObserver_KeepaliveWhenRestartAndTimerAreBothReady(t *testing.T) {
+	saved := loopGateKeepaliveInterval
+	loopGateKeepaliveInterval = time.Nanosecond
+	t.Cleanup(func() { loopGateKeepaliveInterval = saved })
+
+	// A stalled process can resume after both the timer and the restarted
+	// response are ready. Select may choose either case; both must send the
+	// heartbeat promised to a client that waited past the interval.
+	for range 50 {
+		o := newTestLoopGateObserver(t, config.LoopGateEnforce)
+		var out strings.Builder
+		o.keepalive = &out
+		o.restartCut = &loopGateCut{channel: "reasoning"}
+		o.restarting = make(chan loopGateRestarted, 1)
+		body := io.NopCloser(strings.NewReader("data: [DONE]\n\n"))
+		o.restarting <- loopGateRestarted{body: body}
+
+		require.NoError(t, o.awaitRestart())
+		assert.Equal(t, string(loopGateKeepalive), out.String())
+		require.NoError(t, body.Close())
+	}
+}
+
+func TestLoopGateObserver_KeepaliveWriteFailureClosesReadyRestart(t *testing.T) {
+	saved := loopGateKeepaliveInterval
+	loopGateKeepaliveInterval = time.Nanosecond
+	t.Cleanup(func() { loopGateKeepaliveInterval = saved })
+
+	for range 20 {
+		o := newTestLoopGateObserver(t, config.LoopGateEnforce)
+		o.keepalive = newFailAfterNBytesWriter(0)
+		o.restartCut = &loopGateCut{channel: "reasoning"}
+		o.restarting = make(chan loopGateRestarted, 1)
+		closed := make(chan struct{})
+		body := &closeNotifyBody{
+			closeTrackingBody: &closeTrackingBody{Reader: strings.NewReader("data: [DONE]\n\n")},
+			closed:            closed,
+		}
+		o.restarting <- loopGateRestarted{body: body}
+
+		require.Error(t, o.awaitRestart())
+		o.finish()
+		select {
+		case <-closed:
+		case <-time.After(time.Second):
+			t.Fatal("ready restart body was not closed after keepalive write failed")
+		}
+	}
+}
+
 func TestLoopGateObserver_FinishClosesRestartStillOnItsWay(t *testing.T) {
 	o := newTestLoopGateObserver(t, config.LoopGateEnforce)
 	var reasoning []string

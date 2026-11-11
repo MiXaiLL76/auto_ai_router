@@ -560,24 +560,42 @@ func (o *loopGateObserver) startRestart(cut *loopGateCut) {
 // interval: the keepalive is then queued for the client (or written to
 // o.keepalive). An error means the client is gone.
 func (o *loopGateObserver) awaitRestart() error {
+	started := time.Now()
 	timer := time.NewTimer(loopGateKeepaliveInterval)
 	defer timer.Stop()
 	select {
 	case r := <-o.restarting:
 		o.restarting = nil
+		// Both the timer and the restart may be ready when a busy process
+		// resumes. Keep the promised heartbeat even if select picks restart.
+		if time.Since(started) >= loopGateKeepaliveInterval {
+			if err := o.sendRestartKeepalive(); err != nil {
+				o.abortedTokens += o.cutUsage().TotalTokens
+				o.restartCut = nil
+				if r.body != nil {
+					_ = r.body.Close()
+				}
+				return err
+			}
+		}
 		o.restarted(r)
 	case <-timer.C:
-		if o.keepalive == nil {
-			o.pending = loopGateKeepalive
-			return nil
-		}
-		if _, err := o.keepalive.Write(loopGateKeepalive); err != nil {
+		if err := o.sendRestartKeepalive(); err != nil {
 			return err
 		}
 	case <-o.ctx.Done():
 		return o.ctx.Err()
 	}
 	return nil
+}
+
+func (o *loopGateObserver) sendRestartKeepalive() error {
+	if o.keepalive == nil {
+		o.pending = loopGateKeepalive
+		return nil
+	}
+	_, err := o.keepalive.Write(loopGateKeepalive)
+	return err
 }
 
 // restarted continues the stream with the new attempt, or cuts it at the
