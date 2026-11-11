@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 )
 
@@ -101,6 +102,13 @@ func NormalizeCompletionUsage(body []byte, modelID string) ([]byte, bool) {
 // cache_creation.ephemeral_*), so synthesizing the standard name for them
 // would risk double-counting. Returns the (possibly unchanged) body and
 // whether it changed.
+//
+// When converterutil.MirrorCacheWriteTokensEnabled() is on, the same write is
+// also mirrored into cache_write_tokens — the name some clients' own
+// accounting reads in preference to cache_creation_tokens (see PR #355's
+// equivalent for Anthropic-type credentials). Off by default: a client
+// reading cache_creation_tokens already sees the write either way, and this
+// only adds the second name for the one that doesn't.
 func NormalizeCacheCreationUsage(body []byte) ([]byte, bool) {
 	// Cheap gate: the only Requesty fields this reads (caching_tokens,
 	// caching_token_details, caching_5m/1h_tokens) all contain the substring
@@ -147,6 +155,9 @@ func NormalizeCacheCreationUsage(body []byte) ([]byte, bool) {
 	}
 	if total > 0 {
 		details["cache_creation_tokens"] = json.RawMessage(strconv.FormatInt(int64(total), 10))
+		if converterutil.MirrorCacheWriteTokensEnabled() {
+			details["cache_write_tokens"] = json.RawMessage(strconv.FormatInt(int64(total), 10))
+		}
 	}
 	if fiveMinutes > 0 || oneHour > 0 {
 		ctd := make(map[string]json.RawMessage, 2)

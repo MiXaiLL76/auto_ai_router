@@ -761,6 +761,13 @@ type ServerConfig struct {
 	CredentialNameAsTeamID     bool                  `yaml:"credential_name_as_team_id"`        // Use provider credential name as team_id when auth has no team_id (default: false)
 	ProxyHealthTimeout         time.Duration         `yaml:"proxy_health_timeout"`              // Timeout for fetching /health from remote proxy credentials (default: 15s)
 	ResponseHeaders            ResponseHeadersConfig `yaml:"response_headers"`
+	// MirrorCacheWriteTokens mirrors a cache write reported only under a
+	// provider's own naming (Anthropic-type credentials' cache_creation_tokens,
+	// Requesty's caching_tokens) into cache_write_tokens too, so a client whose
+	// own accounting reads only that name sees the write (default: false —
+	// both names already exist on the two readers this router has today;
+	// enable only for a client confirmed to read cache_write_tokens only).
+	MirrorCacheWriteTokens bool `yaml:"mirror_cache_write_tokens"`
 }
 
 type ResponseHeaderMode string
@@ -870,6 +877,7 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		CredentialNameAsTeamID     string                `yaml:"credential_name_as_team_id"`
 		ProxyHealthTimeout         string                `yaml:"proxy_health_timeout"`
 		ResponseHeaders            ResponseHeadersConfig `yaml:"response_headers"`
+		MirrorCacheWriteTokens     string                `yaml:"mirror_cache_write_tokens"`
 	}
 
 	var temp tempConfig
@@ -949,6 +957,9 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if s.SessionStickyAutoCacheCtrl, err = parseField(temp.SessionStickyAutoCacheCtrl, true, strconv.ParseBool, "session_sticky_auto_cache_control"); err != nil {
+		return err
+	}
+	if s.MirrorCacheWriteTokens, err = parseField(temp.MirrorCacheWriteTokens, false, strconv.ParseBool, "mirror_cache_write_tokens"); err != nil {
 		return err
 	}
 	if s.StdoutLogsEnabled, err = parseField(temp.StdoutLogsEnabled, true, strconv.ParseBool, "stdout_logs_enabled"); err != nil {
