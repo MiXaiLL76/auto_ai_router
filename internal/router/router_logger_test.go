@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mixaill76/auto_ai_router/internal/security"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -177,8 +176,11 @@ func TestLogErrorResponse_Success(t *testing.T) {
 	assert.Equal(t, "POST", entry.Method)
 	assert.Equal(t, http.StatusBadRequest, entry.Status)
 	assert.Equal(t, "Bearer secr...", entry.Request.Headers["Authorization"])
-	assert.Equal(t, security.RedactBodyForLog(string(requestBody)), entry.Request.Body)
-	assert.Equal(t, security.RedactBodyForLog("error message"), entry.Response.Body)
+	// This errors log file is the short-lived, access-controlled debugging
+	// path: it carries the real bodies verbatim (headers are the ones masked,
+	// above and below) -- that's the whole point of a dedicated errors log.
+	assert.Equal(t, string(requestBody), entry.Request.Body)
+	assert.Equal(t, "error message", entry.Response.Body)
 	assert.NotContains(t, string(content), "synthetic-api-key-secret")
 	assert.NotContains(t, string(content), "synthetic-cookie-secret")
 	assert.Equal(t, "error message", w.Body.String(), "logging must preserve the client response")

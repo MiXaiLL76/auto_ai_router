@@ -34,6 +34,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/budget"
+	"github.com/mixaill76/auto_ai_router/internal/logger"
 	"github.com/mixaill76/auto_ai_router/internal/loopgate"
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
@@ -1685,7 +1686,7 @@ func (p *Proxy) sendToCredential(
 	if p.logger.Enabled(context.Background(), slog.LevelDebug) {
 		p.logger.DebugContext(r.Context(), "Proxy request details",
 			"target_url", security.RedactURLForLog(targetURL), "credential", cred.Name,
-			"request_body", security.RedactBodyForLog(string(requestBody)))
+			"request_body", logger.SanitizeRequestBodyForLog(requestBody, 500))
 	}
 
 	var configuredHeaders map[string]bool
@@ -2088,7 +2089,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				"reason", retryReason, "model", modelID,
 				"attempt", attempt + 1, "max_attempts", p.maxProviderRetries + 1,
 			}
-			retryLogArgs = appendResponseBodyForLogs(retryLogArgs, string(proxyResp.Body))
+			retryLogArgs = appendResponseBodyForLogs(retryLogArgs, cred, string(proxyResp.Body))
 			p.logger.WarnContext(r.Context(), "Proxy credential returned retryable error, will retry", retryLogArgs...)
 		}
 
@@ -2723,7 +2724,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 						"reason", retryReason, "model", modelID,
 						"attempt", attempt + 1, "max_attempts", p.maxProviderRetries + 1,
 					}
-					retryLogArgs = appendResponseBodyForLogs(retryLogArgs, payload)
+					retryLogArgs = appendResponseBodyForLogs(retryLogArgs, cred, payload)
 					p.logger.WarnContext(r.Context(), "Provider stream started with a retryable error event, will retry", retryLogArgs...)
 					continue
 				}
@@ -2835,7 +2836,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			"reason", retryReason, "model", modelID,
 			"attempt", attempt + 1, "max_attempts", p.maxProviderRetries + 1,
 		}
-		retryLogArgs = appendResponseBodyForLogs(retryLogArgs, string(responseBody))
+		retryLogArgs = appendResponseBodyForLogs(retryLogArgs, cred, string(responseBody))
 		p.logger.WarnContext(r.Context(), "Provider returned retryable error, will retry", retryLogArgs...)
 	}
 
@@ -3135,7 +3136,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 					"model", modelID, "error", convErr,
 					"request_id", logCtx.RequestID,
 				}
-				args = appendResponseBodyForLogs(args, decodedBody)
+				args = appendResponseBodyForLogs(args, cred, decodedBody)
 				p.logger.ErrorContext(r.Context(), "Failed to transform provider response to OpenAI format", args...)
 				finalResponseBody = []byte(decodedBody)
 			} else {
@@ -3203,7 +3204,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 					"model", modelID, "error", convErr,
 					"request_id", logCtx.RequestID,
 				}
-				args = appendResponseBodyForLogs(args, decodedBody)
+				args = appendResponseBodyForLogs(args, cred, decodedBody)
 				p.logger.ErrorContext(r.Context(), "Failed to convert native Responses API response", args...)
 				// finalResponseBody already holds decodedBody — return as-is
 			} else {
@@ -3278,7 +3279,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 					"model", modelID, "error", convErr,
 					"request_id", logCtx.RequestID,
 				}
-				args = appendResponseBodyForLogs(args, decodedBody)
+				args = appendResponseBodyForLogs(args, cred, decodedBody)
 				p.logger.ErrorContext(r.Context(), "Failed to convert Responses API response to Chat Completions format", args...)
 				// finalResponseBody already holds the raw Responses-API body — return as-is.
 			} else {
@@ -3385,7 +3386,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			} else {
 				p.logger.DebugContext(r.Context(), "Proxy response body",
 					"credential", cred.Name, "content_encoding", contentEncoding,
-					"body", security.RedactBodyForLog(string(finalResponseBody)))
+					"body", logger.TruncateLongFields(string(finalResponseBody), 500))
 			}
 		}
 

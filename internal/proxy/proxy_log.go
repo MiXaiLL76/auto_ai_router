@@ -17,6 +17,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/spendlog"
+	"github.com/mixaill76/auto_ai_router/internal/logger"
 	"github.com/mixaill76/auto_ai_router/internal/security"
 	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
@@ -36,17 +37,27 @@ func (p *Proxy) logUpstreamError(ctx context.Context, msg string, errorCode int,
 	}
 	args = append(args, "model", modelID)
 	if len(responseBody) > 0 {
-		args = appendResponseBodyForLogs(args, string(responseBody))
+		args = appendResponseBodyForLogs(args, cred, string(responseBody))
 	}
 	args = append(args, extra...)
 	p.logger.ErrorContext(ctx, msg, args...)
 }
 
-func appendResponseBodyForLogs(args []any, body string) []any {
-	return append(args,
-		"response_body_masked", true,
-		"response_body", security.RedactBodyForLog(body),
-	)
+// appendResponseBodyForLogs restores the body for providers whose error text
+// is safe to log verbatim and masks it for the ones that are not
+// (shouldMaskUpstreamErrors: CometAPI, ProMan — their error bodies have been
+// seen to echo back the caller's own credential). A regression briefly made
+// every caller of this always redact the body to a bare byte count
+// regardless of cred, which defeated this unified error logger's own stated
+// purpose ("everything needed for debugging").
+func appendResponseBodyForLogs(args []any, cred *config.CredentialConfig, body string) []any {
+	if shouldMaskUpstreamErrors(cred) {
+		return append(args,
+			"response_body_masked", true,
+			"response_body", security.RedactBodyForLog(body),
+		)
+	}
+	return append(args, "response_body", logger.TruncateLongFields(body, 500))
 }
 
 // errorMessageForLog prevents a captured provider body from escaping through
@@ -124,7 +135,7 @@ func (p *Proxy) logTransformedResponse(ctx context.Context, credName, providerNa
 		p.logger.DebugContext(ctx, "Transformed response to OpenAI format",
 			"credential", credName,
 			"provider", providerName,
-			"body", security.RedactBodyForLog(string(body)),
+			"body", logger.TruncateLongFields(string(body), 500),
 		)
 	}
 }
