@@ -30,7 +30,7 @@ jobs:
     name: Build Release Binaries
     runs-on: baremetal-mixaill
     container:
-      image: golang:1.27.3
+      image: golang:1.27.4
     strategy:
       matrix:
         goos: [linux]
