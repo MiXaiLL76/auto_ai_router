@@ -16,17 +16,18 @@ const maxRouterResponseBodyBytes = 256 * 1024
 // operator reads one vocabulary.
 const routerResponseRedactedPlaceholder = "[REDACTED]"
 
-// routerResponseTextFields are the keys whose STRING values are the
-// model's own output -- the text it wrote, the arguments of the tool it
-// called, the reasoning it produced. They are replaced by the placeholder
-// when redaction is on.
+// routerResponseTextFields are the keys whose values are the model's own
+// output -- the text it wrote, the reasoning it produced, a refusal. They
+// are replaced by the placeholder when redaction is on.
 //
-// The list is per shape rather than per key alone, because the same key
-// means different things in different places: "content" is the answer in a
-// Chat completion but a container of parts in a Responses-API body, and
-// "text" is the answer inside such a part but a request-side keyword in a
-// schema. Masking by key alone would either miss the output or destroy the
-// structure that makes the captured body useful.
+// A key is masked by its VALUE's shape, not by where it sits: "content" is
+// the answer (a string) in a Chat completion but a container of parts (an
+// array) in a Responses-API or Anthropic body, and "text" is the answer
+// inside such a part. Deciding by position instead ("is this under a
+// message-ish key?") missed the Anthropic-native body entirely -- its top
+// level IS the message, with no "message"/"choices"/"output" key to be
+// found -- and shipped the model's text and its tool-call arguments in the
+// clear.
 var routerResponseTextFields = map[string]struct{}{
 	// Chat completions: message.content, delta.content.
 	"content": {},
@@ -34,9 +35,10 @@ var routerResponseTextFields = map[string]struct{}{
 	// separately (deepseek's reasoning_content, OpenAI's reasoning).
 	"reasoning_content": {},
 	"reasoning":         {},
-	// Responses API: an output part's text.
+	// Responses API: an output part's text. Anthropic Messages: a text
+	// block's text.
 	"text": {},
-	// Anthropic Messages: content blocks and thinking.
+	// Anthropic Messages: a thinking block.
 	"thinking": {},
 	// A refusal is the model's own words too.
 	"refusal": {},
@@ -47,8 +49,13 @@ var routerResponseTextFields = map[string]struct{}{
 // chose -- but the object's shape (which parameter, which type) is what an
 // operator reads to understand the call, so the arguments are masked as a
 // whole rather than field by field.
+//
+// "input" is Anthropic's spelling of the same thing ("arguments" is
+// OpenAI's); "content" on a tool_result block is the tool's OUTPUT, which
+// is the model's own text too, and is masked by the same rule.
 var routerResponseToolArgumentFields = map[string]struct{}{
 	"arguments": {},
+	"input":     {},
 }
 
 // routerResponseLoggableFields are the keys whose values are NOT the
@@ -103,7 +110,7 @@ func redactRouterResponseBody(body []byte) (string, bool) {
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		return "", false
 	}
-	masked := maskRouterResponseValue(parsed, false)
+	masked := maskRouterResponseValue(parsed)
 	out, err := json.Marshal(masked)
 	if err != nil {
 		return "", false
@@ -114,37 +121,50 @@ func redactRouterResponseBody(body []byte) (string, bool) {
 // maskRouterResponseValue walks a decoded response body, replacing the
 // model's own text with the placeholder.
 //
-// inMessage marks a value that came from a message-like object, where
-// "content" means the answer. Outside such an object (a schema's "content"
-// property, a tool's parameter definition) the same key means something
-// else, and masking it would destroy structure without protecting anything.
-func maskRouterResponseValue(value any, inMessage bool) any {
+// What to mask is decided by the KEY and the VALUE's shape, never by where
+// the value sits: "content" is the answer when it is a string and a
+// container of parts when it is an array, and the same is true of "text"
+// inside such a part. Deciding by position ("is this under a message-ish
+// key?") left the Anthropic-native body -- whose top level IS the message,
+// with no "message"/"choices"/"output" key anywhere -- unmasked, and it
+// shipped the model's text and its tool-call arguments in the clear.
+//
+// The one thing the walk must not destroy is the STRUCTURE: the part types,
+// the tool names, the ids, the usage. Those are what an operator reads.
+func maskRouterResponseValue(value any) any {
 	switch typed := value.(type) {
 	case map[string]any:
 		out := make(map[string]any, len(typed))
 		for key, child := range typed {
 			switch {
-			case routerResponseIsTextField(key, inMessage) && routerResponseIsTextValue(child):
+			case routerResponseIsLoggableField(key):
+				out[key] = child
+			case routerResponseIsTextField(key) && routerResponseIsTextValue(child):
 				// A text field whose value IS text: the model's own output,
 				// replaced outright.
 				out[key] = routerResponseRedactedPlaceholder
-			case routerResponseIsLoggableField(key):
-				out[key] = child
+			case routerResponseIsToolArgumentField(key):
+				// A tool call's arguments: the model's own output. The
+				// object shape (which parameter, which type) survives --
+				// only the values are dropped -- so an operator still
+				// sees WHICH tool was called with WHAT shape.
+				out[key] = routerResponseRedactedPlaceholder
 			default:
 				// A text field whose value is a container (the Responses
-				// API's "content": an array of output parts) is NOT the
-				// answer -- it is the answer's structure. Masking it
-				// wholesale would destroy the part types an operator
-				// reads, so the walk goes into it instead and masks the
-				// text inside each part.
-				out[key] = maskRouterResponseValue(child, routerResponseChildIsMessage(key, inMessage))
+				// API's "content": an array of output parts, or Anthropic's
+				// "content": an array of blocks) is NOT the answer -- it
+				// is the answer's structure. Masking it wholesale would
+				// destroy the part types an operator reads, so the walk
+				// goes into it instead and masks the text inside each
+				// part.
+				out[key] = maskRouterResponseValue(child)
 			}
 		}
 		return out
 	case []any:
 		out := make([]any, 0, len(typed))
 		for _, item := range typed {
-			out = append(out, maskRouterResponseValue(item, inMessage))
+			out = append(out, maskRouterResponseValue(item))
 		}
 		return out
 	default:
@@ -153,23 +173,17 @@ func maskRouterResponseValue(value any, inMessage bool) any {
 }
 
 // routerResponseIsTextField reports whether the key holds the model's own
-// text at this position.
-func routerResponseIsTextField(key string, inMessage bool) bool {
-	if _, ok := routerResponseToolArgumentFields[key]; ok {
-		return true
-	}
-	if _, ok := routerResponseTextFields[key]; !ok {
-		return false
-	}
-	// "content" and "text" are only the model's output inside a
-	// message-ish object. Elsewhere -- a schema property named "content", a
-	// request-side keyword -- they are structure.
-	switch key {
-	case "content", "text":
-		return inMessage
-	default:
-		return true
-	}
+// text, whatever it sits under.
+func routerResponseIsTextField(key string) bool {
+	_, ok := routerResponseTextFields[key]
+	return ok
+}
+
+// routerResponseIsToolArgumentField reports whether the key holds a tool
+// call's arguments.
+func routerResponseIsToolArgumentField(key string) bool {
+	_, ok := routerResponseToolArgumentFields[key]
+	return ok
 }
 
 // routerResponseIsTextValue reports whether the value under a text field is
@@ -199,22 +213,6 @@ func routerResponseIsTextValue(value any) bool {
 func routerResponseIsLoggableField(key string) bool {
 	_, ok := routerResponseLoggableFields[key]
 	return ok
-}
-
-// routerResponseChildIsMessage reports whether the children of the given key
-// are in a message context -- that is, whether "content" under them means
-// the answer.
-func routerResponseChildIsMessage(key string, inMessage bool) bool {
-	switch key {
-	case "message", "delta", "choices", "output", "candidates", "parts":
-		return true
-	case "content":
-		// A Responses-API output part's "content" holds the parts of the
-		// answer -- inside it, "text" is the answer.
-		return inMessage
-	default:
-		return inMessage
-	}
 }
 
 // captureRouterResponseBody returns the body to publish for a router

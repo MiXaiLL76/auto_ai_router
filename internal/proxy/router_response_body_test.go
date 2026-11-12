@@ -119,6 +119,60 @@ func TestRedactRouterResponseBody_MasksStringArray(t *testing.T) {
 	assert.NotContains(t, masked, "part two")
 }
 
+// TestRedactRouterResponseBody_MasksEveryResponseShape walks the shapes a
+// provider's answer can take and asserts that none of them ships the
+// model's own words.
+//
+// It exists because the first version decided what to mask by POSITION --
+// "is this under a message-ish key?" -- and the Anthropic-native body has
+// no such key: its top level IS the message. That body went out with the
+// model's text and its tool-call arguments in the clear, and the production
+// rows showed it: a captured response carried the paths of files in a
+// customer's repository, read by the model's own tool call.
+//
+// The decision is now by key and by the value's shape, so the shape list
+// below is the contract.
+func TestRedactRouterResponseBody_MasksEveryResponseShape(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		body string
+	}{
+		{"chat completion", `{"choices":[{"message":{"content":"THE ANSWER","role":"assistant"}}],"model":"m"}`},
+		{"chat completion delta", `{"choices":[{"delta":{"content":"THE ANSWER"}}],"model":"m"}`},
+		{"chat completion refusal", `{"choices":[{"message":{"refusal":"THE ANSWER","role":"assistant"}}],"model":"m"}`},
+		{"chat completion reasoning", `{"choices":[{"message":{"content":"x","reasoning_content":"THE ANSWER"}}],"model":"m"}`},
+		{"chat completion tool arguments", `{"choices":[{"message":{"tool_calls":[{"function":{"arguments":"THE ANSWER","name":"f"}}]}}],"model":"m"}`},
+		{"responses api output part", `{"output":[{"type":"message","content":[{"text":"THE ANSWER","type":"output_text"}]}],"model":"m"}`},
+		{"anthropic native text block", `{"content":[{"text":"THE ANSWER","type":"text"}],"model":"m"}`},
+		{"anthropic native thinking block", `{"content":[{"thinking":"THE ANSWER","type":"thinking"}],"model":"m"}`},
+		{"anthropic native tool_use arguments", `{"content":[{"input":{"q":"THE ANSWER"},"name":"f","type":"tool_use"}],"model":"m"}`},
+		{"anthropic native tool_result content", `{"content":[{"content":"THE ANSWER","type":"tool_result"}],"model":"m"}`},
+		{"anthropic native top-level text", `{"text":"THE ANSWER","model":"m"}`},
+		{"gemini native part", `{"candidates":[{"content":{"parts":[{"text":"THE ANSWER"}],"role":"model"}}],"model":"m"}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			masked, ok := redactRouterResponseBody([]byte(tt.body))
+			require.True(t, ok)
+			assert.NotContains(t, masked, "THE ANSWER",
+				"the model's own text must not survive redaction: %s", masked)
+		})
+	}
+}
+
+// TestRedactRouterResponseBody_KeepsTheStructureOfEveryShape is the other
+// half of the contract: masking the output must not destroy what makes the
+// captured body worth reading -- the part types, the tool names, the ids.
+func TestRedactRouterResponseBody_KeepsTheStructureOfEveryShape(t *testing.T) {
+	masked, ok := redactRouterResponseBody([]byte(
+		`{"content":[{"text":"THE ANSWER","type":"text"},{"input":{"q":"x"},"name":"f","type":"tool_use"}],` +
+			`"id":"msg_1","model":"anthropic/claude-opus-4.8","role":"assistant","stop_reason":"end_turn",` +
+			`"usage":{"input_tokens":10,"output_tokens":5}}`))
+	require.True(t, ok)
+	for _, want := range []string{`"type":"text"`, `"type":"tool_use"`, `"name":"f"`, `"id":"msg_1"`, `"stop_reason":"end_turn"`, `"input_tokens":10`} {
+		assert.Contains(t, masked, want, "the structure must survive redaction: %s", masked)
+	}
+}
+
 // TestCaptureRouterResponseBody_RespectsRedactToggle pins the toggle
 // itself: with redaction off the body is captured verbatim, with it on the
 // text is masked.
