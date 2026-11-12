@@ -243,8 +243,13 @@ func isBase64Payload(text string) bool {
 	return true
 }
 
-// isDataURLPayload reports whether the text is a data: URL carrying a
-// base64 payload -- "data:image/png;base64,...".
+// isDataURLPayload reports whether the text is a data: URL carrying a BINARY
+// payload -- "data:image/png;base64,...".
+//
+// Only the binary media types are caught. A data: URL with a text media type
+// ("data:text/plain;base64,SGVsbG8=") carries prose, not a picture, and
+// prose is the model's own output -- masked by the text rules, not by this
+// one.
 func isDataURLPayload(text string) bool {
 	const prefix = "data:"
 	if !strings.HasPrefix(text, prefix) {
@@ -254,9 +259,19 @@ func isDataURLPayload(text string) bool {
 	if comma < 0 {
 		return false
 	}
-	header := text[:comma]
-	return strings.HasSuffix(header, ";base64") || strings.Contains(header, "image/") ||
-		strings.Contains(header, "audio/") || strings.Contains(header, "video/")
+	header := strings.ToLower(text[:comma])
+	if !strings.HasSuffix(header, ";base64") {
+		return false
+	}
+	for _, mediaType := range []string{
+		"image/", "audio/", "video/", "application/pdf",
+		"application/octet-stream", "application/zip",
+	} {
+		if strings.Contains(header, mediaType) {
+			return true
+		}
+	}
+	return false
 }
 
 // routerResponseIsTextValue reports whether the value under a text field is

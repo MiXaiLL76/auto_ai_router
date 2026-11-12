@@ -276,6 +276,39 @@ func TestRedactRouterResponseBody_KeepsOrdinaryTextAmongTheBinaries(t *testing.T
 	}
 }
 
+// TestRedactRouterResponseBody_MasksDataURLPayloads pins the data: URL form
+// of a binary payload, and that only the BINARY media types are caught: a
+// data: URL with a text media type carries prose, which is the model's own
+// output and is masked by the text rules, not by the payload one.
+func TestRedactRouterResponseBody_MasksDataURLPayloads(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		url  string
+	}{
+		{"image", "data:image/png;base64,iVBORw0KGgo="},
+		{"pdf", "data:application/pdf;base64,JVBERi0="},
+		{"audio", "data:audio/mpeg;base64,SUQz"},
+		{"octet stream", "data:application/octet-stream;base64,AAEC"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.True(t, routerResponseIsBinaryPayload(tt.url),
+				"a binary data: URL must be caught")
+		})
+	}
+	for _, tt := range []struct {
+		name string
+		url  string
+	}{
+		{"text", "data:text/plain;base64,SGVsbG8="},
+		{"csv", "data:text/csv;base64,YQ=="},
+	} {
+		t.Run(tt.name+" is not a payload", func(t *testing.T) {
+			assert.False(t, routerResponseIsBinaryPayload(tt.url),
+				"a text data: URL is prose, not a binary payload")
+		})
+	}
+}
+
 // TestCaptureRouterResponseBody_SkipsEmbeddingsAndImages pins that the two
 // answer shapes whose body IS the payload are not published at all.
 //
