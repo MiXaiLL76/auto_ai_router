@@ -67,8 +67,7 @@ Set `"stream": true` to receive Anthropic-compatible `message_start`, content bl
 ### Classifier refusals
 
 An Anthropic `stop_reason: "refusal"` remains a refusal, including on Bedrock
-and native Messages routes. Chat Completions exposes it as `finish_reason:
-"content_filter"` plus `message.refusal` (`delta.refusal` when streaming).
+and native Messages routes. Chat Completions exposes it as `finish_reason: "content_filter"` plus `message.refusal` (`delta.refusal` when streaming).
 With `litellm_compat`, a non-streaming refusal is under
 `message.provider_specific_fields.refusal`. Responses exposes a refusal output
 item and `incomplete_details.reason: "content_filter"`.
