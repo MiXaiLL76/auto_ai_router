@@ -57,6 +57,11 @@ func contentPartToAnthropic(partMap map[string]interface{}) (*anthropic.ContentB
 	case "input_text", "output_text", "text":
 		text, _ := partMap["text"].(string)
 		return &anthropic.ContentBlock{Type: "text", Text: text}, nil
+	case "refusal", "output_refusal":
+		// Responses output can be replayed directly or through previous_response_id.
+		// Keep its refusal text instead of creating an assistant message with null content.
+		text, _ := partMap["refusal"].(string)
+		return &anthropic.ContentBlock{Type: "text", Text: text}, nil
 
 	case "input_image":
 		return convertInputImageToAnthropic(partMap)

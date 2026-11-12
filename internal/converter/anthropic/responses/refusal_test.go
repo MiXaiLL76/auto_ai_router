@@ -106,3 +106,32 @@ func TestAnthropicRefusalResponses(t *testing.T) {
 		})
 	}
 }
+
+func TestAnthropicRefusalOutputCanBeReplayed(t *testing.T) {
+	response, err := AnthropicToResponsesResponse([]byte(`{"content":[{"type":"text","text":"Partial answer"}],"stop_reason":"refusal","stop_details":{"explanation":"Request declined."}}`), "claude-test", "", 0)
+	require.NoError(t, err)
+	for _, kind := range []string{"refusal", "output_refusal"} {
+		t.Run(kind, func(t *testing.T) {
+			response.Output[1].Content[0].Type = kind
+			var input []interface{}
+			for _, item := range response.Output {
+				input = append(input, item)
+			}
+			input = append(input, map[string]interface{}{"role": "user", "content": "Explain the result."})
+			request, err := json.Marshal(map[string]interface{}{"input": input, "max_output_tokens": 100})
+			require.NoError(t, err)
+			converted, err := ResponsesRequestToAnthropic(request, "claude-test")
+			require.NoError(t, err)
+			var native struct {
+				Messages []struct {
+					Role    string          `json:"role"`
+					Content json.RawMessage `json:"content"`
+				} `json:"messages"`
+			}
+			require.NoError(t, json.Unmarshal(converted, &native))
+			require.Len(t, native.Messages, 3)
+			assert.Equal(t, "assistant", native.Messages[1].Role)
+			assert.JSONEq(t, `[{"type":"text","text":"Request declined."}]`, string(native.Messages[1].Content))
+		})
+	}
+}
