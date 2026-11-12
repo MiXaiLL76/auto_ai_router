@@ -180,9 +180,9 @@ func outputToInputItems(output []OutputItem) []interface{} {
 						"type": "output_text",
 						"text": c.Text,
 					})
-				case "output_refusal":
+				case "output_refusal", "refusal":
 					content = append(content, map[string]interface{}{
-						"type":    "output_refusal",
+						"type":    "refusal",
 						"refusal": c.Refusal,
 					})
 				}
@@ -1149,7 +1149,7 @@ func convertContentParts(parts []interface{}) ([]interface{}, error) {
 				"text": partMap["text"],
 			})
 
-		case "output_refusal":
+		case "output_refusal", "refusal":
 			result = append(result, map[string]interface{}{
 				"type": "text",
 				"text": partMap["refusal"],

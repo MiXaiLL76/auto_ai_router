@@ -159,8 +159,16 @@ type AnthropicResponse struct {
 	Content      []ContentBlock  `json:"content"`
 	Model        string          `json:"model"`
 	StopReason   string          `json:"stop_reason"`
+	StopDetails  *StopDetails    `json:"stop_details,omitempty"`
 	StopSequence string          `json:"stop_sequence,omitempty"`
 	Usage        *AnthropicUsage `json:"usage,omitempty"`
+}
+
+// StopDetails retains only the public refusal reason. Provider fallback credits
+// and other routing metadata must not be copied into OpenAI-compatible responses.
+type StopDetails struct {
+	Category    string `json:"category,omitempty"`
+	Explanation string `json:"explanation,omitempty"`
 }
 
 // CacheCreationDetails contains per-TTL breakdown of cache creation tokens.
@@ -293,8 +301,9 @@ type AnthropicStreamDelta struct {
 	PartialJSON string `json:"partial_json,omitempty"`
 
 	// message_delta
-	StopReason   string `json:"stop_reason,omitempty"`
-	StopSequence string `json:"stop_sequence,omitempty"`
+	StopReason   string       `json:"stop_reason,omitempty"`
+	StopDetails  *StopDetails `json:"stop_details,omitempty"`
+	StopSequence string       `json:"stop_sequence,omitempty"`
 
 	// citations_delta: one citation attached to the current text block (e.g. a
 	// web_search_result_location produced by the web_search server tool).

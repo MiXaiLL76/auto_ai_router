@@ -283,6 +283,12 @@ func TransformAnthropicStreamToOpenAI(anthropicStream io.Reader, model string, o
 				continue
 			}
 			reason := mapAnthropicStopReason(event.Delta.StopReason)
+			if refusal := RefusalMessage(event.Delta.StopReason, event.Delta.StopDetails); refusal != "" {
+				if err := writeChunk(output, buildStreamChunk(chatID, model, timestamp,
+					openai.OpenAIStreamingDelta{Refusal: refusal}, nil)); err != nil {
+					return err
+				}
+			}
 			if err := writeTerminalChunks(output, chatID, model, timestamp, reason, usage.openAI()); err != nil {
 				return err
 			}
