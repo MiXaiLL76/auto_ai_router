@@ -1114,8 +1114,16 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 		})
 	}
 
+	var postFinish chatPostFinishDetector
+	observeJSON := func(value any) {
+		for _, violation := range postFinish.observeJSON(value) {
+			p.logger.WarnContext(respCtx(resp), "Provider sent text after finish_reason in Chat Completions stream",
+				"credential", credName, "model", modelID, "request_id", logContextRequestID(logCtx),
+				"choice_index", violation.index, "finish_reason", violation.finishReason, "delta_field", violation.field)
+		}
+	}
 	clientReader := normalizeSuccessfulResponseModelStream(
-		promanutils.NewSanitizingSSEReader(providerReader, clientVisibleResponseModel(logCtx, modelID)),
+		promanutils.NewSanitizingSSEReaderWithObserver(providerReader, clientVisibleResponseModel(logCtx, modelID), observeJSON),
 		resp.StatusCode,
 		logCtx,
 		modelID,
