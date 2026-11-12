@@ -313,6 +313,10 @@ models:
 #     # response_cost_mode above: can be set alone, or together with it, and
 #     # unlike the header it also works for streaming responses.
 #     response_cost_in_body: true
+#     # Optional: opt this organization out of the router's automatic
+#     # Anthropic prompt-cache cache_control injection (session_sticky_auto_
+#     # cache_control). The client's own cache_control markers are kept.
+#     disable_auto_cache_control: true
 
 # Optional: Redis/Valkey backend for distributed rate limiting and response storage.
 # When enabled, all replicas share a single counter namespace — RPM/TPM limits are

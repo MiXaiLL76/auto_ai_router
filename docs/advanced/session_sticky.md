@@ -227,7 +227,7 @@ Negative values are rejected at startup.
 
 ### Automatic Anthropic Prompt Caching
 
-When routing to an **Anthropic**, **Comet API**, or **Bedrock** credential with an active session, the proxy automatically injects `cache_control: {type: "ephemeral"}` markers into the request body. This converts automatic same-credential affinity into explicit provider-level prompt caching, reducing token costs by up to 90% on long conversations.
+When routing to an **Anthropic**, **Comet API**, **ProMan**, or **Bedrock** credential with an active session, the proxy automatically injects `cache_control: {type: "ephemeral"}` markers into the request body. This converts automatic same-credential affinity into explicit provider-level prompt caching, reducing token costs by up to 90% on long conversations.
 
 **Enabled by default.** To disable:
 
@@ -263,7 +263,7 @@ If the incoming request **already contains** any `cache_control` field anywhere 
 Auto-injection fires when **all** of the following are true:
 
 - `session_sticky_auto_cache_control: true` (default)
-- Credential type is `anthropic`, `cometapi`, or `bedrock`
+- Credential type is `anthropic`, `cometapi`, `proman`, or `bedrock`
 - A session is active: request has a session ID **or** `previous_response_id` resolved to a known credential
 - The request's organization (if any) has not opted out via `disable_auto_cache_control` (see below)
 
