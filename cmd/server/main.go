@@ -24,6 +24,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/banreader"
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/fail2ban"
 	"github.com/mixaill76/auto_ai_router/internal/health"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
@@ -282,6 +283,12 @@ func main() {
 	}
 
 	keyMetrics := initializeKeyMetrics(cfg, log)
+
+	// Off by default: a cache write is already visible under its provider's
+	// own name (Anthropic-type credentials' cache_creation_tokens, Requesty's
+	// caching_tokens) on both readers this router has today; this only adds
+	// cache_write_tokens too, for a client confirmed to read that name alone.
+	converterutil.SetMirrorCacheWriteTokens(cfg.Server.MirrorCacheWriteTokens)
 
 	// ==================== Create Proxy ====================
 	var deepSeekToolsRedis valkey.Client

@@ -2204,6 +2204,20 @@ func TestServerConfigStrictAllTeamModelsACL(t *testing.T) {
 	assert.True(t, strict.StrictAllTeamModelsACL)
 }
 
+func TestServerConfigMirrorCacheWriteTokensDefaultsToTrue(t *testing.T) {
+	// PR #355 already shipped this mirroring unconditionally for Anthropic-type
+	// credentials; the flag only adds Requesty to it and a way to turn the
+	// whole thing off, not a way to opt in from a stricter default — an empty
+	// config must not silently revert #355's behavior.
+	var defaults ServerConfig
+	require.NoError(t, yaml.Unmarshal([]byte("{}"), &defaults))
+	assert.True(t, defaults.MirrorCacheWriteTokens)
+
+	var disabled ServerConfig
+	require.NoError(t, yaml.Unmarshal([]byte("mirror_cache_write_tokens: false"), &disabled))
+	assert.False(t, disabled.MirrorCacheWriteTokens)
+}
+
 func TestLoad_ModelAlias(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.yaml")

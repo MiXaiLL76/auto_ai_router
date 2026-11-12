@@ -214,21 +214,38 @@ func convertAnthropicUsageToOpenAI(usage *AnthropicUsage) *openai.OpenAIUsage {
 		result.PromptTokensDetails = &openai.TokenDetails{
 			CachedTokens:        usage.CacheReadInputTokens,
 			CacheCreationTokens: cacheCreationTokens,
-			// The same cache write under the name the downstream usage
-			// metering reads first: it takes cache_write_tokens in
-			// preference to cache_creation_tokens (cost_calculator.py), and
-			// excludes the latter from the sum when the former is present, so
-			// reporting both is not a double count. An Anthropic-compatible
-			// provider that reports only cache_creation_input_tokens
-			// otherwise lands in the fallback name and, for a customer whose
-			// own accounting reads cache_write_tokens, the write is not
-			// visible at all.
-			CacheWriteTokens: cacheCreationTokens,
+		}
+		// The same cache write, also under the name the downstream usage
+		// metering reads first: it takes cache_write_tokens in preference to
+		// cache_creation_tokens (cost_calculator.py), and excludes the latter
+		// from the sum when the former is present, so reporting both is not a
+		// double count. An Anthropic-compatible provider that reports only
+		// cache_creation_input_tokens otherwise lands in the fallback name
+		// and, for a customer whose own accounting reads cache_write_tokens,
+		// the write is not visible at all. Gated behind the same
+		// mirror-cache-write-tokens flag as the Requesty equivalent
+		// (modelutils.NormalizeCacheCreationUsage) so one config setting
+		// controls both.
+		if converterutil.MirrorCacheWriteTokensEnabled() {
+			result.PromptTokensDetails.CacheWriteTokens = cacheCreationTokens
 		}
 		if cacheCreation5mTokens > 0 || cacheCreation1hTokens > 0 {
 			result.PromptTokensDetails.CacheCreationTokenDetails = &openai.CacheCreationTokenDetails{
 				Ephemeral5mInputTokens: cacheCreation5mTokens,
 				Ephemeral1hInputTokens: cacheCreation1hTokens,
+			}
+			// Same TTL split again, under Alibaba/Qwen's unsuffixed spelling
+			// (cache_creation.ephemeral_5m_input_tokens, no _token_details) —
+			// a third name some clients' accounting may read instead of
+			// cache_creation_token_details. Same flag, same non-double-count
+			// reasoning: TokenDetails.CacheWrite() already prefers
+			// CacheCreationTokenDetails over AlibabaCacheCreation, so this
+			// never gets summed twice internally.
+			if converterutil.MirrorCacheWriteTokensEnabled() {
+				result.PromptTokensDetails.AlibabaCacheCreation = &openai.CacheCreationTokenDetails{
+					Ephemeral5mInputTokens: cacheCreation5mTokens,
+					Ephemeral1hInputTokens: cacheCreation1hTokens,
+				}
 			}
 		}
 	}
