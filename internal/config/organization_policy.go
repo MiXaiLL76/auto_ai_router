@@ -70,6 +70,12 @@ type OrganizationPolicyConfig struct {
 	// final usage chunk is read rather than only after headers are already
 	// committed. Set via the response_cost_in_body field.
 	ReturnResponseCostInBody bool `yaml:"-"`
+	// DisableAutoCacheControl opts this organization out of the router's
+	// automatic Anthropic prompt-cache cache_control injection (see
+	// session_sticky_auto_cache_control / orchestrator.go's InjectCacheControl
+	// call), while leaving that global setting on for every other
+	// organization. Set via the disable_auto_cache_control field.
+	DisableAutoCacheControl bool `yaml:"-"`
 }
 
 func (p *OrganizationPolicyConfig) UnmarshalYAML(value *yaml.Node) error {
@@ -78,15 +84,16 @@ func (p *OrganizationPolicyConfig) UnmarshalYAML(value *yaml.Node) error {
 	}
 
 	allowedFields := map[string]struct{}{
-		"organization_id":       {},
-		"price_profile_id":      {},
-		"model_prices_link":     {},
-		"model_allowlist":       {},
-		"model_mappings":        {},
-		"credential_denylist":   {},
-		"return_response_cost":  {},
-		"response_cost_mode":    {},
-		"response_cost_in_body": {},
+		"organization_id":            {},
+		"price_profile_id":           {},
+		"model_prices_link":          {},
+		"model_allowlist":            {},
+		"model_mappings":             {},
+		"credential_denylist":        {},
+		"return_response_cost":       {},
+		"response_cost_mode":         {},
+		"response_cost_in_body":      {},
+		"disable_auto_cache_control": {},
 	}
 
 	var raw struct {
@@ -98,6 +105,7 @@ func (p *OrganizationPolicyConfig) UnmarshalYAML(value *yaml.Node) error {
 		ReturnResponseCost       *bool    `yaml:"return_response_cost,omitempty"`
 		ResponseCostMode         string   `yaml:"response_cost_mode,omitempty"`
 		ReturnResponseCostInBody bool     `yaml:"response_cost_in_body,omitempty"`
+		DisableAutoCacheControl  bool     `yaml:"disable_auto_cache_control,omitempty"`
 	}
 	mappings := make(map[string]string)
 
@@ -170,6 +178,7 @@ func (p *OrganizationPolicyConfig) UnmarshalYAML(value *yaml.Node) error {
 		p.ResponseCostMode = ResponseCostModeOff
 	}
 	p.ReturnResponseCostInBody = raw.ReturnResponseCostInBody
+	p.DisableAutoCacheControl = raw.DisableAutoCacheControl
 	return nil
 }
 

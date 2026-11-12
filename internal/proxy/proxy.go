@@ -244,6 +244,7 @@ func (p *Proxy) nextPrimaryAfterUnsupportedCredential(
 			prepared.isResponsesAPI,
 			prepared.responsesPrevHandled,
 			prepared.stickyCacheEligible,
+			prepared.autoCacheControlDisabled,
 		)
 		if prepErr != nil {
 			p.logger.WarnContext(r.Context(), "Failed to prepare alternate primary request after provider compatibility skip",
@@ -1341,6 +1342,7 @@ func (p *Proxy) nextRetryCredential(
 			prepared.isResponsesAPI,
 			prepared.responsesPrevHandled,
 			prepared.stickyCacheEligible,
+			prepared.autoCacheControlDisabled,
 		)
 		if prepErr == nil {
 			publicModelID := logCtx.PublicModelID

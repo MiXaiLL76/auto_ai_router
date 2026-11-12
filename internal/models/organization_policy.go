@@ -38,10 +38,11 @@ type OrganizationPolicy struct {
 	// two that also works for streaming responses.
 	ReturnResponseCostInBody bool
 
-	allowlist          map[string]struct{}
-	mappings           map[string]string
-	prices             map[string]*ModelPrice
-	credentialDenylist []string
+	allowlist               map[string]struct{}
+	mappings                map[string]string
+	prices                  map[string]*ModelPrice
+	credentialDenylist      []string
+	disableAutoCacheControl bool
 }
 
 type OrganizationModelResolution struct {
@@ -106,6 +107,7 @@ func LoadOrganizationPolicies(
 				ResponseCostMode:         cfg.ResponseCostMode,
 				ReturnResponseCostInBody: cfg.ReturnResponseCostInBody,
 				credentialDenylist:       append([]string(nil), cfg.CredentialDenylist...),
+				disableAutoCacheControl:  cfg.DisableAutoCacheControl,
 			}
 			continue
 		}
@@ -138,6 +140,7 @@ func LoadOrganizationPolicies(
 			mappings:                 make(map[string]string, len(cfg.ModelMappings)),
 			prices:                   priceRows,
 			credentialDenylist:       append([]string(nil), cfg.CredentialDenylist...),
+			disableAutoCacheControl:  cfg.DisableAutoCacheControl,
 		}
 		for _, modelID := range cfg.ModelAllowlist {
 			policy.allowlist[modelID] = struct{}{}
@@ -193,6 +196,14 @@ func (p *OrganizationPolicy) CredentialDenylist() []string {
 		return nil
 	}
 	return append([]string(nil), p.credentialDenylist...)
+}
+
+// DisablesAutoCacheControl reports whether this organization opted out of the
+// router's automatic Anthropic prompt-cache cache_control injection
+// (session_sticky_auto_cache_control's per-request effect, see
+// orchestrator.go's InjectCacheControl call). A nil policy never disables it.
+func (p *OrganizationPolicy) DisablesAutoCacheControl() bool {
+	return p != nil && p.disableAutoCacheControl
 }
 
 func (r *OrganizationPolicyRegistry) Empty() bool {
