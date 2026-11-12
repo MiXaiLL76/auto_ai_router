@@ -332,8 +332,18 @@ func (p *Proxy) buildRawBodyEvent(logCtx *RequestLogContext, status string, endT
 		ClientResponseBody: logCtx.ClientResponseBody,
 	}
 	if p.rawBodyRedactSensitiveFields {
-		event.ResponseBody = security.RedactBodyForLog(event.ResponseBody)
-		event.ClientResponseBody = security.RedactBodyForLog(event.ClientResponseBody)
+		// A response body is masked by VALUE, keeping the diagnostic
+		// structure (model, usage, finish reason, token counts) and
+		// dropping the provider's prose -- which is where a credential
+		// would leak. The whole-body placeholder the raw-bodies topic
+		// used left nothing to read: "[REDACTED body bytes=495]" cannot
+		// answer "which model answered, how many tokens, what did the
+		// provider complain about", which is exactly what an error
+		// analysis and a cost reconciliation need. The request side
+		// already keeps its structure (redactRequestBodyForLogging);
+		// this brings the response side to the same level.
+		event.ResponseBody = security.RedactProviderResponseBody(event.ResponseBody)
+		event.ClientResponseBody = security.RedactProviderResponseBody(event.ClientResponseBody)
 	}
 	if status == "failure" {
 		event.ErrorClass = mapHTTPStatusToErrorClass(logCtx.HTTPStatus)
