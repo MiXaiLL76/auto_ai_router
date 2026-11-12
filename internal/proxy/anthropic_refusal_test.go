@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	pricing "github.com/mixaill76/auto_ai_router/internal/models"
+	compatlitellm "github.com/mixaill76/auto_ai_router/internal/responsecompat/litellm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -18,6 +20,15 @@ import (
 // passthrough. A classifier refusal is terminal model output, not a transport
 // failure to retry or a reason to ban the credential.
 func TestProxyRequest_AnthropicRefusal(t *testing.T) {
+	for _, compatible := range []bool{false, true} {
+		t.Run(fmt.Sprintf("litellm_compat=%t", compatible), func(t *testing.T) {
+			testProxyAnthropicRefusal(t, compatible)
+		})
+	}
+}
+
+func testProxyAnthropicRefusal(t *testing.T, compatible bool) {
+	t.Helper()
 	for _, provider := range []config.ProviderType{config.ProviderTypeAnthropic, config.ProviderTypeCometAPI} {
 		for _, endpoint := range []string{"/v1/chat/completions", "/v1/responses", "/v1/messages"} {
 			for _, stream := range []bool{false, true} {
@@ -43,6 +54,9 @@ func TestProxyRequest_AnthropicRefusal(t *testing.T) {
 					}))
 					defer upstream.Close()
 					prx := NewTestProxyBuilder().WithSingleCredential("refusal-fixture", provider, upstream.URL, "fixture-key").Build()
+					if compatible {
+						prx.responseCompat = compatlitellm.New()
+					}
 					db := &stubLiteLLMManager{}
 					prx.LiteLLMDB = db
 					setTestModelPrice(prx, "claude-sonnet-4.5", &pricing.ModelPrice{InputCostPerToken: 1, OutputCostPerToken: 2})
@@ -64,6 +78,22 @@ func TestProxyRequest_AnthropicRefusal(t *testing.T) {
 					case "/v1/chat/completions":
 						assert.Contains(t, w.Body.String(), `"finish_reason":"content_filter"`)
 						assert.Contains(t, w.Body.String(), `"refusal":"Request declined.`)
+						if !stream {
+							var response struct {
+								Choices []struct {
+									Message map[string]interface{} `json:"message"`
+								} `json:"choices"`
+							}
+							require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
+							require.Len(t, response.Choices, 1)
+							message := response.Choices[0].Message
+							if compatible {
+								// LiteLLM's non-streaming contract nests refusal here.
+								assert.NotContains(t, message, "refusal")
+								message = message["provider_specific_fields"].(map[string]interface{})
+							}
+							assert.Equal(t, "Request declined. (category: reasoning_extraction)", message["refusal"])
+						}
 					case "/v1/responses":
 						assert.Contains(t, w.Body.String(), `"type":"refusal"`)
 						assert.Contains(t, w.Body.String(), `"status":"incomplete"`)
