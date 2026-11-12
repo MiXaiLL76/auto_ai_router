@@ -416,7 +416,7 @@ func TestPrepareRequestForCredential_ResponsesOnlyScopedToItsOwnCredential(t *te
 
 	prepared, err := prx.prepareRequestForCredential(
 		req, body, body, "gpt-5-pro", "gpt-5-pro", "/v1/chat/completions",
-		false, &openaiCred, false, false, false,
+		false, &openaiCred, false, false, false, false,
 	)
 	require.NoError(t, err)
 	assert.True(t, prepared.convertedToResponses, "the credential the flag was set on must convert to Responses API shape")
@@ -424,7 +424,7 @@ func TestPrepareRequestForCredential_ResponsesOnlyScopedToItsOwnCredential(t *te
 
 	prepared, err = prx.prepareRequestForCredential(
 		req, body, body, "gpt-5-pro", "gpt-5-pro", "/v1/chat/completions",
-		false, &openrouterCred, false, false, false,
+		false, &openrouterCred, false, false, false, false,
 	)
 	require.NoError(t, err)
 	assert.False(t, prepared.convertedToResponses,
@@ -458,7 +458,7 @@ func TestPrepareRequestForCredential_SamplingParamsFollowFinalEffort(t *testing.
 		req := httptest.NewRequest("POST", path, nil)
 		prepared, err := prx.prepareRequestForCredential(
 			req, []byte(body), []byte(body), model, model, path,
-			false, &cred, strings.HasSuffix(path, "/responses"), false, false,
+			false, &cred, strings.HasSuffix(path, "/responses"), false, false, false,
 		)
 		require.NoError(t, err)
 		var raw map[string]any
@@ -534,7 +534,7 @@ func TestPrepareRequestForCredential_UsesCredentialSpecificRealModel(t *testing.
 		&grant,
 		false,
 		false,
-		false,
+		false, false,
 	)
 
 	require.NoError(t, err)
@@ -694,7 +694,7 @@ func TestPrepareRequestForCredential_ProxyBodyKeepsOriginalParams(t *testing.T) 
 		&cred,
 		false,
 		false,
-		false,
+		false, false,
 	)
 
 	require.NoError(t, err)
@@ -740,7 +740,7 @@ func TestPrepareRequestForCredential_ChatCompletionsNormalizesDeveloperRole(t *t
 		&cred,
 		false,
 		false,
-		false,
+		false, false,
 	)
 
 	require.NoError(t, err)
@@ -780,7 +780,7 @@ func TestPrepareRequestForCredential_ChatCompletionsPreservesDeveloperRoleForRea
 		&cred,
 		false,
 		false,
-		false,
+		false, false,
 	)
 
 	require.NoError(t, err)
@@ -819,7 +819,7 @@ func TestPrepareRequestForCredential_ChatCompletionsPreservesDeveloperRoleForNon
 		&cred,
 		false,
 		false,
-		false,
+		false, false,
 	)
 
 	require.NoError(t, err)
@@ -869,7 +869,7 @@ func TestPrepareRequestForCredential_ResponsesOnlyModel_ProxyBodyStaysChatShaped
 		&cred,
 		false,
 		false,
-		false,
+		false, false,
 	)
 	require.NoError(t, err)
 	require.True(t, prepared.convertedToResponses)
@@ -914,7 +914,7 @@ func TestPrepareRequestForCredential_MessagesKeepsOriginalProxyRequest(t *testin
 		&cred,
 		false,
 		false,
-		false,
+		false, false,
 	)
 
 	require.NoError(t, err)
@@ -943,7 +943,7 @@ func TestPrepareRequestForCredential_MessagesProxyLikeCredentialKeepsNativeForma
 		&cred,
 		false,
 		false,
-		false,
+		false, false,
 	)
 
 	require.NoError(t, err)
@@ -977,7 +977,7 @@ func TestPrepareRequestForCredential_MessagesPassthroughForAnthropic(t *testing.
 		&cred,
 		false,
 		false,
-		false,
+		false, false,
 	)
 
 	require.NoError(t, err)
@@ -1004,7 +1004,7 @@ func TestPrepareRequestForCredential_MessagesConvertedForCometAPIOpenAIProtocol(
 		&cred,
 		false,
 		false,
-		false,
+		false, false,
 	)
 
 	require.NoError(t, err)
@@ -1040,7 +1040,7 @@ func TestPrepareRequestForCredential_MessagesPassthroughDisabledByModelOverride(
 		&cred,
 		false,
 		false,
-		false,
+		false, false,
 	)
 
 	require.NoError(t, err)
@@ -1072,7 +1072,7 @@ func TestPrepareRequestForCredential_ResponsesRecomputesProviderMode(t *testing.
 		&openaiCred,
 		true,
 		false,
-		false,
+		false, false,
 	)
 	require.NoError(t, err)
 	require.True(t, openaiReq.passthroughResponses)
@@ -1091,7 +1091,7 @@ func TestPrepareRequestForCredential_ResponsesRecomputesProviderMode(t *testing.
 		&anthropicCred,
 		true,
 		false,
-		false,
+		false, false,
 	)
 	require.NoError(t, err)
 	require.True(t, anthropicReq.convertedResp)
@@ -1135,7 +1135,7 @@ func TestPrepareRequestForCredential_RejectsForcedToolChoice(t *testing.T) {
 			req := httptest.NewRequest("POST", tt.path, nil)
 			body := []byte(tt.body)
 			_, err := prx.prepareRequestForCredential(req, body, body, tt.model, tt.model, tt.path,
-				false, &cred, tt.isResponsesAPI, false, false)
+				false, &cred, tt.isResponsesAPI, false, false, false)
 			if !tt.wantErr {
 				require.NoError(t, err)
 				return
@@ -1183,14 +1183,14 @@ func TestPrepareRequestForCredential_RejectsInvalidThinkingOffOnEveryMessagesPat
 			cred := path.cred
 			valid := []byte(`{"model":"claude-sonnet-5-5","max_tokens":100,"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"disabled"},"output_config":{"effort":"high"}}`)
 			prepared, err := prx.prepareRequestForCredential(httptest.NewRequest("POST", "/v1/messages", nil),
-				valid, valid, path.modelID, "claude-sonnet-5-5", "/v1/messages", false, &cred, false, false, false)
+				valid, valid, path.modelID, "claude-sonnet-5-5", "/v1/messages", false, &cred, false, false, false, false)
 			require.NoError(t, err)
 			require.Equal(t, path.passthrough, prepared.passthroughMessages)
 
 			for _, tt := range bodies {
 				body := []byte(`{"model":"claude-sonnet-5-5","max_tokens":100,"messages":[{"role":"user","content":"hi"}]` + tt.fields + `}`)
 				_, err := prx.prepareRequestForCredential(httptest.NewRequest("POST", "/v1/messages", nil),
-					body, body, path.modelID, "claude-sonnet-5-5", "/v1/messages", false, &cred, false, false, false)
+					body, body, path.modelID, "claude-sonnet-5-5", "/v1/messages", false, &cred, false, false, false, false)
 				testhelpers.RequireValidationError(t, err, tt.param, "")
 			}
 		})

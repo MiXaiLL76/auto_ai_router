@@ -238,3 +238,23 @@ func TestOrganizationPolicyConfig_ResponseCostInBody(t *testing.T) {
 		}
 	}
 }
+
+func TestOrganizationPolicyConfig_DisableAutoCacheControl(t *testing.T) {
+	cases := []struct {
+		doc  string
+		want bool
+	}{
+		{"organization_id: o\ndisable_auto_cache_control: true\n", true},
+		{"organization_id: o\ndisable_auto_cache_control: false\n", false},
+		{"organization_id: o\n", false},
+	}
+	for _, c := range cases {
+		var p OrganizationPolicyConfig
+		if err := yaml.Unmarshal([]byte(c.doc), &p); err != nil {
+			t.Fatalf("unmarshal %q: %v", c.doc, err)
+		}
+		if p.DisableAutoCacheControl != c.want {
+			t.Fatalf("%q: DisableAutoCacheControl=%v want %v", c.doc, p.DisableAutoCacheControl, c.want)
+		}
+	}
+}

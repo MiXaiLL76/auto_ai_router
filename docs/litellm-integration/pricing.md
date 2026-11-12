@@ -75,6 +75,10 @@ Credential exclusions apply during request routing. The model catalog is unchang
 
 The list accepts up to 1024 names and 65536 encoded bytes. Each name may contain up to 256 bytes. Empty names, duplicate names, and control characters fail configuration loading. An omitted or empty list preserves standard routing.
 
+### Disabling automatic cache_control injection
+
+An organization policy entry can also set `disable_auto_cache_control: true` to opt that organization out of the router's automatic Anthropic prompt-cache `cache_control` injection, independently of pricing or credential restrictions. See [Automatic Anthropic Prompt Caching](../advanced/session_sticky.md#automatic-anthropic-prompt-caching) for the full trigger conditions this overrides.
+
 ### Refresh interval
 
 Prices are read once at startup and then re-read in the background every `model_prices_sync_interval`. Set it to any Go duration string:

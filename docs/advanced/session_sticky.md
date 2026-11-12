@@ -265,6 +265,19 @@ Auto-injection fires when **all** of the following are true:
 - `session_sticky_auto_cache_control: true` (default)
 - Credential type is `anthropic`, `cometapi`, or `bedrock`
 - A session is active: request has a session ID **or** `previous_response_id` resolved to a known credential
+- The request's organization (if any) has not opted out via `disable_auto_cache_control` (see below)
+
+#### Disabling it for a specific organization
+
+`session_sticky_auto_cache_control` is a single global switch. To keep auto-injection on for everyone else but turn it off for one LiteLLM organization — for example, one whose compliance policy forbids the router from rewriting its request bodies — set `disable_auto_cache_control: true` on that organization's entry under `organization_policies` (see [Organization Price Profiles](../litellm-integration/pricing.md#organization-price-profiles)):
+
+```yaml
+organization_policies:
+  - organization_id: os.environ/NO_CACHE_CONTROL_ORG_ID
+    disable_auto_cache_control: true
+```
+
+This field works with or without a tariff profile on the same entry, and does not require `price_profile_id` / `model_prices_link`. A request from an organization with no matching policy entry, or whose policy omits the field, keeps the global default.
 
 ### Full Example
 

@@ -74,6 +74,10 @@ type orchestratedRequest struct {
 	responsesMetadata    *responses.ResponsesMetadata // non-nil for Responses API requests
 	messagesMetadata     anthropicconv.MessagesAdapterMetadata
 	stickyCacheEligible  bool
+	// autoCacheControlDisabled mirrors logCtx.OrganizationPolicy.DisablesAutoCacheControl():
+	// an organization-level opt-out of InjectCacheControl, independent of
+	// stickyCacheEligible and the global session_sticky_auto_cache_control switch.
+	autoCacheControlDisabled bool
 }
 
 type credentialPreparedRequest struct {
@@ -288,6 +292,7 @@ func (p *Proxy) orchestrateRequest(
 		"url_path", r.URL.Path)
 
 	stickyCacheEligible := logCtx.SessionID != "" || preferredCredentialName != ""
+	autoCacheControlDisabled := logCtx.OrganizationPolicy.DisablesAutoCacheControl()
 	credentialReq, prepErr := p.prepareRequestForCredential(
 		r,
 		baseBody,
@@ -300,6 +305,7 @@ func (p *Proxy) orchestrateRequest(
 		isResponsesAPI,
 		prevEntryHandled,
 		stickyCacheEligible,
+		autoCacheControlDisabled,
 	)
 	if prepErr != nil {
 		var validationErr *converterutil.RequestValidationError
@@ -366,6 +372,7 @@ func (p *Proxy) orchestrateRequest(
 		responsesMetadata:          responsesMetadata,
 		messagesMetadata:           credentialReq.messagesMetadata,
 		stickyCacheEligible:        stickyCacheEligible,
+		autoCacheControlDisabled:   autoCacheControlDisabled,
 	}, true
 }
 
@@ -387,9 +394,10 @@ func (p *Proxy) prepareRequestForCredential(
 	isResponsesAPI bool,
 	prevEntryHandled bool,
 	stickyCacheEligible bool,
+	autoCacheControlDisabled bool,
 ) (credentialPreparedRequest, error) {
 	req, err := p.buildCredentialRequest(r, baseBody, baseProxyBody, modelID, baseRealModelID,
-		basePath, streaming, cred, isResponsesAPI, prevEntryHandled, stickyCacheEligible)
+		basePath, streaming, cred, isResponsesAPI, prevEntryHandled, stickyCacheEligible, autoCacheControlDisabled)
 	if err != nil {
 		return req, err
 	}
@@ -525,9 +533,10 @@ func (p *Proxy) buildCredentialRequest(
 	isResponsesAPI bool,
 	prevEntryHandled bool,
 	stickyCacheEligible bool,
+	autoCacheControlDisabled bool,
 ) (credentialPreparedRequest, error) {
 	req, err := p.buildCredentialRequestInner(r, baseBody, baseProxyBody, modelID, baseRealModelID,
-		basePath, streaming, cred, isResponsesAPI, prevEntryHandled, stickyCacheEligible)
+		basePath, streaming, cred, isResponsesAPI, prevEntryHandled, stickyCacheEligible, autoCacheControlDisabled)
 	if err != nil {
 		return req, err
 	}
@@ -641,6 +650,7 @@ func (p *Proxy) buildCredentialRequestInner(
 	isResponsesAPI bool,
 	prevEntryHandled bool,
 	stickyCacheEligible bool,
+	autoCacheControlDisabled bool,
 ) (credentialPreparedRequest, error) {
 	body := baseBody
 	proxyBody := baseProxyBody
@@ -697,6 +707,7 @@ func (p *Proxy) buildCredentialRequestInner(
 	effectiveType := cred.EffectiveProviderType()
 	if p.stickyAutoCacheCtrl &&
 		stickyCacheEligible &&
+		!autoCacheControlDisabled &&
 		(effectiveType == config.ProviderTypeAnthropic || effectiveType == config.ProviderTypeCometAPI || effectiveType == config.ProviderTypeProMan || effectiveType == config.ProviderTypeBedrock) {
 		body = anthropicconv.InjectCacheControl(body)
 	}

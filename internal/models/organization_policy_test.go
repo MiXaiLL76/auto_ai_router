@@ -249,3 +249,40 @@ func TestOrganizationPolicyAcceptsExternalModel(t *testing.T) {
 		responseModelIDs(manager.GetAllModelsScopedForOrganization(scope.PublicContext(), policy)),
 	)
 }
+
+func TestOrganizationPolicy_DisableAutoCacheControl(t *testing.T) {
+	manager := testPolicyManager()
+	registry, err := LoadOrganizationPolicies([]config.OrganizationPolicyConfig{
+		{
+			// No price profile: the "default catalog" construction branch.
+			OrganizationID:          "org-no-pricing",
+			DisableAutoCacheControl: true,
+		},
+		{
+			// A price profile: the other construction branch.
+			OrganizationID:          "org-priced",
+			PriceProfileID:          "profile-priced",
+			ModelPricesLink:         writePolicyPrices(t, `{"public/a":{"input_cost_per_token":0.001}}`),
+			DisableAutoCacheControl: true,
+		},
+		{
+			OrganizationID: "org-default",
+		},
+	}, manager, validPolicyOptions())
+	require.NoError(t, err)
+
+	noPricing, ok := registry.Policy("org-no-pricing")
+	require.True(t, ok)
+	assert.True(t, noPricing.DisablesAutoCacheControl())
+
+	priced, ok := registry.Policy("org-priced")
+	require.True(t, ok)
+	assert.True(t, priced.DisablesAutoCacheControl())
+
+	defaultPolicy, ok := registry.Policy("org-default")
+	require.True(t, ok)
+	assert.False(t, defaultPolicy.DisablesAutoCacheControl())
+
+	var nilPolicy *OrganizationPolicy
+	assert.False(t, nilPolicy.DisablesAutoCacheControl())
+}
