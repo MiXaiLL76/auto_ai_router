@@ -16,11 +16,11 @@ func TestAnthropicRefusalChat(t *testing.T) {
 	for _, tc := range []struct {
 		name, reason, details, wantRefusal, wantFinish string
 	}{
-		{"explained", "refusal", `{"type":"refusal","category":"reasoning_extraction","explanation":"Request declined.","fallback_credit_token":"private-fixture-credit"}`, "Request declined. (category: reasoning_extraction)", "content_filter"},
-		{"no details", "refusal", `null`, "Request refused by Anthropic.", "content_filter"},
-		{"null fields", "refusal", `{"category":null,"explanation":null}`, "Request refused by Anthropic.", "content_filter"},
-		{"category only", "refusal", `{"category":"general_harms"}`, "Request refused by Anthropic. (category: general_harms)", "content_filter"},
-		{"explanation only", "refusal", `{"explanation":"Request declined."}`, "Request declined.", "content_filter"},
+		{"explained", "refusal", `{"type":"refusal","category":"reasoning_extraction","explanation":"Request declined.","fallback_credit_token":"private-fixture-credit"}`, "The safety classifier identified a request to reproduce internal reasoning. (category: reasoning_extraction)", "content_filter"},
+		{"no details", "refusal", `null`, "The model declined this request; no public reason was provided.", "content_filter"},
+		{"null fields", "refusal", `{"category":null,"explanation":null}`, "The model declined this request; no public reason was provided.", "content_filter"},
+		{"category only", "refusal", `{"category":"general_harms"}`, "The safety classifier identified a potential usage-policy violation. (category: general_harms)", "content_filter"},
+		{"explanation only", "refusal", `{"explanation":"Request declined."}`, "The model declined this request; no public reason was provided.", "content_filter"},
 		{"ordinary empty completion", "end_turn", `null`, "", "stop"},
 		{"details without refusal", "end_turn", `{"category":"general_harms","explanation":"Ignored"}`, "", "stop"},
 	} {
@@ -74,7 +74,7 @@ func TestAnthropicRefusalAfterPartialText(t *testing.T) {
 	var response openai.OpenAIResponse
 	require.NoError(t, json.Unmarshal(converted, &response))
 	assert.Equal(t, "Partial answer", response.Choices[0].Message.Content)
-	assert.Equal(t, "Stopped by a classifier.", response.Choices[0].Message.Refusal)
+	assert.Equal(t, "The model declined this request; no public reason was provided.", response.Choices[0].Message.Refusal)
 	assert.Equal(t, "content_filter", response.Choices[0].FinishReason)
 
 	stream := strings.Join([]string{

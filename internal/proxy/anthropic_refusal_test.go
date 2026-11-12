@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -29,23 +31,32 @@ func TestProxyRequest_AnthropicRefusal(t *testing.T) {
 
 func testProxyAnthropicRefusal(t *testing.T, compatible bool) {
 	t.Helper()
-	for _, provider := range []config.ProviderType{config.ProviderTypeAnthropic, config.ProviderTypeCometAPI} {
+	for _, provider := range []config.ProviderType{config.ProviderTypeAnthropic, config.ProviderTypeCometAPI, config.ProviderTypeBedrock} {
 		for _, endpoint := range []string{"/v1/chat/completions", "/v1/responses", "/v1/messages"} {
 			for _, stream := range []bool{false, true} {
 				t.Run(fmt.Sprintf("%s%s/stream=%t", provider, endpoint, stream), func(t *testing.T) {
 					var attempts atomic.Int64
 					upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 						attempts.Add(1)
-						assert.Equal(t, "/v1/messages", r.URL.Path)
-						const details = `{"type":"refusal","category":"reasoning_extraction","explanation":"Request declined."}`
+						if provider != config.ProviderTypeBedrock {
+							assert.Equal(t, "/v1/messages", r.URL.Path)
+						}
+						const details = `{"type":"refusal","category":"reasoning_extraction","explanation":"cometapi api_key=fixture-secret https://internal.invalid/private","fallback_credit_token":"fixture-credit","provider":"private-provider"}`
 						if stream {
 							w.Header().Set("Content-Type", "text/event-stream")
+							if provider == config.ProviderTypeBedrock {
+								w.Header().Set("Content-Type", "application/vnd.amazon.eventstream")
+							}
 							for _, event := range []string{
 								`{"type":"message_start","message":{"id":"msg_fixture","type":"message","role":"assistant","content":[],"usage":{"input_tokens":17,"output_tokens":0}}}`,
 								`{"type":"message_delta","delta":{"stop_reason":"refusal","stop_details":` + details + `},"usage":{"output_tokens":0}}`,
 								`{"type":"message_stop"}`,
 							} {
-								_, _ = fmt.Fprintf(w, "data: %s\n\n", event)
+								if provider == config.ProviderTypeBedrock {
+									_, _ = w.Write(refusalBedrockFrame(event))
+								} else {
+									_, _ = fmt.Fprintf(w, "data: %s\n\n", event)
+								}
 							}
 							return
 						}
@@ -53,7 +64,14 @@ func testProxyAnthropicRefusal(t *testing.T, compatible bool) {
 						_, _ = fmt.Fprint(w, `{"id":"msg_fixture","type":"message","role":"assistant","content":[],"stop_reason":"refusal","stop_details":`+details+`,"usage":{"input_tokens":17,"output_tokens":0}}`)
 					}))
 					defer upstream.Close()
-					prx := NewTestProxyBuilder().WithSingleCredential("refusal-fixture", provider, upstream.URL, "fixture-key").Build()
+					builder := NewTestProxyBuilder().WithSingleCredential("refusal-fixture", provider, upstream.URL, "fixture-key")
+					if provider == config.ProviderTypeBedrock {
+						builder.config.ModelManager = pricing.New(builder.config.Logger, 50, []config.ModelRPMConfig{
+							{Name: "claude-sonnet-4.5", Model: "anthropic.claude-sonnet-4-5-test", Credential: "refusal-fixture"},
+						})
+						builder.config.ModelManager.LoadModelsFromConfig(builder.config.Credentials)
+					}
+					prx := builder.Build()
 					if compatible {
 						prx.responseCompat = compatlitellm.New()
 					}
@@ -72,12 +90,15 @@ func testProxyAnthropicRefusal(t *testing.T, compatible bool) {
 					prx.ProxyRequest(w, req)
 					require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 					assert.Equal(t, int64(1), attempts.Load(), "refusals must not be retried")
-					assert.Contains(t, w.Body.String(), "Request declined.")
+					assert.Contains(t, w.Body.String(), "The safety classifier identified a request to reproduce internal reasoning.")
 					assert.Contains(t, w.Body.String(), "reasoning_extraction")
+					for _, private := range []string{"fixture-secret", "internal.invalid", "fixture-credit", "private-provider", "fallback_credit_token"} {
+						assert.NotContains(t, w.Body.String(), private)
+					}
 					switch endpoint {
 					case "/v1/chat/completions":
 						assert.Contains(t, w.Body.String(), `"finish_reason":"content_filter"`)
-						assert.Contains(t, w.Body.String(), `"refusal":"Request declined.`)
+						assert.Contains(t, w.Body.String(), `"refusal":"The safety classifier identified a request to reproduce internal reasoning.`)
 						if !stream {
 							var response struct {
 								Choices []struct {
@@ -92,7 +113,7 @@ func testProxyAnthropicRefusal(t *testing.T, compatible bool) {
 								assert.NotContains(t, message, "refusal")
 								message = message["provider_specific_fields"].(map[string]interface{})
 							}
-							assert.Equal(t, "Request declined. (category: reasoning_extraction)", message["refusal"])
+							assert.Equal(t, "The safety classifier identified a request to reproduce internal reasoning. (category: reasoning_extraction)", message["refusal"])
 						}
 					case "/v1/responses":
 						assert.Contains(t, w.Body.String(), `"type":"refusal"`)
@@ -114,4 +135,12 @@ func testProxyAnthropicRefusal(t *testing.T, compatible bool) {
 			}
 		}
 	}
+}
+
+func refusalBedrockFrame(event string) []byte {
+	payload := []byte(`{"bytes":"` + base64.StdEncoding.EncodeToString([]byte(event)) + `"}`)
+	frame := make([]byte, 16+len(payload))
+	binary.BigEndian.PutUint32(frame[:4], uint32(len(frame))) //nolint:gosec // small test fixture
+	copy(frame[12:], payload)
+	return frame
 }

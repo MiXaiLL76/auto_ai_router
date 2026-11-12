@@ -17,12 +17,12 @@ func TestAnthropicRefusalResponses(t *testing.T) {
 		name, content, details, wantRefusal string
 		beforeRefusal                       int
 	}{
-		{"empty", `[]`, `{"category":"reasoning_extraction","explanation":"Request declined.","fallback_credit_token":"private-fixture-credit"}`, "Request declined. (category: reasoning_extraction)", 0},
-		{"missing details", `[]`, `null`, "Request refused by Anthropic.", 0},
-		{"null fields", `[]`, `{"category":null,"explanation":null}`, "Request refused by Anthropic.", 0},
-		{"after text", `[{"type":"text","text":"Partial answer"}]`, `{"explanation":"Request declined."}`, "Request declined.", 1},
-		{"after thinking", `[{"type":"thinking","thinking":"","signature":"fixture-signature"}]`, `null`, "Request refused by Anthropic.", 1},
-		{"after text and tool", `[{"type":"text","text":"Partial answer"},{"type":"tool_use","id":"tool_fixture","name":"lookup","input":{"q":"test"}}]`, `null`, "Request refused by Anthropic.", 2},
+		{"empty", `[]`, `{"category":"reasoning_extraction","explanation":"Request declined.","fallback_credit_token":"private-fixture-credit"}`, "The safety classifier identified a request to reproduce internal reasoning. (category: reasoning_extraction)", 0},
+		{"missing details", `[]`, `null`, "The model declined this request; no public reason was provided.", 0},
+		{"null fields", `[]`, `{"category":null,"explanation":null}`, "The model declined this request; no public reason was provided.", 0},
+		{"after text", `[{"type":"text","text":"Partial answer"}]`, `{"explanation":"Request declined."}`, "The model declined this request; no public reason was provided.", 1},
+		{"after thinking", `[{"type":"thinking","thinking":"","signature":"fixture-signature"}]`, `null`, "The model declined this request; no public reason was provided.", 1},
+		{"after text and tool", `[{"type":"text","text":"Partial answer"},{"type":"tool_use","id":"tool_fixture","name":"lookup","input":{"q":"test"}}]`, `null`, "The model declined this request; no public reason was provided.", 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body := fmt.Sprintf(`{"content":%s,"stop_reason":"refusal","stop_details":%s,"usage":{"input_tokens":17,"output_tokens":0,"cache_read_input_tokens":3}}`, tc.content, tc.details)
@@ -131,7 +131,7 @@ func TestAnthropicRefusalOutputCanBeReplayed(t *testing.T) {
 			require.NoError(t, json.Unmarshal(converted, &native))
 			require.Len(t, native.Messages, 3)
 			assert.Equal(t, "assistant", native.Messages[1].Role)
-			assert.JSONEq(t, `[{"type":"text","text":"Request declined."}]`, string(native.Messages[1].Content))
+			assert.JSONEq(t, `[{"type":"text","text":"The model declined this request; no public reason was provided."}]`, string(native.Messages[1].Content))
 		})
 	}
 }

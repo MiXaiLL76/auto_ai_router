@@ -376,6 +376,9 @@ func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, c
 	if mappedStatus, ok := statusCodeFromProviderBodyError(resp.StatusCode, resp.Body); ok {
 		resp.StatusCode = mappedStatus
 	}
+	if clientReq != nil && clientReq.URL != nil && clientReq.URL.Path == "/v1/messages" {
+		resp.StatusCode, resp.Body = sanitizeRefusalResponse(resp.StatusCode, resp.Body, logCtx)
+	}
 	responseBody, responseBodyChanged, responseBodyMasked := clientResponseBodyForCredential(resp.StatusCode, resp.Body, cred, modelID, logContextRequestID(logCtx))
 	// writeProxyResponse serves both the primary proxy-credential path
 	// (proxy.go) and the fallback retry path (retry.go); both separately set
@@ -509,6 +512,11 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	detectProviderStreamError := resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
 	providerStreamError := &proxyStreamErrorCapture{}
 	streamBody := io.ReadCloser(resp.StreamBody)
+	if detectProviderStreamError && clientReq != nil && clientReq.URL != nil && clientReq.URL.Path == "/v1/messages" {
+		// The transformer reads asynchronously. Keep the error observer below
+		// this boundary so Observe and Finalize stay on the handler goroutine.
+		streamBody = newMessagesSanitizingReadCloser(streamBody, modelID)
+	}
 	if detectProviderStreamError {
 		streamBody = readerReadCloser{
 			Reader: io.TeeReader(streamBody, proxyStreamErrorObserver{capture: providerStreamError}),

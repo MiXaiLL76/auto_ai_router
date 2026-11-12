@@ -3048,7 +3048,9 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		// retryable error with no more attempts left — is what gets written to
 		// the client below) — record exactly once here with genuine end-to-end
 		// duration, not once per retry attempt.
-		p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, resp.StatusCode, time.Since(start))
+		defer func() {
+			p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, resp.StatusCode, time.Since(start))
+		}()
 	}
 
 	// === Process final response ===
@@ -3086,6 +3088,13 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		// Decode the response body for logging (handles gzip, etc.)
 		contentEncoding := resp.Header.Get("Content-Encoding")
 		decodedBody := decodeResponseBody(responseBody, contentEncoding)
+		// Do this before conversion/history storage as well as native Messages
+		// passthrough: private refusal extensions must never become client output.
+		if isAnthropicResponse(cred, realModelID, r.URL.Path) && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			status, clean := sanitizeRefusalResponse(resp.StatusCode, []byte(decodedBody), logCtx)
+			resp.StatusCode = status
+			decodedBody = string(clean)
+		}
 		// deepSeekToolUsage carries the tool counters of the router-run
 		// search/fetch loop. They are applied to the request's own usage
 		// below, where the billing path reads it -- not through the body,
