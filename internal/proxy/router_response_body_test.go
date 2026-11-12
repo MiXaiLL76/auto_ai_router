@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -208,6 +209,71 @@ func TestCaptureRouterResponseBody_CapsLength(t *testing.T) {
 	assert.Less(t, len(captured), maxRouterResponseBodyBytes+100,
 		"the captured body must be capped")
 	assert.Contains(t, captured, "truncated", "the truncation must be visible")
+}
+
+// aBase64Payload is a payload long enough and shaped enough to be a real
+// binary blob -- a short base64 string is indistinguishable from a word.
+const aBase64Payload = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACHklEQVR4nGNgYGD4z0AEYBxVSF+FABJADveWkH6oAAAAAElFTkSuQmCC" +
+	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACHklEQVR4nGNgYGD4z0AEYBxVSF+FABJADveWkH6oAAAAAElFTkSuQmCC" +
+	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACHklEQVR4nGNgYGD4z0AEYBxVSF+FABJADveWkH6oAAAAAElFTkSuQmCC"
+
+// TestRedactRouterResponseBody_MasksBinaryContentBlocks pins that a binary
+// payload carried INSIDE a content block is dropped, wherever it sits.
+//
+// The Anthropic-native form of this is a tool_result block whose content is
+// an array of blocks, one of which is an image or a document -- the
+// documented way for a tool ("read a document", "take a screenshot") to
+// hand a picture back into the conversation. The block's own keys (type,
+// source, media_type, data) are not the model's text and not tool
+// arguments, so a rule keyed on those names does not see them: the walk
+// descends into the block and the base64 string comes out unchanged.
+//
+// It was found in production: 1550 rows of air.router_responses carried a
+// base64 image in an OpenAI-compatible message.images[].image_url.url, and
+// the same shape reaches a tool_result from any Anthropic-compatible
+// provider.
+func TestRedactRouterResponseBody_MasksBinaryContentBlocks(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		body string
+	}{
+		{"tool_result with an image", `{"content":[{"type":"tool_result","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + aBase64Payload + `"}}]}],"model":"m"}`},
+		{"tool_result with a document", `{"content":[{"type":"tool_result","content":[{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"` + aBase64Payload + `"}}]}],"model":"m"}`},
+		{"message with an image block", `{"content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + aBase64Payload + `"}}],"model":"m"}`},
+		{"openai images extension", `{"choices":[{"message":{"content":"x","images":[{"image_url":{"url":"data:image/png;base64,` + aBase64Payload + `"}}]}}],"model":"m"}`},
+		{"responses input_image", `{"output":[{"type":"message","content":[{"type":"input_image","image_url":"data:image/png;base64,` + aBase64Payload + `"}]}],"model":"m"}`},
+		{"gemini inlineData", `{"candidates":[{"content":{"parts":[{"inlineData":{"data":"` + aBase64Payload + `","mimeType":"image/png"}}]}}],"model":"m"}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			masked, ok := redactRouterResponseBody([]byte(tt.body))
+			require.True(t, ok)
+			assert.NotContains(t, masked, aBase64Payload,
+				"a binary payload must not survive redaction: %s", masked)
+		})
+	}
+}
+
+// TestRedactRouterResponseBody_KeepsOrdinaryTextAmongTheBinaries is the
+// other direction: the binary detection is on the VALUE, so a long prose
+// answer (which is not base64) and a short base64-looking word (which is
+// too short to be a payload) are left alone.
+func TestRedactRouterResponseBody_KeepsOrdinaryTextAmongTheBinaries(t *testing.T) {
+	longProse := strings.Repeat("the model explained the embedding of vectors ", 20)
+	longNonBase64 := strings.Repeat("This is a long sentence with spaces, punctuation! ", 20)
+
+	for _, tt := range []struct {
+		name string
+		text string
+	}{
+		{"a long prose answer", longProse},
+		{"a long string that is not base64", longNonBase64},
+		{"a short base64-looking word", "aGVsbG8gd29ybGQ="},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.False(t, routerResponseIsBinaryPayload(tt.text),
+				"only a real payload may be treated as one")
+		})
+	}
 }
 
 // TestCaptureRouterResponseBody_SkipsEmbeddingsAndImages pins that the two
