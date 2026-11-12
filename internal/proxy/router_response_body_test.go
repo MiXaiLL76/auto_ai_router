@@ -210,6 +210,55 @@ func TestCaptureRouterResponseBody_CapsLength(t *testing.T) {
 	assert.Contains(t, captured, "truncated", "the truncation must be visible")
 }
 
+// TestCaptureRouterResponseBody_SkipsEmbeddingsAndImages pins that the two
+// answer shapes whose body IS the payload are not published at all.
+//
+// An embedding answer is the vector of the client's own input and an image
+// answer is the pixels it asked for: neither is the model's words, and both
+// are enormous -- an embedding body is ~40 KB and an image body is a base64
+// blob that hits the capture cap every time. Together they were a fifth of
+// the stream's daily volume (140 MB of 687 MB), in rows that say nothing
+// about the exchange.
+func TestCaptureRouterResponseBody_SkipsEmbeddingsAndImages(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		body string
+	}{
+		{"openai embedding", `{"object":"list","data":[{"object":"embedding","embedding":[0.1,0.2],"index":0}],"model":"text-embedding-3-small","usage":{"prompt_tokens":8,"total_tokens":8}}`},
+		{"gemini embedding", `{"embeddings":[{"values":[0.1,0.2]}],"model":"gemini-embedding-001"}`},
+		{"openai image", `{"created":1,"data":[{"b64_json":"iVBORw0KGgo="}],"model":"gpt-image-1"}`},
+		{"gemini image inline", `{"candidates":[{"content":{"parts":[{"inlineData":{"data":"iVBORw0KGgo=","mimeType":"image/png"}}]}}],"model":"gemini-3.1-flash-image"}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Empty(t, captureRouterResponseBody([]byte(tt.body), true),
+				"a payload body must not be published at all")
+			assert.Empty(t, captureRouterResponseBody([]byte(tt.body), false),
+				"a payload body must not be published with redaction off either")
+		})
+	}
+}
+
+// TestCaptureRouterResponseBody_KeepsOrdinaryAnswers guards the other
+// direction: the detection is on the STRUCTURE, so an ordinary answer that
+// merely mentions "embedding", or calls a tool named "embed", is still
+// published.
+func TestCaptureRouterResponseBody_KeepsOrdinaryAnswers(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		body string
+	}{
+		{"chat completion", `{"choices":[{"message":{"content":"hi"}}],"model":"gpt-5-mini"}`},
+		{"text mentioning embedding", `{"choices":[{"message":{"content":"the embedding of things"}}],"model":"gpt-5-mini"}`},
+		{"a tool named embed", `{"choices":[{"message":{"tool_calls":[{"function":{"name":"embed","arguments":"{}"}}]}}],"model":"m"}`},
+		{"a data array of files", `{"data":[{"object":"file","id":"x"}],"model":"m"}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.NotEmpty(t, captureRouterResponseBody([]byte(tt.body), true),
+				"an ordinary answer must still be published")
+		})
+	}
+}
+
 // TestCaptureRouterResponseBody_EmptyBody pins that an empty body is
 // captured as empty (and not published at all -- see the publish gate).
 func TestCaptureRouterResponseBody_EmptyBody(t *testing.T) {

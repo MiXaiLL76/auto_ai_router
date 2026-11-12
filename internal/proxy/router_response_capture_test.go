@@ -202,6 +202,39 @@ func TestRouterResponse_PublishedEvenWhenTheModelCannotBePriced(t *testing.T) {
 	assert.Contains(t, events[0].ResponseBody, routerResponseRedactedPlaceholder)
 }
 
+// TestRouterResponse_EmbeddingIsNotPublished pins that an embedding answer
+// produces NO router-response event at all -- not a row with an empty body.
+//
+// An embedding body is the vector of the client's own input, not the model's
+// words, and it is ~40 KB; an image body is a base64 blob that hits the
+// capture cap every time. Together they were a fifth of the stream's daily
+// volume in rows that say nothing about the exchange.
+func TestRouterResponse_EmbeddingIsNotPublished(t *testing.T) {
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"object":"embedding","embedding":[0.1,0.2],"index":0}],"model":"text-embedding-3-small"}`))
+	}))
+	defer upstream.Close()
+
+	mgr := &collectingRouterResponseManager{}
+	prx := NewTestProxyBuilder().
+		WithSingleCredential("cred", "openai", upstream.URL, "k").
+		WithMaxProviderRetries(0).
+		WithRouterResponseLog(mgr, true).
+		Build()
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"text-embedding-3-small","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	prx.ProxyRequest(rec, req)
+
+	assert.Empty(t, mgr.snapshot(),
+		"an embedding answer must not produce a router-response event")
+}
+
 // TestRouterResponse_CapturesTheSimulatedPath pins that the forced-stream
 // path -- how a non-streaming client is served in production -- captures the
 // reassembled body too. Without this, the feature would be silent for every

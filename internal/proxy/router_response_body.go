@@ -221,8 +221,16 @@ func routerResponseIsLoggableField(key string) bool {
 // The cap is applied AFTER the masking, so a huge body is truncated the
 // same way whether or not redaction is on -- and the truncation marker
 // says so, rather than the reader believing the JSON is complete.
+//
+// An embedding or an image answer is NOT captured at all: see
+// isBulkBinaryAnswer.
 func captureRouterResponseBody(body []byte, redact bool) string {
 	if len(body) == 0 {
+		return ""
+	}
+	if isBulkBinaryAnswer(body) {
+		// Not published: the body is the payload itself (a vector, a
+		// base64 image), not the model's answer.
 		return ""
 	}
 	if redact {
@@ -237,6 +245,77 @@ func captureRouterResponseBody(body []byte, redact bool) string {
 		return string(body[:maxRouterResponseBodyBytes]) + "...[truncated]"
 	}
 	return string(body)
+}
+
+// isBulkBinaryAnswer reports whether the body is an embedding vector or an
+// image -- the two answer shapes whose body IS the payload, not the model's
+// words.
+//
+// Such a body is not published, for two reasons. It is the client's own data
+// (the embedding of its input, the pixels it asked for) rather than the
+// model's output, and it is enormous: an embedding answer is ~40 KB and an
+// image answer is a base64 blob that hits the 256 KB cap every time.
+// Together they were 140 MB of the 687 MB the stream carried in a day --
+// a fifth of the volume, for rows that say nothing about the exchange.
+//
+// The detection is on the STRUCTURE, not on the words: an ordinary answer
+// that merely mentions "embedding" in its text must not be dropped.
+func isBulkBinaryAnswer(body []byte) bool {
+	var doc map[string]any
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return false
+	}
+	// Gemini's native shape: "embeddings": [{"values": [...]}] at the top
+	// level, and an image part's "inlineData" inside a candidate.
+	if _, ok := doc["embeddings"].([]any); ok {
+		return true
+	}
+	if bodyContainsKey(doc, "inlineData") {
+		return true
+	}
+	// OpenAI's shapes: "data": [{"embedding": [...]}] and "data": [{"b64_json":
+	// "..."}] -- the same "data" array holds both, so they are told apart by
+	// the key inside the element.
+	items, ok := doc["data"].([]any)
+	if !ok {
+		return false
+	}
+	for _, item := range items {
+		element, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, ok := element["embedding"].([]any); ok {
+			return true
+		}
+		if _, ok := element["b64_json"].(string); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// bodyContainsKey reports whether the decoded body holds the given key
+// anywhere in it.
+func bodyContainsKey(value any, key string) bool {
+	switch typed := value.(type) {
+	case map[string]any:
+		for k, child := range typed {
+			if k == key || bodyContainsKey(child, key) {
+				return true
+			}
+		}
+		return false
+	case []any:
+		for _, item := range typed {
+			if bodyContainsKey(item, key) {
+				return true
+			}
+		}
+		return false
+	default:
+		return false
+	}
 }
 
 // captureRouterResponse stores the response body on the log context, for
