@@ -1,14 +1,19 @@
 package proxy
 
 import (
-	json "github.com/goccy/go-json"
+	"encoding/json"
+	"strconv"
 )
 
-// chatPostFinishDetector tracks terminal choices independently. Usage-only
-// chunks have no choices and therefore cannot signal a violation.
+// chatPostFinishDetector tracks terminal choices independently. The SSE
+// sanitizer passes its already decoded JSON object to observeJSON.
 type chatPostFinishDetector struct {
-	finished map[int]string
-	reported map[int]bool
+	choices map[int]chatPostFinishChoice
+}
+
+type chatPostFinishChoice struct {
+	reason   string
+	reported bool
 }
 
 type chatPostFinishViolation struct {
@@ -17,60 +22,52 @@ type chatPostFinishViolation struct {
 	field        string
 }
 
-// observePayload accepts JSON from an already parsed SSE data line. A delta
-// in the same choice object as finish_reason is allowed.
-func (d *chatPostFinishDetector) observePayload(payload []byte) []chatPostFinishViolation {
-	if len(payload) == 0 || payload[0] != '{' {
+func (d *chatPostFinishDetector) observeJSON(value any) []chatPostFinishViolation {
+	chunk, ok := value.(map[string]any)
+	if !ok {
 		return nil
 	}
-	var chunk struct {
-		Choices []struct {
-			Index        *int    `json:"index"`
-			FinishReason *string `json:"finish_reason"`
-			Delta        struct {
-				Content          json.RawMessage `json:"content"`
-				ReasoningContent json.RawMessage `json:"reasoning_content"`
-			} `json:"delta"`
-		} `json:"choices"`
-	}
-	if json.Unmarshal(payload, &chunk) != nil {
+	choices, ok := chunk["choices"].([]any)
+	if !ok {
 		return nil
 	}
 	var violations []chatPostFinishViolation
-	for _, choice := range chunk.Choices {
-		if choice.Index == nil {
+	for _, rawChoice := range choices {
+		choice, ok := rawChoice.(map[string]any)
+		if !ok {
 			continue
 		}
-		index := *choice.Index
-		if reason, finished := d.finished[index]; finished && !d.reported[index] {
+		indexNumber, ok := choice["index"].(json.Number)
+		if !ok {
+			continue
+		}
+		index, err := strconv.Atoi(string(indexNumber))
+		if err != nil {
+			continue
+		}
+		state := d.choices[index]
+		if state.reason != "" && !state.reported {
+			delta, _ := choice["delta"].(map[string]any)
 			field := ""
-			switch {
-			case nonEmptyJSONText(choice.Delta.Content):
+			if content, _ := delta["content"].(string); content != "" {
 				field = "content"
-			case nonEmptyJSONText(choice.Delta.ReasoningContent):
+			} else if reasoning, _ := delta["reasoning_content"].(string); reasoning != "" {
 				field = "reasoning_content"
 			}
 			if field != "" {
-				violations = append(violations, chatPostFinishViolation{index, reason, field})
-				if d.reported == nil {
-					d.reported = make(map[int]bool)
-				}
-				d.reported[index] = true
+				violations = append(violations, chatPostFinishViolation{index, state.reason, field})
+				state.reported = true
 			}
 		}
-		if choice.FinishReason != nil && *choice.FinishReason != "" {
-			if d.finished == nil {
-				d.finished = make(map[int]string)
+		if reason, _ := choice["finish_reason"].(string); reason != "" && state.reason == "" {
+			state.reason = reason
+		}
+		if state.reason != "" {
+			if d.choices == nil {
+				d.choices = make(map[int]chatPostFinishChoice)
 			}
-			if _, exists := d.finished[index]; !exists {
-				d.finished[index] = *choice.FinishReason
-			}
+			d.choices[index] = state
 		}
 	}
 	return violations
-}
-
-func nonEmptyJSONText(raw json.RawMessage) bool {
-	var value string
-	return json.Unmarshal(raw, &value) == nil && value != ""
 }

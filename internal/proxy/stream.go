@@ -1065,18 +1065,10 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 	}
 
 	var payloadBuf [][]byte
-	var postFinish chatPostFinishDetector
 	onLine := func(chunk []byte) {
 		// Parse complete SSE lines, not individual HTTP reads: a large image
 		// event may carry its usage after several stream buffer boundaries.
 		payloadBuf = splitSSEPayloads(chunk, payloadBuf)
-		for _, payload := range payloadBuf {
-			for _, violation := range postFinish.observePayload(payload) {
-				p.logger.WarnContext(respCtx(resp), "Provider sent text after finish_reason in Chat Completions stream",
-					"credential", credName, "model", modelID, "request_id", logContextRequestID(logCtx),
-					"choice_index", violation.index, "finish_reason", violation.finishReason, "delta_field", violation.field)
-			}
-		}
 		if hasUsage := chunkMayCarryTokenUsage(chunk); hasUsage {
 			if logCtx != nil {
 				// The image usage event isn't necessarily the stream's last data
@@ -1122,8 +1114,16 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 		})
 	}
 
+	var postFinish chatPostFinishDetector
+	observeJSON := func(value any) {
+		for _, violation := range postFinish.observeJSON(value) {
+			p.logger.WarnContext(respCtx(resp), "Provider sent text after finish_reason in Chat Completions stream",
+				"credential", credName, "model", modelID, "request_id", logContextRequestID(logCtx),
+				"choice_index", violation.index, "finish_reason", violation.finishReason, "delta_field", violation.field)
+		}
+	}
 	clientReader := normalizeSuccessfulResponseModelStream(
-		promanutils.NewSanitizingSSEReader(providerReader, clientVisibleResponseModel(logCtx, modelID)),
+		promanutils.NewSanitizingSSEReaderWithObserver(providerReader, clientVisibleResponseModel(logCtx, modelID), observeJSON),
 		resp.StatusCode,
 		logCtx,
 		modelID,
