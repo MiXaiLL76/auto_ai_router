@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"strings"
 )
 
 // maxRouterResponseBodyBytes caps the captured response body. A chat
@@ -149,6 +150,13 @@ func maskRouterResponseValue(value any) any {
 				// only the values are dropped -- so an operator still
 				// sees WHICH tool was called with WHAT shape.
 				out[key] = routerResponseRedactedPlaceholder
+			case routerResponseIsBinaryPayload(child):
+				// A binary payload -- an image, a document, an audio
+				// clip -- carried as a string (base64, or a data: URL
+				// around one). It is not text, and it can be megabytes:
+				// it is the client's own picture or scan, and it says
+				// nothing about the exchange. Dropped whole.
+				out[key] = routerResponseRedactedPlaceholder
 			default:
 				// A text field whose value is a container (the Responses
 				// API's "content": an array of output parts, or Anthropic's
@@ -184,6 +192,71 @@ func routerResponseIsTextField(key string) bool {
 func routerResponseIsToolArgumentField(key string) bool {
 	_, ok := routerResponseToolArgumentFields[key]
 	return ok
+}
+
+// routerResponseIsBinaryPayload reports whether the value is a binary
+// payload carried as text: a base64 blob, or a data: URL around one.
+//
+// It is detected by the VALUE, not by the key, because the keys that carry
+// one differ per provider and per shape -- Anthropic puts it under
+// source.data, Gemini under inlineData.data, OpenAI's image extension under
+// image_url.url -- and a key list would have to enumerate all of them, and
+// would miss the next one. A base64 payload is long and base64-shaped, so
+// the value itself says what it is.
+//
+// The payload is dropped whole rather than truncated: it is the client's own
+// picture or scan, and half a base64 blob is worth nothing to an operator
+// reading the row.
+func routerResponseIsBinaryPayload(value any) bool {
+	text, ok := value.(string)
+	if !ok {
+		return false
+	}
+	return isBase64Payload(text) || isDataURLPayload(text)
+}
+
+// isBase64Payload reports whether the text is a base64 blob: long enough
+// that it cannot be prose, and made only of the base64 alphabet.
+//
+// The length threshold is what keeps prose out -- prose is not hundreds of
+// characters of the base64 alphabet -- and the alphabet check is what keeps a
+// long non-base64 string (a URL, an identifier) out.
+func isBase64Payload(text string) bool {
+	// 256 characters: long enough that prose cannot reach it (a sentence
+	// is not 256 characters of the base64 alphabet), short enough to catch
+	// a small picture or a one-page document. The real payloads measured in
+	// production were 67 KB and up; the threshold only has to tell a
+	// payload from a word.
+	const minBinaryLength = 256
+	if len(text) < minBinaryLength {
+		return false
+	}
+	for i := 0; i < len(text); i++ {
+		c := text[i]
+		switch {
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+		case c == '+', c == '/', c == '=', c == '\n', c == '\r':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// isDataURLPayload reports whether the text is a data: URL carrying a
+// base64 payload -- "data:image/png;base64,...".
+func isDataURLPayload(text string) bool {
+	const prefix = "data:"
+	if !strings.HasPrefix(text, prefix) {
+		return false
+	}
+	comma := strings.IndexByte(text, ',')
+	if comma < 0 {
+		return false
+	}
+	header := text[:comma]
+	return strings.HasSuffix(header, ";base64") || strings.Contains(header, "image/") ||
+		strings.Contains(header, "audio/") || strings.Contains(header, "video/")
 }
 
 // routerResponseIsTextValue reports whether the value under a text field is
