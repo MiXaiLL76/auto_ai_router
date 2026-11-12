@@ -501,6 +501,7 @@ type Config struct {
 	RawBodyLog                   kafkalog.RawBodyManager        // Kafka raw-body publishing (optional, separate topic, failure-only)
 	RawBodyStoreRawBody          bool                           // Mirrors KafkaRawBodiesConfig.StoreRawBody
 	RawBodyStoreOnlyErrors       bool                           // Mirrors KafkaRawBodiesConfig.StoreOnlyErrors
+	RawBodyStoreCacheWrites      bool                           // Mirrors KafkaRawBodiesConfig.StoreCacheWrites
 	RawBodyRedactSensitiveFields bool                           // Mirrors KafkaRawBodiesConfig.RedactSensitiveFields
 	RouterResponseLog            kafkalog.RouterResponseManager // Kafka router-response publishing (optional, separate topic, every request)
 	RouterResponseRedact         bool                           // Mirrors KafkaRouterResponsesConfig.RedactSensitiveFields
@@ -603,6 +604,7 @@ type Proxy struct {
 	routerResponsesRedact            bool                           // Mirrors KafkaRouterResponsesConfig.RedactSensitiveFields
 	rawBodyStoreRawBody              bool                           // Mirrors KafkaRawBodiesConfig.StoreRawBody
 	rawBodyStoreOnlyErrors           bool                           // Mirrors KafkaRawBodiesConfig.StoreOnlyErrors
+	rawBodyStoreCacheWrites          bool                           // Mirrors KafkaRawBodiesConfig.StoreCacheWrites
 	rawBodyRedactSensitiveFields     bool                           // Mirrors KafkaRawBodiesConfig.RedactSensitiveFields
 	healthChecker                    HealthChecker                  // Cached DB health status (optional)
 	events                           *accountevents.Publisher       // Account outcome events publisher (kafka; nil when disabled)
@@ -736,6 +738,7 @@ func New(cfg *Config) *Proxy {
 		rawBodyLog:                       cfg.RawBodyLog,
 		rawBodyStoreRawBody:              cfg.RawBodyStoreRawBody,
 		rawBodyStoreOnlyErrors:           cfg.RawBodyStoreOnlyErrors,
+		rawBodyStoreCacheWrites:          cfg.RawBodyStoreCacheWrites,
 		rawBodyRedactSensitiveFields:     cfg.RawBodyRedactSensitiveFields,
 		routerResponseLog:                cfg.RouterResponseLog,
 		routerResponsesEnabled:           cfg.RouterResponseLog != nil && cfg.RouterResponseLog.IsEnabled(),

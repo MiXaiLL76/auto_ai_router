@@ -1576,6 +1576,19 @@ type KafkaRawBodiesConfig struct {
 	// generally, not just alongside errors.
 	StoreOnlyErrors bool `yaml:"store_only_errors"` // default: true
 
+	// StoreCacheWrites publishes a successful request's event too when it
+	// wrote to the provider's prompt cache (TokenUsage.CacheCreationTokens >
+	// 0), even while StoreOnlyErrors is still true for everything else. A
+	// failed request already publishes regardless of StoreOnlyErrors; this
+	// covers the gap that leaves open -- a cache write that succeeded, but
+	// whose accounting (cache_creation_tokens vs. a client's own
+	// cache_write_tokens figure) needs the actual request/response bodies to
+	// reconcile, not just the token counts already in the spend log (see
+	// #355/#363). Off by default: it is a debugging opt-in, like
+	// StoreOnlyErrors=false, just scoped to cache writes instead of every
+	// request.
+	StoreCacheWrites bool `yaml:"store_cache_writes"` // default: false
+
 	// RedactSensitiveFields omits arbitrary provider/client response bodies
 	// before publishing and controls whether StoreRawBody's captured
 	// request body has prompt/message content stripped before publishing
@@ -1928,6 +1941,7 @@ type tempKafkaRawBodiesConfig struct {
 	Topic                 string `yaml:"topic"`
 	StoreRawBody          string `yaml:"store_raw_body"`
 	StoreOnlyErrors       string `yaml:"store_only_errors"`
+	StoreCacheWrites      string `yaml:"store_cache_writes"`
 	RedactSensitiveFields string `yaml:"redact_sensitive_fields"`
 }
 
@@ -2027,6 +2041,9 @@ func (k *KafkaConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if k.RawBodies.StoreOnlyErrors, err = parseField(temp.RawBodies.StoreOnlyErrors, true, strconv.ParseBool, "kafka.raw_bodies.store_only_errors"); err != nil {
+		return err
+	}
+	if k.RawBodies.StoreCacheWrites, err = parseField(temp.RawBodies.StoreCacheWrites, false, strconv.ParseBool, "kafka.raw_bodies.store_cache_writes"); err != nil {
 		return err
 	}
 	if k.RawBodies.RedactSensitiveFields, err = parseField(temp.RawBodies.RedactSensitiveFields, true, strconv.ParseBool, "kafka.raw_bodies.redact_sensitive_fields"); err != nil {
@@ -2314,6 +2331,7 @@ func defaultKafkaConfig() KafkaConfig {
 			Topic:                 "raw-bodies",
 			StoreRawBody:          false,
 			StoreOnlyErrors:       true,
+			StoreCacheWrites:      false,
 			RedactSensitiveFields: true,
 		},
 	}

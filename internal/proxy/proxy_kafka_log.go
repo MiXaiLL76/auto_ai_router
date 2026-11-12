@@ -246,12 +246,41 @@ func (p *Proxy) buildKafkaSpendEvent(
 	return event
 }
 
-// logRawBodyToKafka publishes the raw request/response body for a failed
-// request to the separate raw-bodies topic (internal/kafkalog), if that
-// write-path is enabled. Best-effort, mirroring logSpendToKafka: never
-// affects request processing, failures are logged and swallowed rather than
-// surfaced to the caller -- unlike the spend event, there's no Postgres row
-// to flag a fallback reason on for this one, it's purely supplementary.
+// shouldLogRawBody reports whether this request's raw body is published to
+// the raw-bodies topic, independent of whether that write-path is enabled at
+// all (the caller checks rawBodyLogEnabled separately):
+//
+//   - a failed request always qualifies, matching the feature's original,
+//     failures-only scope;
+//   - with StoreOnlyErrors off, every request qualifies;
+//   - a successful request that wrote to the provider's prompt cache
+//     (TokenUsage.CacheCreationTokens > 0) qualifies too when
+//     StoreCacheWrites is on, even while StoreOnlyErrors is still on for
+//     everything else: reconciling a client's own cache-write accounting
+//     against ours (see #355/#363) needs the actual bodies for requests that
+//     succeeded, not just the ones that failed -- those already qualify via
+//     the first rule, so this only ever adds the successful-cache-write case.
+//
+// A proxy/chain-audit request never qualifies: its body is the client's raw
+// passthrough traffic, not a provider interaction this write-path exists to
+// capture.
+func (p *Proxy) shouldLogRawBody(logCtx *RequestLogContext, status string) bool {
+	if logCtx.IsProxyRequest {
+		return false
+	}
+	if status == "failure" || !p.rawBodyStoreOnlyErrors {
+		return true
+	}
+	return p.rawBodyStoreCacheWrites && logCtx.TokenUsage.CacheCreationTokens > 0
+}
+
+// logRawBodyToKafka publishes the raw request/response body for a request
+// that qualifies (see shouldLogRawBody) to the separate raw-bodies topic
+// (internal/kafkalog), if that write-path is enabled. Best-effort, mirroring
+// logSpendToKafka: never affects request processing, failures are logged and
+// swallowed rather than surfaced to the caller -- unlike the spend event,
+// there's no Postgres row to flag a fallback reason on for this one, it's
+// purely supplementary.
 func (p *Proxy) logRawBodyToKafka(logCtx *RequestLogContext, status string, endTime time.Time) {
 	event := p.buildRawBodyEvent(logCtx, status, endTime)
 	if err := p.rawBodyLog.LogRawBody(event); err != nil {

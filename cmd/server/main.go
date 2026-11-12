@@ -322,6 +322,7 @@ func main() {
 		RawBodyLog:                   rawBodyLogManager,
 		RawBodyStoreRawBody:          cfg.Kafka.RawBodies.StoreRawBody,
 		RawBodyStoreOnlyErrors:       cfg.Kafka.RawBodies.StoreOnlyErrors,
+		RawBodyStoreCacheWrites:      cfg.Kafka.RawBodies.StoreCacheWrites,
 		RawBodyRedactSensitiveFields: cfg.Kafka.RawBodies.RedactSensitiveFields,
 		RouterResponseLog:            routerResponseLogManager,
 		RouterResponseRedact:         cfg.Kafka.RouterResponses.RedactSensitiveFields,

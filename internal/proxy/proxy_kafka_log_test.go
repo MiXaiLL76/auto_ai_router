@@ -529,6 +529,96 @@ func TestLogRawBodyToKafka_OnlyCalledOnFailure(t *testing.T) {
 	assert.Equal(t, `{"error":"bad request"}`, stub.events[0].ResponseBody)
 }
 
+// TestShouldLogRawBody pins exactly which requests qualify for the
+// raw-bodies write-path, per shouldLogRawBody's own doc comment: a failure
+// always does; with StoreOnlyErrors off every request does; a successful
+// cache write does too, but only with StoreCacheWrites on -- and the flag
+// must never override status=="failure" or IsProxyRequest either way.
+func TestShouldLogRawBody(t *testing.T) {
+	tests := []struct {
+		name             string
+		status           string
+		storeOnlyErrors  bool
+		storeCacheWrites bool
+		cacheCreation    int
+		isProxyRequest   bool
+		want             bool
+	}{
+		{
+			name:            "failure always qualifies, flags off",
+			status:          "failure",
+			storeOnlyErrors: true,
+			want:            true,
+		},
+		{
+			name:            "success with store_only_errors off qualifies",
+			status:          "success",
+			storeOnlyErrors: false,
+			want:            true,
+		},
+		{
+			name:            "success, default config, no cache write: does not qualify",
+			status:          "success",
+			storeOnlyErrors: true,
+			cacheCreation:   0,
+			want:            false,
+		},
+		{
+			name:             "success with a cache write, but store_cache_writes off: does not qualify",
+			status:           "success",
+			storeOnlyErrors:  true,
+			storeCacheWrites: false,
+			cacheCreation:    128,
+			want:             false,
+		},
+		{
+			name:             "success with a cache write and store_cache_writes on: qualifies",
+			status:           "success",
+			storeOnlyErrors:  true,
+			storeCacheWrites: true,
+			cacheCreation:    128,
+			want:             true,
+		},
+		{
+			name:             "store_cache_writes on but no actual cache write: does not qualify",
+			status:           "success",
+			storeOnlyErrors:  true,
+			storeCacheWrites: true,
+			cacheCreation:    0,
+			want:             false,
+		},
+		{
+			name:             "a proxy/chain-audit request never qualifies, even a cache write",
+			status:           "success",
+			storeOnlyErrors:  true,
+			storeCacheWrites: true,
+			cacheCreation:    128,
+			isProxyRequest:   true,
+			want:             false,
+		},
+		{
+			name:           "a proxy/chain-audit request never qualifies, even on failure",
+			status:         "failure",
+			isProxyRequest: true,
+			want:           false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prx := NewTestProxyBuilder().Build()
+			prx.rawBodyStoreOnlyErrors = tt.storeOnlyErrors
+			prx.rawBodyStoreCacheWrites = tt.storeCacheWrites
+
+			logCtx := testLogCtx(t)
+			logCtx.IsProxyRequest = tt.isProxyRequest
+			logCtx.TokenUsage.CacheCreationTokens = tt.cacheCreation
+
+			assert.Equal(t, tt.want, prx.shouldLogRawBody(logCtx, tt.status))
+		})
+	}
+}
+
 func TestBuildKafkaSpendEvent_RealModelIDPreserved(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
 	logCtx := testLogCtx(t)
