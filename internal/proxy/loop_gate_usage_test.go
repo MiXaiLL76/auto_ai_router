@@ -214,14 +214,15 @@ func TestLoopGateObserver_KeepaliveWhileRestartIsOnItsWay(t *testing.T) {
 
 func TestLoopGateObserver_KeepaliveWhenRestartAndTimerAreBothReady(t *testing.T) {
 	saved := loopGateKeepaliveInterval
-	loopGateKeepaliveInterval = time.Nanosecond
+	loopGateKeepaliveInterval = 10 * time.Millisecond
 	t.Cleanup(func() { loopGateKeepaliveInterval = saved })
 
-	// A stalled process can resume after both the timer and the restarted
-	// response are ready. Select may choose either case; both must send the
-	// heartbeat promised to a client that waited past the interval.
+	// A stalled process can reach awaitRestart after the restarted response is
+	// ready. The interval starts at startRestart, not when awaitRestart runs.
+	// Select may choose either ready case; both must send the heartbeat.
 	for range 50 {
 		o := newTestLoopGateObserver(t, config.LoopGateEnforce)
+		o.restartHeartbeatAt = time.Now().Add(-2 * loopGateKeepaliveInterval)
 		var out strings.Builder
 		o.keepalive = &out
 		o.restartCut = &loopGateCut{channel: "reasoning"}

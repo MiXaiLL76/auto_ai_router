@@ -164,17 +164,18 @@ type loopGateObserver struct {
 	now         func() time.Time
 	start       time.Time
 
-	format         loopgate.Format // wire format of the upstream stream
-	normalizeUsage bool            // the upstream body was wrapped in the usage normalizer; restarts get it too
-	respawn        loopGateRespawn // nil = no restarts
-	visionInject   bool            // descriptions were injected into attempt 1: never restart
-	watchOnly      bool            // log and count only, whatever the mode (see newLoopGateWatcher)
-	keepalive      io.Writer       // where waiting keepalives go; nil = into the stream read through the gate
-	stripUsage     bool            // vLLM sends the running usage on every chunk for the gate only: wrap drops it
-	restarts       int
-	abortedTokens  int                    // tokens of restarted attempts, missing from the final usage
-	restarting     chan loopGateRestarted // the next attempt being sent; nil = none
-	restartCut     *loopGateCut           // the loop being restarted, cut with it when the restart fails
+	format             loopgate.Format // wire format of the upstream stream
+	normalizeUsage     bool            // the upstream body was wrapped in the usage normalizer; restarts get it too
+	respawn            loopGateRespawn // nil = no restarts
+	visionInject       bool            // descriptions were injected into attempt 1: never restart
+	watchOnly          bool            // log and count only, whatever the mode (see newLoopGateWatcher)
+	keepalive          io.Writer       // where waiting keepalives go; nil = into the stream read through the gate
+	stripUsage         bool            // vLLM sends the running usage on every chunk for the gate only: wrap drops it
+	restarts           int
+	abortedTokens      int                    // tokens of restarted attempts, missing from the final usage
+	restarting         chan loopGateRestarted // the next attempt being sent; nil = none
+	restartCut         *loopGateCut           // the loop being restarted, cut with it when the restart fails
+	restartHeartbeatAt time.Time              // start of the wait, or the last heartbeat sent
 
 	promptTokens func() int               // local prompt token estimate, 0 = unknown
 	lastUsage    loopGateChatUsage        // chat: the last usage the current attempt reported
@@ -544,6 +545,7 @@ func (o *loopGateObserver) startRestart(cut *loopGateCut) {
 	respawn, normalize, model := o.respawn, o.normalizeUsage, o.publicModel
 	done := make(chan loopGateRestarted, 1)
 	o.restarting, o.restartCut = done, cut
+	o.restartHeartbeatAt = time.Now()
 	go func() {
 		body, err := respawn(restart, penalty)
 		if err == nil {
@@ -560,8 +562,11 @@ func (o *loopGateObserver) startRestart(cut *loopGateCut) {
 // interval: the keepalive is then queued for the client (or written to
 // o.keepalive). An error means the client is gone.
 func (o *loopGateObserver) awaitRestart() error {
-	started := time.Now()
-	timer := time.NewTimer(loopGateKeepaliveInterval)
+	started := o.restartHeartbeatAt
+	if started.IsZero() { // observers assembled directly by tests
+		started = time.Now()
+	}
+	timer := time.NewTimer(max(0, time.Until(started.Add(loopGateKeepaliveInterval))))
 	defer timer.Stop()
 	select {
 	case r := <-o.restarting:
@@ -592,9 +597,13 @@ func (o *loopGateObserver) awaitRestart() error {
 func (o *loopGateObserver) sendRestartKeepalive() error {
 	if o.keepalive == nil {
 		o.pending = loopGateKeepalive
+		o.restartHeartbeatAt = time.Now()
 		return nil
 	}
 	_, err := o.keepalive.Write(loopGateKeepalive)
+	if err == nil {
+		o.restartHeartbeatAt = time.Now()
+	}
 	return err
 }
 
