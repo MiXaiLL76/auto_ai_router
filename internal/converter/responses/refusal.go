@@ -1,6 +1,34 @@
 package responses
 
-import "io"
+import (
+	"io"
+	"strings"
+)
+
+func refusalInputText(item map[string]interface{}) string {
+	parts, _ := item["content"].([]interface{})
+	var text []string
+	for _, raw := range parts {
+		part, ok := raw.(map[string]interface{})
+		if !ok || (part["type"] != "refusal" && part["type"] != "output_refusal") {
+			return ""
+		}
+		value, _ := part["refusal"].(string)
+		text = append(text, value)
+	}
+	return strings.Join(text, "\n\n")
+}
+
+func appendAssistantText(message map[string]interface{}, text string) {
+	switch content := message["content"].(type) {
+	case []interface{}:
+		message["content"] = append(content, map[string]interface{}{"type": "text", "text": text})
+	case string:
+		message["content"] = content + "\n\n" + text
+	default:
+		message["content"] = text
+	}
+}
 
 func emitRefusalStartEvents(w io.Writer, acc *streamAccumulator) error {
 	acc.refusalItemID = GenerateItemID("msg_")

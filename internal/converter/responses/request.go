@@ -1043,6 +1043,17 @@ func convertInputValue(input interface{}) ([]interface{}, error) {
 				return nil, err
 			}
 			if msg["role"] == "assistant" {
+				// A terminal refusal belongs to the pending turn, including its
+				// tool calls. A separate assistant message would split a call
+				// from the function_call_output supplied by the client next.
+				if text := refusalInputText(itemMap); text != "" && (pendingAssistant != nil || len(pendingToolCalls) > 0) {
+					claimReasoning()
+					if pendingAssistant == nil {
+						pendingAssistant = map[string]interface{}{"role": "assistant"}
+					}
+					appendAssistantText(pendingAssistant, text)
+					continue
+				}
 				addAssistantMessage(msg)
 				continue
 			}
