@@ -115,6 +115,7 @@ func AnthropicToOpenAI(anthropicBody []byte, model string) ([]byte, error) {
 	message := openai.OpenAIResponseMessage{
 		Role:    "assistant",
 		Content: textContent,
+		Refusal: RefusalMessage(anthropicResp.StopReason, anthropicResp.StopDetails),
 	}
 	if reasoningContent != "" {
 		message.ReasoningContent = reasoningContent
@@ -184,7 +185,7 @@ func mapAnthropicStopReason(reason string) string {
 		return "tool_calls"
 	case "stop_sequence":
 		return "stop"
-	case "content_filter": // M2 — Anthropic content filtering stop reason
+	case "content_filter", "refusal":
 		return "content_filter"
 	default:
 		return "stop"

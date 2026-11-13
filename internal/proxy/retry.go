@@ -391,6 +391,11 @@ func (p *Proxy) writeFallbackResponse(
 	logCtx *RequestLogContext,
 	start time.Time,
 ) (bool, string) {
+	// Validate native Messages before final status metrics and usage accounting.
+	// writeProxyResponse also guards this boundary when called directly.
+	if !proxyResp.IsStreaming && r.URL.Path == "/v1/messages" {
+		sanitizeProxyRefusalResponse(proxyResp, logCtx)
+	}
 	if logCtx != nil {
 		logCtx.Credential = fallbackCred
 		logCtx.TargetURL = fallbackCred.BaseURL

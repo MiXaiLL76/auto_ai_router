@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
+	"github.com/mixaill76/auto_ai_router/internal/converter/publicrefusal"
 )
 
 const maxOpenAIToolNameLength = 64
@@ -754,6 +755,7 @@ func ChatToMessages(body []byte, metadata MessagesAdapterMetadata, cacheWriteTTL
 		Choices []struct {
 			FinishReason string `json:"finish_reason"`
 			Message      struct {
+				Refusal          string                   `json:"refusal"`
 				Content          *string                  `json:"content"`
 				ReasoningContent string                   `json:"reasoning_content"`
 				ThinkingBlocks   []map[string]interface{} `json:"thinking_blocks"`
@@ -818,6 +820,10 @@ func ChatToMessages(body []byte, metadata MessagesAdapterMetadata, cacheWriteTTL
 		"stop_reason":   chatFinishReasonToMessages(choice.FinishReason),
 		"stop_sequence": nil,
 		"usage":         chatUsageToMessages(response.Usage, cacheWriteTTLFallback5mTokens, cacheWriteTTLFallback1hTokens),
+	}
+	if choice.Message.Refusal != "" {
+		converted["stop_reason"] = "refusal"
+		converted["stop_details"] = publicrefusal.Details(publicrefusal.CategoryFromMessage(choice.Message.Refusal))
 	}
 	return json.Marshal(converted)
 }
@@ -898,6 +904,7 @@ type messagesStreamState struct {
 	thinkingStreamed              bool // the open thinking block got thinking_delta text
 	toolIndex                     int
 	finish                        string
+	refusal                       string
 	usage                         *openai.OpenAIUsage
 	started                       bool
 	cacheWriteTTLFallback5mTokens int
@@ -950,6 +957,9 @@ func TransformChatStreamToMessages(reader io.Reader, writer io.Writer, model str
 			state.usage = chunk.Usage
 		}
 		for _, choice := range chunk.Choices {
+			if choice.Delta.Refusal != "" {
+				state.refusal += choice.Delta.Refusal
+			}
 			if choice.Delta.ReasoningContent != "" {
 				if err := state.writeDelta("thinking", -1, "", "", choice.Delta.ReasoningContent); err != nil {
 					return err
@@ -995,12 +1005,13 @@ func TransformChatStreamToMessages(reader io.Reader, writer io.Writer, model str
 
 // PassthroughMessagesStream relays a provider stream that already is in the Messages
 // API format, one SSE event per write, so thinking signatures, block order and
-// input_transformations reach the client untouched. Two things change: message_start's
+// input_transformations reach the client untouched. message_start's
 // message.model becomes model, and message_delta's usage gets the fields message_start
 // reported and it leaves out — Anthropic may report input and cache tokens in
 // message_start only, while billing reads the final message_delta. Provider fields are
-// copied as sent; only two counters are filled in when missing: web searches, from the
-// server_tool_use blocks, and the cache-write total, from its TTL split.
+// copied as sent except refusal details, which expose only a safe public category
+// and explanation. Two counters are filled in when missing: web searches, from
+// the server_tool_use blocks, and the cache-write total, from its TTL split.
 func PassthroughMessagesStream(reader io.Reader, writer io.Writer, model string) error {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
@@ -1010,7 +1021,11 @@ func PassthroughMessagesStream(reader io.Reader, writer io.Writer, model string)
 		if len(event) == 0 {
 			return nil
 		}
-		_, err := writer.Write(append(event, '\n'))
+		clean, err := sanitizePassthroughMessageEvent(event, model, &state)
+		if err != nil {
+			return err
+		}
+		_, err = writer.Write(append(clean, '\n'))
 		event = event[:0]
 		return err
 	}
@@ -1022,17 +1037,99 @@ func PassthroughMessagesStream(reader io.Reader, writer io.Writer, model string)
 			}
 			continue
 		}
-		if payload, ok := bytes.CutPrefix(line, []byte("data:")); ok {
-			if rewritten, ok := rewritePassthroughEvent(bytes.TrimSpace(payload), model, &state); ok {
-				line = append([]byte("data: "), rewritten...)
-			}
-		}
 		event = append(append(event, line...), '\n')
+		if len(event) > 4*1024*1024 {
+			return fmt.Errorf("messages stream event exceeds size limit")
+		}
 	}
 	if err := scanner.Err(); err != nil {
 		return fmt.Errorf("messages stream scanner: %w", err)
 	}
 	return flush()
+}
+
+// Sanitize a whole SSE event, including multi-line data. Never forward an
+// unparsed refusal or bypass sanitization for an oversized data line.
+func sanitizePassthroughMessageEvent(event []byte, model string, state *passthroughStreamState) ([]byte, error) {
+	lines := bytes.Split(bytes.TrimSuffix(event, []byte("\n")), []byte("\n"))
+	var payload []byte
+	dataLines := 0
+	for _, line := range lines {
+		if value, ok := messagesDataLine(line); ok {
+			dataLines++
+			if dataLines == 1 {
+				payload = value // The common single-line case borrows the event bytes.
+			} else {
+				if dataLines == 2 {
+					joined := make([]byte, 0, len(event))
+					payload = append(joined, payload...)
+				}
+				payload = append(payload, '\n')
+				payload = append(payload, value...)
+			}
+		}
+	}
+	if dataLines == 0 {
+		return event, nil
+	}
+	if bytes.Equal(bytes.TrimSpace(payload), []byte("[DONE]")) {
+		return event, nil
+	}
+	clean := payload
+	changed := false
+	// Escaped JSON keys can spell stop_reason/stop_details too. Route all
+	// unicode escapes through the parser; a substring gate alone is unsafe.
+	if bytes.Contains(payload, []byte(`"stop_`)) || bytes.Contains(payload, []byte(`\u`)) {
+		var err error
+		clean, changed, err = publicrefusal.SanitizeJSON(payload)
+		if err != nil {
+			return nil, fmt.Errorf("invalid Messages stream event")
+		}
+	} else {
+		trimmed := bytes.TrimSpace(payload)
+		if !json.Valid(payload) || (trimmed[0] != '{' && !bytes.Equal(trimmed, []byte("null"))) {
+			return nil, fmt.Errorf("invalid Messages stream event")
+		}
+	}
+	if rewritten, ok := rewritePassthroughEvent(clean, model, state); ok {
+		clean = rewritten
+		changed = true
+	}
+	if !changed {
+		if dataLines == 1 {
+			return event, nil // Valid ordinary deltas need no decoding or re-encoding.
+		}
+		// Only multiline data needs compaction. Rewritten JSON is already compact.
+		var compact bytes.Buffer
+		if err := json.Compact(&compact, clean); err != nil {
+			return nil, fmt.Errorf("invalid Messages stream event")
+		}
+		clean = compact.Bytes()
+	}
+	var result []byte
+	written := false
+	for _, line := range lines {
+		if _, ok := messagesDataLine(line); ok {
+			if !written {
+				result = append(result, "data: "...)
+				result = append(result, clean...)
+				result = append(result, '\n')
+				written = true
+			}
+			continue
+		}
+		result = append(result, line...)
+		result = append(result, '\n')
+	}
+	return result, nil
+}
+
+func messagesDataLine(line []byte) ([]byte, bool) {
+	if bytes.Equal(line, []byte("data")) {
+		return line[:0], true
+	}
+	data, ok := bytes.CutPrefix(line, []byte("data:"))
+	return bytes.TrimPrefix(data, []byte(" ")), ok
 }
 
 // passthroughStreamState is what PassthroughMessagesStream carries between events.
@@ -1042,21 +1139,23 @@ type passthroughStreamState struct {
 }
 
 func rewritePassthroughEvent(payload []byte, model string, state *passthroughStreamState) ([]byte, bool) {
-	if !bytes.Contains(payload, []byte(`"message_`)) && !bytes.Contains(payload, []byte(`"server_tool_use"`)) {
+	if !bytes.Contains(payload, []byte(`"message_`)) && !bytes.Contains(payload, []byte(`"server_tool_use"`)) && !bytes.Contains(payload, []byte(`\u`)) {
 		return nil, false
 	}
 	var event map[string]json.RawMessage
 	if json.Unmarshal(payload, &event) != nil || event == nil {
 		return nil, false
 	}
-	switch string(bytes.TrimSpace(event["type"])) {
-	case `"content_block_start"`:
+	var eventType string
+	_ = json.Unmarshal(event["type"], &eventType)
+	switch eventType {
+	case "content_block_start":
 		var block ContentBlock
 		if json.Unmarshal(event["content_block"], &block) == nil && block.Type == "server_tool_use" && isWebSearchToolName(block.Name) {
 			state.webSearchBlocks++
 		}
 		return nil, false
-	case `"message_start"`:
+	case "message_start":
 		var message map[string]json.RawMessage
 		if json.Unmarshal(event["message"], &message) != nil || message == nil {
 			return nil, false
@@ -1064,7 +1163,7 @@ func rewritePassthroughEvent(payload []byte, model string, state *passthroughStr
 		state.startUsage = decodeJSONObject(message["usage"])
 		message["model"], _ = json.Marshal(model)
 		event["message"], _ = json.Marshal(message)
-	case `"message_delta"`:
+	case "message_delta":
 		usage := decodeJSONObject(event["usage"])
 		for key, value := range state.startUsage {
 			if _, ok := usage[key]; !ok {
@@ -1258,7 +1357,7 @@ func (s *messagesStreamState) finishStream() error {
 	if err := s.startMessage(); err != nil {
 		return err
 	}
-	if s.blockType == "" && s.blockIndex == 0 {
+	if s.blockType == "" && s.blockIndex == 0 && s.refusal == "" {
 		if err := s.writeDelta("text", -1, "", "", ""); err != nil {
 			return err
 		}
@@ -1271,9 +1370,14 @@ func (s *messagesStreamState) finishStream() error {
 		reason = "end_turn"
 	}
 	usage := chatUsageToMessages(s.usage, s.cacheWriteTTLFallback5mTokens, s.cacheWriteTTLFallback1hTokens)
+	delta := map[string]interface{}{"stop_reason": reason, "stop_sequence": nil}
+	if s.refusal != "" {
+		delta["stop_reason"] = "refusal"
+		delta["stop_details"] = publicrefusal.Details(publicrefusal.CategoryFromMessage(s.refusal))
+	}
 	if err := writeMessagesSSE(s.writer, "message_delta", map[string]interface{}{
 		"type":  "message_delta",
-		"delta": map[string]interface{}{"stop_reason": reason, "stop_sequence": nil},
+		"delta": delta,
 		"usage": usage,
 	}); err != nil {
 		return err

@@ -61,6 +61,7 @@ type anthropicStreamAccumulator struct {
 
 	// Stream status
 	stopReason         string
+	refusalItem        *responses.OutputItem
 	headerEmitted      bool
 	messageStarted     bool
 	messageItemID      string
@@ -285,6 +286,7 @@ func processAnthropicEvent(w io.Writer, acc *anthropicStreamAccumulator, event *
 	case "message_delta":
 		if event.Delta != nil && event.Delta.StopReason != "" {
 			acc.stopReason = event.Delta.StopReason
+			acc.refusalItem = anthropicRefusalItem(event.Delta.StopReason, event.Delta.StopDetails)
 		}
 		if event.Usage != nil {
 			// Anthropic reports the real input_tokens in message_start and normally omits
@@ -621,8 +623,15 @@ func emitAnthropicCompletionEvents(w io.Writer, acc *anthropicStreamAccumulator)
 		outputIdx++
 	}
 
-	return writeAnthropicSSE(w, "response.completed",
-		responses.BuildResponseEvent("response.completed", buildAnthropicCompletedResponse(acc)), acc)
+	if err := emitAnthropicRefusal(w, acc, outputIdx); err != nil {
+		return err
+	}
+	eventType := "response.completed"
+	if acc.stopReason == "refusal" {
+		eventType = "response.incomplete"
+	}
+	return writeAnthropicSSE(w, eventType,
+		responses.BuildResponseEvent(eventType, buildAnthropicCompletedResponse(acc)), acc)
 }
 
 func buildAnthropicInProgressResponse(acc *anthropicStreamAccumulator) map[string]interface{} {
@@ -649,6 +658,9 @@ func buildAnthropicCompletedResponse(acc *anthropicStreamAccumulator) *responses
 		output = append(output, anthropicMessageItem(acc))
 	}
 	output = append(output, acc.outputItems[msgIdx:]...)
+	if acc.refusalItem != nil {
+		output = append(output, *acc.refusalItem)
+	}
 
 	if len(output) == 0 {
 		output = []responses.OutputItem{{
