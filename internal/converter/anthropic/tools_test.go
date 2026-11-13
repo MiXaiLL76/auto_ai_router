@@ -42,7 +42,8 @@ func TestValidateToolChoice(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			body := []byte(`{"tools":[{"name":"f"}],` + tt.choice + "}")
-			for _, model := range []string{"claude-sonnet-5-5", "policy/claude-sonnet-5.5", "claude-opus-5-5", "claude-fable-5-1", "claude-mythos-5-1"} {
+			for _, model := range []string{"claude-sonnet-5-5", "policy/claude-sonnet-5.5", "claude-opus-5-5", "claude-fable-5-1", "claude-mythos-5-1",
+				"claude-fable-5-2", "claude-fable-5.2", "policy/claude-fable-5.2", "global.anthropic.claude-fable-5-2"} {
 				err := ValidateToolChoice(body, model, tt.api)
 				if tt.forced {
 					testhelpers.RequireValidationError(t, err, "tool_choice", "")
@@ -50,7 +51,7 @@ func TestValidateToolChoice(t *testing.T) {
 					assert.NoError(t, err, model)
 				}
 			}
-			for _, model := range []string{"claude-sonnet-5", "claude-opus-5", "claude-haiku-5-5", "claude-fable-5", "claude-sonnet-5-50"} {
+			for _, model := range []string{"claude-sonnet-5", "claude-opus-5", "claude-haiku-5-5", "claude-fable-5", "claude-sonnet-5-50", "claude-fable-5-20"} {
 				assert.NoError(t, ValidateToolChoice(body, model, tt.api), "%s accepts a forced tool_choice", model)
 			}
 			assert.NoError(t, ValidateToolChoice([]byte("{"+tt.choice+"}"), "claude-sonnet-5-5", tt.api), "without tools the choice is dropped")

@@ -1117,8 +1117,8 @@ func TestPrepareRequestForCredential_RejectsForcedToolChoice(t *testing.T) {
 	prx := NewTestProxyBuilder().WithCredentials(cred).Build()
 
 	tests := []struct {
-		name, path, model, body string
-		isResponsesAPI, wantErr bool
+		name, path, model, body          string
+		isResponsesAPI, wantErr, bedrock bool
 	}{
 		{name: "chat required", path: "/v1/chat/completions", model: "claude-sonnet-5-5", wantErr: true,
 			body: `{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"f"}}],"tool_choice":"required"}`},
@@ -1129,13 +1129,23 @@ func TestPrepareRequestForCredential_RejectsForcedToolChoice(t *testing.T) {
 			body: `{"model":"m","input":"hi","tools":[{"type":"function","name":"f","parameters":{"type":"object"}}],"tool_choice":{"type":"function","name":"f"}}`},
 		{name: "older model passes", path: "/v1/chat/completions", model: "claude-sonnet-4-5",
 			body: `{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"f"}}],"tool_choice":"required"}`},
+		// The check reads the provider's model id, so a Bedrock grant is covered too.
+		{name: "bedrock global id", path: "/v1/chat/completions", model: "global.anthropic.claude-fable-5-2", bedrock: true, wantErr: true,
+			body: `{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"f"}}],"tool_choice":"required"}`},
+		{name: "bedrock messages tool", path: "/v1/messages", model: "global.anthropic.claude-fable-5-2", bedrock: true, wantErr: true,
+			body: `{"model":"m","max_tokens":100,"messages":[{"role":"user","content":"hi"}],"tools":[{"name":"f","input_schema":{"type":"object"}}],"tool_choice":{"type":"tool","name":"f"}}`},
 	}
+	bedrock := config.CredentialConfig{Name: "bedrock", Type: config.ProviderTypeBedrock, APIKey: "key", BaseURL: "http://bedrock.local", RPM: 100}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			req := httptest.NewRequest("POST", tt.path, nil)
 			body := []byte(tt.body)
+			credential := &cred
+			if tt.bedrock {
+				credential = &bedrock
+			}
 			_, err := prx.prepareRequestForCredential(req, body, body, tt.model, tt.model, tt.path,
-				false, &cred, tt.isResponsesAPI, false, false, false)
+				false, credential, tt.isResponsesAPI, false, false, false)
 			if !tt.wantErr {
 				require.NoError(t, err)
 				return
