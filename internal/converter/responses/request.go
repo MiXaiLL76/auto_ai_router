@@ -180,9 +180,9 @@ func outputToInputItems(output []OutputItem) []interface{} {
 						"type": "output_text",
 						"text": c.Text,
 					})
-				case "output_refusal":
+				case "output_refusal", "refusal":
 					content = append(content, map[string]interface{}{
-						"type":    "output_refusal",
+						"type":    "refusal",
 						"refusal": c.Refusal,
 					})
 				}
@@ -1043,6 +1043,17 @@ func convertInputValue(input interface{}) ([]interface{}, error) {
 				return nil, err
 			}
 			if msg["role"] == "assistant" {
+				// A terminal refusal belongs to the pending turn, including its
+				// tool calls. A separate assistant message would split a call
+				// from the function_call_output supplied by the client next.
+				if text := refusalInputText(itemMap); text != "" && (pendingAssistant != nil || len(pendingToolCalls) > 0) {
+					claimReasoning()
+					if pendingAssistant == nil {
+						pendingAssistant = map[string]interface{}{"role": "assistant"}
+					}
+					appendAssistantText(pendingAssistant, text)
+					continue
+				}
 				addAssistantMessage(msg)
 				continue
 			}
@@ -1149,7 +1160,7 @@ func convertContentParts(parts []interface{}) ([]interface{}, error) {
 				"text": partMap["text"],
 			})
 
-		case "output_refusal":
+		case "output_refusal", "refusal":
 			result = append(result, map[string]interface{}{
 				"type": "text",
 				"text": partMap["refusal"],

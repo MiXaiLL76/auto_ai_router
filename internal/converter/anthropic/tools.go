@@ -10,8 +10,8 @@ import (
 
 // forcedToolChoiceRejected matches the models that answer a forced tool_choice
 // ({"type":"any"} or {"type":"tool"}) with a 400 on every platform: Claude Sonnet 5.5,
-// Opus 5.5, Fable 5.1 and Mythos 5.1, under any provider spelling.
-var forcedToolChoiceRejected = regexp.MustCompile(`claude-(?:(?:sonnet|opus)-5[.-]5|(?:fable|mythos)-5[.-]1)(?:[^0-9]|$)`)
+// Opus 5.5, Fable 5.1 and 5.2 and Mythos 5.1 and 5.2, under any provider spelling.
+var forcedToolChoiceRejected = regexp.MustCompile(`claude-(?:(?:sonnet|opus)-5[.-]5|(?:fable|mythos)-5[.-][12])(?:[^0-9]|$)`)
 
 // RequestAPI is the API shape of a client request body.
 type RequestAPI int

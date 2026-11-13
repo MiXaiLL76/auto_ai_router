@@ -53,6 +53,9 @@ func estimatePromptTokensForModel(body []byte, model string) int {
 	if tokens := countOpenAIChatPromptTokensFromRaw(enc, raw); tokens > 0 {
 		return tokens
 	}
+	if tokens := countSystemOnePromptTokens(enc, raw); tokens > 0 {
+		return tokens
+	}
 	if tokens := countPromptTextTokens(enc, raw); tokens > 0 {
 		return tokens
 	}
@@ -88,6 +91,31 @@ func countOpenAIChatPromptTokensFromRaw(enc tokenizer.Codec, raw map[string]inte
 		}
 	}
 
+	return total
+}
+
+// countSystemOnePromptTokens estimates a native System One body (POST
+// /v1/systemone): the state (text as is, an object or array as compact JSON)
+// plus every question with its nested instructions and criteria, as compact
+// JSON, so the estimate grows with both the input and the number of questions.
+// 0 for a body with neither field, i.e. another API's.
+func countSystemOnePromptTokens(enc tokenizer.Codec, raw map[string]interface{}) int {
+	state, hasState := raw["state"]
+	questions, hasQuestions := raw["questions"]
+	if !hasState && !hasQuestions {
+		return 0
+	}
+	total := 0
+	switch v := state.(type) {
+	case nil:
+	case string:
+		total += countTextTokens(enc, v)
+	default:
+		total += countCompactJSONTokens(enc, v)
+	}
+	if questions != nil {
+		total += countCompactJSONTokens(enc, questions)
+	}
 	return total
 }
 
@@ -416,6 +444,8 @@ func (p *Proxy) setPromptTokensEstimate(logCtx *RequestLogContext, body []byte, 
 	if logCtx == nil || !p.tiktokenEnabled {
 		return
 	}
+	// Re-armed for another attempt's body: the memoized value is stale.
+	logCtx.promptTokensEstimateReady = false
 	logCtx.promptTokensEstimateFn = func() int {
 		tokens := estimatePromptTokensForModel(body, model)
 		tokens = addNativeWSHistoryTokens(logCtx.Context(), tokens)
@@ -492,7 +522,7 @@ func appendDeltaTextForPayload(b *strings.Builder, payload []byte) {
 	if bytes.Contains(payload, []byte(`"content_block_delta"`)) {
 		appendMessagesDeltaText(b, payload)
 	}
-	if bytes.Contains(payload, []byte(`"type"`)) {
+	if bytes.Contains(payload, sseTypeNeedle) {
 		appendResponsesDeltaText(b, payload)
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 )
 
@@ -101,6 +102,18 @@ func NormalizeCompletionUsage(body []byte, modelID string) ([]byte, bool) {
 // cache_creation.ephemeral_*), so synthesizing the standard name for them
 // would risk double-counting. Returns the (possibly unchanged) body and
 // whether it changed.
+//
+// When converterutil.MirrorCacheWriteTokensEnabled() is on, the same write is
+// also mirrored into cache_write_tokens — the name some clients' own
+// accounting reads in preference to cache_creation_tokens (see PR #355's
+// equivalent for Anthropic-type credentials) — and, when a TTL split is
+// known, into cache_creation.ephemeral_5m_input_tokens /
+// ephemeral_1h_input_tokens too (Alibaba/Qwen's unsuffixed spelling of the
+// same split, a third name some clients' accounting may read instead of
+// cache_creation_token_details). Off by default: a client reading
+// cache_creation_tokens/cache_creation_token_details already sees the write
+// either way, and this only adds the alternate names for a client that
+// doesn't.
 func NormalizeCacheCreationUsage(body []byte) ([]byte, bool) {
 	// Cheap gate: the only Requesty fields this reads (caching_tokens,
 	// caching_token_details, caching_5m/1h_tokens) all contain the substring
@@ -147,6 +160,15 @@ func NormalizeCacheCreationUsage(body []byte) ([]byte, bool) {
 	}
 	if total > 0 {
 		details["cache_creation_tokens"] = json.RawMessage(strconv.FormatInt(int64(total), 10))
+		// Mirror into cache_write_tokens too, but only when the response does
+		// not already carry one: cache_write_tokens is also a provider-native
+		// name in its own right (OpenRouter's, for one), so a value already
+		// there is that provider's own count, not Requesty's — overwriting it
+		// would replace a real number with a different provider's, which
+		// prices the write at whichever rate the wrong count happens to imply.
+		if _, exists := details["cache_write_tokens"]; converterutil.MirrorCacheWriteTokensEnabled() && !exists {
+			details["cache_write_tokens"] = json.RawMessage(strconv.FormatInt(int64(total), 10))
+		}
 	}
 	if fiveMinutes > 0 || oneHour > 0 {
 		ctd := make(map[string]json.RawMessage, 2)
@@ -161,6 +183,21 @@ func NormalizeCacheCreationUsage(body []byte) ([]byte, bool) {
 			return body, false
 		}
 		details["cache_creation_token_details"] = encCTD
+		// Same TTL split again, under Alibaba/Qwen's unsuffixed spelling
+		// (cache_creation.ephemeral_5m_input_tokens, no _token_details) — a
+		// third name some clients' accounting may read instead of
+		// cache_creation_token_details. Same flag as cache_write_tokens above;
+		// TokenDetails.CacheWrite() already prefers cache_creation_token_details
+		// over this one, so it is never summed twice internally.
+		//
+		// Guarded the same way: cache_creation is also Alibaba/Qwen's own
+		// native field for a Qwen response passed through Requesty, so a
+		// value already there is Qwen's own TTL split, not a rewrite of
+		// Requesty's — overwriting it would silently re-price the write
+		// under the wrong TTL tier (1h writes cost more than 5m ones).
+		if _, exists := details["cache_creation"]; converterutil.MirrorCacheWriteTokensEnabled() && !exists {
+			details["cache_creation"] = encCTD
+		}
 	}
 	encDetails, err := json.Marshal(details)
 	if err != nil {

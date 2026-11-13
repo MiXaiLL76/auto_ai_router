@@ -3,8 +3,41 @@ package security
 
 import (
 	"net/http"
+	"net/url"
 	"strings"
 )
+
+// RedactURLForLog removes credentials from a URL's query before logging it.
+// The original URL must still be used for the upstream request.
+func RedactURLForLog(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		if i := strings.IndexByte(raw, '?'); i >= 0 {
+			return raw[:i]
+		}
+		return raw
+	}
+	u.User = nil
+	query, err := url.ParseQuery(u.RawQuery)
+	if err != nil {
+		u.RawQuery = ""
+		return u.String()
+	}
+	for key := range query {
+		name := strings.ToLower(strings.ReplaceAll(key, "-", "_"))
+		compact := strings.ReplaceAll(name, "_", "")
+		if name == "key" || name == "token" || name == "password" || name == "secret" ||
+			strings.Contains(compact, "apikey") || strings.Contains(compact, "accesstoken") ||
+			strings.Contains(compact, "authtoken") || strings.Contains(compact, "clientsecret") ||
+			strings.Contains(compact, "signature") ||
+			strings.HasSuffix(name, "_key") || strings.HasSuffix(name, "_token") ||
+			strings.HasSuffix(name, "_secret") || strings.HasSuffix(name, "_password") {
+			query.Set(key, "[REDACTED]")
+		}
+	}
+	u.RawQuery = query.Encode()
+	return u.String()
+}
 
 // MaskSecret masks sensitive strings for logging.
 // Shows first N characters followed by "..." to minimize secret exposure.
@@ -104,14 +137,16 @@ func MaskSensitiveHeaders(headers http.Header) http.Header {
 
 	// List of sensitive headers to mask
 	sensitiveHeaders := map[string]bool{
-		"Authorization":        true,
-		"X-API-Key":            true,
-		"X-Auth-Token":         true,
-		"Proxy-Authorization":  true,
-		"Cookie":               true,
-		"X-Goog-Api-Key":       true,
-		"Api-Key":              true,
-		"Anthropic-Auth-Token": true,
+		"authorization":        true,
+		"x-api-key":            true,
+		"x-litellm-api-key":    true,
+		"x-auth-token":         true,
+		"proxy-authorization":  true,
+		"cookie":               true,
+		"set-cookie":           true,
+		"x-goog-api-key":       true,
+		"api-key":              true,
+		"anthropic-auth-token": true,
 	}
 
 	for key, values := range headers {
@@ -119,11 +154,12 @@ func MaskSensitiveHeaders(headers http.Header) http.Header {
 			continue
 		}
 
-		if sensitiveHeaders[key] {
+		lowerKey := strings.ToLower(key)
+		if sensitiveHeaders[lowerKey] {
 			// Mask sensitive header values
 			value := values[0]
-			switch key {
-			case "Authorization":
+			switch lowerKey {
+			case "authorization":
 				// Handle Bearer tokens specially
 				if strings.HasPrefix(value, "Bearer ") {
 					token := strings.TrimPrefix(value, "Bearer ")
@@ -131,7 +167,7 @@ func MaskSensitiveHeaders(headers http.Header) http.Header {
 				} else {
 					masked.Set(key, MaskSecret(value, 4))
 				}
-			case "Cookie":
+			case "cookie", "set-cookie":
 				// Mask cookie value but indicate it was present
 				masked.Set(key, "***cookie***")
 			default:

@@ -1,11 +1,32 @@
 package proxy
 
 import (
+	"context"
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter"
+	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
+	"github.com/mixaill76/auto_ai_router/internal/security"
+	"go.opentelemetry.io/otel/trace"
 )
+
+// milliseconds is d in whole milliseconds, nil for nil.
+func milliseconds(d *time.Duration) *int64 {
+	if d == nil {
+		return nil
+	}
+	ms := d.Milliseconds()
+	return &ms
+}
+
+// traceID is the id of the trace that ctx's span belongs to, "" without one.
+func traceID(ctx context.Context) string {
+	if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {
+		return sc.TraceID().String()
+	}
+	return ""
+}
 
 // logSpendToKafka publishes an expanded copy of the spend entry to Kafka
 // (internal/kafkalog) for downstream ClickHouse analytics. Best-effort in the
@@ -81,19 +102,41 @@ func (p *Proxy) buildKafkaSpendEvent(
 		upstreamSendMs = &us
 	}
 
-	var keyAlias, userAlias, teamAlias string
+	attempts := httputil.AttemptsFrom(logCtx.Context())
+	var retryMs, connWaitMs, ttfbMs, exitRTTMs, exitConnectMs *int64
+	var connReused *bool
+	if stages, ok := attempts.Stages(logCtx.Credential.Name); ok {
+		retryMs = milliseconds(&stages.Retry)
+		connWaitMs = milliseconds(stages.ConnWait)
+		connReused = stages.Reused
+		ttfbMs = milliseconds(stages.TTFB)
+		exitRTTMs = milliseconds(stages.ExitRTT)
+		exitConnectMs = milliseconds(stages.ExitConnect)
+	}
+
+	var keyAlias, userAlias, teamAlias, organizationAlias string
 	if logCtx.TokenInfo != nil {
 		keyAlias = logCtx.TokenInfo.KeyAlias
 		userAlias = logCtx.TokenInfo.UserAlias
 		teamAlias = logCtx.TokenInfo.TeamAlias
+		organizationAlias = logCtx.TokenInfo.OrganizationAlias
 	}
 
 	event := &kafkalog.SpendEvent{
 		RequestID:           logCtx.spendRequestID(),
+		TraceID:             traceID(logCtx.Context()),
 		StartTime:           logCtx.StartTime,
 		EndTime:             endTime,
 		CompletionStartTime: completionStartTime,
 		UpstreamSendMs:      upstreamSendMs,
+		RetryMs:             retryMs,
+		ConnWaitMs:          connWaitMs,
+		ConnReused:          connReused,
+		TTFBMs:              ttfbMs,
+		UpstreamAttempts:    attempts.Count(),
+		Exit:                attempts.Exit(logCtx.Credential.Name),
+		ExitRTTMs:           exitRTTMs,
+		ExitConnectMs:       exitConnectMs,
 		DurationMs:          endTime.Sub(logCtx.StartTime).Milliseconds(),
 		TTFTMs:              ttftMs,
 
@@ -101,7 +144,7 @@ func (p *Proxy) buildKafkaSpendEvent(
 		APIBase:      apiBase,
 		Status:       status,
 		HTTPStatus:   logCtx.HTTPStatus,
-		ErrorMessage: logCtx.ErrorMsg,
+		ErrorMessage: errorMessageForLog(logCtx),
 
 		Model:      logCtx.ModelID,
 		RealModel:  realModel,
@@ -117,6 +160,7 @@ func (p *Proxy) buildKafkaSpendEvent(
 		ServerRouterID: p.routerID,
 		ServerVersion:  p.version,
 		ServerCommit:   p.commit,
+		ServiceName:    p.serviceName,
 
 		PromptTokens:             usage.PromptTokens,
 		CompletionTokens:         usage.CompletionTokens,
@@ -128,6 +172,7 @@ func (p *Proxy) buildKafkaSpendEvent(
 		CacheCreationTokens:      usage.CacheCreationTokens,
 		CacheCreation5mTokens:    usage.CacheCreation5mTokens,
 		CacheCreation1hTokens:    usage.CacheCreation1hTokens,
+		CacheCreation12hTokens:   usage.CacheCreation12hTokens,
 		CacheType:                usage.CacheType,
 		CachedOutputTokens:       usage.CachedOutputTokens,
 		ReasoningTokens:          usage.ReasoningTokens,
@@ -139,6 +184,7 @@ func (p *Proxy) buildKafkaSpendEvent(
 		OutputImageTokens:        usage.OutputImageTokens,
 		WebSearchRequests:        usage.WebSearchRequests,
 		WebSearchContextSize:     usage.WebSearchContextSize,
+		WebFetchRequests:         usage.WebFetchRequests,
 		XSearchCalls:             usage.XSearchCalls,
 		XSearchPosts:             usage.XSearchPosts,
 		XSearchProfiles:          usage.XSearchProfiles,
@@ -151,14 +197,15 @@ func (p *Proxy) buildKafkaSpendEvent(
 
 		TotalCost: cost,
 
-		APIKeyHash:     hashedToken,
-		UserID:         userID,
-		TeamID:         teamID,
-		OrganizationID: organizationID,
-		EndUser:        endUser,
-		KeyAlias:       keyAlias,
-		UserAlias:      userAlias,
-		TeamAlias:      teamAlias,
+		APIKeyHash:        hashedToken,
+		UserID:            userID,
+		TeamID:            teamID,
+		OrganizationID:    organizationID,
+		EndUser:           endUser,
+		KeyAlias:          keyAlias,
+		UserAlias:         userAlias,
+		TeamAlias:         teamAlias,
+		OrganizationAlias: organizationAlias,
 
 		RequesterIP: getClientIP(logCtx.Request),
 		SessionID:   logCtx.SessionID,
@@ -179,6 +226,7 @@ func (p *Proxy) buildKafkaSpendEvent(
 		event.ImageCost = tokenCosts.ImageCost
 		event.VideoInputCost = tokenCosts.VideoInputCost
 		event.WebSearchCost = tokenCosts.WebSearchCost
+		event.WebFetchCost = tokenCosts.WebFetchCost
 		event.XSearchCost = tokenCosts.XSearchCost
 		event.CodeExecutionCost = tokenCosts.CodeExecutionCost
 		event.AttachmentSearchCost = tokenCosts.AttachmentSearchCost
@@ -214,6 +262,51 @@ func (p *Proxy) logRawBodyToKafka(logCtx *RequestLogContext, status string, endT
 	}
 }
 
+// logRouterResponseToKafka publishes what the router answered to the
+// client, on its own topic.
+func (p *Proxy) logRouterResponseToKafka(logCtx *RequestLogContext, status string, endTime time.Time) {
+	event := p.buildRouterResponseEvent(logCtx, status, endTime)
+	if err := p.routerResponseLog.LogRouterResponse(event); err != nil {
+		p.logger.WarnContext(logCtx.Context(), "Failed to queue Kafka router-response event",
+			"error", err,
+			"request_id", logCtx.RequestID,
+		)
+	}
+}
+
+// buildRouterResponseEvent maps a RequestLogContext onto
+// kafkalog.RouterResponseEvent.
+//
+// The body was already captured -- and masked -- when the response was
+// produced (see captureRouterResponse), so this only carries it over: it
+// is not re-read from the response, which is gone by now.
+func (p *Proxy) buildRouterResponseEvent(logCtx *RequestLogContext, status string, endTime time.Time) *kafkalog.RouterResponseEvent {
+	event := &kafkalog.RouterResponseEvent{
+		RequestID:      logCtx.spendRequestID(),
+		ServerRouterID: p.routerID,
+		StartTime:      logCtx.StartTime,
+		EndTime:        endTime,
+		HTTPStatus:     logCtx.HTTPStatus,
+		Status:         status,
+		ResponseBody:   logCtx.RouterResponseBody,
+		IsStreaming:    logCtx.RouterResponseIsStreaming,
+	}
+	if logCtx.Credential != nil {
+		event.Credential = logCtx.Credential.Name
+	}
+	if logCtx.ModelID != "" {
+		event.Model = logCtx.ModelID
+	}
+	if logCtx.RealModelID != "" {
+		event.RealModel = logCtx.RealModelID
+	}
+	if status == "failure" {
+		event.ErrorClass = mapHTTPStatusToErrorClass(logCtx.HTTPStatus)
+		event.ErrorOrigin = string(logCtx.ErrorOrigin)
+	}
+	return event
+}
+
 // buildRawBodyEvent maps a RequestLogContext onto kafkalog.RawBodyEvent.
 // Caller (logSpendToLiteLLMDB) calls this for every failure, and additionally
 // for successes when StoreOnlyErrors is disabled -- so, unlike
@@ -237,6 +330,10 @@ func (p *Proxy) buildRawBodyEvent(logCtx *RequestLogContext, status string, endT
 		HTTPStatus:         logCtx.HTTPStatus,
 		ResponseBody:       logCtx.ErrorBodyRaw,
 		ClientResponseBody: logCtx.ClientResponseBody,
+	}
+	if p.rawBodyRedactSensitiveFields {
+		event.ResponseBody = security.RedactBodyForLog(event.ResponseBody)
+		event.ClientResponseBody = security.RedactBodyForLog(event.ClientResponseBody)
 	}
 	if status == "failure" {
 		event.ErrorClass = mapHTTPStatusToErrorClass(logCtx.HTTPStatus)

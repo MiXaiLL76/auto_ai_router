@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
@@ -218,6 +219,40 @@ func (p *Proxy) setCredentialResponseHeader(w http.ResponseWriter, logCtx *Reque
 	w.Header().Set("X-Credential-Name", credentialName)
 }
 
+// HeaderResponseCost is the response header carrying the request's billed cost
+// in USD. The name is deliberately provider-neutral (not LiteLLM's
+// X-Litellm-Response-Cost): the router must not reveal that it is LiteLLM-based.
+// It is emitted only when the request's organization opted in
+// (organization_policies[].response_cost_mode is total or breakdown) and the cost
+// is already known (see RequestLogContext.responseCostKnown).
+const HeaderResponseCost = "X-Total-Cost"
+
+// HeaderCostBreakdown carries the per-component cost breakdown as a JSON object,
+// emitted only for organizations whose response_cost_mode is breakdown.
+const HeaderCostBreakdown = "X-Cost-Breakdown"
+
+// setResponseCostHeader writes the cost headers from the computed cost, gated by
+// the request organization's response_cost_mode: off emits nothing, total emits
+// X-Total-Cost, breakdown emits X-Total-Cost and X-Cost-Breakdown. No
+// organization policy (or the off mode) means no cost is emitted at all — it is
+// an opt-in per organization, not a global default. A streaming response is
+// deliberately not covered: its headers leave before the usage that prices the
+// request has arrived, so there is nothing to write yet. The total uses a plain
+// decimal (strconv, no exponent), so a client parsing it with a decimal type does
+// not choke on 1e-07.
+func (p *Proxy) setResponseCostHeader(w http.ResponseWriter, logCtx *RequestLogContext) {
+	if logCtx == nil || !logCtx.responseCostKnown {
+		return
+	}
+	if logCtx.OrganizationPolicy == nil || !logCtx.OrganizationPolicy.ReturnsResponseCost() {
+		return
+	}
+	w.Header().Set(HeaderResponseCost, strconv.FormatFloat(logCtx.responseCostUSD, 'f', -1, 64))
+	if logCtx.OrganizationPolicy.ReturnsCostBreakdown() && len(logCtx.responseCostBreakdown) > 0 {
+		w.Header().Set(HeaderCostBreakdown, string(logCtx.responseCostBreakdown))
+	}
+}
+
 func (p *Proxy) shouldSkipResponseHeaderForClient(key string, cred *config.CredentialConfig) bool {
 	canonical := http.CanonicalHeaderKey(key)
 	if p.responseHeaderMode == config.ResponseHeaderModeAllowlist && !allowedResponseHeaders[canonical] {
@@ -235,7 +270,7 @@ func shouldSkipResponseHeaderForClient(key string, cred *config.CredentialConfig
 	// Content-Length is recalculated after conversion/compression, and Go's client
 	// has already decompressed gzip/deflate bodies when Content-Encoding is present.
 	switch canonical {
-	case "Content-Length", "Content-Encoding", "Transfer-Encoding", "X-Credential-Name":
+	case "Content-Length", "Content-Encoding", "Transfer-Encoding", "X-Credential-Name", HeaderResponseCost, HeaderCostBreakdown:
 		return true
 	}
 	if strings.EqualFold(canonical, HeaderAIRUsageAudioTokens) && (cred == nil || !cred.IsProxyLike()) {

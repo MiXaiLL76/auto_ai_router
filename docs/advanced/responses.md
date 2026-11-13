@@ -23,10 +23,15 @@ models:
     credential: openai_main
 ```
 
-For GPT-6 requests, the router removes `temperature`, `top_p`, and `top_logprobs`.
-Responses requests also drop `message.output_text.logprobs` from `include`, preserving
-other include values. Chat Completions requests drop `logprobs` and use the existing
-`max_tokens` to `max_completion_tokens` conversion. `max_output_tokens` is preserved.
+For OpenAI reasoning models (o1, o3, o4, GPT-5, GPT-6), the router removes
+`temperature`, `top_p`, and `top_logprobs` while reasoning is on, since the upstream
+rejects them with `400`. Responses requests also drop `message.output_text.logprobs`
+from `include`, preserving other include values. Chat Completions requests drop
+`frequency_penalty` and `presence_penalty` too, always drop `logprobs` and
+`top_logprobs`, and use the existing `max_tokens` to `max_completion_tokens`
+conversion. `max_output_tokens` is preserved. The rest is kept when reasoning is off:
+effort `none` on a model that supports it, or no effort at all on GPT-5.1 to GPT-5.4,
+which default to `none`.
 See the [OpenAI migration guide](https://developers.openai.com/api/docs/guides/latest-model).
 
 Use Responses for tool calling. Native HTTP forwarding preserves `async` tool flags,

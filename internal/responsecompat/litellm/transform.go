@@ -337,13 +337,34 @@ func hasMeaningfulError(value any) bool {
 	}
 }
 
+// errorStatus maps a provider's error value to the HTTP status the client
+// should see.
+//
+// It delegates to upstreamerror.ExtractErrorSignals and
+// ClassifyProviderErrorSignals -- the same two functions the native (non-compat)
+// path's own classification uses (statusCodeFromProviderBodyError /
+// statusCodeFromProviderStreamError). The compatibility layer used to
+// re-implement this independently: a narrower content-policy-only check (see
+// git history) with no rate_limit/timeout/overloaded/server_error keyword
+// handling and a 422 default instead of a 502, so the same provider body
+// could classify differently depending on which path it took. One
+// implementation, shared, cannot drift from itself.
+//
+// value is not necessarily a map: a provider may answer {"error":"boom"} or
+// {"error":400} too, which ExtractErrorSignals also reads. Re-marshaling it
+// to JSON is the one conversion needed to hand it to ExtractErrorSignals,
+// which the proxy's own callers reach more directly (they already hold
+// json.RawMessage).
 func errorStatus(value any) int {
-	if body, ok := value.(map[string]any); ok {
-		if code, ok := body["code"].(float64); ok && code >= 400 && code <= 599 {
-			return int(code)
-		}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return http.StatusUnprocessableEntity
 	}
-	return http.StatusUnprocessableEntity
+	signals, ok := upstreamerror.ExtractErrorSignals(raw)
+	if !ok {
+		return http.StatusUnprocessableEntity
+	}
+	return upstreamerror.ClassifyProviderErrorSignals(signals)
 }
 
 // normalizeError builds the litellm-compatible error body for a non-2xx

@@ -262,6 +262,7 @@ type InputDetails struct {
 	CachedAudioTokens         int                        `json:"cached_audio_tokens,omitempty"`
 	CacheCreationTokens       int                        `json:"cache_creation_tokens,omitempty"` // extension: prompt cache writes
 	CacheWriteTokens          int                        `json:"cache_write_tokens,omitempty"`    // extension: OpenAI/Azure name for the same counter
+	CacheWriteTokensDetails   *CacheWriteTokensDetails   `json:"cache_write_tokens_details,omitempty"`
 	CacheCreationTokenDetails *CacheCreationTokenDetails `json:"cache_creation_token_details,omitempty"`
 	AudioTokens               int                        `json:"audio_tokens,omitempty"` // extension: audio input tokens
 	// CacheType is Alibaba's explicit cache mode marker ("ephemeral") from
@@ -276,6 +277,14 @@ type InputDetails struct {
 type CacheCreationTokenDetails struct {
 	Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
 	Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
+}
+
+// CacheWriteTokensDetails is OpenAI's cache-write TTL breakdown for the
+// 30-minute and 12-hour retentions (cache_write_tokens_details), the latter
+// priced above the former.
+type CacheWriteTokensDetails struct {
+	TTL30mTokens int `json:"ttl_30m_tokens,omitempty"`
+	TTL12hTokens int `json:"ttl_12h_tokens,omitempty"`
 }
 
 // OutputDetails represents a breakdown of output token usage.

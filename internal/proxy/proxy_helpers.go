@@ -65,6 +65,40 @@ func isTimeoutError(err error) bool {
 	return false
 }
 
+// responseHeaderTimeoutSubstring matches the error Go's Transport produces
+// when ResponseHeaderTimeout fires: the request was written, the provider
+// never answered with headers, and the transport gave up waiting for them.
+// It is the ONLY timeout kind that means "this credential did not answer at
+// all" -- a dial timeout, a TLS handshake timeout or the client's own
+// deadline all say something else (the connection was never established, or
+// the peer never even started the handshake).
+const responseHeaderTimeoutSubstring = "timeout awaiting response headers"
+
+// isAttemptTimeoutError reports whether err means this specific attempt never
+// got a response within its own header deadline (ResponseHeaderTimeout) --
+// narrower than isTimeoutError, which also classifies Go's HTTP/2 idle-ping
+// teardown (http2ConnectionLostSubstring) as a timeout so the 408/502 split
+// stays stable. That teardown means a *pooled* connection went silent and
+// got pinged out -- a pool-hygiene event, not evidence this credential is
+// currently unresponsive -- so it must not feed a ban keyed on "never
+// responded at all".
+//
+// The check is deliberately narrow: only the transport's own
+// ResponseHeaderTimeout error text qualifies. The other timeout kinds all
+// implement net.Error with Timeout()==true too (a dial timeout reads
+// "dial tcp ...: i/o timeout", the client's own deadline reads "context
+// deadline exceeded"), so a net.Error-based check would ban a credential for
+// failures that say nothing about its health.
+func isAttemptTimeoutError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// The header timeout is a transport error, not a context deadline: the
+	// request's context stays live, only the transport's wait for headers
+	// expired. So this is a text match, deliberately.
+	return strings.Contains(err.Error(), responseHeaderTimeoutSubstring)
+}
+
 // isClientContextCanceled reports whether r's own context is already
 // canceled — i.e. the client itself gave up (closed the connection, hit its
 // own request timeout) before AIR finished talking to any upstream. Checked
@@ -238,6 +272,32 @@ const (
 	// every credential it could use before all of its inputs were sent.
 	// Answered with 429; no credential failed, so nothing reached fail2ban.
 	ErrorOriginFanOutRateLimited ErrorOrigin = "fan_out_rate_limited"
+	// ErrorOriginAllCredentialsRateLimited: the credential cascade ran out
+	// because every candidate was over its rate limit (RPM/TPM saturated) and
+	// no attempt produced a response to relay. Distinct from
+	// ErrorOriginAllAttemptsExhausted: that one means the credentials failed
+	// (transport errors, bans), while this one means they were all simply
+	// momentarily over their limit. Carries 429 with a Retry-After, not 502 —
+	// the model answers normally once the window rolls over, so reporting it
+	// as an outage misstates the cause and leaves the client retrying blindly.
+	ErrorOriginAllCredentialsRateLimited ErrorOrigin = "all_credentials_rate_limited"
+	// ErrorOriginProviderRateLimited: an attempt got a 429 from the provider
+	// (the upstream account is over its own rate limit) and a later attempt
+	// failed on the transport, so no response was left to relay. Distinct from
+	// ErrorOriginAllCredentialsRateLimited, which is the router's own limiter
+	// refusing the candidates: here the upstream itself reported the limit.
+	// Carries 429 with a Retry-After, not 502 — the model answers normally
+	// once the window rolls over, so reporting it as an outage misstates the
+	// cause and leaves the client retrying blindly.
+	ErrorOriginProviderRateLimited ErrorOrigin = "provider_rate_limited"
+	// ErrorOriginProviderRequestRejected: an attempt got a 4xx from the
+	// provider that describes the REQUEST (a bad prompt, a content-policy
+	// refusal, an unknown model) and a later attempt failed on the transport,
+	// so no response was left to relay. The provider's status is relayed as
+	// it is, instead of a 502 that blames the provider for being broken:
+	// every credential would refuse the same request the same way, so
+	// telling the client to retry only sends it around the pool again.
+	ErrorOriginProviderRequestRejected ErrorOrigin = "provider_request_rejected"
 	// ErrorOriginClientCanceled: the client disconnected (closed the
 	// connection, or its own request timeout fired) before any credential
 	// attempt produced a response — see isClientContextCanceled. Distinct
@@ -724,6 +784,42 @@ func (logCtx *RequestLogContext) applyCostMargin(costs *converter.TokenCosts) {
 	costs.TotalCost += costs.MarginTotalAmount
 }
 
+// costBreakdownMap is the per-component cost breakdown, shared by the spend-log
+// metadata's cost_breakdown and the X-Cost-Breakdown response header so the two
+// can never drift. tool_usage_cost sums every built-in tool charge below; each of
+// its parts is already part of total_cost.
+func costBreakdownMap(costs *converter.TokenCosts) map[string]interface{} {
+	if costs == nil {
+		return nil
+	}
+	return map[string]interface{}{
+		"input_cost":                 costs.InputCost,
+		"output_cost":                costs.OutputCost,
+		"reasoning_cost":             costs.ReasoningCost,
+		"cached_input_cost":          costs.CachedInputCost,
+		"explicit_cache_read_cost":   costs.ExplicitCachedInputCost,
+		"cache_creation_cost":        costs.CacheCreationCost,
+		"audio_input_cost":           costs.AudioInputCost,
+		"image_cost":                 costs.ImageCost,
+		"video_input_cost":           costs.VideoInputCost,
+		"total_cost":                 costs.TotalCost,
+		"original_cost":              costs.TotalCost - costs.MarginTotalAmount,
+		"margin_percent":             costs.MarginPercent,
+		"discount_amount":            0.0,
+		"tool_usage_cost":            costs.ToolUsageCost,
+		"web_search_cost":            costs.WebSearchCost,
+		"web_fetch_cost":             costs.WebFetchCost,
+		"x_search_cost":              costs.XSearchCost,
+		"code_execution_cost":        costs.CodeExecutionCost,
+		"attachment_search_cost":     costs.AttachmentSearchCost,
+		"collections_search_cost":    costs.CollectionsSearchCost,
+		"image_generation_tool_cost": costs.ImageGenerationToolCost,
+		"discount_percent":           0.0,
+		"margin_fixed_amount":        costs.MarginFixedAmount,
+		"margin_total_amount":        costs.MarginTotalAmount,
+	}
+}
+
 // buildMetadata builds metadata JSON with user/team alias, usage, cost, and optional error info
 func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg string, httpStatus int, usage *converter.TokenUsage, requesterIP string, costs *converter.TokenCosts, modelID string, overheadMs float64, upstreamSendDelayMs float64, kafkaFallbackReason string) string {
 	var userID, teamID, organizationID string
@@ -777,6 +873,11 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 				"ephemeral_1h_input_tokens": usage.CacheCreation1hTokens,
 			}
 		}
+		if usage.CacheCreation12hTokens > 0 {
+			promptTokensDetails["cache_write_tokens_details"] = map[string]interface{}{
+				"ttl_12h_tokens": usage.CacheCreation12hTokens,
+			}
+		}
 		completionTokensDetails["audio_tokens"] = usage.AudioOutputTokens
 		if usage.OutputTextTokens > 0 {
 			completionTokensDetails["text_tokens"] = usage.OutputTextTokens
@@ -788,6 +889,9 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 		serverToolUse["web_search_requests"] = usage.WebSearchRequests
 		if usage.WebSearchRequests > 0 {
 			serverToolUse["web_search_context_size"] = usage.WebSearchContextSize
+		}
+		if usage.WebFetchRequests > 0 {
+			serverToolUse["web_fetch_requests"] = usage.WebFetchRequests
 		}
 		if usage.HasServerToolUsage() {
 			serverToolUse["x_search_calls"] = usage.XSearchCalls
@@ -835,33 +939,7 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 	// Build cost_breakdown
 	var costBreakdown interface{}
 	if costs != nil {
-		costBreakdown = map[string]interface{}{
-			"input_cost":               costs.InputCost,
-			"output_cost":              costs.OutputCost,
-			"reasoning_cost":           costs.ReasoningCost,
-			"cached_input_cost":        costs.CachedInputCost,
-			"explicit_cache_read_cost": costs.ExplicitCachedInputCost,
-			"cache_creation_cost":      costs.CacheCreationCost,
-			"audio_input_cost":         costs.AudioInputCost,
-			"image_cost":               costs.ImageCost,
-			"video_input_cost":         costs.VideoInputCost,
-			"total_cost":               costs.TotalCost,
-			"original_cost":            costs.TotalCost - costs.MarginTotalAmount,
-			"margin_percent":           costs.MarginPercent,
-			"discount_amount":          0.0,
-			// tool_usage_cost sums every built-in tool charge below; it is
-			// already part of total_cost, as each of its parts is.
-			"tool_usage_cost":            costs.ToolUsageCost,
-			"web_search_cost":            costs.WebSearchCost,
-			"x_search_cost":              costs.XSearchCost,
-			"code_execution_cost":        costs.CodeExecutionCost,
-			"attachment_search_cost":     costs.AttachmentSearchCost,
-			"collections_search_cost":    costs.CollectionsSearchCost,
-			"image_generation_tool_cost": costs.ImageGenerationToolCost,
-			"discount_percent":           0.0,
-			"margin_fixed_amount":        costs.MarginFixedAmount,
-			"margin_total_amount":        costs.MarginTotalAmount,
-		}
+		costBreakdown = costBreakdownMap(costs)
 	}
 
 	metadata := map[string]interface{}{

@@ -48,6 +48,7 @@ SELECT
 
   -- ============ Organization ============
   o.organization_id as org_id_check,
+  o.organization_alias as org_alias,
   o.spend as org_spend,
   b_org.max_budget as org_max_budget,
   b_org.tpm_limit as org_tpm_limit,

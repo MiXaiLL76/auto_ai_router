@@ -31,6 +31,11 @@ type RequestMode struct {
 	IsEmbeddings      bool // true for /embeddings requests
 	IsStreaming       bool // true for streaming (stream: true) requests
 	IsResponsesAPI    bool // true when the outbound request uses /v1/responses
+	// IsSystemOne is true for /v1/systemone requests (the native System One
+	// API). The body goes upstream as is (the orchestrator has already put the
+	// provider's model id in it) and the reply comes back unconverted: no
+	// chat/messages/responses conversion and no chat-only field cleanup.
+	IsSystemOne bool
 	// MessagesPassthrough is true when an incoming /v1/messages request is being
 	// forwarded to an Anthropic-wire-compatible provider (Anthropic itself, or CometAPI
 	// in its default Anthropic-protocol mode) without the Messages->Chat->Messages
@@ -216,6 +221,14 @@ func (c *ProviderConverter) shouldStripOpenRouterOnlyFields() bool {
 // RequestFrom converts an OpenAI-format request body to the provider-specific format.
 // Returns the original body unchanged for OpenAI-compatible providers (passthrough).
 func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
+	if c.mode.IsSystemOne {
+		// Only OpenAI-wire destinations take the request path as is; every other
+		// provider type builds its own URL and expects a chat-shaped body.
+		if c.providerType != config.ProviderTypeOpenAI && !c.providerType.IsProxyLike() {
+			return nil, converterutil.NewRequestValidationError("model", "model does not support the System One API")
+		}
+		return body, nil
+	}
 	// Handle embeddings requests
 	if c.mode.IsEmbeddings {
 		switch c.providerType {
@@ -409,6 +422,9 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 // ResponseTo converts a provider-specific response body to OpenAI format.
 // Returns the original body unchanged for OpenAI-compatible providers (passthrough).
 func (c *ProviderConverter) ResponseTo(body []byte) ([]byte, error) {
+	if c.mode.IsSystemOne {
+		return body, nil
+	}
 	// Handle embeddings responses
 	if c.mode.IsEmbeddings {
 		switch c.providerType {
@@ -637,24 +653,41 @@ type responsesUsageDetails struct {
 			Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
 			Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
 		} `json:"cache_creation_token_details,omitempty"`
+		CacheWriteTokensDetails struct {
+			TTL30mTokens int `json:"ttl_30m_tokens,omitempty"`
+			TTL12hTokens int `json:"ttl_12h_tokens,omitempty"`
+		} `json:"cache_write_tokens_details,omitempty"`
 		ImageTokens         int    `json:"image_tokens,omitempty"`
 		VideoTokens         int    `json:"video_tokens,omitempty"`
 		TextTokens          int    `json:"text_tokens,omitempty"`
 		AudioTokens         int    `json:"audio_tokens,omitempty"`
 		CacheType           string `json:"cache_type,omitempty"`
 		InitialPromptTokens int    `json:"initial_prompt_tokens,omitempty"`
+		// WebFetchRequests is the router's own count of the billable web
+		// fetches it executed (the field the router writes into the body it
+		// returns), so the billing path sees it like any other counter.
+		WebFetchRequests int `json:"web_fetch_requests,omitempty"`
+		// WebSearchRequests is the count of the billable searches, in the same
+		// place the router writes it.
+		WebSearchRequests int `json:"web_search_requests,omitempty"`
 	} `json:"input_tokens_details,omitempty"`
 	OutputTokensDetails struct {
 		AudioTokens     int `json:"audio_tokens,omitempty"`
 		CachedTokens    int `json:"cached_tokens,omitempty"`
 		ImageTokens     int `json:"image_tokens,omitempty"`
 		ReasoningTokens int `json:"reasoning_tokens,omitempty"`
-		TextTokens      int `json:"text_tokens,omitempty"`
+		// ThinkingTokens is the same count in a Messages API usage object, as some
+		// Anthropic-compatible providers report it (included in output_tokens).
+		ThinkingTokens int `json:"thinking_tokens,omitempty"`
+		TextTokens     int `json:"text_tokens,omitempty"`
 	} `json:"output_tokens_details,omitempty"`
 	ServerToolUse struct {
 		WebSearchRequests int `json:"web_search_requests,omitempty"`
 	} `json:"server_tool_use,omitempty"`
 	WebSearchRequests int `json:"web_search_requests,omitempty"`
+	// WebFetchRequests is the router's own count of the billable web fetches
+	// it executed.
+	WebFetchRequests int `json:"web_fetch_requests,omitempty"`
 	converterutil.ToolUsageExtensions
 	// Provider-side cost of the request, read for reconciliation only (see
 	// TokenUsage.ProviderCostUSD). Raw so an unexpected shape cannot fail the
@@ -719,10 +752,14 @@ type tokenUsageShapeUsage struct {
 	// from PromptTokens+CompletionTokens rather than derived from them.
 	TotalTokens         int `json:"total_tokens,omitempty"`
 	PromptTokensDetails struct {
-		CachedTokens              int `json:"cached_tokens,omitempty"`
-		CachedAudioTokens         int `json:"cached_audio_tokens,omitempty"`
-		CacheCreationTokens       int `json:"cache_creation_tokens,omitempty"`
-		CacheWriteTokens          int `json:"cache_write_tokens,omitempty"`
+		CachedTokens            int `json:"cached_tokens,omitempty"`
+		CachedAudioTokens       int `json:"cached_audio_tokens,omitempty"`
+		CacheCreationTokens     int `json:"cache_creation_tokens,omitempty"`
+		CacheWriteTokens        int `json:"cache_write_tokens,omitempty"`
+		CacheWriteTokensDetails struct {
+			TTL30mTokens int `json:"ttl_30m_tokens,omitempty"`
+			TTL12hTokens int `json:"ttl_12h_tokens,omitempty"`
+		} `json:"cache_write_tokens_details,omitempty"`
 		CacheCreationTokenDetails struct {
 			Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
 			Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
@@ -737,6 +774,12 @@ type tokenUsageShapeUsage struct {
 		TextTokens  int `json:"text_tokens,omitempty"`
 		ImageTokens int `json:"image_tokens,omitempty"`
 		VideoTokens int `json:"video_tokens,omitempty"`
+		// WebFetchRequests is the router's own count of the billable web
+		// fetches it executed.
+		WebFetchRequests int `json:"web_fetch_requests,omitempty"`
+		// WebSearchRequests is the router's own count of the billable
+		// searches it executed.
+		WebSearchRequests int `json:"web_search_requests,omitempty"`
 		// CacheType is Alibaba's explicit cache mode marker:
 		// "ephemeral" when the request used an explicit cache marker, absent
 		// otherwise (implicit cache). Explicit and implicit cache are mutually
@@ -867,6 +910,37 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 	)
 	imageToolGenerations, imageToolEdits := imageGenerationToolImages(resp.Output, resp.Response.Output, toolUsage)
 
+	// The searches the router itself executed: it wrote the count into the
+	// body it returns, so the billing path reads it back like any other
+	// counter. It is added to the provider-reported count rather than
+	// replacing it: the two are different things (the provider's own
+	// server-side search, and the search the router ran for the model).
+	routerWebSearchRequests := resp.Usage.PromptTokensDetails.WebSearchRequests
+	if routerWebSearchRequests == 0 {
+		routerWebSearchRequests = resp.Usage.InputTokensDetails.WebSearchRequests
+	}
+	if routerWebSearchRequests == 0 && resp.Response.Usage != nil {
+		routerWebSearchRequests = resp.Response.Usage.InputTokensDetails.WebSearchRequests
+	}
+
+	// The web fetches the router itself executed: it wrote the count into the
+	// body it returns, so the billing path reads it back like any other
+	// counter. Only a positive count counts -- a fetch that failed or returned
+	// nothing was never billed.
+	webFetchRequests := resp.Usage.WebFetchRequests
+	if webFetchRequests == 0 {
+		webFetchRequests = resp.Usage.PromptTokensDetails.WebFetchRequests
+	}
+	if webFetchRequests == 0 {
+		webFetchRequests = resp.Usage.InputTokensDetails.WebFetchRequests
+	}
+	if webFetchRequests == 0 && resp.Response.Usage != nil {
+		webFetchRequests = resp.Response.Usage.WebFetchRequests
+		if webFetchRequests == 0 {
+			webFetchRequests = resp.Response.Usage.InputTokensDetails.WebFetchRequests
+		}
+	}
+
 	if promptTokens == 0 && completionTokens == 0 && webSearchRequests == 0 &&
 		!toolUsageReported && imageToolGenerations == 0 && imageToolEdits == 0 {
 		return nil
@@ -902,6 +976,15 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 	cacheCreationTokens := resp.Usage.PromptTokensDetails.CacheCreationTokens
 	cacheCreation5mTokens := resp.Usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens
 	cacheCreation1hTokens := resp.Usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens
+	// OpenAI's 12h cache-retention write (prompt_cache_retention:"12h") is a
+	// separate TTL tier reported under cache_write_tokens_details, and a single
+	// request may also carry a 30m tier alongside it; both are billed, each at
+	// its own rate. The 30m tier is not Anthropic's 5m one, so it fills the 5m
+	// slot only when no 5m/1h split was given.
+	cacheCreation12hTokens := resp.Usage.PromptTokensDetails.CacheWriteTokensDetails.TTL12hTokens
+	if cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
+		cacheCreation5mTokens = resp.Usage.PromptTokensDetails.CacheWriteTokensDetails.TTL30mTokens
+	}
 	// Alibaba spells the TTL detail cache_creation.ephemeral_5m_input_tokens
 	// (nested in prompt_tokens_details, no _token_details suffix).
 	if cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
@@ -912,13 +995,19 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 	if cacheCreationTokens == 0 {
 		cacheCreationTokens = resp.Usage.PromptTokensDetails.CacheWriteTokens
 	}
-	if cacheCreationTokens == 0 && cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
+	if cacheCreationTokens == 0 && cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 && cacheCreation12hTokens == 0 {
 		cacheCreationTokens, cacheCreation5mTokens, cacheCreation1hTokens = resp.Usage.PromptTokensDetails.CachingWrite()
 	}
-	if cacheCreationTokens == 0 && cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
+	if cacheCreationTokens == 0 && cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 && cacheCreation12hTokens == 0 {
 		cacheCreationTokens = resp.Usage.InputTokensDetails.CacheCreationTokens
 		cacheCreation5mTokens = resp.Usage.InputTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens
 		cacheCreation1hTokens = resp.Usage.InputTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens
+		if cacheCreation12hTokens == 0 {
+			cacheCreation12hTokens = resp.Usage.InputTokensDetails.CacheWriteTokensDetails.TTL12hTokens
+			if cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
+				cacheCreation5mTokens = resp.Usage.InputTokensDetails.CacheWriteTokensDetails.TTL30mTokens
+			}
+		}
 	}
 	if cacheCreationTokens == 0 {
 		cacheCreationTokens = resp.Usage.InputTokensDetails.CacheWriteTokens
@@ -958,6 +1047,9 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 	reasoning := resp.Usage.CompletionTokensDetails.ReasoningTokens
 	if reasoning == 0 {
 		reasoning = resp.Usage.OutputTokensDetails.ReasoningTokens
+	}
+	if reasoning == 0 {
+		reasoning = resp.Usage.OutputTokensDetails.ThinkingTokens
 	}
 	outputImageTokens := resp.Usage.CompletionTokensDetails.ImageTokens
 	if outputImageTokens == 0 {
@@ -1081,6 +1173,8 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 		CacheCreationTokens:      cacheCreationTokens,
 		CacheCreation5mTokens:    cacheCreation5mTokens,
 		CacheCreation1hTokens:    cacheCreation1hTokens,
+		CacheCreation12hTokens:   cacheCreation12hTokens,
+		WebFetchRequests:         webFetchRequests,
 		AudioInputTokens:         audioIn,
 		ImageTokens:              inputImageTokens,
 		VideoInputTokens:         inputVideoTokens,
@@ -1089,7 +1183,7 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 		RejectedPredictionTokens: resp.Usage.CompletionTokensDetails.RejectedPredictionTokens,
 		AudioOutputTokens:        audioOut,
 		ReasoningTokens:          reasoning,
-		WebSearchRequests:        webSearchRequests,
+		WebSearchRequests:        webSearchRequests + routerWebSearchRequests,
 		ServerToolUsageReported:  toolUsageReported,
 		XSearchCalls:             toolUsage.XSearchCalls,
 		XSearchPosts:             toolUsage.XPostsFetched,

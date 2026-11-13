@@ -100,32 +100,35 @@ litellm_db:
 
 ## Server Parameters
 
-| Parameter                    | Type     | Default     | Description                                                                                           |
-| ---------------------------- | -------- | ----------- | ----------------------------------------------------------------------------------------------------- |
-| `port`                       | int      | 8080        | Listen port                                                                                           |
-| `max_body_size_mb`           | int      | 100         | Maximum request body size (MB)                                                                        |
-| `response_body_multiplier`   | int      | 10          | Response body limit = max_body_size_mb * this value                                                   |
-| `response_compatibility`     | string   | native      | Response contract: `native` or LiteLLM-compatible `litellm`                                           |
-| `request_timeout`            | duration | 60s         | Request timeout                                                                                       |
-| `write_timeout`              | duration | 60s         | HTTP server write timeout                                                                             |
-| `idle_timeout`               | duration | 2m          | HTTP server idle timeout (default: 2 * write_timeout)                                                 |
-| `shutdown_delay`             | duration | 5s          | After SIGTERM: how long the router keeps serving while not ready, before it stops (see below)         |
-| `shutdown_timeout`           | duration | 30s         | Then: how long in-flight requests get to finish before the rest are cancelled                         |
-| `idle_conn_timeout`          | duration | 120s        | Idle connection timeout for keep-alive connections                                                    |
-| `max_idle_conns`             | int      | 200         | Maximum idle connections                                                                              |
-| `max_idle_conns_per_host`    | int      | 20          | Maximum idle connections per host                                                                     |
-| `max_connection_lifetime`    | duration | 0           | How long a provider connection takes new requests (0 = reused while requests come, see below)         |
-| `logging_level`              | string   | info        | Logging level: `info`, `debug`, `error`                                                               |
-| `master_key`                 | string   | —           | **Required.** Master key for client authentication                                                    |
-| `default_models_rpm`         | int      | -1          | Default RPM limit for models (-1 = unlimited)                                                         |
-| `credential_name_as_team_id` | bool     | false       | Use the selected provider credential name as `team_id` in spend logs when auth has no team assignment |
-| `model_prices_link`          | string   | —           | URL or file path to model prices JSON                                                                 |
-| `model_prices_sync_interval` | duration | 5m          | How often model prices are re-fetched from `model_prices_link`                                        |
-| `proxy_health_timeout`       | duration | 15s         | Timeout for fetching `/health` from remote proxy credentials                                          |
-| `response_headers.mode`      | string   | passthrough | Response header policy. Supported values are `passthrough` and `allowlist`                            |
-| `tiktoken_enabled`           | bool     | true        | Local tiktoken-based fallback token estimation for streaming responses (see below)                    |
+| Parameter                      | Type     | Default     | Description                                                                                           |
+| ------------------------------ | -------- | ----------- | ----------------------------------------------------------------------------------------------------- |
+| `port`                         | int      | 8080        | Listen port                                                                                           |
+| `max_body_size_mb`             | int      | 100         | Maximum request body size (MB)                                                                        |
+| `response_body_multiplier`     | int      | 10          | Response body limit = max_body_size_mb * this value                                                   |
+| `response_compatibility`       | string   | native      | Response contract: `native` or LiteLLM-compatible `litellm`                                           |
+| `request_timeout`              | duration | 60s         | Request timeout                                                                                       |
+| `write_timeout`                | duration | 60s         | HTTP server write timeout                                                                             |
+| `idle_timeout`                 | duration | 2m          | HTTP server idle timeout (default: 2 * write_timeout)                                                 |
+| `shutdown_delay`               | duration | 5s          | After SIGTERM: how long the router keeps serving while not ready, before it stops (see below)         |
+| `shutdown_timeout`             | duration | 30s         | Then: how long in-flight requests get to finish before the rest are cancelled                         |
+| `idle_conn_timeout`            | duration | 120s        | Idle connection timeout for keep-alive connections                                                    |
+| `max_idle_conns`               | int      | 200         | Maximum idle connections                                                                              |
+| `max_idle_conns_per_host`      | int      | 20          | Maximum idle connections per host                                                                     |
+| `max_connection_lifetime`      | duration | 0           | How long a provider connection takes new requests (0 = reused while requests come, see below)         |
+| `logging_level`                | string   | info        | Logging level: `info`, `debug`, `error`                                                               |
+| `master_key`                   | string   | —           | **Required.** Master key for client authentication                                                    |
+| `default_models_rpm`           | int      | -1          | Default RPM limit for models (-1 = unlimited)                                                         |
+| `credential_name_as_team_id`   | bool     | false       | Use the selected provider credential name as `team_id` in spend logs when auth has no team assignment |
+| `model_prices_link`            | string   | —           | URL or file path to model prices JSON                                                                 |
+| `model_prices_sync_interval`   | duration | 5m          | How often model prices are re-fetched from `model_prices_link`                                        |
+| `proxy_health_timeout`         | duration | 15s         | Timeout for fetching `/health` from remote proxy credentials                                          |
+| `response_headers.mode`        | string   | passthrough | Response header policy. Supported values are `passthrough` and `allowlist`                            |
+| `tiktoken_enabled`             | bool     | true        | Local tiktoken-based fallback token estimation for streaming responses (see below)                    |
+| `anthropic_default_max_tokens` | int      | 32000       | `max_tokens` sent to a Claude model when the client sends none (see below)                            |
 
 The `allowlist` mode forwards `Content-Type`, `Cache-Control`, `Retry-After`, `Content-Disposition`, `Content-Range`, `Last-Modified`, and `Location`. Transport headers are generated by the router. Other upstream response headers are removed.
+
+`anthropic_default_max_tokens` is the `max_tokens` the router sends to a Claude model when a `/v1/chat/completions` or `/v1/responses` request carries no limit (`max_tokens`, `max_completion_tokens` or `max_output_tokens`; a `null` value counts as no limit). Claude 5 models think by default (Claude Opus 5.5 and Claude Fable cannot turn thinking off), so the converter's 4096 can be spent on thinking and the response ends with `finish_reason: length` and no text. The value applies to Claude models on Anthropic, Azure AI Foundry, CometAPI, ProMan and Bedrock; other models keep 4096, and `/v1/messages` bodies and requests relayed to another router are left as they are. Zero means the default. It must not be negative and must not exceed the smallest output limit among the Claude models you serve (Claude Opus 4 and 4.1: 32000), otherwise Anthropic answers `400`. The key budget check does not use it: a request without a limit is still estimated at `litellm_db.default_estimated_completion_tokens`.
 
 When `credential_name_as_team_id` is enabled, spend logs use the selected provider credential name as `team_id` only when the authenticated key does not provide a `team_id`. An explicit team assignment always takes precedence. This is intended for billing-aggregator AIR instances that group spend by provider credential; leave it disabled for embedded routers and migration helpers.
 
@@ -177,6 +180,7 @@ Common fields for all credentials:
 | `tpm`              | int    | Tokens per minute limit (-1 = unlimited)                                                                                         |
 | `is_fallback`      | bool   | Use as fallback when primary credentials are exhausted                                                                           |
 | `reasoning_only`   | bool   | Route only requests that explicitly enable reasoning/thinking                                                                    |
+| `system_one`       | bool   | Serve only the native System One API, `POST /v1/systemone` ([details](#system-one-credentials))                                  |
 | `scopes`           | list   | Optional client scopes allowed to use and see this credential                                                                    |
 | `denied_scopes`    | list   | Optional client scopes that must not use or see this credential                                                                  |
 | `forbidden_scopes` | list   | Alias for `denied_scopes`                                                                                                        |
@@ -327,6 +331,42 @@ The filter recognizes enabled `reasoning_effort`, `reasoning`, `thinking`,
 explicitly disable it skip the credential during initial selection, sticky routing,
 retries, and fallback selection. For DB-loaded credentials, use
 `"air_reasoning_only": true` in `credential_info`.
+
+### System One credentials
+
+Set `system_one: true` on an OpenAI-wire credential (`openai`, `vllm`) whose provider speaks only
+the native System One API (`POST /v1/systemone`):
+
+```yaml
+credentials:
+  - name: system-one-primary
+    type: openai
+    api_key: "os.environ/SYSTEM_ONE_API_KEY"
+    base_url: "https://api.example.com"
+    priority: 1
+    system_one: true
+```
+
+`/v1/systemone` requests go only to `system_one` credentials (and to proxy-like ones, whose peer
+router applies the same rule), and no other endpoint ever selects them. The request body is
+forwarded as sent, with only `model` replaced by the credential's upstream model id; the reply
+comes back unconverted except for `model`, which names the public model. `stream: true` is
+rejected with 400, and so is a model that has no credential for the endpoint it is called on.
+
+Usage is read from `usage.input_tokens` / `usage.output_tokens`: without `total_tokens` their sum
+feeds the credential and model TPM, and a successful reply without usage is billed on the
+request's prompt-token estimate. Spend rows carry the call type `asystemone` (daily endpoint
+`/systemone`).
+
+To pass payload errors (400, 413, 415, 422) to the client instead of failing over, limit the
+credential's retryable status codes:
+
+```yaml
+retry:
+  credential_overrides:
+    system-one-primary:
+      status_codes: ["402", "429", "5xx"]
+```
 
 ## Models
 

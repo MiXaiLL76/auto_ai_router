@@ -19,6 +19,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	promanutils "github.com/mixaill76/auto_ai_router/internal/converter/proman/utils"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
+	"github.com/mixaill76/auto_ai_router/internal/loopgate"
 	"github.com/mixaill76/auto_ai_router/internal/proxy/modelutils"
 )
 
@@ -131,6 +132,7 @@ type StreamUsageInfo struct {
 	CacheCreationTokens      int // Tokens created for cache (billed at different rate)
 	CacheCreation5mTokens    int
 	CacheCreation1hTokens    int
+	CacheCreation12hTokens   int // OpenAI 12h cache-retention writes (own rate)
 	// CacheType mirrors TokenUsage.CacheType: Alibaba's explicit cache mode
 	// marker ("ephemeral") from prompt_tokens_details.cache_type.
 	CacheType         string
@@ -178,107 +180,127 @@ func (o *openAIStreamUsageExtractor) ExtractUsage(chunk []byte) *StreamUsageInfo
 	return nil
 }
 
+// chatCompletionStreamUsage is the usage object of the Chat Completions
+// streaming format.
+type chatCompletionStreamUsage struct {
+	PromptTokens        *int `json:"prompt_tokens"`
+	CompletionTokens    *int `json:"completion_tokens"`
+	PromptTokensDetails struct {
+		CachedTokens            int `json:"cached_tokens,omitempty"`
+		CachedAudioTokens       int `json:"cached_audio_tokens,omitempty"`
+		CacheCreationTokens     int `json:"cache_creation_tokens,omitempty"`
+		CacheWriteTokens        int `json:"cache_write_tokens,omitempty"`
+		CacheWriteTokensDetails struct {
+			TTL30mTokens int `json:"ttl_30m_tokens,omitempty"`
+			TTL12hTokens int `json:"ttl_12h_tokens,omitempty"`
+		} `json:"cache_write_tokens_details,omitempty"`
+		CacheCreationTokenDetails struct {
+			Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
+			Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
+		} `json:"cache_creation_token_details,omitempty"`
+		// Alibaba returns the explicit cache creation TTL detail under
+		// cache_creation.ephemeral_5m_input_tokens (no _token_details).
+		CacheCreation struct {
+			Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
+			Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
+		} `json:"cache_creation,omitempty"`
+		AudioTokens int    `json:"audio_tokens,omitempty"`
+		ImageTokens int    `json:"image_tokens,omitempty"`
+		VideoTokens int    `json:"video_tokens,omitempty"`
+		CacheType   string `json:"cache_type,omitempty"`
+		converterutil.CachingTokensExtension
+	} `json:"prompt_tokens_details,omitempty"`
+	CompletionTokensDetails struct {
+		AcceptedPredictionTokens int `json:"accepted_prediction_tokens,omitempty"`
+		AudioTokens              int `json:"audio_tokens,omitempty"`
+		CachedTokens             int `json:"cached_tokens,omitempty"`
+		ImageTokens              int `json:"image_tokens,omitempty"`
+		ReasoningTokens          int `json:"reasoning_tokens,omitempty"`
+		RejectedPredictionTokens int `json:"rejected_prediction_tokens,omitempty"`
+	} `json:"completion_tokens_details,omitempty"`
+	ServerToolUse struct {
+		WebSearchRequests int `json:"web_search_requests,omitempty"`
+	} `json:"server_tool_use,omitempty"`
+	WebSearchRequests int `json:"web_search_requests,omitempty"`
+	converterutil.ToolUsageExtensions
+}
+
 // extractChatCompletionUsage parses usage from Chat Completions streaming format.
 // Format: {"usage":{"prompt_tokens":N,"completion_tokens":N,...}}
 func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) *StreamUsageInfo {
 	var data struct {
-		Usage *struct {
-			PromptTokens        *int `json:"prompt_tokens"`
-			CompletionTokens    *int `json:"completion_tokens"`
-			PromptTokensDetails struct {
-				CachedTokens              int `json:"cached_tokens,omitempty"`
-				CachedAudioTokens         int `json:"cached_audio_tokens,omitempty"`
-				CacheCreationTokens       int `json:"cache_creation_tokens,omitempty"`
-				CacheWriteTokens          int `json:"cache_write_tokens,omitempty"`
-				CacheCreationTokenDetails struct {
-					Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
-					Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
-				} `json:"cache_creation_token_details,omitempty"`
-				// Alibaba returns the explicit cache creation TTL detail under
-				// cache_creation.ephemeral_5m_input_tokens (no _token_details).
-				CacheCreation struct {
-					Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
-					Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
-				} `json:"cache_creation,omitempty"`
-				AudioTokens int    `json:"audio_tokens,omitempty"`
-				ImageTokens int    `json:"image_tokens,omitempty"`
-				VideoTokens int    `json:"video_tokens,omitempty"`
-				CacheType   string `json:"cache_type,omitempty"`
-				converterutil.CachingTokensExtension
-			} `json:"prompt_tokens_details,omitempty"`
-			CompletionTokensDetails struct {
-				AcceptedPredictionTokens int `json:"accepted_prediction_tokens,omitempty"`
-				AudioTokens              int `json:"audio_tokens,omitempty"`
-				CachedTokens             int `json:"cached_tokens,omitempty"`
-				ImageTokens              int `json:"image_tokens,omitempty"`
-				ReasoningTokens          int `json:"reasoning_tokens,omitempty"`
-				RejectedPredictionTokens int `json:"rejected_prediction_tokens,omitempty"`
-			} `json:"completion_tokens_details,omitempty"`
-			ServerToolUse struct {
-				WebSearchRequests int `json:"web_search_requests,omitempty"`
-			} `json:"server_tool_use,omitempty"`
-			WebSearchRequests int `json:"web_search_requests,omitempty"`
-			converterutil.ToolUsageExtensions
-		} `json:"usage"`
+		Usage *chatCompletionStreamUsage `json:"usage"`
 	}
 
 	if err := json.Unmarshal(payload, &data); err != nil {
 		return nil
 	}
+	return o.chatCompletionUsageInfo(data.Usage)
+}
 
-	if data.Usage == nil || (data.Usage.PromptTokens == nil && data.Usage.CompletionTokens == nil) {
+// chatCompletionUsageInfo is extractChatCompletionUsage for an already decoded
+// usage object.
+func (o *openAIStreamUsageExtractor) chatCompletionUsageInfo(usage *chatCompletionStreamUsage) *StreamUsageInfo {
+	if usage == nil || (usage.PromptTokens == nil && usage.CompletionTokens == nil) {
 		return nil
 	}
 
-	cacheCreationTokens := data.Usage.PromptTokensDetails.CacheCreationTokens
+	cacheCreationTokens := usage.PromptTokensDetails.CacheCreationTokens
 	if cacheCreationTokens == 0 {
-		cacheCreationTokens = data.Usage.PromptTokensDetails.CacheWriteTokens
+		cacheCreationTokens = usage.PromptTokensDetails.CacheWriteTokens
 	}
-	cacheCreation5mTokens := data.Usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens
-	cacheCreation1hTokens := data.Usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens
+	cacheCreation5mTokens := usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens
+	cacheCreation1hTokens := usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens
+	// OpenAI's 12h cache-retention writes are a separate TTL tier under
+	// cache_write_tokens_details; a request may also carry a 30m tier beside it.
+	cacheCreation12hTokens := usage.PromptTokensDetails.CacheWriteTokensDetails.TTL12hTokens
 	if cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
-		cacheCreation5mTokens = data.Usage.PromptTokensDetails.CacheCreation.Ephemeral5mInputTokens
-		cacheCreation1hTokens = data.Usage.PromptTokensDetails.CacheCreation.Ephemeral1hInputTokens
+		cacheCreation5mTokens = usage.PromptTokensDetails.CacheWriteTokensDetails.TTL30mTokens
+	}
+	if cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
+		cacheCreation5mTokens = usage.PromptTokensDetails.CacheCreation.Ephemeral5mInputTokens
+		cacheCreation1hTokens = usage.PromptTokensDetails.CacheCreation.Ephemeral1hInputTokens
 	}
 	if cacheCreationTokens == 0 {
-		cacheCreationTokens = cacheCreation5mTokens + cacheCreation1hTokens
+		cacheCreationTokens = cacheCreation5mTokens + cacheCreation1hTokens + cacheCreation12hTokens
 	}
 	if cacheCreationTokens == 0 {
-		cacheCreationTokens, cacheCreation5mTokens, cacheCreation1hTokens = data.Usage.PromptTokensDetails.CachingWrite()
+		cacheCreationTokens, cacheCreation5mTokens, cacheCreation1hTokens = usage.PromptTokensDetails.CachingWrite()
 	}
 	cachedTokens, cachedAudioTokens := converterutil.NormalizeCachedAudioBreakdown(
-		data.Usage.PromptTokensDetails.CachedTokens,
-		data.Usage.PromptTokensDetails.CachedAudioTokens,
+		usage.PromptTokensDetails.CachedTokens,
+		usage.PromptTokensDetails.CachedAudioTokens,
 	)
-	toolUsage, _ := data.Usage.ServerSideToolUsage()
+	toolUsage, _ := usage.ServerSideToolUsage()
 
 	return &StreamUsageInfo{
-		PromptTokens:          intValue(data.Usage.PromptTokens),
-		CompletionTokens:      intValue(data.Usage.CompletionTokens),
-		CachedTokens:          cachedTokens,
-		CachedAudioTokens:     cachedAudioTokens,
-		CacheCreationTokens:   cacheCreationTokens,
-		CacheCreation5mTokens: cacheCreation5mTokens,
-		CacheCreation1hTokens: cacheCreation1hTokens,
-		CacheType:             data.Usage.PromptTokensDetails.CacheType,
+		PromptTokens:           intValue(usage.PromptTokens),
+		CompletionTokens:       intValue(usage.CompletionTokens),
+		CachedTokens:           cachedTokens,
+		CachedAudioTokens:      cachedAudioTokens,
+		CacheCreationTokens:    cacheCreationTokens,
+		CacheCreation5mTokens:  cacheCreation5mTokens,
+		CacheCreation1hTokens:  cacheCreation1hTokens,
+		CacheCreation12hTokens: cacheCreation12hTokens,
+		CacheType:              usage.PromptTokensDetails.CacheType,
 		AudioInputTokens: normalizeStreamAudioInput(
-			data.Usage.PromptTokensDetails.AudioTokens,
+			usage.PromptTokensDetails.AudioTokens,
 			cachedTokens,
 			cachedAudioTokens,
 			o.audioInputAlreadyExcludesCachedAudio,
 		),
-		AudioOutputTokens:        data.Usage.CompletionTokensDetails.AudioTokens,
-		ImageTokens:              data.Usage.PromptTokensDetails.ImageTokens,
-		VideoInputTokens:         data.Usage.PromptTokensDetails.VideoTokens,
-		OutputImageTokens:        data.Usage.CompletionTokensDetails.ImageTokens,
-		ReasoningTokens:          data.Usage.CompletionTokensDetails.ReasoningTokens,
-		AcceptedPredictionTokens: data.Usage.CompletionTokensDetails.AcceptedPredictionTokens,
-		RejectedPredictionTokens: data.Usage.CompletionTokensDetails.RejectedPredictionTokens,
-		CachedOutputTokens:       data.Usage.CompletionTokensDetails.CachedTokens,
+		AudioOutputTokens:        usage.CompletionTokensDetails.AudioTokens,
+		ImageTokens:              usage.PromptTokensDetails.ImageTokens,
+		VideoInputTokens:         usage.PromptTokensDetails.VideoTokens,
+		OutputImageTokens:        usage.CompletionTokensDetails.ImageTokens,
+		ReasoningTokens:          usage.CompletionTokensDetails.ReasoningTokens,
+		AcceptedPredictionTokens: usage.CompletionTokensDetails.AcceptedPredictionTokens,
+		RejectedPredictionTokens: usage.CompletionTokensDetails.RejectedPredictionTokens,
+		CachedOutputTokens:       usage.CompletionTokensDetails.CachedTokens,
 		WebSearchRequests: webSearchRequestsFromUsage(
-			data.Usage.ServerToolUse.WebSearchRequests,
-			data.Usage.WebSearchRequests,
-			data.Usage.ToolUsageExtensions.WebSearchRequests(),
+			usage.ServerToolUse.WebSearchRequests,
+			usage.WebSearchRequests,
+			usage.ToolUsageExtensions.WebSearchRequests(),
 			toolUsage.WebSearchCalls,
 		),
 	}
@@ -303,11 +325,21 @@ func (o *openAIStreamUsageExtractor) extractResponsesAPIUsage(payload []byte) *S
 	if err := json.Unmarshal(payload, &data); err != nil {
 		return nil
 	}
+	return o.responsesAPIUsageInfo(data.Usage, data.Output, data.Response.Usage, data.Response.Output)
+}
 
+// responsesAPIUsageInfo is extractResponsesAPIUsage for an already decoded
+// event: its top-level usage and output, and those of its nested response.
+func (o *openAIStreamUsageExtractor) responsesAPIUsageInfo(
+	topUsage *responsesAPIUsage,
+	topOutput []streamingResponseOutput,
+	nestedUsage *responsesAPIUsage,
+	nestedOutput []streamingResponseOutput,
+) *StreamUsageInfo {
 	// Prefer nested response.usage (response.completed event), fall back to top-level
-	usage := data.Response.Usage
+	usage := nestedUsage
 	if usage == nil {
-		usage = data.Usage
+		usage = topUsage
 	}
 	if usage == nil || (usage.InputTokens == nil && usage.OutputTokens == nil) {
 		return nil
@@ -317,9 +349,14 @@ func (o *openAIStreamUsageExtractor) extractResponsesAPIUsage(payload []byte) *S
 	if cacheCreationTokens == 0 {
 		cacheCreationTokens = usage.InputTokensDetails.CacheWriteTokens
 	}
+	cacheCreation12hTokens := usage.InputTokensDetails.CacheWriteTokensDetails.TTL12hTokens
+	cacheCreation5mTokens := usage.InputTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens
+	cacheCreation1hTokens := usage.InputTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens
+	if cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
+		cacheCreation5mTokens = usage.InputTokensDetails.CacheWriteTokensDetails.TTL30mTokens
+	}
 	if cacheCreationTokens == 0 {
-		cacheCreationTokens = usage.InputTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens +
-			usage.InputTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens
+		cacheCreationTokens = cacheCreation5mTokens + cacheCreation1hTokens + cacheCreation12hTokens
 	}
 	cachedTokens, cachedAudioTokens := converterutil.NormalizeCachedAudioBreakdown(
 		usage.InputTokensDetails.CachedTokens,
@@ -337,21 +374,22 @@ func (o *openAIStreamUsageExtractor) extractResponsesAPIUsage(payload []byte) *S
 	// failed attempts must not replace it. Only an object without the
 	// web_search_calls counter leaves the items to count.
 	if webSearchRequests == 0 && !toolUsage.WebSearchCallsReported {
-		webSearchRequests = countCompletedStreamingWebSearchItems(data.Response.Output)
+		webSearchRequests = countCompletedStreamingWebSearchItems(nestedOutput)
 		if webSearchRequests == 0 {
-			webSearchRequests = countCompletedStreamingWebSearchItems(data.Output)
+			webSearchRequests = countCompletedStreamingWebSearchItems(topOutput)
 		}
 	}
 
 	return &StreamUsageInfo{
-		PromptTokens:          intValue(usage.InputTokens),
-		CompletionTokens:      intValue(usage.OutputTokens),
-		CachedTokens:          cachedTokens,
-		CachedAudioTokens:     cachedAudioTokens,
-		CacheCreationTokens:   cacheCreationTokens,
-		CacheCreation5mTokens: usage.InputTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens,
-		CacheCreation1hTokens: usage.InputTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens,
-		CacheType:             usage.InputTokensDetails.CacheType,
+		PromptTokens:           intValue(usage.InputTokens),
+		CompletionTokens:       intValue(usage.OutputTokens),
+		CachedTokens:           cachedTokens,
+		CachedAudioTokens:      cachedAudioTokens,
+		CacheCreationTokens:    cacheCreationTokens,
+		CacheCreation5mTokens:  cacheCreation5mTokens,
+		CacheCreation1hTokens:  cacheCreation1hTokens,
+		CacheCreation12hTokens: cacheCreation12hTokens,
+		CacheType:              usage.InputTokensDetails.CacheType,
 		AudioInputTokens: normalizeStreamAudioInput(
 			usage.InputTokensDetails.AudioTokens,
 			cachedTokens,
@@ -390,10 +428,14 @@ type responsesAPIUsage struct {
 	InputTokens        *int `json:"input_tokens"`
 	OutputTokens       *int `json:"output_tokens"`
 	InputTokensDetails struct {
-		CachedTokens              int `json:"cached_tokens,omitempty"`
-		CachedAudioTokens         int `json:"cached_audio_tokens,omitempty"`
-		CacheCreationTokens       int `json:"cache_creation_tokens,omitempty"`
-		CacheWriteTokens          int `json:"cache_write_tokens,omitempty"`
+		CachedTokens            int `json:"cached_tokens,omitempty"`
+		CachedAudioTokens       int `json:"cached_audio_tokens,omitempty"`
+		CacheCreationTokens     int `json:"cache_creation_tokens,omitempty"`
+		CacheWriteTokens        int `json:"cache_write_tokens,omitempty"`
+		CacheWriteTokensDetails struct {
+			TTL30mTokens int `json:"ttl_30m_tokens,omitempty"`
+			TTL12hTokens int `json:"ttl_12h_tokens,omitempty"`
+		} `json:"cache_write_tokens_details,omitempty"`
 		CacheCreationTokenDetails struct {
 			Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
 			Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
@@ -501,6 +543,9 @@ var (
 	// cannot possibly carry usage/total_tokens — skip the unmarshal attempt
 	// entirely rather than paying for it on every content-only chunk.
 	sseUsageNeedle = []byte(`"usage"`)
+	// sseTypeNeedle prefilters Responses / Messages events, which all carry a
+	// "type".
+	sseTypeNeedle = []byte(`"type"`)
 	// sseWebSearchCallNeedle and sseAnnotationsNeedle catch the two other
 	// shapes converter.ExtractTokenUsageWithOptions can derive a non-nil,
 	// billable TokenUsage from *without* any "usage" key present at all:
@@ -594,12 +639,8 @@ func splitSSEPayloads(chunk []byte, dst [][]byte) [][]byte {
 			line = rest
 			rest = nil
 		}
-		line = bytes.TrimSpace(line)
-		if bytes.HasPrefix(line, sseDataPrefix) {
-			payload := bytes.TrimSpace(line[len(sseDataPrefix):])
-			if len(payload) > 0 && !bytes.Equal(payload, sseDoneSentinel) {
-				dst = append(dst, payload)
-			}
+		if payload, ok := sseLinePayload(line); ok {
+			dst = append(dst, payload)
 		}
 		if rest == nil {
 			break
@@ -607,6 +648,21 @@ func splitSSEPayloads(chunk []byte, dst [][]byte) [][]byte {
 	}
 
 	return dst
+}
+
+// sseLinePayload returns the data payload of one SSE line: the text after
+// "data:" with surrounding whitespace trimmed, a sub-slice of line. ok is false
+// for any other line, an empty payload and the [DONE] sentinel.
+func sseLinePayload(line []byte) ([]byte, bool) {
+	payload, ok := bytes.CutPrefix(bytes.TrimSpace(line), sseDataPrefix)
+	if !ok {
+		return nil, false
+	}
+	payload = bytes.TrimSpace(payload)
+	if len(payload) == 0 || bytes.Equal(payload, sseDoneSentinel) {
+		return nil, false
+	}
+	return payload, true
 }
 
 // getStreamUsageExtractor returns the appropriate usage extractor for a provider.
@@ -726,9 +782,22 @@ type tokenCapturingWriter struct {
 	// the chunk. Optional; used to capture the last chunk for usage
 	// extraction.
 	onChunk func(chunk []byte, payloads [][]byte, hasUsage bool)
+	// proxy and logCtx, when both set, let Write add the final per-request
+	// cost to the client-visible usage chunk for organizations that opted
+	// into usage.cost (see client_cost.go). nil/nil for any stream whose
+	// organization didn't opt in — Write then skips the check entirely.
+	proxy  *Proxy
+	logCtx *RequestLogContext
 }
 
 func (tcw *tokenCapturingWriter) Write(p []byte) (n int, err error) {
+	// inputLen is what callers must see as "fully written" on success,
+	// regardless of the cost injection below possibly substituting a
+	// differently-sized buffer for the actual write — satisfies the
+	// io.Writer contract from the caller's point of view (it handed us
+	// inputLen bytes of p, not whatever injectCostIntoSSEUsageChunk rebuilt).
+	inputLen := len(p)
+
 	// One parse per chunk: split once, reuse the sub-slices for the token
 	// count below, the completion accumulator, and onChunk.
 	tcw.payloadBuf = splitSSEPayloads(p, tcw.payloadBuf)
@@ -755,12 +824,26 @@ func (tcw *tokenCapturingWriter) Write(p []byte) (n int, err error) {
 		tcw.completion.AddPayloads(tcw.payloadBuf)
 	}
 
-	// Invoke callback if provided (used to capture last chunk for usage extraction)
+	// Invoke callback if provided (used to capture last chunk for usage
+	// extraction). This runs before the cost injection below so
+	// logCtx.TokenUsage already reflects this chunk (onChunk merges it in)
+	// by the time clientFacingCost reads it.
 	if tcw.onChunk != nil {
 		tcw.onChunk(p, tcw.payloadBuf, hasUsage)
 	}
 
-	return tcw.writer.Write(p)
+	if hasUsage && tcw.proxy != nil && shouldExposeCostToClient(tcw.logCtx) {
+		if cost, ok := tcw.proxy.clientFacingCost(tcw.logCtx, tcw.logCtx.TokenUsage); ok {
+			if withCost, injected := injectCostIntoSSEUsageChunk(p, tcw.payloadBuf, cost); injected {
+				p = withCost
+			}
+		}
+	}
+
+	if _, writeErr := tcw.writer.Write(p); writeErr != nil {
+		return 0, writeErr
+	}
+	return inputLen, nil
 }
 
 // rememberLastStreamDataChunk stores each chunk, keeping only the last one
@@ -811,6 +894,18 @@ func (p *Proxy) handleTransformedStreaming(
 	rawProviderStreamError := &proxyStreamErrorCapture{}
 	outputStreamError := &proxyStreamErrorCapture{}
 	providerReader := io.Reader(resp.Body)
+	// Loop gate on the upstream stream, before conversion: a chat completion
+	// converted to Responses / Messages events, or a Messages stream relayed as
+	// is. The closing events it adds go through the same conversion. Its
+	// reads run in the transform goroutine, which ends before this returns.
+	// A converter drops SSE comments, so keepalives during a restart go
+	// straight to the client stream: the converter is blocked in its read
+	// between two events, nothing else writes to pw meanwhile.
+	if loopGate := p.newLoopGateObserver(respCtx(resp), logCtx, modelID, resp.StatusCode, loopGateFormatOf(logCtx)); loopGate != nil {
+		defer loopGate.finish()
+		loopGate.keepalive = pw
+		providerReader = loopGate.wrap(resp.Body)
+	}
 	if detectProviderStreamError {
 		// Some converters normalize a provider error event into an apparently
 		// successful output chunk. Observe both sides so the original terminal
@@ -836,6 +931,8 @@ func (p *Proxy) handleTransformedStreaming(
 			tokens:     &totalTokens,
 			completion: completion,
 			logger:     p.logger,
+			proxy:      p,
+			logCtx:     logCtx,
 			onChunk: func(chunk []byte, payloads [][]byte, hasUsage bool) {
 				chunkCount++
 
@@ -953,6 +1050,16 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 	detectProviderStreamError := resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
 	providerStreamError := &proxyStreamErrorCapture{}
 	providerReader := io.Reader(resp.Body)
+	// Loop gate: watches the generated text for a model stuck repeating itself
+	// and, in enforce mode, ends the stream there. It reads the raw upstream
+	// body, so the closing chunk it adds goes through the same sanitizing and
+	// usage accounting as the upstream chunks. Reports when the handler returns.
+	loopGate := p.newLoopGateObserver(respCtx(resp), logCtx, modelID, resp.StatusCode, loopgate.FormatChat)
+	if loopGate != nil {
+		defer loopGate.finish()
+		loopGate.normalizeUsage = true // handleProviderStreaming wrapped resp.Body
+		providerReader = loopGate.wrap(resp.Body)
+	}
 	if detectProviderStreamError {
 		providerReader = io.TeeReader(providerReader, proxyStreamErrorObserver{capture: providerStreamError})
 	}
@@ -1007,12 +1114,29 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 		})
 	}
 
+	var postFinish chatPostFinishDetector
+	observeJSON := func(value any) {
+		for _, violation := range postFinish.observeJSON(value) {
+			p.logger.WarnContext(respCtx(resp), "Provider sent text after finish_reason in Chat Completions stream",
+				"credential", credName, "model", modelID, "request_id", logContextRequestID(logCtx),
+				"choice_index", violation.index, "finish_reason", violation.finishReason, "delta_field", violation.field)
+		}
+	}
 	clientReader := normalizeSuccessfulResponseModelStream(
-		promanutils.NewSanitizingSSEReader(providerReader, clientVisibleResponseModel(logCtx, modelID)),
+		promanutils.NewSanitizingSSEReaderWithObserver(providerReader, clientVisibleResponseModel(logCtx, modelID), observeJSON),
 		resp.StatusCode,
 		logCtx,
 		modelID,
 	)
+	if shouldExposeCostToClient(logCtx) {
+		// This is the raw OpenAI-compatible passthrough path (no format
+		// conversion) -- the chunks streamToClient reads below are socket-read
+		// boundaries, not SSE-line boundaries, so cost can't be spliced in at
+		// the single Write() this package uses for providers that do get
+		// converted (see tokenCapturingWriter.Write). Only requests whose
+		// organization opted in pay for this extra line-buffering reader.
+		clientReader = newCostInjectingSSEReader(clientReader, p, logCtx, tokenUsageOpts)
+	}
 	if err := p.streamToClient(respCtx(resp), w, clientReader, credName, metricModelID(modelID, logCtx), endpointFromLogContext(logCtx), resp.StatusCode, onChunk, nil, logCtx); err != nil {
 		p.logStreamHandlerError(respCtx(resp), "streamToClient error in handleStreamingWithTokens", err,
 			"credential", credName, "model", modelID, "chunks_received", chunkCount)
@@ -1077,6 +1201,21 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 
 // finalizeStreamingLog extracts usage info from the last streaming chunk and logs spend to LiteLLM DB.
 func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int, lastChunk []byte, providerName string, statusCode int, audioInputAlreadyExcludesCachedAudio bool) {
+	p.finalizeStreamingLogParsed(logCtx, totalTokens, lastChunk, nil, providerName, statusCode, audioInputAlreadyExcludesCachedAudio)
+}
+
+// finalChunkParse is what finalizeStreamingLog reads from its last chunk,
+// given by a stream handler that has already decoded that chunk so it is not
+// decoded again.
+type finalChunkParse struct {
+	usage      *StreamUsageInfo // the stream usage extractor's result
+	errorEvent string           // extractStreamErrorEvent's result
+}
+
+// finalizeStreamingLogParsed is finalizeStreamingLog with lastChunk already
+// parsed when parsed is not nil; lastChunk then only serves the error message
+// of a failed (HTTP >= 400) stream.
+func (p *Proxy) finalizeStreamingLogParsed(logCtx *RequestLogContext, totalTokens int, lastChunk []byte, parsed *finalChunkParse, providerName string, statusCode int, audioInputAlreadyExcludesCachedAudio bool) {
 	if logCtx == nil || logCtx.Logged {
 		return
 	}
@@ -1099,86 +1238,93 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 	// reports some fields but not others still gets a fallback for the missing one.
 	providerReportedPromptTokens := false
 	providerReportedCompletionTokens := false
-	if len(lastChunk) > 0 {
+	var usageInfo *StreamUsageInfo
+	if parsed != nil {
+		usageInfo = parsed.usage
+	} else if len(lastChunk) > 0 {
 		extractor := getStreamUsageExtractor(providerName)
 		if audioInputAlreadyExcludesCachedAudio {
 			extractor = &openAIStreamUsageExtractor{audioInputAlreadyExcludesCachedAudio: true}
 		}
-		if usageInfo := extractor.ExtractUsage(lastChunk); usageInfo != nil {
-			providerUsage = true
-			if usageInfo.PromptTokens > 0 {
-				logCtx.TokenUsage.PromptTokens = usageInfo.PromptTokens
-				providerReportedPromptTokens = true
-			}
-			if usageInfo.CompletionTokens > 0 {
-				logCtx.TokenUsage.CompletionTokens = usageInfo.CompletionTokens
-				providerReportedCompletionTokens = true
-			}
-
-			if usageInfo.CachedTokens > 0 {
-				logCtx.TokenUsage.CachedInputTokens = usageInfo.CachedTokens
-			}
-			if usageInfo.CacheType != "" {
-				logCtx.TokenUsage.CacheType = usageInfo.CacheType
-			}
-			if usageInfo.CachedAudioTokens > 0 {
-				logCtx.TokenUsage.CachedAudioInputTokens = usageInfo.CachedAudioTokens
-			}
-			if usageInfo.AudioInputTokens > 0 {
-				logCtx.TokenUsage.AudioInputTokens = usageInfo.AudioInputTokens
-			}
-			if usageInfo.AudioOutputTokens > 0 {
-				logCtx.TokenUsage.AudioOutputTokens = usageInfo.AudioOutputTokens
-			}
-			if usageInfo.ImageTokens > 0 {
-				logCtx.TokenUsage.ImageTokens = usageInfo.ImageTokens
-			}
-			if usageInfo.VideoInputTokens > 0 {
-				logCtx.TokenUsage.VideoInputTokens = usageInfo.VideoInputTokens
-			}
-			if usageInfo.OutputImageTokens > 0 {
-				logCtx.TokenUsage.OutputImageTokens = usageInfo.OutputImageTokens
-			}
-			if usageInfo.ReasoningTokens > 0 {
-				logCtx.TokenUsage.ReasoningTokens = usageInfo.ReasoningTokens
-			}
-			if usageInfo.AcceptedPredictionTokens > 0 {
-				logCtx.TokenUsage.AcceptedPredictionTokens = usageInfo.AcceptedPredictionTokens
-			}
-			if usageInfo.RejectedPredictionTokens > 0 {
-				logCtx.TokenUsage.RejectedPredictionTokens = usageInfo.RejectedPredictionTokens
-			}
-			if usageInfo.CachedOutputTokens > 0 {
-				logCtx.TokenUsage.CachedOutputTokens = usageInfo.CachedOutputTokens
-			}
-
-			if usageInfo.CacheCreationTokens > 0 {
-				logCtx.TokenUsage.CacheCreationTokens = usageInfo.CacheCreationTokens
-			}
-			if usageInfo.CacheCreation5mTokens > 0 {
-				logCtx.TokenUsage.CacheCreation5mTokens = usageInfo.CacheCreation5mTokens
-			}
-			if usageInfo.CacheCreation1hTokens > 0 {
-				logCtx.TokenUsage.CacheCreation1hTokens = usageInfo.CacheCreation1hTokens
-			}
-			if usageInfo.WebSearchRequests > 0 {
-				logCtx.TokenUsage.WebSearchRequests = usageInfo.WebSearchRequests
-			}
-
-			p.logger.DebugContext(logCtx.Context(), "Extracted usage from streaming response",
-				"provider", providerName,
-				"prompt_tokens", usageInfo.PromptTokens,
-				"completion_tokens", usageInfo.CompletionTokens,
-				"cached_tokens", usageInfo.CachedTokens,
-				"audio_input_tokens", usageInfo.AudioInputTokens,
-				"audio_output_tokens", usageInfo.AudioOutputTokens,
-				"image_tokens", usageInfo.ImageTokens,
-				"video_input_tokens", usageInfo.VideoInputTokens,
-				"output_image_tokens", usageInfo.OutputImageTokens,
-				"reasoning_tokens", usageInfo.ReasoningTokens,
-				"web_search_requests", usageInfo.WebSearchRequests,
-			)
+		usageInfo = extractor.ExtractUsage(lastChunk)
+	}
+	if usageInfo != nil {
+		providerUsage = true
+		if usageInfo.PromptTokens > 0 {
+			logCtx.TokenUsage.PromptTokens = usageInfo.PromptTokens
+			providerReportedPromptTokens = true
 		}
+		if usageInfo.CompletionTokens > 0 {
+			logCtx.TokenUsage.CompletionTokens = usageInfo.CompletionTokens
+			providerReportedCompletionTokens = true
+		}
+
+		if usageInfo.CachedTokens > 0 {
+			logCtx.TokenUsage.CachedInputTokens = usageInfo.CachedTokens
+		}
+		if usageInfo.CacheType != "" {
+			logCtx.TokenUsage.CacheType = usageInfo.CacheType
+		}
+		if usageInfo.CachedAudioTokens > 0 {
+			logCtx.TokenUsage.CachedAudioInputTokens = usageInfo.CachedAudioTokens
+		}
+		if usageInfo.AudioInputTokens > 0 {
+			logCtx.TokenUsage.AudioInputTokens = usageInfo.AudioInputTokens
+		}
+		if usageInfo.AudioOutputTokens > 0 {
+			logCtx.TokenUsage.AudioOutputTokens = usageInfo.AudioOutputTokens
+		}
+		if usageInfo.ImageTokens > 0 {
+			logCtx.TokenUsage.ImageTokens = usageInfo.ImageTokens
+		}
+		if usageInfo.VideoInputTokens > 0 {
+			logCtx.TokenUsage.VideoInputTokens = usageInfo.VideoInputTokens
+		}
+		if usageInfo.OutputImageTokens > 0 {
+			logCtx.TokenUsage.OutputImageTokens = usageInfo.OutputImageTokens
+		}
+		if usageInfo.ReasoningTokens > 0 {
+			logCtx.TokenUsage.ReasoningTokens = usageInfo.ReasoningTokens
+		}
+		if usageInfo.AcceptedPredictionTokens > 0 {
+			logCtx.TokenUsage.AcceptedPredictionTokens = usageInfo.AcceptedPredictionTokens
+		}
+		if usageInfo.RejectedPredictionTokens > 0 {
+			logCtx.TokenUsage.RejectedPredictionTokens = usageInfo.RejectedPredictionTokens
+		}
+		if usageInfo.CachedOutputTokens > 0 {
+			logCtx.TokenUsage.CachedOutputTokens = usageInfo.CachedOutputTokens
+		}
+
+		if usageInfo.CacheCreationTokens > 0 {
+			logCtx.TokenUsage.CacheCreationTokens = usageInfo.CacheCreationTokens
+		}
+		if usageInfo.CacheCreation5mTokens > 0 {
+			logCtx.TokenUsage.CacheCreation5mTokens = usageInfo.CacheCreation5mTokens
+		}
+		if usageInfo.CacheCreation1hTokens > 0 {
+			logCtx.TokenUsage.CacheCreation1hTokens = usageInfo.CacheCreation1hTokens
+		}
+		if usageInfo.CacheCreation12hTokens > 0 {
+			logCtx.TokenUsage.CacheCreation12hTokens = usageInfo.CacheCreation12hTokens
+		}
+		if usageInfo.WebSearchRequests > 0 {
+			logCtx.TokenUsage.WebSearchRequests = usageInfo.WebSearchRequests
+		}
+
+		p.logger.DebugContext(logCtx.Context(), "Extracted usage from streaming response",
+			"provider", providerName,
+			"prompt_tokens", usageInfo.PromptTokens,
+			"completion_tokens", usageInfo.CompletionTokens,
+			"cached_tokens", usageInfo.CachedTokens,
+			"audio_input_tokens", usageInfo.AudioInputTokens,
+			"audio_output_tokens", usageInfo.AudioOutputTokens,
+			"image_tokens", usageInfo.ImageTokens,
+			"video_input_tokens", usageInfo.VideoInputTokens,
+			"output_image_tokens", usageInfo.OutputImageTokens,
+			"reasoning_tokens", usageInfo.ReasoningTokens,
+			"web_search_requests", usageInfo.WebSearchRequests,
+		)
 	}
 
 	// explicitZeroUsage: the provider sent a usage object and reported BOTH fields as zero
@@ -1205,6 +1351,13 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 		logCtx.TokenUsage.CompletionTokens = fallbackCompletion
 	}
 	logCtx.TokenUsage.Normalize()
+	// The router-run search/fetch loop's own usage wins over the figures read
+	// from the last chunk: the loop made several upstream requests, and the
+	// chunk carries only the last step's. Applied here, before the spend row
+	// is written from this usage.
+	if logCtx.DeepSeekToolUsage != nil {
+		applyDeepSeekToolUsageTo(logCtx.TokenUsage, logCtx.DeepSeekToolUsage)
+	}
 	if providerUsage {
 		logCtx.UsageSource = "provider"
 	} else if logCtx.UsageSource == "" {
@@ -1233,7 +1386,7 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 			logCtx.ErrorBodyRaw = extractErrorBodyRaw(lastChunk)
 			logCtx.ClientResponseBody = logCtx.ErrorBodyRaw
 		}
-	} else if streamErr := extractStreamErrorEvent(lastChunk); streamErr != "" {
+	} else if streamErr := finalStreamErrorEvent(parsed, lastChunk); streamErr != "" {
 		// Provider returned HTTP 2xx but sent an error event inside the stream
 		// (e.g. `data: {"error":...}`, `event: error`, response.failed). Without
 		// this check such requests are logged as success and never hit ERROR.
@@ -1341,6 +1494,15 @@ func extractStreamErrorEvent(chunk []byte) string {
 		return checkPayload(strings.TrimSpace(string(chunk)))
 	}
 	return ""
+}
+
+// finalStreamErrorEvent is extractStreamErrorEvent(lastChunk), taken from
+// parsed when the stream handler has already decoded lastChunk.
+func finalStreamErrorEvent(parsed *finalChunkParse, lastChunk []byte) string {
+	if parsed != nil {
+		return parsed.errorEvent
+	}
+	return extractStreamErrorEvent(lastChunk)
 }
 
 func isStreamErrorEvent(eventType string, hasError bool) bool {
@@ -1595,12 +1757,12 @@ func (p *Proxy) streamToClient(
 		// recomputed here (cheap, pure) just to record exactly what that call
 		// is about to write, rather than trusting the two to stay in sync by
 		// construction.
-		clientSaw := string(maskedUpstreamErrorBody(statusCode, logContextRequestID(logCtx)))
+		clientSaw := string(maskedUpstreamErrorBody(statusCode, logContextRequestID(logCtx), []byte(payload)))
 		markProxyProviderStreamError(logCtx, statusCode, payload, clientSaw)
 		if logCtx != nil {
 			logCtx.StreamOutcome = "stream_error"
 		}
-		writeProviderStreamErrorBeforeCommit(w, statusCode, logContextRequestID(logCtx))
+		writeProviderStreamErrorBeforeCommit(w, statusCode, logContextRequestID(logCtx), payload)
 		if onWriteErr != nil {
 			onWriteErr()
 		}
@@ -1614,7 +1776,7 @@ func (p *Proxy) streamToClient(
 			responseIDScanner.observe(logCtx, chunk)
 			if ttftPending {
 				if ttftScan.observe(chunk) {
-					logCtx.CompletionStartTime = time.Now()
+					logCtx.markFirstToken()
 					ttftPending = false
 				} else if ttftScan.total > streamTTFTDetectionLimit {
 					ttftPending = false
@@ -1914,8 +2076,8 @@ func (p *Proxy) handleNativeResponsesStreaming(
 //
 // Token counts and the optional save callback are driven by the response.completed SSE
 // event. Because the event payload can be very large (full response JSON with reasoning),
-// it often spans multiple 8 KB buffer reads. This function maintains a line-level
-// accumulator (partialSSELine) so that a data: line that arrives in pieces is reassembled
+// it often spans multiple 8 KB buffer reads. This function reassembles lines
+// (newResponsesStreamLines) so that a data: line that arrives in pieces is complete
 // before JSON parsing, avoiding the silent json.Unmarshal failures that would otherwise
 // leave totalTokens = 0 and the store callback never invoked.
 func (p *Proxy) handlePassthroughResponsesStreaming(
@@ -1937,14 +2099,19 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 	var (
 		totalTokens           int
 		chunkCount            int
-		lastRawChunk          []byte // last raw buffer for fallback in finalizeStreamingLog
-		completedEventPayload []byte // JSON payload of response.completed (used instead of lastRawChunk)
-		partialSSELine        string // partial SSE line accumulator across buffer reads
+		lastRawChunk          []byte           // last raw buffer for fallback in finalizeStreamingLog
+		completedEventPayload []byte           // JSON payload of response.completed (used instead of lastRawChunk)
+		completedEventParse   *finalChunkParse // what finalizeStreamingLog reads from completedEventPayload
+		lines                 = newResponsesStreamLines()
 		completion            = p.newCompletionTokenAccumulator(modelID, logCtx)
 		detectStreamError     = resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
 		providerStreamError   = &proxyStreamErrorCapture{}
 	)
 	providerReader := io.Reader(resp.Body)
+	if loopGate := p.newLoopGateObserver(respCtx(resp), logCtx, modelID, resp.StatusCode, loopgate.FormatResponses); loopGate != nil {
+		defer loopGate.finish()
+		providerReader = loopGate.wrap(resp.Body)
+	}
 	if detectStreamError {
 		providerReader = io.TeeReader(providerReader, proxyStreamErrorObserver{capture: providerStreamError})
 	}
@@ -1956,85 +2123,75 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 		// lastRawChunk with the bare sentinel — keeps the usage event accessible.
 		rememberLastStreamDataChunk(&lastRawChunk, chunk)
 
-		// Combine the partial line buffered from the previous read with the new chunk.
 		// SSE data: lines can be arbitrarily long (e.g. response.completed with reasoning)
 		// and will be split across multiple 8 KB buffer reads.
-		combined := partialSSELine + string(chunk)
-		partialSSELine = ""
-
-		lastNL := strings.LastIndex(combined, "\n")
-		if lastNL < 0 {
-			// No newline yet — entire content is an incomplete line.
-			partialSSELine = combined
-			return
-		}
-		if lastNL < len(combined)-1 {
-			// Characters after the last newline are an incomplete line.
-			partialSSELine = combined[lastNL+1:]
-		}
-
-		// Walk every complete line in this chunk.
-		for _, line := range strings.Split(combined[:lastNL+1], "\n") {
-			line = strings.TrimRight(line, "\r")
-			// Accept "data:" with or without the (spec-optional) space: some
-			// Responses-compatible upstreams emit "data:{...}".
-			if !strings.HasPrefix(line, "data:") {
-				continue
-			}
-			jsonData := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-			if jsonData == "" || jsonData == "[DONE]" {
-				continue
+		lines.Observe(chunk, func(line []byte) {
+			// Some Responses-compatible upstreams emit "data:{...}" without the space.
+			jsonData := responsesStreamDataPayload(line)
+			if jsonData == nil {
+				return
 			}
 
-			var event struct {
-				Type     string             `json:"type"`
-				Response responses.Response `json:"response"`
+			// The terminal event is decoded once: its typed usage, the usage
+			// finalizeStreamingLog would otherwise extract from it again, and
+			// the whole response only when it is stored.
+			event, ok := parseResponsesTerminalEvent(jsonData)
+			if !ok {
+				return
 			}
-			if json.Unmarshal([]byte(jsonData), &event) == nil && (event.Type == "response.completed" || event.Type == "response.incomplete") {
-				if event.Response.Usage != nil {
-					totalTokens = event.Response.Usage.TotalTokens
-					if logCtx != nil {
-						if logCtx.TokenUsage == nil {
-							logCtx.TokenUsage = &converter.TokenUsage{}
-						}
-						cachedTokens, cachedAudioTokens := converterutil.NormalizeCachedAudioBreakdown(
-							event.Response.Usage.InputTokensDetails.CachedTokens,
-							event.Response.Usage.InputTokensDetails.CachedAudioTokens,
-						)
-						logCtx.TokenUsage.PromptTokens = event.Response.Usage.InputTokens
-						logCtx.TokenUsage.CompletionTokens = event.Response.Usage.OutputTokens
-						logCtx.TokenUsage.CachedInputTokens = cachedTokens
-						logCtx.TokenUsage.CachedAudioInputTokens = cachedAudioTokens
-						logCtx.TokenUsage.CacheCreationTokens = event.Response.Usage.InputTokensDetails.CacheCreationTokens
-						if details := event.Response.Usage.InputTokensDetails.CacheCreationTokenDetails; details != nil {
-							logCtx.TokenUsage.CacheCreation5mTokens = details.Ephemeral5mInputTokens
-							logCtx.TokenUsage.CacheCreation1hTokens = details.Ephemeral1hInputTokens
-						}
-						logCtx.TokenUsage.AudioInputTokens = normalizeStreamAudioInput(
-							event.Response.Usage.InputTokensDetails.AudioTokens,
-							cachedTokens,
-							cachedAudioTokens,
-							audioInputAlreadyExcludesCachedAudio,
-						)
-						logCtx.TokenUsage.AudioOutputTokens = event.Response.Usage.OutputTokensDetails.AudioTokens
-						logCtx.TokenUsage.ReasoningTokens = event.Response.Usage.OutputTokensDetails.ReasoningTokens
-						if event.Response.Usage.ServerToolUse != nil {
-							logCtx.TokenUsage.WebSearchRequests = event.Response.Usage.ServerToolUse.WebSearchRequests
-						}
-						// The typed usage above has no room for provider extensions:
-						// xAI's server-side tool counters, images of a built-in
-						// image_generation tool in response.output, the reasoning
-						// accounting (total_tokens) and the provider's own cost.
-						logCtx.TokenUsage.MergeUsageExtensions(
-							converter.ExtractTokenUsageWithOptions([]byte(jsonData), tokenUsageOptions))
+			payload := bytes.Clone(jsonData) // line is only valid during this call
+			if usage := event.typedUsage(); usage != nil {
+				totalTokens = usage.TotalTokens
+				if logCtx != nil {
+					if logCtx.TokenUsage == nil {
+						logCtx.TokenUsage = &converter.TokenUsage{}
 					}
-				}
-				completedEventPayload = []byte(jsonData) // plain JSON; extractResponsesAPIUsage handles it
-				if onComplete != nil {
-					onComplete(&event.Response)
+					cachedTokens, cachedAudioTokens := converterutil.NormalizeCachedAudioBreakdown(
+						usage.InputTokensDetails.CachedTokens,
+						usage.InputTokensDetails.CachedAudioTokens,
+					)
+					logCtx.TokenUsage.PromptTokens = usage.InputTokens
+					logCtx.TokenUsage.CompletionTokens = usage.OutputTokens
+					logCtx.TokenUsage.CachedInputTokens = cachedTokens
+					logCtx.TokenUsage.CachedAudioInputTokens = cachedAudioTokens
+					logCtx.TokenUsage.CacheCreationTokens = usage.InputTokensDetails.CacheCreationTokens
+					if details := usage.InputTokensDetails.CacheCreationTokenDetails; details != nil {
+						logCtx.TokenUsage.CacheCreation5mTokens = details.Ephemeral5mInputTokens
+						logCtx.TokenUsage.CacheCreation1hTokens = details.Ephemeral1hInputTokens
+					}
+					if details := usage.InputTokensDetails.CacheWriteTokensDetails; details != nil {
+						logCtx.TokenUsage.CacheCreation12hTokens = details.TTL12hTokens
+						if logCtx.TokenUsage.CacheCreation5mTokens == 0 && logCtx.TokenUsage.CacheCreation1hTokens == 0 {
+							logCtx.TokenUsage.CacheCreation5mTokens = details.TTL30mTokens
+						}
+					}
+					logCtx.TokenUsage.AudioInputTokens = normalizeStreamAudioInput(
+						usage.InputTokensDetails.AudioTokens,
+						cachedTokens,
+						cachedAudioTokens,
+						audioInputAlreadyExcludesCachedAudio,
+					)
+					logCtx.TokenUsage.AudioOutputTokens = usage.OutputTokensDetails.AudioTokens
+					logCtx.TokenUsage.ReasoningTokens = usage.OutputTokensDetails.ReasoningTokens
+					if usage.ServerToolUse != nil {
+						logCtx.TokenUsage.WebSearchRequests = usage.ServerToolUse.WebSearchRequests
+					}
+					// The typed usage above has no room for provider extensions:
+					// xAI's server-side tool counters, images of a built-in
+					// image_generation tool in response.output, the reasoning
+					// accounting (total_tokens) and the provider's own cost.
+					logCtx.TokenUsage.MergeUsageExtensions(
+						converter.ExtractTokenUsageWithOptions(payload, tokenUsageOptions))
 				}
 			}
-		}
+			completedEventPayload = payload
+			completedEventParse = event.finalChunkParse(payload, audioInputAlreadyExcludesCachedAudio)
+			if onComplete != nil {
+				if response, ok := decodeTerminalResponse(payload); ok {
+					onComplete(response)
+				}
+			}
+		})
 	}
 
 	clientReader := normalizeSuccessfulResponseModelStream(
@@ -2043,6 +2200,14 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 		logCtx,
 		modelID,
 	)
+	if shouldExposeCostToClient(logCtx) {
+		// Same raw-passthrough situation as handleStreamingWithTokens (see its
+		// own wrap), but the Responses API nests usage at response.usage on
+		// the terminal response.completed/response.incomplete event instead
+		// of a flat top-level "usage" key -- see
+		// newResponsesAPICostInjectingReader's doc comment.
+		clientReader = newResponsesAPICostInjectingReader(clientReader, p, logCtx, tokenUsageOptions, audioInputAlreadyExcludesCachedAudio)
+	}
 	if err := p.streamToClient(respCtx(resp), w, clientReader, credName, metricModelID(modelID, logCtx), endpointFromLogContext(logCtx), resp.StatusCode, onChunk, nil, logCtx); err != nil {
 		p.logStreamHandlerError(respCtx(resp), "streamToClient error in handlePassthroughResponsesStreaming", err,
 			"credential", credName, "model", modelID, "chunks_received", chunkCount)
@@ -2051,9 +2216,9 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 			defer cancel()
 			p.drainUpstream(drainCtx, clientReader, onChunk, credName)
 		}
-		finalChunk := lastRawChunk
+		finalChunk, finalParse := lastRawChunk, (*finalChunkParse)(nil)
 		if len(completedEventPayload) > 0 {
-			finalChunk = completedEventPayload
+			finalChunk, finalParse = completedEventPayload, completedEventParse
 		}
 		logTokens := totalTokens
 		if logTokens == 0 {
@@ -2063,7 +2228,7 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 			err = resolveCapturedProviderStreamError(logCtx, resp.StatusCode, err, providerStreamError)
 		}
 		markStreamFailure(logCtx, err)
-		p.finalizeStreamingLog(logCtx, logTokens, finalChunk, "openai", resp.StatusCode, audioInputAlreadyExcludesCachedAudio)
+		p.finalizeStreamingLogParsed(logCtx, logTokens, finalChunk, finalParse, "openai", resp.StatusCode, audioInputAlreadyExcludesCachedAudio)
 		return err
 	}
 
@@ -2095,13 +2260,13 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 
 	// Prefer the parsed response.completed payload for detailed token extraction.
 	// The raw lastRawChunk may contain only `data: [DONE]` with no usage info.
-	// completedEventPayload is plain JSON; extractJSONPayloadsFromStreamChunk handles it
-	// via the non-SSE fast path, so extractResponsesAPIUsage works correctly.
-	finalChunk := lastRawChunk
+	// completedEventParse already holds what finalizeStreamingLog reads from the
+	// payload, so the payload is not decoded again.
+	finalChunk, finalParse := lastRawChunk, (*finalChunkParse)(nil)
 	if len(completedEventPayload) > 0 {
-		finalChunk = completedEventPayload
+		finalChunk, finalParse = completedEventPayload, completedEventParse
 	}
 
-	p.finalizeStreamingLog(logCtx, logTokens, finalChunk, "openai", resp.StatusCode, audioInputAlreadyExcludesCachedAudio)
+	p.finalizeStreamingLogParsed(logCtx, logTokens, finalChunk, finalParse, "openai", resp.StatusCode, audioInputAlreadyExcludesCachedAudio)
 	return streamErr
 }

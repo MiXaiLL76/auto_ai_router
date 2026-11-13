@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+
+cd "$(git rev-parse --show-toplevel)"
+
+# go fmt can edit files while returning success. Stop so the formatted result
+# can be reviewed and staged before committing.
+before=$(git diff --binary | git hash-object --stdin)
+make format
+after=$(git diff --binary | git hash-object --stdin)
+if [ "$before" != "$after" ]; then
+	echo "make format changed files; review and stage them before committing" >&2
+	exit 1
+fi
+
+make lint

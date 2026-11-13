@@ -35,6 +35,12 @@ func (p *Proxy) ScopeContextForRequest(r *http.Request) (scope.Context, error) {
 	return scopeContextFromTokenInfo(tokenInfo), nil
 }
 
+// scopeContextFromTokenInfo derives a token's scope from its own metadata
+// UNIONED with its team's and organization's metadata: a scope granted (or
+// denied) at any level applies, so an admin can flip a feature on for a
+// whole team/org without touching every key's metadata individually. A
+// token with no air_scopes set at ANY of the three levels keeps the
+// original key/alias-namespace fallback below, unchanged.
 func scopeContextFromTokenInfo(info *dbmodels.TokenInfo) scope.Context {
 	if info == nil {
 		return scope.PublicContext()
@@ -43,7 +49,11 @@ func scopeContextFromTokenInfo(info *dbmodels.TokenInfo) scope.Context {
 		return scope.AdminContext()
 	}
 
-	allowed := metadataScopes(info.Metadata, "air_scopes", "air_scope")
+	allowed := unionScopeLists(
+		metadataScopes(info.Metadata, "air_scopes", "air_scope"),
+		metadataScopes(info.TeamMetadata, "air_scopes", "air_scope"),
+		metadataScopes(info.OrganizationMetadata, "air_scopes", "air_scope"),
+	)
 	if len(allowed) == 0 {
 		allowed = append(allowed, info.KeyName)
 		if info.KeyName == "" {
@@ -51,14 +61,31 @@ func scopeContextFromTokenInfo(info *dbmodels.TokenInfo) scope.Context {
 		}
 	}
 
-	denied := metadataScopes(info.Metadata,
-		"air_denied_scopes",
-		"air_denied_scope",
-		"air_forbidden_scopes",
-		"air_forbidden_scope",
+	deniedKeys := []string{"air_denied_scopes", "air_denied_scope", "air_forbidden_scopes", "air_forbidden_scope"}
+	denied := unionScopeLists(
+		metadataScopes(info.Metadata, deniedKeys...),
+		metadataScopes(info.TeamMetadata, deniedKeys...),
+		metadataScopes(info.OrganizationMetadata, deniedKeys...),
 	)
 
 	return scope.NewContext(allowed, denied)
+}
+
+// unionScopeLists merges scope lists, preserving first-seen order and
+// dropping duplicates.
+func unionScopeLists(lists ...[]string) []string {
+	var out []string
+	seen := make(map[string]struct{})
+	for _, list := range lists {
+		for _, v := range list {
+			if _, ok := seen[v]; ok {
+				continue
+			}
+			seen[v] = struct{}{}
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // ScopeContextFromTokenInfo derives the model/credential visibility scope from
