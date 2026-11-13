@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"math/rand/v2"
 	"net/http"
 	"os"
@@ -132,22 +133,7 @@ func (p *Proxy) applyCredentialCompatibilityRouting(
 	nextCred, nextReq, routed := p.nextPrimaryAfterUnsupportedCredential(r, prepared, modelID, cred, logCtx.Scope, reason, provider)
 	if routed {
 		r.URL.Path = nextReq.path
-		prepared.cred = nextCred
-		prepared.body = nextReq.body
-		prepared.proxyBody = nextReq.proxyBody
-		prepared.proxyPath = nextReq.proxyPath
-		prepared.realModelID = nextReq.realModelID
-		prepared.convertedResp = nextReq.convertedResp
-		prepared.convertedMessages = nextReq.convertedMessages
-		prepared.convertedToResponses = nextReq.convertedToResponses
-		prepared.passthroughResponses = nextReq.passthroughResponses
-		prepared.passthroughMessages = nextReq.passthroughMessages
-		prepared.nativeResponses = nextReq.nativeResponses
-		prepared.forcedNativeNonStream = nextReq.forcedNativeNonStream
-		prepared.forcedPassthroughNonStream = nextReq.forcedPassthroughNonStream
-		prepared.forcedChatNonStream = nextReq.forcedChatNonStream
-		prepared.completionsPath = nextReq.completionsPath
-		prepared.messagesMetadata = nextReq.messagesMetadata
+		prepared.useCredential(nextCred, nextReq)
 		logCtx.Credential = nextCred
 		logCtx.RealModelID = prepared.realModelID
 		if span := trace.SpanFromContext(r.Context()); span.IsRecording() {
@@ -271,6 +257,111 @@ func (p *Proxy) nextPrimaryAfterUnsupportedCredential(
 		"model", modelID,
 		"reason", reason)
 	return nil, credentialPreparedRequest{}, false
+}
+
+// useCredential switches the prepared request to cred and its prepared body.
+func (prepared *orchestratedRequest) useCredential(cred *config.CredentialConfig, nextReq credentialPreparedRequest) {
+	prepared.cred = cred
+	prepared.body = nextReq.body
+	prepared.proxyBody = nextReq.proxyBody
+	prepared.proxyPath = nextReq.proxyPath
+	prepared.realModelID = nextReq.realModelID
+	prepared.convertedResp = nextReq.convertedResp
+	prepared.convertedMessages = nextReq.convertedMessages
+	prepared.convertedToResponses = nextReq.convertedToResponses
+	prepared.passthroughResponses = nextReq.passthroughResponses
+	prepared.passthroughMessages = nextReq.passthroughMessages
+	prepared.nativeResponses = nextReq.nativeResponses
+	prepared.forcedNativeNonStream = nextReq.forcedNativeNonStream
+	prepared.forcedPassthroughNonStream = nextReq.forcedPassthroughNonStream
+	prepared.forcedChatNonStream = nextReq.forcedChatNonStream
+	prepared.completionsPath = nextReq.completionsPath
+	prepared.messagesMetadata = nextReq.messagesMetadata
+}
+
+// nextCrossTypeRetryCredential picks and prepares the next retry credential of any type
+// for the model and resolves its billing price. allowProxy=false skips
+// proxy/AIR candidates. Returns false when no credential is left.
+//
+// On a request that came from a peer router, a direct credential never hands
+// over to a router: two routers listing each other would bounce it back and forth.
+func (p *Proxy) nextCrossTypeRetryCredential(
+	r *http.Request,
+	prepared *orchestratedRequest,
+	logCtx *RequestLogContext,
+	cred *config.CredentialConfig,
+	triedCreds map[string]bool,
+	attemptedCreds map[string]bool,
+	attempt int,
+	allowProxy bool,
+) (*config.CredentialConfig, credentialPreparedRequest, bool, bool) {
+	modelID := prepared.modelID
+	allowProxy = allowProxy && (!logCtx.IsProxyRequest || cred.IsProxyLike())
+	exclude := triedCreds
+	if !allowProxy {
+		// Excluded up front: a candidate the balancer returns already took a rate-limit slot.
+		exclude = maps.Clone(triedCreds)
+		for _, proxyCred := range p.balancer.GetProxyCredentials() {
+			exclude[proxyCred.Name] = true
+		}
+	}
+	for {
+		candidate, err := p.balancer.NextRetryForModelExcludingScoped(modelID, cred, exclude, attemptedCreds, logCtx.Scope)
+		if err != nil {
+			p.logger.DebugContext(r.Context(), "No more retry credentials available",
+				"model", modelID, "attempt", attempt, "error", err)
+			return nil, credentialPreparedRequest{}, false, errors.Is(err, balancer.ErrRateLimitExceeded)
+		}
+		triedCreds[candidate.Name] = true
+		exclude[candidate.Name] = true
+		if reason, _ := unsupportedCredentialRequest(candidate, prepared.baseBody, modelID); reason != "" {
+			continue
+		}
+		preparedRetry, prepErr := p.prepareRequestForCredential(
+			r,
+			prepared.baseBody,
+			prepared.baseProxyBody,
+			modelID,
+			prepared.baseRealModelID,
+			prepared.basePath,
+			prepared.streaming,
+			candidate,
+			prepared.isResponsesAPI,
+			prepared.responsesPrevHandled,
+			prepared.stickyCacheEligible,
+			prepared.autoCacheControlDisabled,
+		)
+		if prepErr != nil {
+			p.logger.WarnContext(r.Context(), "Failed to prepare retry request for credential",
+				"credential", candidate.Name,
+				"provider", string(candidate.Type),
+				"model", modelID,
+				"attempt", attempt,
+				"error", prepErr)
+			continue
+		}
+		publicModelID := logCtx.PublicModelID
+		if publicModelID == "" {
+			publicModelID = modelID
+		}
+		retryPriceModelID, retryPrice := p.resolveRetryBillingPrice(
+			logCtx, publicModelID, modelID, preparedRetry.realModelID,
+		)
+		if retryPrice == nil && p.spendTrackingEnabled() {
+			p.logger.ErrorContext(r.Context(), "Retry credential skipped: model price unavailable",
+				"credential", candidate.Name,
+				"model", modelID,
+				"real_model", preparedRetry.realModelID,
+				"request_id", logCtx.RequestID)
+			continue
+		}
+		logCtx.ModelPrice = retryPrice
+		logCtx.PriceModelID = retryPriceModelID
+		logCtx.billingPriceResolved = true
+		logCtx.billingPriceModelID = retryPriceModelID
+		logCtx.billingPrice = retryPrice
+		return candidate, preparedRetry, true, false
+	}
 }
 
 func unsupportedCredentialRequest(cred *config.CredentialConfig, body []byte, selectedModel string) (string, string) {
@@ -1324,8 +1415,14 @@ func (p *Proxy) nextRetryCredential(
 	attempt int,
 	triedCreds, attemptedCreds map[string]bool,
 ) (nextCred *config.CredentialConfig, nextReq credentialPreparedRequest, ready bool, rateLimited bool) {
+	// This helper is used by simulated stream handlers, which send through the
+	// direct-provider path. A proxy-like credential needs proxyRequest dispatch.
+	exclude := maps.Clone(triedCreds)
+	for _, proxyCred := range p.balancer.GetProxyCredentials() {
+		exclude[proxyCred.Name] = true
+	}
 	for {
-		candidate, err := p.balancer.NextRetryForModelExcludingScoped(modelID, cred, triedCreds, attemptedCreds, logCtx.Scope)
+		candidate, err := p.balancer.NextRetryForModelExcludingScoped(modelID, cred, exclude, attemptedCreds, logCtx.Scope)
 		if err != nil {
 			p.logger.DebugContext(r.Context(), "No more retry credentials available",
 				"model", modelID, "attempt", attempt, "error", err)
@@ -1355,6 +1452,7 @@ func (p *Proxy) nextRetryCredential(
 			)
 			if retryPrice == nil && p.spendTrackingEnabled() {
 				triedCreds[candidate.Name] = true
+				exclude[candidate.Name] = true
 				p.logger.ErrorContext(r.Context(), "Retry credential skipped: model price unavailable",
 					"credential", candidate.Name,
 					"model", modelID,
@@ -1370,6 +1468,7 @@ func (p *Proxy) nextRetryCredential(
 			return candidate, preparedRetry, true, false
 		}
 		triedCreds[candidate.Name] = true
+		exclude[candidate.Name] = true
 		p.logger.WarnContext(r.Context(), "Failed to prepare retry request for credential",
 			"credential", candidate.Name,
 			"provider", string(candidate.Type),
@@ -2014,10 +2113,60 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	logCtx.mark(markAdmitted)
 
-	// Handle proxy/AIR credential types with exact same-type retry + fallback.
+	// Retries cross between the proxy/AIR and the direct path: any credential
+	// serving the model may take the next attempt, whatever its type. A switch
+	// jumps back to dispatch and continues the shared attempt count there.
+	triedCreds := GetTried(r.Context())
+	attemptedCreds := make(map[string]bool)
+	retryStart := 0
+	// Keep the last HTTP error across a switch between proxy and direct paths.
+	// A later transport failure must not replace a real upstream response with 502.
+	var priorRetryResp *ProxyResponse
+	var priorRetryCred *config.CredentialConfig
+	var priorRetryRealModelID string
+	var priorRetryPriceModelID string
+	var priorRetryPrice *models.ModelPrice
+	rememberRetryResponse := func(resp *ProxyResponse) {
+		// 401/402/403 describe the upstream credential, not the client's key.
+		// Request-scoped 400/404 already have dedicated classification below.
+		if resp == nil || (resp.StatusCode != http.StatusTooManyRequests && resp.StatusCode < http.StatusInternalServerError) {
+			return
+		}
+		priorRetryResp = resp
+		priorRetryCred = cred
+		priorRetryRealModelID = realModelID
+		priorRetryPriceModelID = logCtx.PriceModelID
+		priorRetryPrice = logCtx.ModelPrice
+	}
+	restoreRetryResponse := func() {
+		cred = priorRetryCred
+		logCtx.Credential = cred
+		realModelID = priorRetryRealModelID
+		logCtx.RealModelID = realModelID
+		logCtx.ActualCredentialName = priorRetryResp.ActualCredentialName
+		logCtx.PriceModelID = priorRetryPriceModelID
+		logCtx.ModelPrice = priorRetryPrice
+		logCtx.billingPriceModelID = priorRetryPriceModelID
+		logCtx.billingPrice = priorRetryPrice
+	}
+	useRetryCredential := func(next *config.CredentialConfig, nextReq credentialPreparedRequest) {
+		cred = next
+		triedCreds[cred.Name] = true
+		logCtx.Credential = cred
+		// Set by a failed peer router; spend logs and X-Credential-Name must not keep it.
+		logCtx.ActualCredentialName = ""
+		body = nextReq.body
+		proxyBody = nextReq.proxyBody
+		realModelID = nextReq.realModelID
+		r.URL.Path = nextReq.path
+		prepared.useCredential(next, nextReq)
+		logCtx.RealModelID = realModelID
+	}
+
+dispatch:
+	// Handle proxy/AIR credential types with retry + fallback.
 	if cred.IsProxyLike() {
 		logCtx.Credential = cred
-		triedCreds := GetTried(r.Context())
 		var proxyResp *ProxyResponse
 		// respCred is the credential that actually produced proxyResp. It can
 		// lag behind `cred`: e.g. attempt A returns a retryable error (proxyResp
@@ -2031,26 +2180,27 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		var shouldRetry bool
 		var retryReason RetryReason
 
-		for attempt := 0; attempt <= p.maxProviderRetries; attempt++ {
-			if attempt > 0 {
-				nextCred, err := p.balancer.NextSameTypeForModelExcludingScoped(modelID, cred.Type, triedCreds, logCtx.Scope)
-				if err != nil {
-					p.logger.DebugContext(r.Context(), "No more same-type remote-router credentials for retry",
-						"model", modelID, "attempt", attempt, "error", err)
+		for attempt := retryStart; attempt <= p.maxProviderRetries; attempt++ {
+			if attempt > retryStart {
+				nextCred, nextReq, ok, _ := p.nextCrossTypeRetryCredential(r, prepared, logCtx, cred, triedCreds, attemptedCreds, attempt, true)
+				if !ok {
 					break
 				}
-				cred = nextCred
-				triedCreds[cred.Name] = true
-				logCtx.Credential = cred
+				useRetryCredential(nextCred, nextReq)
 				httputil.AttemptsFrom(r.Context()).Next(httputil.AttemptRetry, string(retryReason))
-				p.logger.WarnContext(r.Context(), "Retrying with next same-type proxy credential",
+				p.logger.WarnContext(r.Context(), "Retrying with next credential",
 					"credential", cred.Name, "model", modelID,
 					"attempt", attempt+1, "max_attempts", p.maxProviderRetries+1,
 					"retry_reason", retryReason)
 				time.Sleep(time.Duration(rand.IntN(50)) * time.Millisecond)
+				if !cred.IsProxyLike() {
+					retryStart = attempt
+					goto dispatch
+				}
 			}
 
 			shouldRetry = false
+			attemptedCreds[cred.Name] = true
 
 			resp, fwdErr := p.forwardToProxy(w, r, modelID, cred, proxyBody, start, logCtx)
 			lastProxyErr = fwdErr
@@ -2083,6 +2233,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			if !shouldRetry {
 				break
 			}
+			rememberRetryResponse(proxyResp)
 
 			// Mid-retry failure — the request will be retried with another credential.
 			// The final failure (if all attempts fail) is logged at ERROR when the
@@ -2102,6 +2253,8 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			if proxyResp != nil {
 				// Prefer the last HTTP status code we actually received.
 				fallbackStatus = proxyResp.StatusCode
+			} else if priorRetryResp != nil {
+				fallbackStatus = priorRetryResp.StatusCode
 			} else if lastProxyErr != nil {
 				fallbackStatus = http.StatusBadGateway
 				if isTimeoutError(lastProxyErr) {
@@ -2109,7 +2262,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 
-			p.logger.InfoContext(r.Context(), "All same-type proxy credentials exhausted, attempting fallback",
+			p.logger.InfoContext(r.Context(), "All retry credentials exhausted, attempting fallback proxy",
 				"credential", cred.Name, "model", modelID,
 				"last_status", fallbackStatus, "reason", retryReason)
 			success, fallbackReason := p.TryFallbackProxy(w, r, modelID, cred.Name, fallbackStatus, retryReason, proxyBody, start, logCtx)
@@ -2131,6 +2284,11 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		// If we have a saved proxyResp (e.g. a 429 from an earlier attempt that was
 		// followed by a network error on the retry), fall through to writeProxyResponse
 		// so the real HTTP status is returned to the client instead of 502.
+		if proxyResp == nil && priorRetryResp != nil && !isClientCanceledTransportError(r, lastProxyErr) {
+			proxyResp = priorRetryResp
+			respCred = priorRetryCred
+			restoreRetryResponse()
+		}
 		if lastProxyErr != nil && proxyResp == nil {
 			statusCode := http.StatusBadGateway
 			statusMessage := "Bad Gateway"
@@ -2191,6 +2349,8 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			cred = respCred
 			logCtx.Credential = cred
 		}
+		// Retries reset it; the peer that produced this response named its own credential.
+		logCtx.ActualCredentialName = proxyResp.ActualCredentialName
 
 		if !proxyResp.IsStreaming {
 			if mappedStatus, ok := statusCodeFromProviderBodyError(proxyResp.StatusCode, proxyResp.Body); ok {
@@ -2488,9 +2648,6 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 	// Track embeddings requests (once, before retry loop)
 	isEmbeddings := strings.Contains(r.URL.Path, "/embeddings")
 
-	// Retry loop: try same-type credentials by default, or fallback_priority tiers when configured.
-	triedCreds := GetTried(r.Context())
-	attemptedCreds := make(map[string]bool)
 	var (
 		resp            *http.Response
 		responseBody    []byte
@@ -2550,15 +2707,14 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	for attempt := 0; attempt <= p.maxProviderRetries; attempt++ {
-		if attempt > 0 {
+	for attempt := retryStart; attempt <= p.maxProviderRetries; attempt++ {
+		if attempt > retryStart {
 			// Check for next credential BEFORE resetting resp/responseBody.
 			// If no credential is available, break while preserving the last HTTP response
 			// (e.g. a 429 from the provider) so the caller returns it instead of 502.
-			nextCred, nextReq, retryReady, retryRateLimited := p.nextRetryCredential(
-				r, logCtx, modelID, cred, prepared, streaming, attempt, triedCreds, attemptedCreds,
-			)
-			if !retryReady {
+			// A fan-out's kept replies can't follow the request to a peer router.
+			nextCred, nextReq, ok, retryRateLimited := p.nextCrossTypeRetryCredential(r, prepared, logCtx, cred, triedCreds, attemptedCreds, attempt, len(embedFanOutReplies.byInput) == 0)
+			if !ok {
 				// The cascade ran out because every candidate was rate-limited
 				// (RPM/TPM saturated), not because there is no candidate at all.
 				// Remember it: with no response to relay, the outcome below would
@@ -2580,29 +2736,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			resp = nil
 			responseBody = nil
 
-			cred = nextCred
-			triedCreds[cred.Name] = true
-			logCtx.Credential = cred
-			body = nextReq.body
-			proxyBody = nextReq.proxyBody
-			realModelID = nextReq.realModelID
-			r.URL.Path = nextReq.path
-			prepared.body = nextReq.body
-			prepared.proxyBody = nextReq.proxyBody
-			prepared.proxyPath = nextReq.proxyPath
-			prepared.realModelID = nextReq.realModelID
-			prepared.convertedResp = nextReq.convertedResp
-			prepared.convertedMessages = nextReq.convertedMessages
-			prepared.convertedToResponses = nextReq.convertedToResponses
-			prepared.passthroughResponses = nextReq.passthroughResponses
-			prepared.passthroughMessages = nextReq.passthroughMessages
-			prepared.nativeResponses = nextReq.nativeResponses
-			prepared.forcedNativeNonStream = nextReq.forcedNativeNonStream
-			prepared.forcedPassthroughNonStream = nextReq.forcedPassthroughNonStream
-			prepared.forcedChatNonStream = nextReq.forcedChatNonStream
-			prepared.completionsPath = nextReq.completionsPath
-			prepared.messagesMetadata = nextReq.messagesMetadata
-			logCtx.RealModelID = realModelID
+			useRetryCredential(nextCred, nextReq)
 			httputil.AttemptsFrom(r.Context()).Next(httputil.AttemptRetry, string(retryReason))
 
 			p.logger.InfoContext(r.Context(), "Retrying with next credential",
@@ -2611,6 +2745,10 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				"retry_reason", retryReason)
 
 			time.Sleep(time.Duration(rand.IntN(50)) * time.Millisecond)
+			if cred.IsProxyLike() {
+				retryStart = attempt
+				goto dispatch
+			}
 		}
 
 		// Reset retry state for this attempt
@@ -2830,6 +2968,11 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		if !shouldRetry {
 			break
 		}
+		rememberRetryResponse(&ProxyResponse{
+			StatusCode: resp.StatusCode,
+			Headers:    resp.Header.Clone(),
+			Body:       bytes.Clone(responseBody),
+		})
 
 		// Mid-retry failure — the request will be retried with another credential.
 		// The final failure (if all attempts fail) is logged at ERROR when the
@@ -2846,7 +2989,9 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 	// After retry loop: try proxy fallback as last resort
 	if shouldRetry && !isStreamingResp {
 		fallbackStatus := 0
-		if transportErr != nil {
+		if resp == nil && priorRetryResp != nil {
+			fallbackStatus = priorRetryResp.StatusCode
+		} else if transportErr != nil {
 			fallbackStatus = http.StatusBadGateway
 			if isTimeoutError(transportErr) {
 				fallbackStatus = http.StatusRequestTimeout
@@ -2884,6 +3029,22 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 	if resp == nil {
 		if closeBody != nil {
 			closeBody()
+		}
+		if priorRetryResp != nil && !isClientCanceledTransportError(r, transportErr) {
+			restoreRetryResponse()
+			visibility := logCtx.Scope
+			p.ensureRetryAfterOn429(w, priorRetryResp.StatusCode, priorRetryResp.Headers, modelID, visibility)
+			p.setCredentialResponseHeader(w, logCtx, logCtx.ActualCredentialName)
+			p.writeProxyResponse(w, priorRetryResp, r, cred, modelID, logCtx)
+			logCtx.Status = "failure"
+			logCtx.HTTPStatus = priorRetryResp.StatusCode
+			logCtx.ErrorMsg = extractErrorMessage(priorRetryResp.Body)
+			logCtx.ErrorBodyRaw = extractErrorBodyRaw(priorRetryResp.Body)
+			logCtx.TargetURL = cred.BaseURL
+			p.logUpstreamError(r.Context(), "Earlier retry response returned after a later transport error", priorRetryResp.StatusCode, cred, modelID, priorRetryResp.Body,
+				"url", cred.BaseURL, "request_id", logCtx.RequestID)
+			p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, priorRetryResp.StatusCode, time.Since(start))
+			return
 		}
 		statusCode := http.StatusBadGateway
 		statusMessage := "Bad Gateway"

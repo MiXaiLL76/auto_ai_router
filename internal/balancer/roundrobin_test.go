@@ -1326,22 +1326,30 @@ func TestNextSameTypeForModelExcluding_AIRDoesNotReturnGenericProxy(t *testing.T
 	require.ErrorIs(t, err, ErrNoCredentialsAvailable)
 }
 
-func TestNextRetryForModelExcluding_ProxyLikeRetriesStayExactType(t *testing.T) {
+func TestNextRetryForModelExcluding_RetriesCrossProxyAndDirectTypes(t *testing.T) {
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()
 
 	credentials := []config.CredentialConfig{
 		{Name: "air1", Type: config.ProviderTypeAIR, BaseURL: "http://air1.com", RPM: -1},
-		{Name: "proxy1", Type: config.ProviderTypeProxy, BaseURL: "http://proxy1.com", RPM: -1},
+		{Name: "openai1", Type: config.ProviderTypeOpenAI, RPM: -1},
 	}
 
 	bal := New(credentials, f2b, rl)
 
+	// AIR failed: retry reaches the direct credential.
 	tried := map[string]bool{"air1": true}
-	_, err := bal.NextRetryForModelExcluding("gpt-cache", &credentials[0], tried, tried)
-	require.ErrorIs(t, err, ErrNoCredentialsAvailable)
+	cred, err := bal.NextRetryForModelExcluding("gpt-cache", &credentials[0], tried, tried)
+	require.NoError(t, err)
+	assert.Equal(t, "openai1", cred.Name)
 
-	tried = map[string]bool{"proxy1": true}
+	// Direct failed: retry reaches the AIR credential.
+	tried = map[string]bool{"openai1": true}
+	cred, err = bal.NextRetryForModelExcluding("gpt-cache", &credentials[1], tried, tried)
+	require.NoError(t, err)
+	assert.Equal(t, "air1", cred.Name)
+
+	tried = map[string]bool{"air1": true, "openai1": true}
 	_, err = bal.NextRetryForModelExcluding("gpt-cache", &credentials[1], tried, tried)
 	require.ErrorIs(t, err, ErrNoCredentialsAvailable)
 }
