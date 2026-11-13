@@ -91,6 +91,24 @@ var geminiModelProfiles = []geminiModelProfile{
 		functionCallIDs:       true,
 		billsRepeatedSearches: true,
 	},
+	{
+		// Gemini 4 Carbon takes Argon's rules.
+		id: "gemini-4-carbon",
+		thinkingLevels: []genai.ThinkingLevel{
+			genai.ThinkingLevelLow,
+			genai.ThinkingLevelMedium,
+			genai.ThinkingLevelHigh,
+		},
+		defaultThinkingLevel:  genai.ThinkingLevelMedium,
+		thinkingLevelsOnly:    true,
+		ignoresSamplingParams: true,
+		singleCandidate:       true,
+		noModelPrefill:        true,
+		tokenLimit:            1048576,
+		longDecode:            true,
+		functionCallIDs:       true,
+		billsRepeatedSearches: true,
+	},
 }
 
 // lookupGeminiModelProfile returns the profile for model, or nil. Provider prefixes

@@ -220,7 +220,7 @@ Gemini 2.5 and Gemini 3+ models support configurable reasoning. The router suppo
 3. `extra_body.thinking` — Anthropic-style format
 4. `extra_body.reasoning_effort` — OpenAI format (lowest priority)
 
-If none are specified, the router explicitly suppresses autonomous thinking for **predictable latency**. Exceptions: `gemini-2.5-pro` cannot disable thinking and uses dynamic budget (`-1`) by default; [`gemini-nano-banana-2.1`](#gemini-nano-banana-21) and [`gemini-4-argon`](#gemini-4-argon) keep their own default level (`MEDIUM`).
+If none are specified, the router explicitly suppresses autonomous thinking for **predictable latency**. Exceptions: `gemini-2.5-pro` cannot disable thinking and uses dynamic budget (`-1`) by default; [`gemini-nano-banana-2.1`](#gemini-nano-banana-21), [`gemini-4-argon` and `gemini-4-carbon`](#gemini-4-argon-and-carbon) keep their own default level (`MEDIUM`).
 
 Each source is read at the top level (where the OpenAI SDKs put `extra_body` keys) first, then inside a literal
 `extra_body` object; `thinking_config` is also read from `extra_body.generation_config`, as in Gemini's REST
@@ -542,9 +542,10 @@ client.embeddings.create(
 
 `usage.prompt_tokens_details` splits the tokens by modality (`text_tokens`, `image_tokens`, `audio_tokens`, `video_tokens`; PDF pages count as images), and each modality is billed at its own rate (see [Model Pricing](../litellm-integration/pricing.md)). If Google returns no usage for some or all inputs, their text is estimated at ~4 characters per token (media is not counted) and a warning is logged.
 
-### Gemini 4 Argon
+### Gemini 4 Argon and Carbon
 
-`gemini-4-argon` has rules of its own, which the router applies on the chat and Responses routes alike:
+`gemini-4-argon` and `gemini-4-carbon` share rules of their own, which the router applies on the chat and Responses
+routes alike:
 
 - **Thinking levels only.** `reasoning_effort` (or `reasoning.effort`) `low` / `medium` / `high` map to `LOW` /
   `MEDIUM` / `HIGH`; without one the model's default `MEDIUM` is sent. Thinking cannot be turned off: `minimal`,
@@ -605,4 +606,4 @@ The router provides accurate token counting with modality breakdown:
 - **Image and video tokens**: Reported separately (`prompt_tokens_details.image_tokens` / `video_tokens`), each at its own price; PDF pages (`DOCUMENT`) count as image tokens, as in embeddings
 - **Thinking tokens**: Included in completion count, tracked in `completion_tokens_details.reasoning_tokens`
 - **Generated image tokens**: Tracked in `completion_tokens_details.image_tokens` and billed at the image output rate, apart from text and thinking
-- **Google Search**: Queries in `server_tool_use.web_search_requests`, a query text repeated in a response once (except on [`gemini-4-argon`](#gemini-4-argon)); search-retrieved context counts as prompt tokens except on `gemini-nano-banana-2.1` (see [Google Search types](#google-search-types))
+- **Google Search**: Queries in `server_tool_use.web_search_requests`, a query text repeated in a response once (except on [`gemini-4-argon` and `gemini-4-carbon`](#gemini-4-argon-and-carbon)); search-retrieved context counts as prompt tokens except on `gemini-nano-banana-2.1` (see [Google Search types](#google-search-types))
