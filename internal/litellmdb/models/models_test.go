@@ -9,6 +9,33 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// ==================== TokenInfo Clone Tests ====================
+
+func TestTokenInfo_Clone_DeepCopiesTeamAndOrganizationMetadata(t *testing.T) {
+	original := &TokenInfo{
+		TeamMetadata:         map[string]interface{}{"air_scopes": []interface{}{"team-scope"}},
+		OrganizationMetadata: map[string]interface{}{"air_scopes": []interface{}{"org-scope"}},
+	}
+
+	clone := original.Clone()
+	require.NotNil(t, clone)
+	assert.Equal(t, original.TeamMetadata, clone.TeamMetadata)
+	assert.Equal(t, original.OrganizationMetadata, clone.OrganizationMetadata)
+
+	// Mutating the clone's maps must not affect the original.
+	clone.TeamMetadata["air_scopes"] = []interface{}{"mutated"}
+	clone.OrganizationMetadata["air_scopes"] = []interface{}{"mutated"}
+	assert.Equal(t, []interface{}{"team-scope"}, original.TeamMetadata["air_scopes"])
+	assert.Equal(t, []interface{}{"org-scope"}, original.OrganizationMetadata["air_scopes"])
+}
+
+func TestTokenInfo_Clone_NilTeamAndOrganizationMetadata(t *testing.T) {
+	clone := (&TokenInfo{}).Clone()
+	require.NotNil(t, clone)
+	assert.Nil(t, clone.TeamMetadata)
+	assert.Nil(t, clone.OrganizationMetadata)
+}
+
 // ==================== DefaultConfig Tests ====================
 
 func TestDefaultConfig(t *testing.T) {

@@ -255,10 +255,10 @@ func (m *DefaultManager) SpendLoggingEnabled() bool {
 
 // MarkSpendLogKafkaFallback flags an existing spend log row's metadata so it
 // can be found and re-published to Kafka later (by external/DBA tooling, not
-// by AIR itself). request_id is the table's primary key, so this is a single
-// targeted update — it's a no-op (rows affected = 0, no error) if the row
-// doesn't exist, which can happen if litellm_db writes are disabled for this
-// request.
+// by AIR itself). It flags every row with this request_id: on a partitioned
+// table the primary key is (request_id, "startTime"), so there can be more
+// than one. It's a no-op (rows affected = 0, no error) if no row exists, which
+// can happen if litellm_db writes are disabled for this request.
 func (m *DefaultManager) MarkSpendLogKafkaFallback(ctx context.Context, requestID, reason string) error {
 	const query = `
 		UPDATE "LiteLLM_SpendLogs"

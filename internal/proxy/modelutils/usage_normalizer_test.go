@@ -6,9 +6,18 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// enableMirrorCacheWriteTokens turns the flag on for the duration of one test
+// and restores it to off (the default) afterward, since it is process-global.
+func enableMirrorCacheWriteTokens(t *testing.T) {
+	t.Helper()
+	converterutil.SetMirrorCacheWriteTokens(true)
+	t.Cleanup(func() { converterutil.SetMirrorCacheWriteTokens(false) })
+}
 
 func TestNormalizeCompletionUsage(t *testing.T) {
 	body := []byte(`{"usage":{"completion_tokens":134,"completion_tokens_details":{"text_tokens":134,"reasoning_tokens":127,"provider_detail":"kept"}}}`)
@@ -113,6 +122,27 @@ func TestUsageNormalizingReadCloserNormalizesCacheCreationForNonQwen(t *testing.
 	assert.Contains(t, string(output), "data: [DONE]\r\n\r\n")
 }
 
+func TestUsageNormalizingReadCloserMirrorsCacheWriteTokensWhenEnabled(t *testing.T) {
+	// Same streamed Requesty cache write as
+	// TestUsageNormalizingReadCloserNormalizesCacheCreationForNonQwen, but with
+	// MirrorCacheWriteTokens on: the SSE path must mirror it too, not just the
+	// non-streaming one.
+	enableMirrorCacheWriteTokens(t)
+	stream := "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\r\n" +
+		`data: {"id":"rqsty-cmpl-abc","usage":{"prompt_tokens":3010,"completion_tokens":50,"total_tokens":3060,"prompt_tokens_details":{"cached_tokens":0,"caching_tokens":2755,"caching_token_details":{"caching_5m_tokens":2755,"caching_1h_tokens":0}}}}` + "\r\n\r\n" +
+		"data: [DONE]\r\n\r\n"
+
+	reader, wrapped := NewUsageNormalizingReadCloser(io.NopCloser(strings.NewReader(stream)), "anthropic/claude-sonnet-4.6")
+	require.True(t, wrapped)
+	output, err := io.ReadAll(reader)
+
+	require.NoError(t, err)
+	assert.Contains(t, string(output), `"cache_creation_tokens":2755`)
+	assert.Contains(t, string(output), `"cache_write_tokens":2755`)
+	assert.Contains(t, string(output), `"caching_tokens":2755`)
+	assert.Contains(t, string(output), "data: [DONE]\r\n\r\n")
+}
+
 func TestUsageNormalizerLeavesOtherModelsUntouched(t *testing.T) {
 	body := []byte(`{"usage":{"completion_tokens":134,"completion_tokens_details":{"text_tokens":134,"reasoning_tokens":127}}}`)
 
@@ -140,6 +170,77 @@ func TestNormalizeCacheCreationUsageFromRequestyNaming(t *testing.T) {
 	assert.Equal(t, float64(2755), ctd["ephemeral_5m_input_tokens"])
 	// Alternate naming preserved.
 	assert.Equal(t, float64(2755), details["caching_tokens"])
+}
+
+func TestNormalizeCacheCreationUsageMirrorsCacheWriteTokensWhenEnabled(t *testing.T) {
+	// Same Requesty-only cache write as above, but with MirrorCacheWriteTokens
+	// on: a client whose own accounting reads cache_write_tokens (not
+	// cache_creation_tokens) must see the write too.
+	enableMirrorCacheWriteTokens(t)
+	body := []byte(`{"id":"rqsty-cmpl-abc","usage":{"prompt_tokens":3010,"completion_tokens":50,"total_tokens":3060,"prompt_tokens_details":{"cached_tokens":0,"caching_tokens":2755,"caching_token_details":{"caching_5m_tokens":2755,"caching_1h_tokens":0}}}}`)
+
+	normalized, changed := NormalizeCacheCreationUsage(body)
+
+	require.True(t, changed)
+	var response map[string]any
+	require.NoError(t, json.Unmarshal(normalized, &response))
+	details := response["usage"].(map[string]any)["prompt_tokens_details"].(map[string]any)
+	assert.Equal(t, float64(2755), details["cache_creation_tokens"])
+	assert.Equal(t, float64(2755), details["cache_write_tokens"])
+	// The TTL split is also mirrored under Alibaba/Qwen's unsuffixed spelling
+	// (cache_creation.ephemeral_*), a third name some clients' accounting may
+	// read instead of cache_creation_token_details.
+	alibabaCC := details["cache_creation"].(map[string]any)
+	assert.Equal(t, float64(2755), alibabaCC["ephemeral_5m_input_tokens"])
+	// Alternate naming still preserved.
+	assert.Equal(t, float64(2755), details["caching_tokens"])
+}
+
+// A response that already carries its own cache_write_tokens (OpenRouter's
+// own naming, say) or its own Alibaba-spelled cache_creation (a Qwen model
+// passed through Requesty, with Requesty's own caching_tokens wrapper added
+// on top) must keep that provider's own numbers — mirroring must not
+// overwrite a name that is already someone else's real count.
+func TestNormalizeCacheCreationUsageDoesNotOverwriteExistingAlternateNames(t *testing.T) {
+	enableMirrorCacheWriteTokens(t)
+	body := []byte(`{"usage":{"prompt_tokens_details":{` +
+		`"caching_tokens":100,"caching_token_details":{"caching_5m_tokens":60,"caching_1h_tokens":40},` +
+		`"cache_write_tokens":999,` +
+		`"cache_creation":{"ephemeral_5m_input_tokens":77,"ephemeral_1h_input_tokens":0}` +
+		`}}}`)
+
+	normalized, changed := NormalizeCacheCreationUsage(body)
+
+	require.True(t, changed) // cache_creation_tokens/cache_creation_token_details are still synthesized
+	var response map[string]any
+	require.NoError(t, json.Unmarshal(normalized, &response))
+	details := response["usage"].(map[string]any)["prompt_tokens_details"].(map[string]any)
+	// The pre-existing alternate-name values are untouched.
+	assert.Equal(t, float64(999), details["cache_write_tokens"])
+	cc := details["cache_creation"].(map[string]any)
+	assert.Equal(t, float64(77), cc["ephemeral_5m_input_tokens"])
+	assert.Equal(t, float64(0), cc["ephemeral_1h_input_tokens"])
+	// The standard name is still synthesized from Requesty's own fields, as
+	// always.
+	assert.Equal(t, float64(100), details["cache_creation_tokens"])
+}
+
+func TestNormalizeCacheCreationUsageOmitsCacheWriteTokensWhenMirroringDisabled(t *testing.T) {
+	// MirrorCacheWriteTokens defaults to false: cache_write_tokens must not
+	// appear at all, as before the Requesty mirroring was added.
+	body := []byte(`{"id":"rqsty-cmpl-abc","usage":{"prompt_tokens":3010,"completion_tokens":50,"total_tokens":3060,"prompt_tokens_details":{"cached_tokens":0,"caching_tokens":2755,"caching_token_details":{"caching_5m_tokens":2755,"caching_1h_tokens":0}}}}`)
+
+	normalized, changed := NormalizeCacheCreationUsage(body)
+
+	require.True(t, changed)
+	var response map[string]any
+	require.NoError(t, json.Unmarshal(normalized, &response))
+	details := response["usage"].(map[string]any)["prompt_tokens_details"].(map[string]any)
+	assert.Equal(t, float64(2755), details["cache_creation_tokens"])
+	_, exists := details["cache_write_tokens"]
+	assert.False(t, exists, "cache_write_tokens must be absent while mirroring is disabled")
+	_, exists = details["cache_creation"]
+	assert.False(t, exists, "cache_creation (Alibaba spelling) must be absent while mirroring is disabled")
 }
 
 func TestNormalizeCacheCreationUsageLeavesStandardNamingUnchanged(t *testing.T) {

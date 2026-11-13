@@ -224,6 +224,8 @@ The router tries the configured priority tiers first, starting from the tier of 
 that failed, then continues with regular credentials that do not set `fallback_priority`. Fallback credentials
 (`is_fallback: true`) are still used only by the fallback mechanism. See
 [Proxy — Fallback Behavior](../providers/proxy.md#fallback-behavior) for details.
+The simulated non-stream path used by `force_stream_for_ttft` retries among direct credentials only;
+it does not switch to an `air`/`proxy` credential after an upstream stream has started.
 
 ## AIR Chain Fallback
 

@@ -780,6 +780,12 @@ func convertPricingToModelPrice(p *queries.CustomPricingLiteLLMParams) *manager.
 	if p.CacheCreationInputTokenCostAbove272kTokens != nil {
 		price.CacheCreationInputTokenCostAbove272k = *p.CacheCreationInputTokenCostAbove272kTokens
 	}
+	if p.CacheCreationInputTokenCost12h != nil {
+		price.CacheCreationInputTokenCost12h = *p.CacheCreationInputTokenCost12h
+	}
+	if p.CacheCreationInputTokenCost12hAbove272kTokens != nil {
+		price.CacheCreationInputTokenCost12hAbove272k = *p.CacheCreationInputTokenCost12hAbove272kTokens
+	}
 	if p.CacheReadInputTokenCostAbove512kTokens != nil {
 		price.CacheReadInputTokenCostAbove512k = *p.CacheReadInputTokenCostAbove512kTokens
 	}

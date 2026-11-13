@@ -19,9 +19,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mixaill76/auto_ai_router/internal/accountevents"
 	"github.com/mixaill76/auto_ai_router/internal/auth"
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
+	"github.com/mixaill76/auto_ai_router/internal/banreader"
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/fail2ban"
 	"github.com/mixaill76/auto_ai_router/internal/health"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
@@ -133,6 +136,21 @@ func main() {
 	litellmDBManager := initializeLiteLLMDB(cfg, log)
 	kafkaLogManager := initializeKafkaLog(cfg, log, litellmDBManager)
 	rawBodyLogManager := initializeRawBodyLog(cfg, log)
+	routerResponseLogManager := initializeRouterResponseLog(cfg, log)
+
+	// Outcome events for the health worker: kafka-first transport (the
+	// service no longer accepts HTTP reports). Broker/SASL/TLS come from
+	// the kafka section; only the topic is account-events specific.
+	var accountEvents *accountevents.Publisher
+	if cfg.AccountEvents.Enabled {
+		accountEvents, err = accountevents.New(&cfg.AccountEvents, &cfg.Kafka, log)
+		if err != nil {
+			log.Error("Failed to create account events publisher, disabling", "error", err)
+			accountEvents = nil
+		} else {
+			log.Info("Account events publishing enabled", "topic", cfg.AccountEvents.Topic)
+		}
+	}
 
 	// ==================== Budget reservation & key-level RPM/TPM ====================
 	// Both are Redis-backed and reuse the shared valkey client with isolated key
@@ -174,10 +192,33 @@ func main() {
 	// UpdateDBModels so that the sync loop can correctly add/remove DB-sourced entries.
 
 	priceRegistry := models.NewModelPriceRegistry()
-	_, rateLimiter, bal, hybridBackend := initializeBalancer(cfg, log, redisBackend, metrics)
+	f2b, rateLimiter, bal, hybridBackend := initializeBalancer(cfg, log, redisBackend, metrics)
 	if hybridBackend != nil {
 		defer hybridBackend.Close()
 	}
+
+	// Ban decision source: with account_events enabled (kafka path) the
+	// router reads the worker's bans straight from Redis and materializes
+	// them into the local fail2ban; otherwise no external bans are applied
+	// (the router keeps its fail2ban rules). Unknown/stale state always
+	// fails open (nothing is dead).
+	var banReader *banreader.Reader
+	banDecisionsExternal := false
+	if cfg.AccountEvents.Enabled {
+		if redisBackend != nil {
+			banReader = banreader.New(redisBackend.Client(), cfg.Redis, f2b,
+				credentialProviderTypes(cfg), cfg.AccountEvents.ReaderInterval, log)
+			bal.SetHealthChecker(banReader)
+			// The local fail2ban counters may now step aside: an external
+			// source of bans is really connected. Only then.
+			banDecisionsExternal = true
+			log.Info("Health worker ban reader active",
+				"interval", cfg.AccountEvents.ReaderInterval)
+		} else {
+			log.Warn("account_events enabled but redis disabled: ban reader inactive, local fail2ban stays active")
+		}
+	}
+
 	modelManager := initializeModelManager(log, cfg, rateLimiter, bal)
 
 	// ==================== Apply Initial DB Model Table ====================
@@ -243,7 +284,18 @@ func main() {
 
 	keyMetrics := initializeKeyMetrics(cfg, log)
 
+	// Off by default: a cache write is already visible under its provider's
+	// own name (Anthropic-type credentials' cache_creation_tokens, Requesty's
+	// caching_tokens) on both readers this router has today; this only adds
+	// cache_write_tokens too, for a client confirmed to read that name alone.
+	converterutil.SetMirrorCacheWriteTokens(cfg.Server.MirrorCacheWriteTokens)
+
 	// ==================== Create Proxy ====================
+	var deepSeekToolsRedis valkey.Client
+	if redisBackend != nil {
+		deepSeekToolsRedis = redisBackend.Client()
+	}
+
 	prx := proxy.New(&proxy.Config{
 		Balancer:                     bal,
 		Logger:                       log,
@@ -253,6 +305,7 @@ func main() {
 		MaxIdleConns:                 cfg.Server.MaxIdleConns,
 		MaxIdleConnsPerHost:          cfg.Server.MaxIdleConnsPerHost,
 		IdleConnTimeout:              cfg.Server.IdleConnTimeout,
+		ResponseHeaderTimeout:        cfg.Server.ResponseHeaderTimeout,
 		HTTP2IdlePingTimeout:         cfg.Server.HTTP2IdlePingTimeout,
 		HTTP2PingTimeout:             cfg.Server.HTTP2PingTimeout,
 		MaxConnectionLifetime:        cfg.Server.MaxConnectionLifetime,
@@ -263,18 +316,27 @@ func main() {
 		ModelManager:                 modelManager,
 		Version:                      Version,
 		Commit:                       Commit,
+		ServiceName:                  cfg.OTEL.ServiceName,
 		LiteLLMDB:                    litellmDBManager,
 		KafkaLog:                     kafkaLogManager,
 		RawBodyLog:                   rawBodyLogManager,
 		RawBodyStoreRawBody:          cfg.Kafka.RawBodies.StoreRawBody,
 		RawBodyStoreOnlyErrors:       cfg.Kafka.RawBodies.StoreOnlyErrors,
 		RawBodyRedactSensitiveFields: cfg.Kafka.RawBodies.RedactSensitiveFields,
+		RouterResponseLog:            routerResponseLogManager,
+		RouterResponseRedact:         cfg.Kafka.RouterResponses.RedactSensitiveFields,
 		HealthChecker:                healthChecker,
+		Events:                       accountEvents,
+		BanDecisionsExternal:         banDecisionsExternal,
 		PriceRegistry:                priceRegistry,
 		OrganizationPolicies:         organizationPolicies,
 		MaxProviderRetries:           cfg.Server.MaxProviderRetries,
 		Retry:                        cfg.Retry,
 		MaxFallbackAttempts:          cfg.Server.MaxFallbackAttempts,
+		AnthropicDefaultMaxTokens:    cfg.Server.AnthropicDefaultMaxTokens,
+		DeepSeekTools:                cfg.Server.DeepSeekTools,
+		DeepSeekToolsKeyPrefix:       cfg.Redis.KeyPrefix + "deepseektools:",
+		DeepSeekToolsRedisClient:     deepSeekToolsRedis,
 		ResponseStore:                respStore,
 		SessionStickyEnabled:         cfg.Server.SessionStickyEnabled,
 		SessionStickyAutoCacheCtrl:   cfg.Server.SessionStickyAutoCacheCtrl,
@@ -295,17 +357,22 @@ func main() {
 		KeyRateLimitsEnabled:             cfg.LiteLLMDB.EnforceKeyRateLimits,
 		DefaultEstimatedCompletionTokens: cfg.LiteLLMDB.DefaultEstimatedCompletionTokens,
 		VisionFallback:                   cfg.VisionFallback,
+		LoopGate:                         cfg.LoopGate,
 		ServerWriteTimeout:               cfg.Server.WriteTimeout,
 		KeyMetrics:                       keyMetrics,
 	})
 
 	videoRuntime := initializeVideoOrExit(cfg, prx, litellmDBManager, log)
+	yandexSearchHandler := initializeYandexSearchOrExit(cfg, prx, litellmDBManager, kafkaLogManager, redisBackend, budgetReserver, log)
 
 	// ==================== Background Goroutines ====================
 	bgCtx, bgCancel := context.WithCancel(context.Background())
 	defer bgCancel()
 
 	prx.Start(bgCtx)
+	if banReader != nil {
+		go banReader.Start(bgCtx)
+	}
 
 	var wg sync.WaitGroup
 	videoRuntime.start(bgCtx, &wg)
@@ -321,6 +388,9 @@ func main() {
 	}
 	if rawBodyLogManager.IsEnabled() {
 		startRawBodyLogMetricsUpdater(bgCtx, cfg, log, rawBodyLogManager, metrics, &wg)
+	}
+	if routerResponseLogManager.IsEnabled() {
+		startRouterResponseLogMetricsUpdater(bgCtx, cfg, log, routerResponseLogManager, metrics, &wg)
 	}
 
 	if respStore != nil {
@@ -347,6 +417,9 @@ func main() {
 	rtr := router.New(prx, modelManager, &cfg.Monitoring, log, cfg)
 	if videoRuntime != nil {
 		rtr.SetVideoHandler(videoRuntime.handler)
+	}
+	if yandexSearchHandler != nil {
+		rtr.SetYandexSearchHandler(yandexSearchHandler)
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/", rtr)
@@ -523,6 +596,7 @@ func main() {
 	// open through Kafka's final flush.
 	shutdownSink(log, "Kafka spend-log publisher", kafkaLogManager)
 	shutdownSink(log, "Kafka raw-body publisher", rawBodyLogManager)
+	shutdownSink(log, "Kafka router-response publisher", routerResponseLogManager)
 	shutdownSink(log, "LiteLLM DB", litellmDBManager)
 
 	if err := router.CloseErrorLogFiles(); err != nil {
@@ -1241,6 +1315,53 @@ func initializeRawBodyLog(cfg *config.Config, log *slog.Logger) kafkalog.RawBody
 	return manager
 }
 
+// initializeRouterResponseLog sets up the separate, independently-toggleable
+// Kafka write-path that publishes what the router ANSWERED to the client
+// (internal/kafkalog.RouterResponseManager).
+//
+// Like the raw-body path it has no Postgres counterpart, so a broker
+// unavailable at startup just keeps IsHealthy() false -- it never blocks
+// startup and never degrades into anything worse than "not publishing this
+// optional stream".
+func initializeRouterResponseLog(cfg *config.Config, log *slog.Logger) kafkalog.RouterResponseManager {
+	if !cfg.Kafka.Enabled || !cfg.Kafka.RouterResponses.Enabled {
+		log.Info("Kafka router-response publishing disabled - using NoopRouterResponseManager")
+		return kafkalog.NewNoopRouterResponseManager()
+	}
+
+	log.Info("Initializing Kafka router-response publisher...", "brokers", cfg.Kafka.Brokers, "topic", cfg.Kafka.RouterResponses.Topic)
+
+	// Same brokers/TLS/SASL/queue tuning as the spend-log path -- same
+	// cluster, a different topic with its own retention. Only Topic differs.
+	responseCfg := &kafkalog.Config{
+		Brokers:          cfg.Kafka.Brokers,
+		Topic:            cfg.Kafka.RouterResponses.Topic,
+		ClientID:         cfg.Kafka.ClientID,
+		LogQueueSize:     cfg.Kafka.LogQueueSize,
+		LogBatchSize:     cfg.Kafka.LogBatchSize,
+		LogFlushInterval: cfg.Kafka.LogFlushInterval,
+		LogWorkers:       cfg.Kafka.LogWorkers,
+		TLSEnabled:       cfg.Kafka.TLSEnabled,
+		SASLMechanism:    cfg.Kafka.SASLMechanism,
+		SASLUsername:     cfg.Kafka.SASLUsername,
+		SASLPassword:     cfg.Kafka.SASLPassword,
+		TLSCACert:        cfg.Kafka.TLSCACert,
+		Logger:           log,
+		// No FallbackNotifier: there's no Postgres row for this event to flag.
+	}
+
+	manager, err := kafkalog.NewRouterResponse(responseCfg)
+	if err != nil {
+		log.Warn("Failed to initialize Kafka router-response publisher, degrading to NoopRouterResponseManager",
+			"error", err,
+			"impact", "Router response bodies will not be published; spend logging is unaffected",
+		)
+		return kafkalog.NewNoopRouterResponseManager()
+	}
+	log.Info("Kafka router-response publisher initialized successfully")
+	return manager
+}
+
 // loadAndUpdateModelPrices loads model prices and updates the registry
 func loadAndUpdateModelPrices(
 	link string,
@@ -1376,6 +1497,40 @@ func startKafkaMetricsUpdater(
 	}()
 
 	log.Info("Kafka spend logger metrics updater started (updates every 10 seconds)")
+}
+
+// startRouterResponseLogMetricsUpdater mirrors startRawBodyLogMetricsUpdater
+// for the router-response write-path.
+func startRouterResponseLogMetricsUpdater(
+	bgCtx context.Context,
+	cfg *config.Config,
+	log *slog.Logger,
+	routerResponseLogManager kafkalog.RouterResponseManager,
+	metrics *monitoring.Metrics,
+	wg *sync.WaitGroup,
+) {
+	if !cfg.MetricsCollectionEnabled() {
+		return
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-bgCtx.Done():
+				return
+			case <-ticker.C:
+				stats := routerResponseLogManager.Stats()
+				metrics.UpdateKafkaRouterResponseLoggerStats(stats.Queued, stats.Produced, stats.Dropped, stats.Errors, stats.DLQSize, stats.Healthy)
+			}
+		}
+	}()
+
+	log.Info("Kafka router-response logger metrics updater started (updates every 10 seconds)")
 }
 
 // startRawBodyLogMetricsUpdater mirrors startKafkaMetricsUpdater for the
@@ -1551,4 +1706,19 @@ func startResponseStoreCleanup(
 		}
 	}()
 	log.Info("Response store cleanup worker started (runs every 1 hour)")
+}
+
+// credentialProviderTypes returns the unique credential types from the
+// static config; the ban reader merges them with the worker's providers set.
+func credentialProviderTypes(cfg *config.Config) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, cred := range cfg.Credentials {
+		t := string(cred.Type)
+		if t != "" && !seen[t] {
+			seen[t] = true
+			out = append(out, t)
+		}
+	}
+	return out
 }

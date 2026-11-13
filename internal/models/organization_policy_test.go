@@ -68,6 +68,31 @@ func TestOrganizationPolicy_DefaultCatalog(t *testing.T) {
 	assert.Equal(t, []string{"public/a"}, responseModelIDs(manager.GetAllModelsScopedForOrganization(visibility, custom)))
 }
 
+func TestOrganizationPolicy_ReturnsCostInBody(t *testing.T) {
+	manager := testPolicyManager()
+	registry, err := LoadOrganizationPolicies([]config.OrganizationPolicyConfig{{
+		OrganizationID:           "org-body-cost",
+		ReturnResponseCostInBody: true,
+	}, {
+		OrganizationID:  "org-custom-no-body-cost",
+		PriceProfileID:  "custom",
+		ModelPricesLink: writePolicyPrices(t, `{"public/a":{"input_cost_per_token":0.001}}`),
+	}}, manager, validPolicyOptions())
+	require.NoError(t, err)
+
+	withBodyCost, ok := registry.Policy("org-body-cost")
+	require.True(t, ok)
+	assert.True(t, withBodyCost.ReturnsCostInBody())
+	// Independent of the header form, which this policy never set.
+	assert.False(t, withBodyCost.ReturnsResponseCost())
+
+	withoutBodyCost, ok := registry.Policy("org-custom-no-body-cost")
+	require.True(t, ok)
+	assert.False(t, withoutBodyCost.ReturnsCostInBody())
+
+	assert.False(t, (*OrganizationPolicy)(nil).ReturnsCostInBody())
+}
+
 // TestResolveOrganizationModel_PublicAlias covers the bug where a request through a
 // public model alias (router_settings.model_group_alias, testPolicyManager's
 // "alias/a" -> "public/a") under a custom-pricing organization recorded the alias's
@@ -223,4 +248,41 @@ func TestOrganizationPolicyAcceptsExternalModel(t *testing.T) {
 		[]string{"runway/gen4.5"},
 		responseModelIDs(manager.GetAllModelsScopedForOrganization(scope.PublicContext(), policy)),
 	)
+}
+
+func TestOrganizationPolicy_DisableAutoCacheControl(t *testing.T) {
+	manager := testPolicyManager()
+	registry, err := LoadOrganizationPolicies([]config.OrganizationPolicyConfig{
+		{
+			// No price profile: the "default catalog" construction branch.
+			OrganizationID:          "org-no-pricing",
+			DisableAutoCacheControl: true,
+		},
+		{
+			// A price profile: the other construction branch.
+			OrganizationID:          "org-priced",
+			PriceProfileID:          "profile-priced",
+			ModelPricesLink:         writePolicyPrices(t, `{"public/a":{"input_cost_per_token":0.001}}`),
+			DisableAutoCacheControl: true,
+		},
+		{
+			OrganizationID: "org-default",
+		},
+	}, manager, validPolicyOptions())
+	require.NoError(t, err)
+
+	noPricing, ok := registry.Policy("org-no-pricing")
+	require.True(t, ok)
+	assert.True(t, noPricing.DisablesAutoCacheControl())
+
+	priced, ok := registry.Policy("org-priced")
+	require.True(t, ok)
+	assert.True(t, priced.DisablesAutoCacheControl())
+
+	defaultPolicy, ok := registry.Policy("org-default")
+	require.True(t, ok)
+	assert.False(t, defaultPolicy.DisablesAutoCacheControl())
+
+	var nilPolicy *OrganizationPolicy
+	assert.False(t, nilPolicy.DisablesAutoCacheControl())
 }

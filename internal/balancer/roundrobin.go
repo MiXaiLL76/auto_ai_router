@@ -13,6 +13,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/fail2ban"
+
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
@@ -94,8 +95,12 @@ type RoundRobin struct {
 	swrr            map[schedKey]*swrrState   // smooth weighted round-robin state per selection cycle
 	fail2ban        *fail2ban.Fail2Ban
 	rateLimiter     *ratelimit.RPMLimiter
-	modelChecker    ModelChecker
-	logger          *slog.Logger
+	// health mirrors the worker's per-account liveness (alive/dead).
+	// Always set: defaulted to a no-op that reports every account alive
+	// when the feature is disabled.
+	health       HealthChecker
+	modelChecker ModelChecker
+	logger       *slog.Logger
 }
 
 func New(credentials []config.CredentialConfig, f2b *fail2ban.Fail2Ban, rl *ratelimit.RPMLimiter) *RoundRobin {
@@ -125,6 +130,7 @@ func New(credentials []config.CredentialConfig, f2b *fail2ban.Fail2Ban, rl *rate
 		swrr:            make(map[schedKey]*swrrState),
 		fail2ban:        f2b,
 		rateLimiter:     rl,
+		health:          NewNoopHealthChecker(),
 		modelChecker:    nil,
 		logger:          slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo})),
 	}
@@ -364,6 +370,12 @@ func (r *RoundRobin) NextSpecificScoped(credentialName, modelID string, visibili
 		return nil, ErrNoCredentialsAvailable
 	}
 
+	if r.health.IsDead(credentialName) {
+		// Exact-pick path: the health-check service says the account is
+		// dead, so the credential is not available at all.
+		return nil, ErrNoCredentialsAvailable
+	}
+
 	if !r.rateLimiter.TryAllowAll(credentialName, modelID) {
 		return nil, ErrRateLimitExceeded
 	}
@@ -582,6 +594,13 @@ func (r *RoundRobin) liveCandidates(modelID string, candidates []candidateEntry)
 			monitoring.CredentialSelectionRejected.WithLabelValues("banned").Inc()
 			continue
 		}
+		if r.health.IsDead(c.cred.Name) {
+			// The health-check service marked this account dead fork
+			// every model; skipping it here lets another credential
+			// serve and keeps the dead one out of the rotation.
+			monitoring.CredentialSelectionRejected.WithLabelValues("dead").Inc()
+			continue
+		}
 		if c.tier != nil && !r.tierHasHeadroom(c.cred.Name, modelID, c.tier) {
 			// Local cumulative gate: tiers up to and including this one are full, so the
 			// upstream has cascaded to a pricier group — cascade locally too rather than
@@ -765,10 +784,10 @@ func (r *RoundRobin) NextRetryForModelExcludingScoped(modelID string, current *c
 	if current.EffectivePriority() <= 0 && r.hasTriedPriorityCredential(attempted) {
 		return r.nextUnprioritizedRetry(modelID, exclude, visibility)
 	}
-	return r.nextPriorityRetry(modelID, current.EffectivePriority(), exclude, visibility)
+	return r.nextPriorityRetry(modelID, current.EffectivePriority(), exclude, attempted, visibility)
 }
 
-func (r *RoundRobin) nextPriorityRetry(modelID string, minPriority int, exclude map[string]bool, visibility scope.Context) (*config.CredentialConfig, error) {
+func (r *RoundRobin) nextPriorityRetry(modelID string, minPriority int, exclude, attempted map[string]bool, visibility scope.Context) (*config.CredentialConfig, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -777,7 +796,59 @@ func (r *RoundRobin) nextPriorityRetry(modelID string, minPriority int, exclude 
 	if found {
 		return cred, nil
 	}
-	return r.selectUnprioritizedRetryCandidateLocked(modelID, unprioritizedCandidates, priorityRateLimitHit)
+	cred, err := r.selectUnprioritizedRetryCandidateLocked(modelID, unprioritizedCandidates, priorityRateLimitHit)
+	if err == nil {
+		return cred, nil
+	}
+	// The search came up empty. Before reporting "no credentials available",
+	// check the credentials this chain actually dispatched to: one that was
+	// used and is now over its rate limit explains the dead end far better
+	// than "there is nothing here" -- and the two mean different things to
+	// the caller (a 429 with a Retry-After vs a 503). The credential just used
+	// is excluded from the search above precisely because it was already
+	// tried, so without this check a model served by a single
+	// momentarily-over-its-limit credential always reports the latter.
+	//
+	// The scan looks at attempted (credentials a request was actually sent
+	// to), NOT at exclude: exclude also carries credentials that were never
+	// dispatched to at all -- a reasoning_only credential on a request without
+	// reasoning, an organization-policy denylist entry, a system_one split.
+	// One of those being over its limit from unrelated traffic says nothing
+	// about why this request failed, and letting it decide turns a genuine
+	// transport failure into a false "all credentials rate limited".
+	if errors.Is(err, ErrNoCredentialsAvailable) && r.attemptedCredentialRateLimitedLocked(modelID, attempted, visibility) {
+		return nil, ErrRateLimitExceeded
+	}
+	return nil, err
+}
+
+// attemptedCredentialRateLimitedLocked reports whether any credential this
+// chain actually dispatched a request to is now over its rate limit for
+// modelID. It runs only after the normal search found nothing, so it never
+// diverts a request that could have been served by another credential. The
+// caller holds r.mu.
+func (r *RoundRobin) attemptedCredentialRateLimitedLocked(modelID string, attempted map[string]bool, visibility scope.Context) bool {
+	if len(attempted) == 0 {
+		return false
+	}
+	for i := range r.credentials {
+		cred := &r.credentials[i]
+		if !attempted[cred.Name] {
+			continue
+		}
+		if !cred.VisibleTo(visibility) {
+			continue
+		}
+		if modelID != "" && r.modelChecker != nil && r.modelChecker.IsEnabled() {
+			if !r.hasModel(cred.Name, modelID, visibility) {
+				continue
+			}
+		}
+		if r.credentialRateLimited(cred.Name, modelID) {
+			return true
+		}
+	}
+	return false
 }
 
 // nextUnprioritizedRetry searches only the unprioritized pool (no credential with an
@@ -943,6 +1014,27 @@ func (r *RoundRobin) selectUnprioritizedRetryCandidateLocked(modelID string, can
 	return r.selectWeightedLiveCandidate(modelID, live, key, rateLimitHit)
 }
 
+// credentialRateLimited reports whether the credential is currently over its
+// own RPM/TPM limit for modelID (or for the credential as a whole when the
+// model has no separate limit). It is the same check liveCandidates performs,
+// but for one named credential rather than a candidate list -- used to tell
+// "this credential cannot take another request right now" apart from "this
+// credential does not serve the model" for a credential that was already tried
+// and therefore no longer part of the search.
+func (r *RoundRobin) credentialRateLimited(credentialName, modelID string) bool {
+	if r.rateLimiter == nil {
+		return false
+	}
+	if !r.rateLimiter.CanAllow(credentialName) || !r.rateLimiter.AllowTokens(credentialName) {
+		return true
+	}
+	if modelID == "" {
+		return false
+	}
+	return !r.rateLimiter.CanAllowModel(credentialName, modelID) ||
+		!r.rateLimiter.AllowModelTokens(credentialName, modelID)
+}
+
 // hasTriedPriorityCredential reports whether this retry chain has already dispatched to
 // a credential with a real priority tier (not a fallback/proxy credential, whose tiers are
 // a different mechanism). Used by NextRetryForModelExcludingScoped to narrow a later
@@ -965,6 +1057,13 @@ func (r *RoundRobin) hasTriedPriorityCredential(attempted map[string]bool) bool 
 		}
 	}
 	return false
+}
+
+// SetHealthChecker installs the account-liveness view used when picking
+// credentials. Nil-safe callers do not exist: a no-op checker is the default,
+// so tests and disabled setups keep behaving as before.
+func (r *RoundRobin) SetHealthChecker(hc HealthChecker) {
+	r.health = hc
 }
 
 func (r *RoundRobin) RecordResponse(credentialName, modelID string, statusCode int) {
@@ -1036,6 +1135,21 @@ func (r *RoundRobin) GetCredentialsSnapshot() []config.CredentialConfig {
 	creds := make([]config.CredentialConfig, len(r.credentials))
 	copy(creds, r.credentials)
 	return creds
+}
+
+// CredentialNamesMatching returns the names of the credentials match accepts,
+// in configuration order, without copying the configs (GetCredentialsSnapshot
+// does): cheap enough for the per-request routing filters.
+func (r *RoundRobin) CredentialNamesMatching(match func(*config.CredentialConfig) bool) []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var names []string
+	for i := range r.credentials {
+		if match(&r.credentials[i]) {
+			names = append(names, r.credentials[i].Name)
+		}
+	}
+	return names
 }
 
 func (r *RoundRobin) GetAvailableCount() int {

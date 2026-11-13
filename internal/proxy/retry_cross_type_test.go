@@ -14,6 +14,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	dbmodels "github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	"github.com/mixaill76/auto_ai_router/internal/models"
+	"github.com/mixaill76/auto_ai_router/internal/scope"
 )
 
 // A retry reaches any credential serving the model, AIR or direct, in both directions.
@@ -154,4 +155,63 @@ func TestProxyRequestRetryKeepsPeerCredentialNameOfWrittenResponse(t *testing.T)
 	case <-time.After(5 * time.Second):
 		t.Fatal("no spend log entry")
 	}
+}
+
+func TestProxyRequestRetryKeepsEarlierHTTPResponseAcrossCredentialTypes(t *testing.T) {
+	for _, tc := range []struct {
+		name                string
+		firstType, lastType config.ProviderType
+		status, wantStatus  int
+	}{
+		{"air to direct, 429", config.ProviderTypeAIR, config.ProviderTypeOpenAI, http.StatusTooManyRequests, http.StatusTooManyRequests},
+		{"direct to air, 429", config.ProviderTypeOpenAI, config.ProviderTypeAIR, http.StatusTooManyRequests, http.StatusTooManyRequests},
+		{"air to direct, 503", config.ProviderTypeAIR, config.ProviderTypeOpenAI, http.StatusServiceUnavailable, http.StatusServiceUnavailable},
+		{"direct to air, 503", config.ProviderTypeOpenAI, config.ProviderTypeAIR, http.StatusServiceUnavailable, http.StatusServiceUnavailable},
+		{"air to direct, 401", config.ProviderTypeAIR, config.ProviderTypeOpenAI, http.StatusUnauthorized, http.StatusBadGateway},
+		{"direct to air, 401", config.ProviderTypeOpenAI, config.ProviderTypeAIR, http.StatusUnauthorized, http.StatusBadGateway},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var firstHits atomic.Int32
+			first := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				firstHits.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Retry-After", "17")
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, `{"error":{"message":"original upstream error","type":"server_error"}}`)
+			}))
+			defer first.Close()
+			down := newIPv4Server(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+			down.Close()
+
+			prx := NewTestProxyBuilder().WithCredentials(
+				config.CredentialConfig{Name: "first", Type: tc.firstType, BaseURL: first.URL, APIKey: "k1", RPM: 100, TPM: 10000},
+				config.CredentialConfig{Name: "last", Type: tc.lastType, BaseURL: down.URL, APIKey: "k2", Priority: 1, RPM: 100, TPM: 10000},
+			).WithMaxProviderRetries(2).Build()
+			w := httptest.NewRecorder()
+
+			prx.ProxyRequest(w, newRequestHeadersClientRequest("/v1/chat/completions", requestHeadersCases[0].body))
+
+			require.Equal(t, tc.wantStatus, w.Code, w.Body.String())
+			assert.Equal(t, int32(1), firstHits.Load())
+			assert.Contains(t, w.Body.String(), `"error"`)
+			if tc.status == http.StatusTooManyRequests {
+				assert.Equal(t, "17", w.Header().Get("Retry-After"))
+			}
+		})
+	}
+}
+
+func TestSimulatedStreamRetryDoesNotSelectAIRForDirectSend(t *testing.T) {
+	direct := config.CredentialConfig{Name: "direct", Type: config.ProviderTypeOpenAI, BaseURL: "http://direct.invalid", APIKey: "k1", RPM: 100, TPM: 10000}
+	air := config.CredentialConfig{Name: "air", Type: config.ProviderTypeAIR, BaseURL: "http://air.invalid", APIKey: "k2", Priority: 1, RPM: 100, TPM: 10000}
+	prx := NewTestProxyBuilder().WithCredentials(direct, air).Build()
+	tried := map[string]bool{"direct": true}
+	_, _, ready, _ := prx.nextRetryCredential(
+		httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
+		&RequestLogContext{Scope: scope.PublicContext()}, "gpt-4", &direct,
+		&orchestratedRequest{baseBody: []byte(requestHeadersCases[0].body), baseProxyBody: []byte(requestHeadersCases[0].body), basePath: "/v1/chat/completions"},
+		false, 1, tried, map[string]bool{"direct": true},
+	)
+	assert.False(t, ready)
+	assert.False(t, tried["air"], "AIR must not be consumed by a direct-only retry loop")
 }

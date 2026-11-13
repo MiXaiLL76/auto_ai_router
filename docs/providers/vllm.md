@@ -29,6 +29,23 @@ vLLM serves `/v1/responses` natively, so a Responses API request is forwarded to
 unchanged (the real model name replaces the model group name) rather than being converted
 into a Chat Completions request. Set `passthrough_responses: false` on a model to convert instead.
 
+## Messages API
+
+vLLM 0.11.1 and later also serve the Anthropic Messages API (`/v1/messages`,
+`/v1/messages/count_tokens`), but AIR **converts** a `/v1/messages` request into a Chat
+Completions request by default, as LiteLLM does for `hosted_vllm`. vLLM converts a Messages
+request into a chat completion internally anyway, and the conversion in AIR keeps what a
+relayed Messages body would skip:
+
+- the deployment's [default parameters](#default-parameters) (`chat_template_kwargs`,
+  `temperature`, ...), `reasoning_effort_map` and the empty-`tools` cleanup, which apply to
+  Chat Completions and Responses bodies only;
+- the [loop gate](../advanced/loop_gate.md) restarting a looping generation (a relayed
+  Messages stream can only be cut).
+
+Set `passthrough_messages: true` on a model to relay `/v1/messages` to vLLM as is. vLLM's
+thinking signatures are random values, so relaying keeps no verifiable signature either.
+
 ## Using a LiteLLM database
 
 Deployments read from the LiteLLM database (`LiteLLM_ProxyModelTable`) with
@@ -42,6 +59,12 @@ A vLLM model without a vision encoder (GLM, gpt-oss) rejects image inputs with `
 Mark such models with `supports_vision: false` and choose what AIR does with the images —
 reject early, strip them, or have a vision model describe them. See
 [Vision Fallback](../advanced/vision_fallback.md).
+
+## Looping generations
+
+Reasoning models sometimes repeat the same passage until `max_tokens`. The loop gate
+watches streamed vLLM generations, reports such loops and can restart or cut them. See
+[Loop Gate](../advanced/loop_gate.md).
 
 ## Default parameters
 

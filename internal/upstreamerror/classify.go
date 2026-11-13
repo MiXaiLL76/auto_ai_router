@@ -524,6 +524,28 @@ func inferMaxTokensParam(joined string) string {
 func classifyValidationError(joined string, param *string, signals []string) (BadRequest, bool) {
 	result := BadRequest{Param: param}
 	switch {
+	case IsContentPolicySignal(joined):
+		// A provider-side content refusal is a fault of the request, not of the
+		// credential: surface it as a clear 400 (the retry policy's content-policy
+		// marker also makes it non-retryable) instead of a generic 502.
+		// Checked before the generic validation branches so the real cause wins.
+		//
+		// The markers come from ContentPolicyMarkers -- the single list shared
+		// with the proxy's status classification, the LiteLLM compatibility
+		// layer and the retry policy. It used to be a fourth copy of its own,
+		// and the copies drifted: a wording added to the other three left this
+		// one behind, so a refusal phrased that way was correctly classified as
+		// a non-retryable 400 yet reported to the client as the generic
+		// "Invalid request" instead of the content-policy message.
+		//
+		// The markers stay narrowly content-policy-specific. A bare "safety" or
+		// "blocklist" would also match unrelated validation messages (e.g. a
+		// safety_identifier parameter error); a bare "blocked by the provider"
+		// would swallow billing/geo/IP blocks ("Your account has been blocked by
+		// the provider for suspected fraud"), replacing the real cause with a
+		// misleading content-policy message.
+		result.Message, result.Code = "The prompt was blocked by the provider's content policy", "content_policy_violation"
+		return result, true
 	case hasSignal(joined, "invalid_image_size", "invalid image size"):
 		result.Message, result.Code = "Invalid image size", "invalid_image_size"
 		if result.Param == nil {

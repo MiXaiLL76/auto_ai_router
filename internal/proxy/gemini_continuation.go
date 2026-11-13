@@ -101,41 +101,27 @@ func (c *geminiContinuation) send(token string) (*http.Response, error) {
 	return nil, lastErr
 }
 
+// sendOnce sends one follow-up request with resendToCredential; retryable
+// reports a transport error or a 429/5xx while the client is still there.
 func (c *geminiContinuation) sendOnce(body []byte) (*http.Response, bool, error) {
 	if err := c.clientCtx.Err(); err != nil {
 		return nil, false, err
 	}
-	req := c.template.Clone(c.template.Context())
-	req.Body = io.NopCloser(bytes.NewReader(body))
-	req.ContentLength = int64(len(body))
-	req.GetBody = nil
-	if c.cred.EffectiveProviderType() == config.ProviderTypeVertexAI {
-		// A long generation can outlive the first request's access token.
-		token, err := c.p.tokenManager.GetToken(c.cred.Name, c.cred.CredentialsFile, c.cred.CredentialsJSON, c.cred.ProxyURL)
-		if err != nil {
-			return nil, true, fmt.Errorf("vertex token: %w", err)
-		}
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
 	c.p.logger.InfoContext(c.template.Context(), "Continuing Gemini long decode",
 		"credential", c.cred.Name, "model", c.modelID, "continuation", c.requests,
 		"request_id", c.requestID)
-	resp, err := c.p.client.Do(req) //nolint:gosec // G704: the first request's URL, from the credential's configuration
-	if err != nil {
-		if c.clientCtx.Err() != nil {
-			return nil, false, err
-		}
-		return nil, true, err
-	}
-	c.p.balancer.RecordResponse(c.cred.Name, c.modelID, resp.StatusCode)
-	if resp.StatusCode == http.StatusOK {
+	resp, err := c.p.resendToCredential(c.clientCtx, c.template, body, c.cred, c.modelID)
+	if err == nil {
 		return resp, false, nil
 	}
-	errBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxRetryBodyScan))
-	_ = resp.Body.Close()
-	c.p.metrics.RecordCredentialAttemptError(c.cred.Name)
-	retryable := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= http.StatusInternalServerError
-	return nil, retryable, fmt.Errorf("continuation request answered %d: %s", resp.StatusCode, bytes.TrimSpace(errBody))
+	if c.clientCtx.Err() != nil {
+		return nil, false, err
+	}
+	var statusErr *credentialStatusError
+	if errors.As(err, &statusErr) {
+		return nil, statusErr.retryable(), fmt.Errorf("continuation request: %w", err)
+	}
+	return nil, true, err
 }
 
 // complete continues a non-streamed generation whose first response is first,
