@@ -309,6 +309,15 @@ FROM air.spend_logs_kafka;
 -- the client. They're equal only when a mid-stream error was detected after
 -- the response had already committed -- nothing left to mask, the client
 -- already got those exact bytes live.
+--
+-- response_body itself holds the provider's OWN error text verbatim -- it is
+-- the only field that says WHY a request failed ("usage limit reached",
+-- "content policy violation", ...), so it is published as the provider wrote
+-- it. The one exception: CometAPI/ProMan credentials have been seen to echo
+-- the caller's own credential back inside their error body, so for those two
+-- it is reduced to "[REDACTED body bytes=N]".
+-- client_response_body -- what the client actually received -- stays masked
+-- by default (kafka.raw_bodies.redact_sensitive_fields=true).
 -- Named air.raw_bodies_kafka/air.raw_bodies, not air.error_bodies_kafka/
 -- air.error_bodies: neither table is error-only once
 -- kafka.raw_bodies.store_only_errors is set to false (they can then carry a

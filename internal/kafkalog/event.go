@@ -211,6 +211,13 @@ type RawBodyEvent struct {
 	// maxErrorBodyRawBytes. Same capture sites as SpendEvent.ErrorMessage
 	// used to populate before this event type existed, just uncapped at 512
 	// bytes.
+	//
+	// Published verbatim: it is the provider describing its own failure, and
+	// it is the only field that says WHY a request failed ("usage limit
+	// reached", "content policy violation", ...). The one exception is a
+	// credential whose error text echoes the caller's own credential back
+	// (CometAPI, ProMan) -- that body is reduced to a byte count, so the
+	// credential does not ride along with it.
 	ResponseBody string `json:"response_body,omitempty"`
 	// RequestBody is the client's own request body (e.g. the prompt),
 	// capped at the same limit as ResponseBody. Only ever populated when
@@ -231,6 +238,11 @@ type RawBodyEvent struct {
 	// mid-stream error was detected after the response had already committed
 	// (nothing left to mask at that point -- the client already received
 	// those exact bytes as they streamed through).
+	//
+	// Masked to a byte count by default
+	// (KafkaRawBodiesConfig.RedactSensitiveFields): on a success this is the
+	// model's answer -- the client's own data -- and on a failure it is the
+	// router's already-masked error body.
 	ClientResponseBody string `json:"client_response_body,omitempty"`
 }
 
