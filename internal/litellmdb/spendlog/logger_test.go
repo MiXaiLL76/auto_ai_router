@@ -695,3 +695,27 @@ func TestLogger_SQLInjectionPrevention_ParameterEscaping(t *testing.T) {
 		})
 	}
 }
+
+// pgx writes a time's wall clock into the zone-less "startTime", "endTime" and
+// "completionStartTime" columns, so a value in the pod's local zone would be
+// stored shifted.
+func TestGetSpendLogParams_TimestampsInUTC(t *testing.T) {
+	utc := time.Date(2026, 9, 16, 12, 0, 0, 0, time.UTC)
+	msk := time.FixedZone("MSK", 3*3600)
+	completion := utc.Add(time.Second).In(msk)
+	entry := &models.SpendLogEntry{
+		StartTime:           utc.In(msk),
+		EndTime:             utc.Add(2 * time.Second).In(msk),
+		CompletionStartTime: &completion,
+	}
+
+	params := GetSpendLogParams(entry)
+
+	assert.Equal(t, utc, params[7])
+	assert.Equal(t, utc.Add(2*time.Second), params[8])
+	assert.Equal(t, utc.Add(time.Second), *params[10].(*time.Time))
+	assert.Equal(t, msk, entry.CompletionStartTime.Location(), "entry is not mutated")
+
+	entry.CompletionStartTime = nil
+	assert.Nil(t, GetSpendLogParams(entry)[10])
+}
