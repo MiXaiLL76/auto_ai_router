@@ -987,6 +987,7 @@ type ProxyResponse struct {
 	StreamBody           io.ReadCloser
 	IsStreaming          bool
 	ActualCredentialName string // Credential name from upstream X-Credential-Name header
+	refusalSanitized     bool   // This completed non-stream body already passed the refusal boundary.
 }
 
 // cancelOnCloseBody wraps an upstream response body so the context that
@@ -3091,9 +3092,12 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		// Do this before conversion/history storage as well as native Messages
 		// passthrough: private refusal extensions must never become client output.
 		if isAnthropicResponse(cred, realModelID, r.URL.Path) && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			status, clean := sanitizeRefusalResponse(resp.StatusCode, []byte(decodedBody), logCtx)
+			status, clean, changed := sanitizeRefusalResponse(resp.StatusCode, []byte(decodedBody), logCtx)
 			resp.StatusCode = status
 			decodedBody = string(clean)
+			if changed {
+				dropRepresentationIntegrityHeaders(resp.Header)
+			}
 		}
 		// deepSeekToolUsage carries the tool counters of the router-run
 		// search/fetch loop. They are applied to the request's own usage

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 )
 
 const Unknown = "The model declined this request; no public reason was provided."
@@ -64,8 +65,12 @@ func SanitizeEnvelope(obj map[string]any) bool {
 	if reason, _ := obj["stop_reason"].(string); reason == "refusal" {
 		details, _ := obj["stop_details"].(map[string]any)
 		category, _ := details["category"].(string)
-		obj["stop_details"] = Details(category)
-		changed = true
+		public := Details(category)
+		if len(details) != len(public) || details["type"] != public["type"] ||
+			details["category"] != public["category"] || details["explanation"] != public["explanation"] {
+			obj["stop_details"] = public
+			changed = true
+		}
 	} else if _, present := obj["stop_details"]; present && obj["stop_details"] != nil {
 		// Details are defined only for refusal; never expose misplaced extensions.
 		obj["stop_details"] = nil
@@ -87,7 +92,8 @@ func SanitizeJSON(body []byte) ([]byte, bool, error) {
 		return nil, false, err
 	}
 	// Reject a valid object followed by garbage; never pass the suffix through.
-	if !json.Valid(body) {
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
 		return nil, false, errors.New("invalid refusal response JSON")
 	}
 	if !SanitizeEnvelope(obj) {

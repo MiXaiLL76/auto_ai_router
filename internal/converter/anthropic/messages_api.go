@@ -1051,34 +1051,61 @@ func PassthroughMessagesStream(reader io.Reader, writer io.Writer, model string)
 // Sanitize a whole SSE event, including multi-line data. Never forward an
 // unparsed refusal or bypass sanitization for an oversized data line.
 func sanitizePassthroughMessageEvent(event []byte, model string, state *passthroughStreamState) ([]byte, error) {
-	lines := strings.Split(strings.TrimSuffix(string(event), "\n"), "\n")
-	var data []string
+	lines := bytes.Split(bytes.TrimSuffix(event, []byte("\n")), []byte("\n"))
+	var payload []byte
+	dataLines := 0
 	for _, line := range lines {
 		if value, ok := messagesDataLine(line); ok {
-			data = append(data, value)
+			dataLines++
+			if dataLines == 1 {
+				payload = value // The common single-line case borrows the event bytes.
+			} else {
+				if dataLines == 2 {
+					joined := make([]byte, 0, len(event))
+					payload = append(joined, payload...)
+				}
+				payload = append(payload, '\n')
+				payload = append(payload, value...)
+			}
 		}
 	}
-	if len(data) == 0 {
+	if dataLines == 0 {
 		return event, nil
 	}
-	payload := []byte(strings.Join(data, "\n"))
 	if bytes.Equal(bytes.TrimSpace(payload), []byte("[DONE]")) {
 		return event, nil
 	}
-	clean, _, err := publicrefusal.SanitizeJSON(payload)
-	if err != nil {
-		return nil, fmt.Errorf("invalid Messages stream event")
+	clean := payload
+	changed := false
+	// Escaped JSON keys can spell stop_reason/stop_details too. Route all
+	// unicode escapes through the parser; a substring gate alone is unsafe.
+	if bytes.Contains(payload, []byte(`"stop_`)) || bytes.Contains(payload, []byte(`\u`)) {
+		var err error
+		clean, changed, err = publicrefusal.SanitizeJSON(payload)
+		if err != nil {
+			return nil, fmt.Errorf("invalid Messages stream event")
+		}
+	} else {
+		trimmed := bytes.TrimSpace(payload)
+		if !json.Valid(payload) || (trimmed[0] != '{' && !bytes.Equal(trimmed, []byte("null"))) {
+			return nil, fmt.Errorf("invalid Messages stream event")
+		}
 	}
 	if rewritten, ok := rewritePassthroughEvent(clean, model, state); ok {
 		clean = rewritten
+		changed = true
 	}
-	// A single data: line must not contain literal newlines from a multi-line
-	// event, including ordinary content deltas that needed no rewriting.
-	var compact bytes.Buffer
-	if err := json.Compact(&compact, clean); err != nil {
-		return nil, fmt.Errorf("invalid Messages stream event")
+	if !changed {
+		if dataLines == 1 {
+			return event, nil // Valid ordinary deltas need no decoding or re-encoding.
+		}
+		// Only multiline data needs compaction. Rewritten JSON is already compact.
+		var compact bytes.Buffer
+		if err := json.Compact(&compact, clean); err != nil {
+			return nil, fmt.Errorf("invalid Messages stream event")
+		}
+		clean = compact.Bytes()
 	}
-	clean = compact.Bytes()
 	var result []byte
 	written := false
 	for _, line := range lines {
@@ -1097,12 +1124,12 @@ func sanitizePassthroughMessageEvent(event []byte, model string, state *passthro
 	return result, nil
 }
 
-func messagesDataLine(line string) (string, bool) {
-	if line == "data" {
-		return "", true
+func messagesDataLine(line []byte) ([]byte, bool) {
+	if bytes.Equal(line, []byte("data")) {
+		return line[:0], true
 	}
-	data, ok := strings.CutPrefix(line, "data:")
-	return strings.TrimPrefix(data, " "), ok
+	data, ok := bytes.CutPrefix(line, []byte("data:"))
+	return bytes.TrimPrefix(data, []byte(" ")), ok
 }
 
 // passthroughStreamState is what PassthroughMessagesStream carries between events.
@@ -1112,21 +1139,23 @@ type passthroughStreamState struct {
 }
 
 func rewritePassthroughEvent(payload []byte, model string, state *passthroughStreamState) ([]byte, bool) {
-	if !bytes.Contains(payload, []byte(`"message_`)) && !bytes.Contains(payload, []byte(`"server_tool_use"`)) {
+	if !bytes.Contains(payload, []byte(`"message_`)) && !bytes.Contains(payload, []byte(`"server_tool_use"`)) && !bytes.Contains(payload, []byte(`\u`)) {
 		return nil, false
 	}
 	var event map[string]json.RawMessage
 	if json.Unmarshal(payload, &event) != nil || event == nil {
 		return nil, false
 	}
-	switch string(bytes.TrimSpace(event["type"])) {
-	case `"content_block_start"`:
+	var eventType string
+	_ = json.Unmarshal(event["type"], &eventType)
+	switch eventType {
+	case "content_block_start":
 		var block ContentBlock
 		if json.Unmarshal(event["content_block"], &block) == nil && block.Type == "server_tool_use" && isWebSearchToolName(block.Name) {
 			state.webSearchBlocks++
 		}
 		return nil, false
-	case `"message_start"`:
+	case "message_start":
 		var message map[string]json.RawMessage
 		if json.Unmarshal(event["message"], &message) != nil || message == nil {
 			return nil, false
@@ -1134,7 +1163,7 @@ func rewritePassthroughEvent(payload []byte, model string, state *passthroughStr
 		state.startUsage = decodeJSONObject(message["usage"])
 		message["model"], _ = json.Marshal(model)
 		event["message"], _ = json.Marshal(message)
-	case `"message_delta"`:
+	case "message_delta":
 		usage := decodeJSONObject(event["usage"])
 		for key, value := range state.startUsage {
 			if _, ok := usage[key]; !ok {

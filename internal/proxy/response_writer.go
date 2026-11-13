@@ -377,7 +377,7 @@ func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, c
 		resp.StatusCode = mappedStatus
 	}
 	if clientReq != nil && clientReq.URL != nil && clientReq.URL.Path == "/v1/messages" {
-		resp.StatusCode, resp.Body = sanitizeRefusalResponse(resp.StatusCode, resp.Body, logCtx)
+		sanitizeProxyRefusalResponse(resp, logCtx)
 	}
 	responseBody, responseBodyChanged, responseBodyMasked := clientResponseBodyForCredential(resp.StatusCode, resp.Body, cred, modelID, logContextRequestID(logCtx))
 	// writeProxyResponse serves both the primary proxy-credential path

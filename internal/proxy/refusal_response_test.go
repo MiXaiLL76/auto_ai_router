@@ -90,3 +90,56 @@ func TestProxyMessagesAbortClosesProvider(t *testing.T) {
 		}
 	}
 }
+
+func TestMessagesRefusalDropsStaleIntegrityHeaders(t *testing.T) {
+	for _, path := range []string{"native", "proxy", "fallback"} {
+		for _, refusal := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/refusal=%t", path, refusal), func(t *testing.T) {
+				headers := http.Header{"Content-Type": {"application/json"}, "X-Fixture": {"kept"}}
+				for _, key := range []string{"ETag", "Content-MD5", "Digest", "Content-Digest", "Repr-Digest"} {
+					headers.Set(key, "stale-fixture")
+				}
+				const model = "claude-sonnet-4.5"
+				body := []byte(`{"id":"msg_fixture","type":"message","role":"assistant","model":"claude-sonnet-4.5","content":[],"stop_reason":"refusal","stop_details":{"category":"cyber","explanation":"private-fixture"},"usage":{"input_tokens":17,"output_tokens":0}}`)
+				if !refusal {
+					body = []byte(strings.Replace(string(body), `"stop_reason":"refusal"`, `"stop_reason":"end_turn"`, 1))
+				}
+				req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-sonnet-4.5","messages":[{"role":"user","content":"hi"}],"max_tokens":100}`))
+				req.Header.Set("Authorization", "Bearer master-key")
+				w := httptest.NewRecorder()
+				if path == "native" {
+					upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+						for k, v := range headers {
+							w.Header()[k] = v
+						}
+						_, _ = w.Write(body)
+					}))
+					defer upstream.Close()
+					prx := NewTestProxyBuilder().WithSingleCredential("fixture", config.ProviderTypeAnthropic, upstream.URL, "fixture").Build()
+					prx.ProxyRequest(w, req)
+				} else {
+					prx := NewTestProxyBuilder().Build()
+					resp := &ProxyResponse{StatusCode: http.StatusOK, Headers: headers, Body: body}
+					cred := &config.CredentialConfig{Name: "fixture", Type: config.ProviderTypeProxy}
+					ctx := &RequestLogContext{Request: req}
+					if path == "fallback" {
+						prx.writeFallbackResponse(w, req, resp, cred, model, "original", ctx, time.Now())
+					} else {
+						prx.writeProxyResponse(w, resp, req, cred, model, ctx)
+					}
+				}
+				require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+				assert.NotContains(t, w.Body.String(), "private-fixture")
+				if refusal {
+					assert.Contains(t, w.Body.String(), "cybersecurity")
+				} else {
+					assert.Contains(t, w.Body.String(), `"stop_details":null`)
+				}
+				assert.Equal(t, "kept", w.Header().Get("X-Fixture"))
+				for _, key := range []string{"ETag", "Content-MD5", "Digest", "Content-Digest", "Repr-Digest"} {
+					assert.Empty(t, w.Header().Get(key), key)
+				}
+			})
+		}
+	}
+}
