@@ -39,6 +39,28 @@ func TestGetHopByHopHeaders(t *testing.T) {
 	assert.False(t, hasCustom, "modifying returned map should not affect the original")
 }
 
+func TestSetForwardedSessionHeaderRejectsInvalidValues(t *testing.T) {
+	cred := &config.CredentialConfig{Type: config.ProviderTypeAIR}
+	for _, tc := range []struct {
+		name, sessionID, want string
+	}{
+		{"valid", "session-123", "session-123"},
+		{"newline", "session\nInjected: yes", ""},
+		{"carriage return", "session\rInjected: yes", ""},
+		{"control", "session\x00id", ""},
+		{"delete", "session\x7fid", ""},
+		{"too long", strings.Repeat("x", maxForwardedSessionIDLength+1), ""},
+		{"at limit", strings.Repeat("x", maxForwardedSessionIDLength), strings.Repeat("x", maxForwardedSessionIDLength)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			header := make(http.Header)
+			header.Set(HeaderSessionID, "stale")
+			setForwardedSessionHeader(header, cred, &RequestLogContext{SessionID: tc.sessionID})
+			assert.Equal(t, tc.want, header.Get(HeaderSessionID))
+		})
+	}
+}
+
 func TestCopyResponseHeaders_PassthroughByDefault(t *testing.T) {
 	src := http.Header{
 		"Content-Type":       {"application/json"},

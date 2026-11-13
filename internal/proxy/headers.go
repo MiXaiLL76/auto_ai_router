@@ -8,6 +8,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	promanutils "github.com/mixaill76/auto_ai_router/internal/converter/proman/utils"
 	"github.com/mixaill76/auto_ai_router/internal/requestid"
+	"golang.org/x/net/http/httpguts"
 )
 
 const accelBufferingHeader = "X-Accel-Buffering"
@@ -296,6 +297,8 @@ func dropRepresentationIntegrityHeaders(headers http.Header) {
 // routing (e.g. Gemini 3 thoughtSignatures bound to one credential) breaks.
 const HeaderSessionID = "Session-Id"
 
+const maxForwardedSessionIDLength = 512
+
 // setForwardedSessionHeader propagates the resolved session id to a type: air
 // credential. The downstream reads it via extractSessionIDFromHeaders, where a
 // bare "Session-Id" wins over any client X-*-Session-Id variant, matching the
@@ -305,7 +308,10 @@ func setForwardedSessionHeader(header http.Header, cred *config.CredentialConfig
 	if cred == nil || cred.Type != config.ProviderTypeAIR || logCtx == nil {
 		return
 	}
-	if logCtx.SessionID == "" || logCtx.SessionID == logCtx.RequestID {
+	header.Del(HeaderSessionID)
+	if logCtx.SessionID == "" || logCtx.SessionID == logCtx.RequestID ||
+		len(logCtx.SessionID) > maxForwardedSessionIDLength ||
+		!httpguts.ValidHeaderFieldValue(logCtx.SessionID) {
 		return
 	}
 	header.Set(HeaderSessionID, logCtx.SessionID)
