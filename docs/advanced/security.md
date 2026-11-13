@@ -89,10 +89,18 @@ reflected prompt does not outlive the debugging session in the billing table.
 Kafka body diagnostics are a separate path with their own controls.
 `kafka.raw_bodies.redact_sensitive_fields` and
 `kafka.router_responses.redact_sensitive_fields` both default to `true`: the
-first replaces captured request content and omits response content before
-publishing, the second keeps the response's structure (model, usage, ids,
-finish reasons) and replaces the model's own text with a placeholder. An
-explicit `false` allows captured body text in those separate debug topics.
+first replaces captured request content and omits the client-facing response
+content before publishing, the second keeps the response's structure (model,
+usage, ids, finish reasons) and replaces the model's own text with a
+placeholder. An explicit `false` allows captured body text in those separate
+debug topics.
+
+One body in the raw-bodies topic is deliberately *not* covered by that
+redaction: `response_body` carries the provider's own error text verbatim,
+because it is the provider describing its own failure and nothing else says
+*why* a request failed. The CometAPI/ProMan exception above applies there
+too — those credentials' provider bodies are reduced to a byte count so the
+echoed credential is not published with them.
 See [Kafka logging](../litellm-integration/kafka_spend_log.md).
 
 These controls do not remove historical logs or guarantee that arbitrary custom

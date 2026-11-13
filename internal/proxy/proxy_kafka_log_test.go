@@ -381,23 +381,74 @@ func TestBuildRawBodyEvent_MapsRawBodies(t *testing.T) {
 	assert.Empty(t, event.RequestBody, "RequestBody must stay empty when rawBodyStoreRawBody is off, even if logCtx captured one")
 }
 
-func TestBuildRawBodyEventRedactsResponseTextBeforePublishing(t *testing.T) {
+func TestBuildRawBodyEventPublishesProviderErrorTextVerbatim(t *testing.T) {
+	// The provider's own error text is what says WHY a request failed, so
+	// raw_bodies publishes it as it is -- reducing it to a byte count makes
+	// the topic useless for its stated purpose. The bodies that can carry
+	// client-side content (the client's own request, and the answer the
+	// client received) stay masked.
 	prx := NewTestProxyBuilder().Build()
 	prx.rawBodyRedactSensitiveFields = true
 	logCtx := testLogCtx(t)
 	logCtx.HTTPStatus = 400
-	logCtx.ErrorBodyRaw = `{"error":{"message":"synthetic-oauth-secret"}}`
-	logCtx.ClientResponseBody = "synthetic-oauth-secret in provider text"
+	logCtx.ErrorBodyRaw = `{"error":{"message":"synthetic-provider-text"}}`
+	logCtx.ClientResponseBody = "synthetic-client-facing-body"
 	prx.rawBodyStoreRawBody = true
 	logCtx.RequestBodyRaw = `{"messages":"[REDACTED]"}`
 
 	event := prx.buildRawBodyEvent(logCtx, "failure", logCtx.StartTime)
-	assert.NotContains(t, event.ResponseBody, "synthetic-oauth-secret")
-	assert.NotContains(t, event.ClientResponseBody, "synthetic-oauth-secret")
-	assert.Contains(t, event.ResponseBody, "REDACTED")
+	assert.Equal(t, logCtx.ErrorBodyRaw, event.ResponseBody,
+		"the provider's own error text is published verbatim")
+	assert.NotContains(t, event.ClientResponseBody, "synthetic-client-facing-body",
+		"what the client received is the model's own output and stays masked")
+	assert.Contains(t, event.ClientResponseBody, "REDACTED")
 	assert.Equal(t, logCtx.RequestBodyRaw, event.RequestBody)
-	assert.Contains(t, logCtx.ErrorBodyRaw, "synthetic-oauth-secret", "logging must not alter the provider/client payload")
 	assert.Equal(t, "BadRequestError", event.ErrorClass)
+}
+
+func TestBuildRawBodyEventKeepsProviderTextWhenRedactionIsOff(t *testing.T) {
+	// The provider's error text is published verbatim either way; the toggle
+	// only governs the CLIENT-side bodies.
+	prx := NewTestProxyBuilder().Build()
+	prx.rawBodyRedactSensitiveFields = false
+	logCtx := testLogCtx(t)
+	logCtx.HTTPStatus = 400
+	logCtx.ErrorBodyRaw = `{"error":{"message":"synthetic-provider-text"}}`
+	logCtx.ClientResponseBody = "synthetic-client-facing-body"
+
+	event := prx.buildRawBodyEvent(logCtx, "failure", logCtx.StartTime)
+	assert.Equal(t, logCtx.ErrorBodyRaw, event.ResponseBody)
+	assert.Equal(t, logCtx.ClientResponseBody, event.ClientResponseBody,
+		"with redaction off the client-facing body is published verbatim too")
+}
+
+func TestBuildRawBodyEventMasksProviderTextThatEchoesTheCredential(t *testing.T) {
+	// CometAPI and ProMan have been seen to echo the caller's own credential
+	// back in their error text, so their provider body is masked even though
+	// every other provider's is published verbatim -- and even with the
+	// redaction toggle turned OFF: that toggle is a debugging override for
+	// the client's own bodies, never a licence to publish a credential.
+	for _, cred := range []*config.CredentialConfig{
+		{Name: "cometapi-01", Type: config.ProviderTypeCometAPI},
+		{Name: "proman-01", Type: config.ProviderTypeProMan},
+	} {
+		for _, redact := range []bool{true, false} {
+			t.Run(cred.Name, func(t *testing.T) {
+				prx := NewTestProxyBuilder().Build()
+				prx.rawBodyRedactSensitiveFields = redact
+				logCtx := testLogCtx(t)
+				logCtx.HTTPStatus = 400
+				logCtx.Credential = cred
+				logCtx.ErrorBodyRaw = `{"error":{"message":"synthetic-oauth-secret"}}`
+				logCtx.ClientResponseBody = "synthetic-oauth-secret in provider text"
+
+				event := prx.buildRawBodyEvent(logCtx, "failure", logCtx.StartTime)
+				assert.NotContains(t, event.ResponseBody, "synthetic-oauth-secret",
+					"a credential echoed back by the provider must not be published")
+				assert.Contains(t, event.ResponseBody, "REDACTED")
+			})
+		}
+	}
 }
 
 func TestProviderBodyCannotEscapeViaSpendErrorMessage(t *testing.T) {

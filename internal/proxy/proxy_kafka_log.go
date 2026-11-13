@@ -331,8 +331,32 @@ func (p *Proxy) buildRawBodyEvent(logCtx *RequestLogContext, status string, endT
 		ResponseBody:       logCtx.ErrorBodyRaw,
 		ClientResponseBody: logCtx.ClientResponseBody,
 	}
-	if p.rawBodyRedactSensitiveFields {
+	// ResponseBody -- the provider's own error text -- is published verbatim:
+	// it is what says WHY a request failed, and reducing it to a byte count
+	// makes the whole topic useless for its stated purpose ("why did this
+	// request fail"). It is the provider's text about the provider's own
+	// failure, not the client's prompt. This matches what the router's own
+	// error log already does for every credential but CometAPI/ProMan (see
+	// appendResponseBodyForLogs).
+	//
+	// The two bodies that CAN carry client-side content stay masked:
+	//
+	//   - ClientResponseBody: what the router sent the client, which for
+	//     an error is the router's own masked body (maskedUpstreamErrorBody
+	//     never echoes provider text) but for a SUCCESS is the provider's
+	//     answer -- the client's data, and the model output itself.
+	//   - RequestBody: the client's own request, prompt included.
+	//
+	// A provider whose error text echoes the caller's credential (CometAPI,
+	// ProMan -- see shouldMaskUpstreamErrors) is the one exception: its
+	// ResponseBody is masked too, because publishing it verbatim would
+	// publish the credential with it. That exception is NOT gated on the
+	// redaction toggle: turning redaction off is a debugging override for
+	// the client's own bodies, never a licence to publish a credential.
+	if shouldMaskUpstreamErrors(logCtx.Credential) {
 		event.ResponseBody = security.RedactBodyForLog(event.ResponseBody)
+	}
+	if p.rawBodyRedactSensitiveFields {
 		event.ClientResponseBody = security.RedactBodyForLog(event.ClientResponseBody)
 	}
 	if status == "failure" {
