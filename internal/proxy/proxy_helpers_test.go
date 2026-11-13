@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"strings"
@@ -45,6 +46,21 @@ func TestIsTimeoutError(t *testing.T) {
 		{"context_canceled", context.Canceled, false},
 		{"generic_error", errors.New("something"), false},
 		{"non_timeout_net_error", &nonTimeoutNetError{}, false},
+		{
+			"http2_connection_lost_from_ping_check",
+			errors.New("http2: client connection lost"),
+			true,
+		},
+		{
+			"http2_connection_lost_wrapped",
+			fmt.Errorf("Post %q: %w", "https://example.com", errors.New("http2: client connection lost")),
+			true,
+		},
+		{
+			"http2_unrelated_error_not_misclassified",
+			errors.New("http2: client conn is closed"),
+			false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -947,6 +963,33 @@ func TestRedactRequestBodyForLogging(t *testing.T) {
 		assert.Equal(t, map[string]any{"responseMimeType": "application/json", "thinkingLevel": "high", "topK": float64(40),
 			"responseSchema": map[string]any{"type": "OBJECT", "properties": map[string]any{"metadata": map[string]any{"type": "STRING"}}}},
 			parsed["generationConfig"], "a Gemini response schema parameter named metadata is still a schema")
+	})
+
+	t.Run("keeps Gemini image and search parameters", func(t *testing.T) {
+		body := []byte(`{
+			"model": "gemini-nano-banana-2.1",
+			"prompt": "SECRET",
+			"aspect_ratio": "16:9",
+			"image_size": "4K",
+			"thinking_level": "high",
+			"image_config": {"aspect_ratio": "4:5", "note": "SECRET"},
+			"generationConfig": {"imageConfig": {"aspectRatio": "21:9", "imageSize": "2K"}},
+			"tools": [{"type": "google_search", "search_types": ["web_search", "image_search"]}]
+		}`)
+
+		out, ok := redactRequestBodyForLogging(body)
+		require.True(t, ok)
+		assert.NotContains(t, out, "SECRET")
+
+		var parsed map[string]any
+		require.NoError(t, json.Unmarshal([]byte(out), &parsed))
+		assert.Equal(t, "16:9", parsed["aspect_ratio"])
+		assert.Equal(t, "4K", parsed["image_size"])
+		assert.Equal(t, "high", parsed["thinking_level"])
+		assert.Equal(t, "4:5", parsed["image_config"].(map[string]any)["aspect_ratio"])
+		imageConfig := parsed["generationConfig"].(map[string]any)["imageConfig"].(map[string]any)
+		assert.Equal(t, map[string]any{"aspectRatio": "21:9", "imageSize": "2K"}, imageConfig)
+		assert.Equal(t, []any{"web_search", "image_search"}, parsed["tools"].([]any)[0].(map[string]any)["search_types"])
 	})
 
 	t.Run("fails closed on non-JSON body", func(t *testing.T) {

@@ -83,7 +83,7 @@ func imageEditJSONURL(raw json.RawMessage, param string) (*openai.ImageURL, erro
 		if err != nil {
 			return nil, err
 		}
-		if part == nil || part.InlineData == nil || !strings.HasPrefix(part.InlineData.MIMEType, "image/") || len(part.InlineData.Data) == 0 {
+		if part == nil || part.InlineData == nil || !IsImageMIME(part.InlineData.MIMEType) || len(part.InlineData.Data) == 0 {
 			return nil, imageValidationError(param, "Invalid image data", "invalid_image")
 		}
 	} else {

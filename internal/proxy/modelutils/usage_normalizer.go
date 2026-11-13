@@ -11,6 +11,9 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
+	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 )
 
 const maxSSEUsageLineBytes = 1 << 20
@@ -85,6 +88,143 @@ func NormalizeCompletionUsage(body []byte, modelID string) ([]byte, bool) {
 	return normalizedResponse, true
 }
 
+// NormalizeCacheCreationUsage ensures an OpenAI chat-completions response
+// carries the standard cache-write naming in usage.prompt_tokens_details
+// whenever the cache write is known only under Requesty's spelling
+// (caching_tokens / caching_token_details). Downstream usage-metering matches
+// the standard cache_creation_tokens / cache_creation_token_details in its
+// pricing jsonpaths, but has no path for the Requesty names, so an
+// Requesty-only spelling drops the cache write from billing. The Requesty
+// fields are preserved; the standard ones are added.
+//
+// This is deliberately Requesty-only. Other cache-write spellings are already
+// matched directly by the pricing jsonpaths (cache_write_tokens, Alibaba's
+// cache_creation.ephemeral_*), so synthesizing the standard name for them
+// would risk double-counting. Returns the (possibly unchanged) body and
+// whether it changed.
+//
+// When converterutil.MirrorCacheWriteTokensEnabled() is on, the same write is
+// also mirrored into cache_write_tokens — the name some clients' own
+// accounting reads in preference to cache_creation_tokens (see PR #355's
+// equivalent for Anthropic-type credentials) — and, when a TTL split is
+// known, into cache_creation.ephemeral_5m_input_tokens /
+// ephemeral_1h_input_tokens too (Alibaba/Qwen's unsuffixed spelling of the
+// same split, a third name some clients' accounting may read instead of
+// cache_creation_token_details). Off by default: a client reading
+// cache_creation_tokens/cache_creation_token_details already sees the write
+// either way, and this only adds the alternate names for a client that
+// doesn't.
+func NormalizeCacheCreationUsage(body []byte) ([]byte, bool) {
+	// Cheap gate: the only Requesty fields this reads (caching_tokens,
+	// caching_token_details, caching_5m/1h_tokens) all contain the substring
+	// "caching", so a body without it can never need a rewrite. Skips the JSON
+	// parse on the hot non-streaming path for the vast majority of responses.
+	if !bytes.Contains(body, []byte("caching")) {
+		return body, false
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(body, &top); err != nil {
+		return body, false
+	}
+	usageRaw, ok := top["usage"]
+	if !ok {
+		return body, false
+	}
+	var usage map[string]json.RawMessage
+	if err := json.Unmarshal(usageRaw, &usage); err != nil {
+		return body, false
+	}
+	detailsRaw, ok := usage["prompt_tokens_details"]
+	if !ok {
+		return body, false
+	}
+	// Already carries a positive standard count — leave it untouched.
+	if existing, ok := nonNegativeJSONInteger(detailsRawKey(detailsRaw, "cache_creation_tokens")); ok && existing > 0 {
+		return body, false
+	}
+	// Read ONLY Requesty's naming (caching_tokens / caching_token_details).
+	// CachingWrite() is the Requesty-extension reader; it ignores the standard,
+	// cache_write and Alibaba spellings, so those responses are left alone.
+	var td openai.TokenDetails
+	if err := json.Unmarshal(detailsRaw, &td); err != nil {
+		return body, false
+	}
+	total, fiveMinutes, oneHour := td.CachingWrite()
+	if total <= 0 && fiveMinutes <= 0 && oneHour <= 0 {
+		return body, false
+	}
+
+	var details map[string]json.RawMessage
+	if err := json.Unmarshal(detailsRaw, &details); err != nil {
+		return body, false
+	}
+	if total > 0 {
+		details["cache_creation_tokens"] = json.RawMessage(strconv.FormatInt(int64(total), 10))
+		// Mirror into cache_write_tokens too, but only when the response does
+		// not already carry one: cache_write_tokens is also a provider-native
+		// name in its own right (OpenRouter's, for one), so a value already
+		// there is that provider's own count, not Requesty's — overwriting it
+		// would replace a real number with a different provider's, which
+		// prices the write at whichever rate the wrong count happens to imply.
+		if _, exists := details["cache_write_tokens"]; converterutil.MirrorCacheWriteTokensEnabled() && !exists {
+			details["cache_write_tokens"] = json.RawMessage(strconv.FormatInt(int64(total), 10))
+		}
+	}
+	if fiveMinutes > 0 || oneHour > 0 {
+		ctd := make(map[string]json.RawMessage, 2)
+		if fiveMinutes > 0 {
+			ctd["ephemeral_5m_input_tokens"] = json.RawMessage(strconv.FormatInt(int64(fiveMinutes), 10))
+		}
+		if oneHour > 0 {
+			ctd["ephemeral_1h_input_tokens"] = json.RawMessage(strconv.FormatInt(int64(oneHour), 10))
+		}
+		encCTD, err := json.Marshal(ctd)
+		if err != nil {
+			return body, false
+		}
+		details["cache_creation_token_details"] = encCTD
+		// Same TTL split again, under Alibaba/Qwen's unsuffixed spelling
+		// (cache_creation.ephemeral_5m_input_tokens, no _token_details) — a
+		// third name some clients' accounting may read instead of
+		// cache_creation_token_details. Same flag as cache_write_tokens above;
+		// TokenDetails.CacheWrite() already prefers cache_creation_token_details
+		// over this one, so it is never summed twice internally.
+		//
+		// Guarded the same way: cache_creation is also Alibaba/Qwen's own
+		// native field for a Qwen response passed through Requesty, so a
+		// value already there is Qwen's own TTL split, not a rewrite of
+		// Requesty's — overwriting it would silently re-price the write
+		// under the wrong TTL tier (1h writes cost more than 5m ones).
+		if _, exists := details["cache_creation"]; converterutil.MirrorCacheWriteTokensEnabled() && !exists {
+			details["cache_creation"] = encCTD
+		}
+	}
+	encDetails, err := json.Marshal(details)
+	if err != nil {
+		return body, false
+	}
+	usage["prompt_tokens_details"] = encDetails
+	encUsage, err := json.Marshal(usage)
+	if err != nil {
+		return body, false
+	}
+	top["usage"] = encUsage
+	encTop, err := json.Marshal(top)
+	if err != nil {
+		return body, false
+	}
+	return encTop, true
+}
+
+// detailsRawKey digs a named key out of a raw prompt_tokens_details object.
+func detailsRawKey(detailsRaw json.RawMessage, key string) json.RawMessage {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(detailsRaw, &m); err != nil {
+		return nil
+	}
+	return m[key]
+}
+
 func nonNegativeJSONInteger(raw json.RawMessage) (int64, bool) {
 	if len(raw) == 0 {
 		return 0, false
@@ -101,7 +241,7 @@ func nonNegativeJSONInteger(raw json.RawMessage) (int64, bool) {
 }
 
 func NewUsageNormalizingReadCloser(source io.ReadCloser, modelID string) (io.ReadCloser, bool) {
-	if source == nil || !isQwenModel(modelID) {
+	if source == nil {
 		return source, false
 	}
 	return &usageNormalizingReadCloser{
@@ -205,7 +345,24 @@ func normalizeSSEUsageLine(line []byte, modelID string) []byte {
 		return line
 	}
 
-	normalizedPayload, changed := NormalizeCompletionUsage(payload, modelID)
+	// Cheap substring gates before the normalizers' full JSON parse: a streamed
+	// content delta carries neither key, so the common case costs a byte scan
+	// instead of an unmarshal. Each gate matches the key its normalizer can
+	// actually rewrite, so nothing eligible is skipped.
+	normalizedPayload := payload
+	changed := false
+	if bytes.Contains(payload, []byte("completion_tokens_details")) {
+		if p, didChange := NormalizeCompletionUsage(payload, modelID); didChange {
+			normalizedPayload = p
+			changed = true
+		}
+	}
+	// NormalizeCacheCreationUsage self-gates on the "caching" substring, so a
+	// content-delta line costs only that scan before it returns unchanged.
+	if p, didChange := NormalizeCacheCreationUsage(normalizedPayload); didChange {
+		normalizedPayload = p
+		changed = true
+	}
 	if !changed {
 		return line
 	}

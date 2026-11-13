@@ -9,6 +9,26 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 )
 
+// chatThinkingBlock is the thinking_blocks entry a Chat client gets for a thinking or
+// redacted_thinking block, to echo back on the next turn (convertOpenAIMessagesToAnthropic),
+// or nil for a block that can't be echoed: Anthropic rejects a thinking block without
+// its signature. index is the entry's position in the message's thinking_blocks; a
+// stream sends one entry per chunk, and stream accumulators such as the OpenAI SDK's
+// merge list entries by index and fail on entries without one.
+//
+// A Chat message keeps thinking, text and tool calls in separate fields, so the echo
+// replays every thinking block first: a turn that interleaved them (Sonnet 5.5 progress
+// notes between text and tool calls) comes back reordered, and its text joined.
+func chatThinkingBlock(block ContentBlock, index int) map[string]interface{} {
+	switch {
+	case block.Type == "thinking" && block.Signature != "":
+		return map[string]interface{}{"index": index, "type": "thinking", "thinking": block.Thinking, "signature": block.Signature}
+	case block.Type == "redacted_thinking" && block.Data != "":
+		return map[string]interface{}{"index": index, "type": "redacted_thinking", "data": block.Data}
+	}
+	return nil
+}
+
 // AnthropicToOpenAI converts an Anthropic Messages API response body to OpenAI
 // Chat Completions response format.
 func AnthropicToOpenAI(anthropicBody []byte, model string) ([]byte, error) {
@@ -28,6 +48,7 @@ func AnthropicToOpenAI(anthropicBody []byte, model string) ([]byte, error) {
 	// Translate content blocks to OpenAI message fields.
 	var textParts []string // collect text parts separately, join with separator
 	var reasoningContent string
+	var thinkingBlocks []map[string]interface{}
 	var toolCalls []openai.OpenAIToolCall
 	webSearchRequests := 0
 
@@ -37,8 +58,11 @@ func AnthropicToOpenAI(anthropicBody []byte, model string) ([]byte, error) {
 			if block.Text != "" {
 				textParts = append(textParts, block.Text)
 			}
-		case "thinking":
+		case "thinking", "redacted_thinking":
 			reasoningContent += block.Thinking
+			if entry := chatThinkingBlock(block, len(thinkingBlocks)); entry != nil {
+				thinkingBlocks = append(thinkingBlocks, entry)
+			}
 		case "server_tool_use":
 			// Server-side tool calls are executed by the provider and have no OpenAI
 			// equivalent to surface, but they are billable. Count them so a provider that
@@ -91,9 +115,13 @@ func AnthropicToOpenAI(anthropicBody []byte, model string) ([]byte, error) {
 	message := openai.OpenAIResponseMessage{
 		Role:    "assistant",
 		Content: textContent,
+		Refusal: RefusalMessage(anthropicResp.StopReason, anthropicResp.StopDetails),
 	}
 	if reasoningContent != "" {
 		message.ReasoningContent = reasoningContent
+	}
+	if len(thinkingBlocks) > 0 {
+		message.ThinkingBlocks = thinkingBlocks
 	}
 	if len(toolCalls) > 0 {
 		message.ToolCalls = toolCalls
@@ -157,7 +185,7 @@ func mapAnthropicStopReason(reason string) string {
 		return "tool_calls"
 	case "stop_sequence":
 		return "stop"
-	case "content_filter": // M2 — Anthropic content filtering stop reason
+	case "content_filter", "refusal":
 		return "content_filter"
 	default:
 		return "stop"
@@ -188,10 +216,37 @@ func convertAnthropicUsageToOpenAI(usage *AnthropicUsage) *openai.OpenAIUsage {
 			CachedTokens:        usage.CacheReadInputTokens,
 			CacheCreationTokens: cacheCreationTokens,
 		}
+		// The same cache write, also under the name the downstream usage
+		// metering reads first: it takes cache_write_tokens in preference to
+		// cache_creation_tokens (cost_calculator.py), and excludes the latter
+		// from the sum when the former is present, so reporting both is not a
+		// double count. An Anthropic-compatible provider that reports only
+		// cache_creation_input_tokens otherwise lands in the fallback name
+		// and, for a customer whose own accounting reads cache_write_tokens,
+		// the write is not visible at all. Gated behind the same
+		// mirror-cache-write-tokens flag as the Requesty equivalent
+		// (modelutils.NormalizeCacheCreationUsage) so one config setting
+		// controls both.
+		if converterutil.MirrorCacheWriteTokensEnabled() {
+			result.PromptTokensDetails.CacheWriteTokens = cacheCreationTokens
+		}
 		if cacheCreation5mTokens > 0 || cacheCreation1hTokens > 0 {
 			result.PromptTokensDetails.CacheCreationTokenDetails = &openai.CacheCreationTokenDetails{
 				Ephemeral5mInputTokens: cacheCreation5mTokens,
 				Ephemeral1hInputTokens: cacheCreation1hTokens,
+			}
+			// Same TTL split again, under Alibaba/Qwen's unsuffixed spelling
+			// (cache_creation.ephemeral_5m_input_tokens, no _token_details) —
+			// a third name some clients' accounting may read instead of
+			// cache_creation_token_details. Same flag, same non-double-count
+			// reasoning: TokenDetails.CacheWrite() already prefers
+			// CacheCreationTokenDetails over AlibabaCacheCreation, so this
+			// never gets summed twice internally.
+			if converterutil.MirrorCacheWriteTokensEnabled() {
+				result.PromptTokensDetails.AlibabaCacheCreation = &openai.CacheCreationTokenDetails{
+					Ephemeral5mInputTokens: cacheCreation5mTokens,
+					Ephemeral1hInputTokens: cacheCreation1hTokens,
+				}
 			}
 		}
 	}
@@ -199,6 +254,11 @@ func convertAnthropicUsageToOpenAI(usage *AnthropicUsage) *openai.OpenAIUsage {
 		result.ServerToolUse = &openai.ServerToolUseDetails{
 			WebSearchRequests: usage.ServerToolUse.WebSearchRequests,
 		}
+	}
+	// Thinking tokens are part of output_tokens, as reasoning_tokens are part of
+	// completion_tokens: a breakdown, not an addition.
+	if reasoningTokens := usage.ReasoningTokens(); reasoningTokens > 0 {
+		result.CompletionTokensDetails = &openai.CompletionTokenDetails{ReasoningTokens: reasoningTokens}
 	}
 	return result
 }

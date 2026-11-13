@@ -144,7 +144,7 @@ func logErrorResponse(errorsLogPath string, req *http.Request, rc *responseCaptu
 
 	// Create response headers map
 	respHeaders := make(map[string]string)
-	for key, values := range rc.Header() {
+	for key, values := range security.MaskSensitiveHeaders(rc.Header()) {
 		if len(values) > 0 {
 			respHeaders[key] = values[0]
 		}

@@ -177,6 +177,12 @@ func TestExtractWebSearchRequestUsage(t *testing.T) {
 			wantSize: "low",
 		},
 		{
+			name:     "gemini google_search tool with image search",
+			body:     `{"model":"gemini-nano-banana-2.1","tools":[{"type":"google_search","search_types":["image_search"]}]}`,
+			wantOn:   true,
+			wantSize: "medium",
+		},
+		{
 			name:   "no web search",
 			body:   `{"model":"gpt-4o","tools":[{"type":"function","function":{"name":"f"}}]}`,
 			wantOn: false,

@@ -100,6 +100,8 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 		"read_timeout", cfg.Server.ReadTimeout.String(),
 		"write_timeout", cfg.Server.WriteTimeout.String(),
 		"idle_timeout", cfg.Server.IdleTimeout.String(),
+		"shutdown_delay", cfg.Server.ShutdownDelay.String(),
+		"shutdown_timeout", cfg.Server.ShutdownTimeout.String(),
 		"logging_level", cfg.Server.LoggingLevel,
 		"stdout_logs_enabled", cfg.Server.StdoutLogsEnabled,
 		"credential_name_as_team_id", cfg.Server.CredentialNameAsTeamID,
@@ -108,10 +110,12 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 		"max_idle_conns", cfg.Server.MaxIdleConns,
 		"max_idle_conns_per_host", cfg.Server.MaxIdleConnsPerHost,
 		"idle_conn_timeout", cfg.Server.IdleConnTimeout.String(),
+		"max_connection_lifetime", cfg.Server.MaxConnectionLifetime.String(),
 		"model_prices_link", cfg.Server.ModelPricesLink,
 		"model_prices_sync_interval", cfg.Server.ModelPricesSyncInterval.String(),
 		"max_provider_retries", cfg.Server.MaxProviderRetries,
 		"max_fallback_attempts", cfg.Server.MaxFallbackAttempts,
+		"anthropic_default_max_tokens", cfg.Server.AnthropicDefaultMaxTokens,
 		"response_headers_mode", cfg.Server.ResponseHeaders.Mode,
 		"session_sticky_enabled", cfg.Server.SessionStickyEnabled,
 		"session_sticky_ttl_minutes", cfg.Server.SessionStickyTTL,
@@ -232,6 +236,20 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 			"max_tokens", cfg.VisionFallback.MaxTokens,
 			"timeout", cfg.VisionFallback.Timeout,
 			"inject_into_response", cfg.VisionFallback.InjectEnabled(),
+		)
+	}
+	if cfg.LoopGate.Enabled() {
+		logger.Info("loop_gate",
+			"mode", cfg.LoopGate.Mode,
+			"providers", cfg.LoopGate.Providers,
+			"ngram", cfg.LoopGate.NGram,
+			"arm_words", cfg.LoopGate.ArmWords,
+			"min_repeat", cfg.LoopGate.MinRepeat,
+			"min_ratio", cfg.LoopGate.MinRatio,
+			"cut_min_ratio", cfg.LoopGate.CutRatio(),
+			"max_attempts", cfg.LoopGate.MaxAttempts,
+			"retry_deadline", cfg.LoopGate.RetryDeadline,
+			"retry_presence_penalty", cfg.LoopGate.RetryPresencePenalty,
 		)
 	}
 	if cfg.Video.Enabled {

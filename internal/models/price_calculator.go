@@ -11,6 +11,7 @@ import (
 const (
 	tokenTiering200kThreshold = 200_000
 	tokenTiering32kThreshold  = 32_000
+	tokenTiering100kThreshold = 100_000
 	tokenTiering128kThreshold = 128_000
 	tokenTiering256kThreshold = 256_000
 	tokenTiering272kThreshold = 272_000
@@ -34,12 +35,18 @@ const (
 	ToolCodeExecution     = "code_execution"
 	ToolAttachmentSearch  = "attachment_search"
 	ToolCollectionsSearch = "collections_search"
+	// ToolWebFetch is the built-in web fetch tool: a page fetch the router
+	// executed, billed per successful call (one that returned page content).
+	ToolWebFetch = "web_fetch"
 )
 
 var toolCostAliases = map[string]string{
 	"code_interpreter": ToolCodeExecution,
 	"document_search":  ToolAttachmentSearch,
 	"file_search":      ToolCollectionsSearch,
+	// "fetch" is the name DeepSeek's own price lists use for the web fetch
+	// tool; "web_fetch" is the tool's type name in a request.
+	"fetch": ToolWebFetch,
 }
 
 // fullSessionTier describes one "Alibaba Cloud style" pricing bracket: once
@@ -47,6 +54,14 @@ var toolCostAliases = map[string]string{
 // billed at this tier's rates. Zero-value rates mean "not configured for
 // this tier" and are skipped by fullSessionRate. An inclusive tier already
 // applies when the prompt equals threshold.
+//
+// cacheCreation1hRate is the tier's own rate for 1-hour cache writes. A tier
+// without one bills both TTLs at cacheCreationRate, as all tiers did before
+// the 100k tier, whose provider prices the two TTLs differently.
+//
+// cacheCreation12hRate is the tier's own rate for OpenAI's 12-hour
+// cache-retention writes, same shape as cacheCreation1hRate: a tier without
+// one bills the 12h TTL at cacheCreationRate too.
 type fullSessionTier struct {
 	threshold             int
 	inclusive             bool
@@ -54,6 +69,8 @@ type fullSessionTier struct {
 	outputRate            float64
 	cacheReadRate         float64
 	cacheCreationRate     float64
+	cacheCreation1hRate   float64
+	cacheCreation12hRate  float64
 	explicitCacheReadRate float64
 }
 
@@ -91,11 +108,12 @@ func fullSessionTiers(price *ModelPrice) []fullSessionTier {
 			cacheCreationRate: price.CacheCreationInputTokenCostAbove512k,
 		},
 		{
-			threshold:         tokenTiering272kThreshold,
-			inputRate:         price.InputCostPerTokenAbove272k,
-			outputRate:        price.OutputCostPerTokenAbove272k,
-			cacheReadRate:     price.CacheReadInputTokenCostAbove272k,
-			cacheCreationRate: price.CacheCreationInputTokenCostAbove272k,
+			threshold:            tokenTiering272kThreshold,
+			inputRate:            price.InputCostPerTokenAbove272k,
+			outputRate:           price.OutputCostPerTokenAbove272k,
+			cacheReadRate:        price.CacheReadInputTokenCostAbove272k,
+			cacheCreationRate:    price.CacheCreationInputTokenCostAbove272k,
+			cacheCreation12hRate: price.CacheCreationInputTokenCost12hAbove272k,
 		},
 		{
 			threshold:             tokenTiering256kThreshold,
@@ -126,6 +144,14 @@ func fullSessionTiers(price *ModelPrice) []fullSessionTier {
 			explicitCacheReadRate: price.ExplicitCacheReadInputTokenCostAbove128k,
 		},
 		fullSessionTier{
+			threshold:           tokenTiering100kThreshold,
+			inputRate:           price.InputCostPerTokenAbove100k,
+			outputRate:          price.OutputCostPerTokenAbove100k,
+			cacheReadRate:       price.CacheReadInputTokenCostAbove100k,
+			cacheCreationRate:   price.CacheCreationInputTokenCostAbove100k,
+			cacheCreation1hRate: price.CacheCreationInputTokenCostAbove1hrAbove100k,
+		},
+		fullSessionTier{
 			threshold:             tokenTiering32kThreshold,
 			inputRate:             price.InputCostPerTokenAbove32k,
 			outputRate:            price.OutputCostPerTokenAbove32k,
@@ -142,15 +168,25 @@ func fullSessionTiers(price *ModelPrice) []fullSessionTier {
 // (non-zero). Returns ok=false when no full-session tier applies, in which
 // case callers should fall back to the existing 200k-proportional/base rate.
 func fullSessionRate(tiers []fullSessionTier, promptTokens int, pick func(fullSessionTier) float64) (rate float64, ok bool) {
+	tier, ok := fullSessionTierFor(tiers, promptTokens, pick)
+	if !ok {
+		return 0, false
+	}
+	return pick(tier), true
+}
+
+// fullSessionTierFor is fullSessionRate returning the matched tier itself, for
+// callers that need a second rate from the same tier.
+func fullSessionTierFor(tiers []fullSessionTier, promptTokens int, pick func(fullSessionTier) float64) (fullSessionTier, bool) {
 	for _, tier := range tiers {
 		if promptTokens < tier.threshold || (promptTokens == tier.threshold && !tier.inclusive) {
 			continue
 		}
-		if r := pick(tier); r > 0 {
-			return r, true
+		if pick(tier) > 0 {
+			return tier, true
 		}
 	}
-	return 0, false
+	return fullSessionTier{}, false
 }
 
 // CalculateTokenCosts computes costs based on token usage and model pricing
@@ -198,6 +234,7 @@ func CalculateTokenCostsWithResolver(usage *converter.TokenUsage, price *ModelPr
 	audioInputTokens := converterutil.NonNegativeTokenCount(usage.AudioInputTokens)
 	audioOutputTokens := converterutil.NonNegativeTokenCount(usage.AudioOutputTokens)
 	imageTokens := converterutil.NonNegativeTokenCount(usage.ImageTokens)
+	videoInputTokens := converterutil.NonNegativeTokenCount(usage.VideoInputTokens)
 	outputImageTokens := converterutil.NonNegativeTokenCount(usage.OutputImageTokens)
 	cachedOutputTokens := converterutil.NonNegativeTokenCount(usage.CachedOutputTokens)
 	outputTextTokens := converterutil.NonNegativeTokenCount(usage.OutputTextTokens)
@@ -206,7 +243,7 @@ func CalculateTokenCostsWithResolver(usage *converter.TokenUsage, price *ModelPr
 	rejectedPredictionTokens := converterutil.NonNegativeTokenCount(usage.RejectedPredictionTokens)
 	imageCount := converterutil.NonNegativeTokenCount(usage.ImageCount)
 
-	// Full-session tiers (32k/128k/256k/272k): the highest exceeded threshold
+	// Full-session tiers (32k/100k/128k/256k/272k/512k): the highest exceeded threshold
 	// whose rate is configured wins and applies to the WHOLE request, not
 	// just the excess. Falls back to the 200k proportional tier (unchanged
 	// below) when no full-session tier matches.
@@ -214,7 +251,8 @@ func CalculateTokenCostsWithResolver(usage *converter.TokenUsage, price *ModelPr
 	fullSessionInputRate, fullSessionInputMatched := fullSessionRate(tiers, promptTokens, func(t fullSessionTier) float64 { return t.inputRate })
 	fullSessionOutputRate, fullSessionOutputMatched := fullSessionRate(tiers, promptTokens, func(t fullSessionTier) float64 { return t.outputRate })
 	fullSessionCacheReadRate, fullSessionCacheReadMatched := fullSessionRate(tiers, promptTokens, func(t fullSessionTier) float64 { return t.cacheReadRate })
-	fullSessionCacheCreationRate, fullSessionCacheCreationMatched := fullSessionRate(tiers, promptTokens, func(t fullSessionTier) float64 { return t.cacheCreationRate })
+	fullSessionCacheCreationTier, fullSessionCacheCreationMatched := fullSessionTierFor(tiers, promptTokens, func(t fullSessionTier) float64 { return t.cacheCreationRate })
+	fullSessionCacheCreationRate := fullSessionCacheCreationTier.cacheCreationRate
 
 	inputCostPerToken := price.InputCostPerToken
 	if fullSessionInputMatched {
@@ -230,7 +268,9 @@ func CalculateTokenCostsWithResolver(usage *converter.TokenUsage, price *ModelPr
 
 	// Calculate "regular" input tokens by subtracting specialized token types.
 	// Vertex/OpenAI: audio/cached tokens are included in PromptTokens; Anthropic: same + cache creation.
-	regularInputTokens := promptTokens - audioInputTokens - cachedInputTokens - cacheCreationTokens - imageTokens
+	// Image and video tokens are part of PromptTokens too, so only the text
+	// remainder is priced at the regular input rate.
+	regularInputTokens := promptTokens - audioInputTokens - cachedInputTokens - cacheCreationTokens - imageTokens - videoInputTokens
 	if regularInputTokens < 0 {
 		regularInputTokens = 0
 	}
@@ -240,11 +280,15 @@ func CalculateTokenCostsWithResolver(usage *converter.TokenUsage, price *ModelPr
 	// does: prompt=340, cached=320, image=81). Charging the whole image bucket on
 	// top of the cached one then bills the overlap twice -- once at the cache-read
 	// rate and once at the image rate -- and the negative clamp above hides it.
+	// Video tokens share the same bucket; the overlap is taken off images first.
 	billableImageTokens := imageTokens
+	billableVideoTokens := videoInputTokens
 	if promptTokens > 0 {
-		overlap := audioInputTokens + cachedInputTokens + cacheCreationTokens + imageTokens - promptTokens
+		overlap := audioInputTokens + cachedInputTokens + cacheCreationTokens + imageTokens + videoInputTokens - promptTokens
 		if overlap > 0 {
-			billableImageTokens = converterutil.NonNegativeTokenCount(imageTokens - overlap)
+			fromImages := min(overlap, imageTokens)
+			billableImageTokens = imageTokens - fromImages
+			billableVideoTokens = converterutil.NonNegativeTokenCount(videoInputTokens - (overlap - fromImages))
 		}
 	}
 
@@ -395,15 +439,43 @@ func CalculateTokenCostsWithResolver(usage *converter.TokenUsage, price *ModelPr
 	if cacheCreationCost == 0 {
 		cacheCreationCost = inputCostPerToken
 	}
+	// 1-hour writes: a full-session tier bills them at its own 1-hour rate when
+	// it has one (the 100k tier), otherwise at its single write rate.
 	cacheCreation1hCost := cacheCreationCost
-	if !cacheCreationFullSession {
+	if cacheCreationFullSession {
+		if rate := fullSessionCacheCreationTier.cacheCreation1hRate; rate > 0 {
+			cacheCreation1hCost = rate
+		}
+	} else {
 		cacheCreation1hCost = price.CacheCreationInputTokenCostAbove1hr
-		if promptTokens > tokenTiering200kThreshold && price.CacheCreationInputTokenCostAbove1hrAbove200k > 0 {
+		if rate, ok := fullSessionRate(tiers, promptTokens, func(t fullSessionTier) float64 { return t.cacheCreation1hRate }); ok {
+			// A tier priced only for 1-hour writes still applies to them.
+			cacheCreation1hCost = rate
+		} else if promptTokens > tokenTiering200kThreshold && price.CacheCreationInputTokenCostAbove1hrAbove200k > 0 {
 			cacheCreation1hCost = price.CacheCreationInputTokenCostAbove1hrAbove200k
 		}
 		if cacheCreation1hCost == 0 {
 			cacheCreation1hCost = cacheCreationCost
 		}
+	}
+
+	// 12-hour cache-retention writes: their own tier, priced apart from the
+	// 30m/1h writes, and resolved from the full-session tier list the same way
+	// cacheCreation1hRate is above, rather than a threshold hardcoded to 272k
+	// — so the right bracket's 12h rate applies (today, only the 272k tier has
+	// one) regardless of which OTHER tier (if any) matches the base
+	// cache-creation rate for the same request, and a model that later needs
+	// its own 512k/256k/128k/100k 12h rate only has to add that price field
+	// and wire it into fullSessionTiers, with no change needed here. Falls
+	// back to the base write rate only when the model prices no 12h tier at
+	// all — a model that does is never silently billed at the cheaper 30m
+	// rate.
+	cacheCreation12hCost := price.CacheCreationInputTokenCost12h
+	if rate, ok := fullSessionRate(tiers, promptTokens, func(t fullSessionTier) float64 { return t.cacheCreation12hRate }); ok {
+		cacheCreation12hCost = rate
+	}
+	if cacheCreation12hCost == 0 {
+		cacheCreation12hCost = cacheCreationCost
 	}
 
 	// The aggregate remains authoritative for compatibility. TTL details split it;
@@ -416,9 +488,14 @@ func CalculateTokenCostsWithResolver(usage *converter.TokenUsage, price *ModelPr
 	if cacheCreation1hTokens > cacheCreationTokens-cacheCreation5mTokens {
 		cacheCreation1hTokens = cacheCreationTokens - cacheCreation5mTokens
 	}
-	unclassifiedCacheCreationTokens := cacheCreationTokens - cacheCreation5mTokens - cacheCreation1hTokens
+	cacheCreation12hTokens := converterutil.NonNegativeTokenCount(usage.CacheCreation12hTokens)
+	if cacheCreation12hTokens > cacheCreationTokens-cacheCreation5mTokens-cacheCreation1hTokens {
+		cacheCreation12hTokens = cacheCreationTokens - cacheCreation5mTokens - cacheCreation1hTokens
+	}
+	unclassifiedCacheCreationTokens := cacheCreationTokens - cacheCreation5mTokens - cacheCreation1hTokens - cacheCreation12hTokens
 	costs.CacheCreationCost = float64(unclassifiedCacheCreationTokens+cacheCreation5mTokens)*cacheCreationCost +
-		float64(cacheCreation1hTokens)*cacheCreation1hCost
+		float64(cacheCreation1hTokens)*cacheCreation1hCost +
+		float64(cacheCreation12hTokens)*cacheCreation12hCost
 
 	cachedOutputCost := price.OutputCostPerCachedToken
 	if cachedOutputCost == 0 {
@@ -452,6 +529,14 @@ func CalculateTokenCostsWithResolver(usage *converter.TokenUsage, price *ModelPr
 		inputImageCost = inputCostPerToken
 	}
 	costs.ImageCost = float64(billableImageTokens) * inputImageCost
+
+	// Input video tokens: own rate when configured, otherwise the image rate
+	// (video used to be reported inside the image counter).
+	inputVideoCost := price.InputCostPerVideoToken
+	if inputVideoCost == 0 {
+		inputVideoCost = inputImageCost
+	}
+	costs.VideoInputCost = float64(billableVideoTokens) * inputVideoCost
 
 	// Generated image tokens are part of CompletionTokens and must not also be
 	// charged as text. Prefer the token-based image rate when the provider reports
@@ -489,8 +574,14 @@ func CalculateTokenCostsWithResolver(usage *converter.TokenUsage, price *ModelPr
 		price.toolCostPerCall(ToolAttachmentSearch)
 	costs.CollectionsSearchCost = float64(converterutil.NonNegativeTokenCount(usage.CollectionsSearchCalls)) *
 		price.toolCostPerCall(ToolCollectionsSearch)
+	// The built-in web fetch the router executed: billed per successful call
+	// (one that returned page content), never by tokens. A failed or empty
+	// fetch is never counted in usage.WebFetchRequests, so it costs nothing.
+	costs.WebFetchCost = float64(converterutil.NonNegativeTokenCount(usage.WebFetchRequests)) *
+		price.toolCostPerCall(ToolWebFetch)
 	costs.ImageGenerationToolCost = price.imageGenerationToolCost(usage, resolve)
 	costs.ToolUsageCost = costs.WebSearchCost +
+		costs.WebFetchCost +
 		costs.XSearchCost +
 		costs.CodeExecutionCost +
 		costs.AttachmentSearchCost +
@@ -510,6 +601,7 @@ func CalculateTokenCostsWithResolver(usage *converter.TokenUsage, price *ModelPr
 		costs.CachedOutputCost +
 		costs.PredictionCost +
 		costs.ImageCost +
+		costs.VideoInputCost +
 		costs.ToolUsageCost
 
 	return costs

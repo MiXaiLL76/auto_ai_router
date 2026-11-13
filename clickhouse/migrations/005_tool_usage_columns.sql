@@ -36,9 +36,8 @@
 --
 -- Run it before (or together with) rolling out the AIR version that emits
 -- these fields, with AIR Kafka publishing paused. Safe to re-run on its own
--- -- but this is currently the last migration in the chain, so that's the
--- only direction that's safe: once a migration after this one exists, never
--- run 005 again on its own afterwards, for the same reason
+-- only while it is the last applied migration: never run 005 again once
+-- 006_video_input_columns.sql has been applied, for the same reason
 -- 002_cache_web_search_columns.sql's doc comment spells out -- it would
 -- rebuild air.spend_logs_kafka from only 005's column set, narrowing it
 -- back below whatever the later migration added, and break ingestion with

@@ -132,6 +132,10 @@ class TestGeminiImageGeneration:
             ("gemini-3.1-flash-image-preview", "1792x2400", (1792, 2400)),
             ("gemini-3.1-flash-image-preview", "896x1152", (928, 1152)),
             ("gemini-3.1-flash-image-preview", "640x1024", (848, 1264)),
+            ("gemini-nano-banana-2.1", "4096x4096", (4096, 4096)),
+            # 512px is a 3.1 Flash Image size only: 2.1 maps it to 1K.
+            ("gemini-nano-banana-2.1", "512x512", (1024, 1024)),
+            ("gemini-nano-banana-2.1", "1536x12288", (1536, 12288)),
         ],
     )
     def test_generation_respects_size_profile(
@@ -504,3 +508,100 @@ class TestGeminiImageEditWithFlower:
         assert result_b64 != input_b64, (
             "Edit result is byte-identical to the input — model may have returned the original unchanged"
         )
+
+
+# ---------------------------------------------------------------------------
+# Gemini Nano Banana 2.1
+# ---------------------------------------------------------------------------
+
+NANO_BANANA_21 = "gemini-nano-banana-2.1"
+
+
+def _bad_request_code(e) -> str:
+    """Return the error code of an OpenAI SDK 400, or fail on anything else."""
+    status = getattr(e, "status_code", None)
+    if status != 400:
+        raise e
+    body = getattr(e, "body", None) or {}
+    error = body.get("error", body) if isinstance(body, dict) else {}
+    return error.get("code", "") if isinstance(error, dict) else ""
+
+
+class TestNanoBanana21:
+    """Live checks for gemini-nano-banana-2.1."""
+
+    @pytest.mark.parametrize("thinking_level", ["minimal", "high"])
+    def test_thinking_levels_accepted(self, openai_client, thinking_level):
+        """The lowest and highest levels are accepted upstream (the default is covered above)."""
+        extra_body = {"thinking_level": thinking_level}
+        try:
+            resp = openai_client.images.generate(
+                model=NANO_BANANA_21,
+                prompt="A futuristic city built inside a giant glass bottle floating in space",
+                n=1,
+                size="1024x1024",
+                extra_body=extra_body,
+            )
+        except Exception as e:
+            _skip_on_error(e, NANO_BANANA_21)
+
+        assert resp.data, "Response data is empty"
+        _assert_image_item(resp.data[0])
+
+    def test_fourteen_reference_images(self, openai_client):
+        """Up to 14 reference images are accepted in one edit."""
+        images = [_png_bytes(18 * i, 255 - 18 * i, 120) for i in range(14)]
+        try:
+            resp = openai_client.images.edit(
+                model=NANO_BANANA_21,
+                image=images,
+                prompt="Arrange all of these color swatches into one palette poster",
+                n=1,
+                size="1024x1024",
+            )
+        except Exception as e:
+            _skip_on_error(e, NANO_BANANA_21)
+
+        assert resp.data, "Response data is empty"
+        _assert_image_item(resp.data[0])
+
+    def test_fifteen_reference_images_rejected_locally(self, openai_client):
+        """15 references fail with a validation error before reaching Google."""
+        images = [_png_bytes(17 * i, 255 - 17 * i, 60) for i in range(15)]
+        with pytest.raises(Exception) as excinfo:
+            openai_client.images.edit(
+                model=NANO_BANANA_21,
+                image=images,
+                prompt="Arrange all of these color swatches into one palette poster",
+                n=1,
+            )
+        assert _bad_request_code(excinfo.value) == "too_many_images"
+
+    def test_aspect_ratio_9_21_rejected(self, openai_client):
+        """9:21 is listed for Vertex only; the router rejects it before the upstream call."""
+        with pytest.raises(Exception) as excinfo:
+            openai_client.images.generate(
+                model=NANO_BANANA_21,
+                prompt="A tall waterfall",
+                n=1,
+                extra_body={"aspect_ratio": "9:21"},
+            )
+        assert _bad_request_code(excinfo.value) == "invalid_value"
+
+    def test_google_search_types(self, openai_client):
+        """Web and image search are accepted upstream; whether the model searches is its own
+        choice, so the billed query count is checked only when one is reported."""
+        try:
+            resp = openai_client.chat.completions.create(
+                model=NANO_BANANA_21,
+                messages=[{"role": "user", "content": "A detailed painting of a Timareta butterfly resting on a flower"}],
+                tools=[{"type": "web_search", "search_types": ["web_search", "image_search"]}],
+            )
+        except Exception as e:
+            _skip_on_error(e, NANO_BANANA_21)
+
+        assert resp.choices, "Response has no choices"
+        usage = resp.model_dump().get("usage") or {}
+        searches = (usage.get("server_tool_use") or {}).get("web_search_requests")
+        if searches is not None:
+            assert isinstance(searches, int) and searches > 0, f"web_search_requests reported as {searches!r}"

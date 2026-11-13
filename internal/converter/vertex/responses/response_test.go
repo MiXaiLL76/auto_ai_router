@@ -28,7 +28,7 @@ func TestCandidatesToOutputItems_InlineImageBecomesImageGenerationCall(t *testin
 		},
 	}
 
-	output := candidatesToOutputItems(vertexResp)
+	output := candidatesToOutputItems(vertexResp, "")
 	require.Len(t, output, 2)
 	assert.Equal(t, "message", output[0].Type)
 	assert.Equal(t, "Here is the image.", output[0].Content[0].Text)
@@ -108,7 +108,7 @@ func TestCandidatesToOutputItems_CodeInterpreter_CodeAndResult(t *testing.T) {
 		},
 	}
 
-	output := candidatesToOutputItems(vertexResp)
+	output := candidatesToOutputItems(vertexResp, "")
 	require.Len(t, output, 1)
 
 	ci := output[0]
@@ -179,7 +179,7 @@ func TestCandidatesToOutputItems_CodeInterpreter_CodeOnly(t *testing.T) {
 		},
 	}
 
-	output := candidatesToOutputItems(vertexResp)
+	output := candidatesToOutputItems(vertexResp, "")
 	require.Len(t, output, 1)
 	assert.Equal(t, "code_interpreter_call", output[0].Type)
 	assert.Equal(t, "x = 42", output[0].Code)
@@ -204,7 +204,7 @@ func TestCandidatesToOutputItems_CodeInterpreter_InterleavedWithText(t *testing.
 		},
 	}
 
-	output := candidatesToOutputItems(vertexResp)
+	output := candidatesToOutputItems(vertexResp, "")
 	// message("Let me calculate:"), code_interpreter_call, message("The answer is 4.")
 	require.Len(t, output, 3)
 
@@ -255,7 +255,7 @@ func TestCandidatesToOutputItems_GroundingMetadataAddsAnnotationsAndWebSearchCal
 		},
 	}
 
-	output := candidatesToOutputItems(vertexResp)
+	output := candidatesToOutputItems(vertexResp, "")
 	require.Len(t, output, 2)
 
 	require.Equal(t, "message", output[0].Type)
@@ -277,7 +277,7 @@ func TestCandidatesToOutputItems_GroundingMetadataAddsAnnotationsAndWebSearchCal
 		CandidatesTokenCount: 2,
 		TotalTokenCount:      7,
 	}
-	response := buildResponsesResponse(vertexResp, "gemini-test", "resp_test", 1)
+	response := buildResponsesResponse(nil, vertexResp, "gemini-test", "resp_test", 1)
 	require.NotNil(t, response.Usage)
 	require.NotNil(t, response.Usage.ServerToolUse)
 	assert.Equal(t, 1, response.Usage.ServerToolUse.WebSearchRequests)
@@ -304,7 +304,7 @@ func TestVertexToResponsesResponse_RequiredSchemaFields(t *testing.T) {
 		},
 	}
 
-	resp := buildResponsesResponse(vertexResp, "gemini-test", "resp_test", 123)
+	resp := buildResponsesResponse(nil, vertexResp, "gemini-test", "resp_test", 123)
 
 	assert.Equal(t, "auto", resp.ToolChoice)
 	assert.Equal(t, "disabled", resp.Truncation)
@@ -344,7 +344,7 @@ func TestCandidatesToOutputItems_FunctionCallEmbedsThoughtSignature(t *testing.T
 		}},
 	}
 
-	output := candidatesToOutputItems(vertexResp)
+	output := candidatesToOutputItems(vertexResp, "gemini-3-flash")
 	require.Len(t, output, 1)
 	baseID, decoded := converterutil.SplitToolCallIDSignature(output[0].CallID)
 	assert.Equal(t, "call_1", baseID)

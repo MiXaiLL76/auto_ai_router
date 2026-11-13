@@ -182,6 +182,8 @@ type Tool struct {
 	// web_search_preview
 	UserLocation      interface{} `json:"user_location,omitempty"`
 	SearchContextSize string      `json:"search_context_size,omitempty"`
+	// Gemini-only search types (see vertex.GoogleSearchTypes).
+	SearchTypes interface{} `json:"search_types,omitempty"`
 
 	// Anthropic-specific web_search restriction fields, carried through as-is
 	// for a Responses-shaped request that targets an Anthropic backend (see
@@ -205,6 +207,10 @@ type Tool struct {
 
 	// code_interpreter
 	Container interface{} `json:"container,omitempty"`
+
+	// image_generation: "1024x1536", "auto", ... Untyped, so that a value of another
+	// type fails no request; only the Gemini route reads it (a string).
+	Size interface{} `json:"size,omitempty"`
 
 	// mcp
 	ServerLabel     string      `json:"server_label,omitempty"`
@@ -256,17 +262,29 @@ type InputDetails struct {
 	CachedAudioTokens         int                        `json:"cached_audio_tokens,omitempty"`
 	CacheCreationTokens       int                        `json:"cache_creation_tokens,omitempty"` // extension: prompt cache writes
 	CacheWriteTokens          int                        `json:"cache_write_tokens,omitempty"`    // extension: OpenAI/Azure name for the same counter
+	CacheWriteTokensDetails   *CacheWriteTokensDetails   `json:"cache_write_tokens_details,omitempty"`
 	CacheCreationTokenDetails *CacheCreationTokenDetails `json:"cache_creation_token_details,omitempty"`
 	AudioTokens               int                        `json:"audio_tokens,omitempty"` // extension: audio input tokens
 	// CacheType is Alibaba's explicit cache mode marker ("ephemeral") from
 	// prompt_tokens_details.cache_type; see converter.TokenUsage.CacheType.
 	CacheType string `json:"cache_type,omitempty"`
+	// InitialPromptTokens is the context the client sent when a generation ran
+	// over several upstream requests; see converter.TokenUsage.InitialPromptTokens.
+	InitialPromptTokens int `json:"initial_prompt_tokens,omitempty"`
 }
 
 // CacheCreationTokenDetails preserves Anthropic's cache-write TTL breakdown.
 type CacheCreationTokenDetails struct {
 	Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
 	Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
+}
+
+// CacheWriteTokensDetails is OpenAI's cache-write TTL breakdown for the
+// 30-minute and 12-hour retentions (cache_write_tokens_details), the latter
+// priced above the former.
+type CacheWriteTokensDetails struct {
+	TTL30mTokens int `json:"ttl_30m_tokens,omitempty"`
+	TTL12hTokens int `json:"ttl_12h_tokens,omitempty"`
 }
 
 // OutputDetails represents a breakdown of output token usage.
@@ -362,6 +380,20 @@ type OutputItem struct {
 
 	// custom_tool_call: JSON input to the custom tool
 	Input interface{} `json:"input,omitempty"`
+}
+
+// MarshalJSON keeps "summary":[] on a reasoning item with no summary (one carrying
+// only encrypted_content): the schema requires the list, and strict clients such as
+// Codex drop a reasoning item without it.
+func (o OutputItem) MarshalJSON() ([]byte, error) {
+	type plain OutputItem
+	if o.Type != "reasoning" || len(o.Summary) > 0 {
+		return json.Marshal(plain(o))
+	}
+	return json.Marshal(struct {
+		plain
+		Summary []OutputContent `json:"summary"`
+	}{plain(o), []OutputContent{}})
 }
 
 // ===== Response Types =====

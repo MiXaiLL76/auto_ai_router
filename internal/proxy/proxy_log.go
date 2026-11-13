@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -42,14 +43,32 @@ func (p *Proxy) logUpstreamError(ctx context.Context, msg string, errorCode int,
 	p.logger.ErrorContext(ctx, msg, args...)
 }
 
+// appendResponseBodyForLogs restores the body for providers whose error text
+// is safe to log verbatim and masks it for the ones that are not
+// (shouldMaskUpstreamErrors: CometAPI, ProMan — their error bodies have been
+// seen to echo back the caller's own credential). A regression briefly made
+// every caller of this always redact the body to a bare byte count
+// regardless of cred, which defeated this unified error logger's own stated
+// purpose ("everything needed for debugging").
 func appendResponseBodyForLogs(args []any, cred *config.CredentialConfig, body string) []any {
 	if shouldMaskUpstreamErrors(cred) {
 		return append(args,
 			"response_body_masked", true,
-			"response_body", body,
+			"response_body", security.RedactBodyForLog(body),
 		)
 	}
 	return append(args, "response_body", logger.TruncateLongFields(body, 500))
+}
+
+// errorMessageForLog prevents a captured provider body from escaping through
+// the long-lived spend event/metadata's error_message copy. Preserve internal
+// diagnostics when there was no provider body; classify provider failures from
+// the body using the allowlisted classifier so reflected free text never reaches this sink.
+func errorMessageForLog(logCtx *RequestLogContext) string {
+	if logCtx.ErrorBodyRaw != "" {
+		return classifiedErrorMessage(logCtx.HTTPStatus, []byte(logCtx.ErrorBodyRaw))
+	}
+	return logCtx.ErrorMsg
 }
 
 func shouldMaskUpstreamErrors(cred *config.CredentialConfig) bool {
@@ -168,7 +187,7 @@ func (p *Proxy) handleLiteLLMAuthError(ctx context.Context, w http.ResponseWrite
 	for errType, info := range errorMap {
 		if errors.Is(err, errType) {
 			logCtx.HTTPStatus = info.status
-			logCtx.ErrorMsg = "LiteLLM auth validation failed"
+			logCtx.ErrorMsg = "LiteLLM auth validation failed: " + info.logMsg
 			p.logger.WarnContext(ctx, info.logMsg,
 				"error_code", info.status,
 				"token_prefix", security.MaskAPIKey(token))
@@ -210,7 +229,14 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	litellmEnabled := p.postgresSpendTrackingEnabled()
 	kafkaEnabled := p.kafkaLog != nil && p.kafkaLog.IsEnabled()
 	rawBodyLogEnabled := p.rawBodyLog != nil && p.rawBodyLog.IsEnabled()
-	if !litellmEnabled && !kafkaEnabled {
+	// The router-response path is independent of the spend log: it answers
+	// "what did this key get", not "what did it cost", and an operator may
+	// want it on a router that publishes no spend log at all (a
+	// non-billing deployment, or one whose spend log is disabled). So it
+	// keeps the function alive on its own -- otherwise it would silently
+	// publish nothing whenever the spend path happens to be off.
+	routerResponseEnabled := p.routerResponsesEnabled
+	if !litellmEnabled && !kafkaEnabled && !routerResponseEnabled {
 		return nil
 	}
 	if logCtx == nil || logCtx.Credential == nil || logCtx.Request == nil {
@@ -285,14 +311,7 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	}
 
 	// Determine final status if not explicitly set
-	status := logCtx.Status
-	if status == "" {
-		if logCtx.HTTPStatus >= 400 {
-			status = "failure"
-		} else {
-			status = "success"
-		}
-	}
+	status := logCtx.finalStatus()
 
 	// Ensure TokenUsage is not nil to prevent nil pointer dereference
 	if logCtx.TokenUsage == nil {
@@ -301,6 +320,26 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	logCtx.finalizeImageUsage(status)
 	logCtx.applyWebSearchUsageDefaults(status)
 	logCtx.TokenUsage.Normalize()
+
+	// What the router ANSWERED, published to its own topic (see
+	// KafkaRouterResponsesConfig). Unlike the raw bodies above, this is not
+	// failures-only and not an error-debugging aid: it is the answer the
+	// client received, kept so an operator can reconcile what a key got
+	// against what it was billed for.
+	//
+	// It is published BEFORE the cost is resolved, deliberately. The cost
+	// resolution below fails closed when a model's price is missing (it
+	// returns an error and the spend row is dropped) -- and a router that
+	// cannot price a model must still be able to say what that model
+	// answered. Publishing after would make this stream depend on the
+	// billing configuration, which has nothing to do with it.
+	//
+	// The body itself was captured (and masked) at the point the response
+	// was produced -- see captureRouterResponse -- so nothing here has to
+	// parse it again.
+	if p.routerResponsesEnabled && !logCtx.IsProxyRequest && logCtx.RouterResponseBody != "" {
+		p.logRouterResponseToKafka(logCtx, status, utils.NowUTC())
+	}
 
 	logSpendCtx := logCtx.Context()
 	modelPrice := logCtx.ModelPrice
@@ -331,6 +370,19 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 		logCtx.applyCostMargin(tokenCosts)
 	}
 	cost := tokenCosts.TotalCost
+	// Record the client-billed cost so the response path can surface it as
+	// X-Total-Cost — but only for organizations that opted in (see
+	// setResponseCostHeader, which re-checks the mode). Set even for a $0 row: a
+	// free or unpriced-but-zero request is still "known".
+	logCtx.responseCostUSD = cost
+	logCtx.responseCostKnown = true
+	// The full breakdown is only needed for the breakdown mode; marshal it once,
+	// here, from the same map the spend metadata carries so the two never drift.
+	if logCtx.OrganizationPolicy.ReturnsCostBreakdown() {
+		if encoded, err := json.Marshal(costBreakdownMap(tokenCosts)); err == nil {
+			logCtx.responseCostBreakdown = encoded
+		}
+	}
 	p.logger.DebugContext(logSpendCtx, "Calculated cost for model",
 		"model_name", priceModelID,
 		"cost", cost,
@@ -389,12 +441,25 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	if !logCtx.UpstreamSendTime.IsZero() {
 		upstreamSendDelayMs = float64(logCtx.UpstreamSendTime.Sub(logCtx.StartTime).Microseconds()) / 1000.0
 	}
-	metadata := buildMetadata(hashedToken, logCtx.TokenInfo, logCtx.ErrorMsg, logCtx.HTTPStatus, logCtx.TokenUsage, requesterIP, tokenCosts, logCtx.ModelID, overheadMs, upstreamSendDelayMs, kafkaFallbackReason)
+	metadata := buildMetadata(hashedToken, logCtx.TokenInfo, errorMessageForLog(logCtx), logCtx.HTTPStatus, logCtx.TokenUsage, requesterIP, tokenCosts, logCtx.ModelID, overheadMs, upstreamSendDelayMs, kafkaFallbackReason)
 	metadata = addAIRSpendMetadata(metadata, logCtx.RequestID, logCtx.ClientResponseID, logCtx.IsProxyRequest, logCtx.ModelID, logCtx.PublicModelID, logCtx.billingPriceModelID)
 	metadata = addRequestSpendMetadata(metadata, logCtx)
 	metadata = addOrganizationPolicySpendMetadata(metadata, logCtx)
 
 	var completionStartTime *time.Time
+	if logCtx.StreamOutcome == "" && logCtx.CompletionStartTime.IsZero() {
+		// Only requests that never streamed qualify for the definitional
+		// fill: a non-streaming response delivers its first (and only) token
+		// when the response completes, so TTFT equals total latency. Real
+		// streaming paths (including the simulated force_stream_for_ttft
+		// reassembly) always stamp StreamOutcome — "completed", "stream_error"
+		// or "client_aborted" — by the time the log runs, so a stream that
+		// died before its first token, only carried keep-alives, or exhausted
+		// the TTFT detector budget keeps its honest null instead of a fake
+		// ttft_ms = duration_ms mixed into the same column as real TTFT
+		// measurements.
+		logCtx.CompletionStartTime = endTime
+	}
 	if !logCtx.CompletionStartTime.IsZero() {
 		completionStartTime = &logCtx.CompletionStartTime
 	}

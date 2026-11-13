@@ -202,14 +202,31 @@ func extractSessionIDFromRawBody(reqBody map[string]goccyjson.RawMessage) string
 	if sid, ok := rawJSONString(reqBody["session_id"]); ok && sid != "" {
 		return sid
 	}
-	if uid, ok := rawJSONString(reqBody["user"]); ok && uid != "" {
-		return uid
-	}
-	if sid, ok := rawJSONString(reqBody["safety_identifier"]); ok && sid != "" {
-		return sid
-	}
 	if pck, ok := rawJSONString(reqBody["prompt_cache_key"]); ok && pck != "" {
 		return pck
+	}
+	if metadataRaw, ok := reqBody["metadata"]; ok {
+		var metadata map[string]goccyjson.RawMessage
+		if err := goccyjson.Unmarshal(metadataRaw, &metadata); err == nil {
+			if sid, ok := rawJSONString(metadata["session_id"]); ok && sid != "" {
+				return sid
+			}
+		}
+	}
+	return ""
+}
+
+// extractClientIDFromRawBody returns the per-client identifier
+// (safety_identifier, then the user field it replaces, the precedence OpenAI
+// applies). It is the last-resort session key, after the body session fields
+// and the session headers: binding to it pins every conversation of a client
+// to one credential instead of balancing each one.
+func extractClientIDFromRawBody(reqBody map[string]goccyjson.RawMessage) string {
+	if cid, ok := rawJSONString(reqBody["safety_identifier"]); ok && cid != "" {
+		return cid
+	}
+	if cid, ok := rawJSONString(reqBody["user"]); ok && cid != "" {
+		return cid
 	}
 	return ""
 }
@@ -239,7 +256,7 @@ func extractSessionIDFromHeaders(header http.Header) string {
 	return ""
 }
 
-var rawIncludeUsageTrue = goccyjson.RawMessage("true")
+var rawJSONTrue = goccyjson.RawMessage("true")
 
 // injectIncludeUsageRaw ensures reqBody["stream_options"]["include_usage"] is
 // true, merging into whatever stream_options object the client sent rather
@@ -253,15 +270,18 @@ var rawIncludeUsageTrue = goccyjson.RawMessage("true")
 // sub-slices so the rest of reqBody (in particular messages/input) is never
 // boxed into interface{}.
 func injectIncludeUsageRaw(reqBody map[string]goccyjson.RawMessage) error {
-	streamOptionsRaw, exists := reqBody["stream_options"]
-	var streamOptions map[string]goccyjson.RawMessage
-	if exists {
-		_ = goccyjson.Unmarshal(streamOptionsRaw, &streamOptions)
-	}
+	return setStreamOptionsRaw(reqBody, "include_usage")
+}
+
+// setStreamOptionsRaw sets each of keys to true in reqBody["stream_options"],
+// merging into whatever stream_options object the client sent.
+func setStreamOptionsRaw(reqBody map[string]goccyjson.RawMessage, keys ...string) error {
+	streamOptions := streamOptionsRaw(reqBody)
 	if streamOptions == nil {
-		streamOptions = map[string]goccyjson.RawMessage{"include_usage": rawIncludeUsageTrue}
-	} else {
-		streamOptions["include_usage"] = rawIncludeUsageTrue
+		streamOptions = make(map[string]goccyjson.RawMessage, len(keys))
+	}
+	for _, key := range keys {
+		streamOptions[key] = rawJSONTrue
 	}
 
 	marshaled, err := goccyjson.Marshal(streamOptions)
@@ -270,6 +290,18 @@ func injectIncludeUsageRaw(reqBody map[string]goccyjson.RawMessage) error {
 	}
 	reqBody["stream_options"] = marshaled
 	return nil
+}
+
+// streamOptionsRaw returns reqBody's stream_options object, nil when it is
+// absent or not an object.
+func streamOptionsRaw(reqBody map[string]goccyjson.RawMessage) map[string]goccyjson.RawMessage {
+	raw, exists := reqBody["stream_options"]
+	if !exists {
+		return nil
+	}
+	var streamOptions map[string]goccyjson.RawMessage
+	_ = goccyjson.Unmarshal(raw, &streamOptions)
+	return streamOptions
 }
 
 // clientControlledBillingParams are request parameters through which a client
@@ -307,36 +339,49 @@ func deleteClientControlledBillingParams(object map[string]goccyjson.RawMessage)
 	return changed
 }
 
+// appendServiceTier appends object's service_tier to tiers when it is a
+// non-empty string.
+func appendServiceTier(tiers []string, object map[string]goccyjson.RawMessage) []string {
+	if tier, _ := rawJSONString(object["service_tier"]); tier != "" {
+		return append(tiers, tier)
+	}
+	return tiers
+}
+
 // stripClientControlledBillingParams removes clientControlledBillingParams
 // from the two request locations through which clients may set them: the
 // top level and extra_body. It is intentionally not recursive: the same names
 // in metadata, messages, or tool schemas are user data and must be preserved.
-func stripClientControlledBillingParams(reqBody map[string]goccyjson.RawMessage) (bool, error) {
+// It returns the service tiers it removed, so they can still be checked
+// against the model they reach (see clientServiceTiers).
+func stripClientControlledBillingParams(reqBody map[string]goccyjson.RawMessage) (bool, []string, error) {
+	serviceTiers := appendServiceTier(nil, reqBody)
 	changed := deleteClientControlledBillingParams(reqBody)
 
 	extraBodyRaw, exists := reqBody["extra_body"]
 	if !exists {
-		return changed, nil
+		return changed, serviceTiers, nil
 	}
 	trimmed := bytes.TrimSpace(extraBodyRaw)
 	if len(trimmed) == 0 || trimmed[0] != '{' {
-		return changed, nil
+		return changed, serviceTiers, nil
 	}
 
 	var extraBody map[string]goccyjson.RawMessage
 	if err := goccyjson.Unmarshal(extraBodyRaw, &extraBody); err != nil {
-		return changed, err
+		return changed, serviceTiers, err
 	}
+	serviceTiers = appendServiceTier(serviceTiers, extraBody)
 	if !deleteClientControlledBillingParams(extraBody) {
-		return changed, nil
+		return changed, serviceTiers, nil
 	}
 
 	sanitizedExtraBody, err := goccyjson.Marshal(extraBody)
 	if err != nil {
-		return true, err
+		return true, serviceTiers, err
 	}
 	reqBody["extra_body"] = sanitizedExtraBody
-	return true, nil
+	return true, serviceTiers, nil
 }
 
 type sanitizedRequestBody struct {
@@ -344,7 +389,11 @@ type sanitizedRequestBody struct {
 	ModelID   string
 	Streaming bool
 	SessionID string
+	ClientID  string
 	Changed   bool
+	// ServiceTiers are the client's service_tier values (top level, then
+	// extra_body), removed from Body.
+	ServiceTiers []string
 }
 
 var errInvalidMultipartRequestBody = errors.New("invalid multipart request body")
@@ -407,10 +456,11 @@ func sanitizeJSONRequestBody(body []byte, isMessagesAPI bool) (sanitizedRequestB
 		return result, nil // Existing invalid-body handling reports missing model.
 	}
 
-	changed, err := stripClientControlledBillingParams(reqBody)
+	changed, serviceTiers, err := stripClientControlledBillingParams(reqBody)
 	if err != nil {
 		return sanitizedRequestBody{}, err
 	}
+	result.ServiceTiers = serviceTiers
 
 	model, ok := rawJSONString(reqBody["model"])
 	if !ok {
@@ -420,6 +470,7 @@ func sanitizeJSONRequestBody(body []byte, isMessagesAPI bool) (sanitizedRequestB
 
 	// Extract session ID before removing LiteLLM-only request metadata.
 	result.SessionID = extractSessionIDFromRawBody(reqBody)
+	result.ClientID = extractClientIDFromRawBody(reqBody)
 	// litellm_session_id/session_id only ever drive AIR's own sticky-routing
 	// decision (already captured above into result.SessionID); no provider
 	// understands either as a wire-protocol field, and both are gone from
@@ -547,10 +598,10 @@ func sanitizeMultipartRequestBody(body []byte, params map[string]string) (saniti
 			switch name {
 			case "model":
 				result.ModelID = value
-			case "session_id", "user":
-				if result.SessionID == "" {
-					result.SessionID = value
-				}
+			case "session_id":
+				result.SessionID = value
+			case "user":
+				result.ClientID = value
 			}
 		}
 
@@ -714,7 +765,8 @@ func extractWebSearchRequestUsage(body []byte, contentType string) (bool, string
 
 func isWebSearchTool(tool map[string]interface{}) bool {
 	toolType, _ := tool["type"].(string)
-	return toolType == "web_search" || strings.HasPrefix(toolType, "web_search_")
+	// google_search is the Gemini route's alias (see vertex.GoogleSearchTypes).
+	return toolType == "web_search" || strings.HasPrefix(toolType, "web_search_") || toolType == "google_search"
 }
 
 func isWebSearchPlugin(plugin map[string]interface{}) bool {
@@ -847,9 +899,17 @@ func extractTokensFromResponse(body []byte, credType config.ProviderType) int {
 // the destination provider is resolved, so provider-specific extension keys
 // are stripped later if needed, in converter.RequestFrom. Used after
 // Responses API conversion where ingress sanitization skipped injection.
+// injectStreamOptions ensures stream_options.include_usage is set in a Chat
+// Completions request body, merging into whatever the client sent rather
+// than discarding it. Uses UseNumber so the JSON round-trip preserves
+// large integers (e.g. seeds) byte-for-byte instead of rounding them to
+// float64 precision. Used after Responses API conversion where ingress
+// sanitization skipped injection.
 func injectStreamOptions(body []byte) []byte {
 	var raw map[string]interface{}
-	if err := json.Unmarshal(body, &raw); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	if err := dec.Decode(&raw); err != nil {
 		return body
 	}
 
@@ -866,6 +926,27 @@ func injectStreamOptions(body []byte) []byte {
 		}
 	}
 
+	modified, err := json.Marshal(raw)
+	if err != nil {
+		return body
+	}
+	return modified
+}
+
+// setStreamTrue force-sets "stream": true in a JSON request body. Used by the
+// force_stream_for_ttft toggle to make the upstream respond with SSE even when
+// the client asked for a non-stream response. Decodes with UseNumber so numbers
+// beyond float64 precision (e.g. large seeds) survive the round-trip unchanged.
+// Non-JSON bodies (or bodies the marshal round-trip would corrupt) are returned
+// unchanged, which makes the toggle a no-op for such requests.
+func setStreamTrue(body []byte) []byte {
+	var raw map[string]interface{}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	if err := dec.Decode(&raw); err != nil {
+		return body
+	}
+	raw["stream"] = true
 	modified, err := json.Marshal(raw)
 	if err != nil {
 		return body

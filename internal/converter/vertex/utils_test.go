@@ -283,3 +283,12 @@ func TestParseDataURLToPart_EmptyPayload(t *testing.T) {
 		assert.Len(t, part.InlineData.Data, 3)
 	})
 }
+
+func TestIsImageMIME(t *testing.T) {
+	for _, mimeType := range []string{"image/png", "Image/PNG", "IMAGE/webp", "image/"} {
+		assert.True(t, IsImageMIME(mimeType), mimeType)
+	}
+	for _, mimeType := range []string{"", "image", "video/mp4", "application/pdf", " image/png", "imagex/png"} {
+		assert.False(t, IsImageMIME(mimeType), mimeType)
+	}
+}

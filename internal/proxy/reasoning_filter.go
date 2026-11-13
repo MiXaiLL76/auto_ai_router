@@ -74,7 +74,7 @@ func normalizeThinkingMode(value interface{}) string {
 	switch strings.ToLower(strings.TrimSpace(kind)) {
 	case thinkingModeAdaptive:
 		return thinkingModeAdaptive
-	case thinkingModeDisabled:
+	case thinkingModeDisabled, "between_tools": // Sonnet 5.5's "disabled"
 		return thinkingModeDisabled
 	case thinkingModeEnabled:
 		return thinkingModeEnabled
@@ -93,20 +93,41 @@ func mapReasoningSource(fields map[string]interface{}, prefix string) (bool, str
 	if value, ok := fields["thinking"]; ok && reasoningValueEnabled(value) {
 		return true, prefix + "thinking"
 	}
-	if value, ok := fields["thinking_budget"]; ok && reasoningBudgetEnabled(value) {
-		return true, prefix + "thinking_budget"
-	}
-	if value, ok := fields["thinking_level"]; ok && reasoningValueEnabled(value) {
-		return true, prefix + "thinking_level"
-	}
-	if nested, ok := fields["thinking_config"].(map[string]interface{}); ok {
-		if requested, source := mapReasoningSource(nested, prefix+"thinking_config."); requested {
-			return true, source
+	// Gemini's camelCase spellings are accepted by the Gemini converter too.
+	for _, key := range []string{"thinking_budget", "thinkingBudget"} {
+		if value, ok := fields[key]; ok && reasoningBudgetEnabled(value) {
+			return true, prefix + key
 		}
+	}
+	for _, key := range []string{"thinking_level", "thinkingLevel"} {
+		if value, ok := fields[key]; ok && reasoningValueEnabled(value) {
+			return true, prefix + key
+		}
+	}
+	if requested, source := thinkingConfigReasoningSource(fields, prefix); requested {
+		return true, source
 	}
 	if nested, ok := fields["extra_body"].(map[string]interface{}); ok {
 		if requested, source := mapReasoningSource(nested, prefix+"extra_body."); requested {
 			return true, source
+		}
+		// The Gemini converter also reads extra_body.generation_config.thinking_config.
+		if gc, ok := nested["generation_config"].(map[string]interface{}); ok {
+			if requested, source := thinkingConfigReasoningSource(gc, prefix+"extra_body.generation_config."); requested {
+				return true, source
+			}
+		}
+	}
+	return false, ""
+}
+
+// thinkingConfigReasoningSource checks fields' thinking_config / thinkingConfig.
+func thinkingConfigReasoningSource(fields map[string]interface{}, prefix string) (bool, string) {
+	for _, key := range []string{"thinking_config", "thinkingConfig"} {
+		if nested, ok := fields[key].(map[string]interface{}); ok {
+			if requested, source := mapReasoningSource(nested, prefix+key+"."); requested {
+				return true, source
+			}
 		}
 	}
 	return false, ""
@@ -160,7 +181,7 @@ func reasoningBudgetEnabled(value interface{}) bool {
 
 func reasoningStringEnabled(value string) bool {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "", "0", "false", "none", "disable", "disabled", "off":
+	case "", "0", "false", "none", "disable", "disabled", "off", "between_tools":
 		return false
 	default:
 		return true

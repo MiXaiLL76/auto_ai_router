@@ -75,6 +75,10 @@ Credential exclusions apply during request routing. The model catalog is unchang
 
 The list accepts up to 1024 names and 65536 encoded bytes. Each name may contain up to 256 bytes. Empty names, duplicate names, and control characters fail configuration loading. An omitted or empty list preserves standard routing.
 
+### Disabling automatic cache_control injection
+
+An organization policy entry can also set `disable_auto_cache_control: true` to opt that organization out of the router's automatic Anthropic prompt-cache `cache_control` injection, independently of pricing or credential restrictions. See [Automatic Anthropic Prompt Caching](../advanced/session_sticky.md#automatic-anthropic-prompt-caching) for the full trigger conditions this overrides.
+
 ### Refresh interval
 
 Prices are read once at startup and then re-read in the background every `model_prices_sync_interval`. Set it to any Go duration string:
@@ -170,6 +174,8 @@ For reference:
 | `output_cost_per_token_above_200k_tokens`                     | Output rate for tokens beyond the 200k threshold                                                                                                                                         |
 | `input_cost_per_token_above_32k_tokens`                       | Full-session input rate when prompt exceeds 32k tokens                                                                                                                                   |
 | `output_cost_per_token_above_32k_tokens`                      | Full-session output rate when prompt exceeds 32k tokens                                                                                                                                  |
+| `input_cost_per_token_above_100k_tokens`                      | Full-session input rate when prompt exceeds 100k tokens                                                                                                                                  |
+| `output_cost_per_token_above_100k_tokens`                     | Full-session output rate when prompt exceeds 100k tokens                                                                                                                                 |
 | `input_cost_per_token_above_128k_tokens`                      | Full-session input rate when prompt exceeds 128k tokens                                                                                                                                  |
 | `output_cost_per_token_above_128k_tokens`                     | Full-session output rate when prompt exceeds 128k tokens                                                                                                                                 |
 | `input_cost_per_token_above_256k_tokens`                      | Full-session input rate when prompt exceeds 256k tokens                                                                                                                                  |
@@ -178,7 +184,8 @@ For reference:
 | `output_cost_per_token_above_272k_tokens`                     | Full-session output rate when prompt exceeds 272k tokens                                                                                                                                 |
 | `input_cost_per_audio_token`                                  | Audio input tokens (falls back to `input_cost_per_token` if absent)                                                                                                                      |
 | `output_cost_per_audio_token`                                 | Audio output tokens (falls back to `output_cost_per_token` if absent)                                                                                                                    |
-| `input_cost_per_image_token`                                  | Image input tokens                                                                                                                                                                       |
+| `input_cost_per_image_token`                                  | Image input tokens (PDF pages included; falls back to `input_cost_per_token`)                                                                                                            |
+| `input_cost_per_video_token`                                  | Video input tokens (falls back to `input_cost_per_image_token`, then `input_cost_per_token`)                                                                                             |
 | `output_cost_per_image_token`                                 | Image output tokens                                                                                                                                                                      |
 | `output_cost_per_reasoning_token`                             | Reasoning/thinking tokens (falls back to `output_cost_per_token`)                                                                                                                        |
 | `input_cost_per_cached_token`                                 | Cached prompt read cost (alias: `cache_read_input_token_cost`)                                                                                                                           |
@@ -190,6 +197,9 @@ For reference:
 | `cache_creation_input_token_cost_above_1hr_above_200k_tokens` | Anthropic 1h cache write rate above 200k                                                                                                                                                 |
 | `cache_read_input_token_cost_above_32k_tokens`                | Full-session cache read rate when prompt exceeds 32k tokens                                                                                                                              |
 | `cache_creation_input_token_cost_above_32k_tokens`            | Full-session cache write rate when prompt exceeds 32k tokens                                                                                                                             |
+| `cache_read_input_token_cost_above_100k_tokens`               | Full-session cache read rate when prompt exceeds 100k tokens                                                                                                                             |
+| `cache_creation_input_token_cost_above_100k_tokens`           | Full-session 5m/unclassified cache write rate when prompt exceeds 100k tokens                                                                                                            |
+| `cache_creation_input_token_cost_above_1hr_above_100k_tokens` | Full-session 1h cache write rate when prompt exceeds 100k tokens                                                                                                                         |
 | `cache_read_input_token_cost_above_128k_tokens`               | Full-session cache read rate when prompt exceeds 128k tokens                                                                                                                             |
 | `cache_creation_input_token_cost_above_128k_tokens`           | Full-session cache write rate when prompt exceeds 128k tokens                                                                                                                            |
 | `cache_read_input_token_cost_above_256k_tokens`               | Full-session cache read rate when prompt exceeds 256k tokens                                                                                                                             |
@@ -207,7 +217,7 @@ For reference:
 | `output_cost_per_image`                                       | Cost per generated image (takes priority over `output_cost_per_image_token`)                                                                                                             |
 | `search_context_cost_per_query`                               | Web Search cost per request/call, keyed by `search_context_size_*`                                                                                                                       |
 | `web_search_billing_unit`                                     | `per_query` or `per_prompt` Web Search charging mode                                                                                                                                     |
-| `tool_cost_per_call`                                          | Price per successful call: `code_execution`, `attachment_search`, `collections_search` (aliases `code_interpreter`, `document_search`, `file_search`)                                    |
+| `tool_cost_per_call`                                          | Price per successful call: `code_execution`, `attachment_search`, `collections_search`, `web_fetch` (aliases `code_interpreter`, `document_search`, `file_search`, `fetch`)              |
 | `x_search_cost_per_post`                                      | X Search price per fetched post (parent and quoted posts included, not de-duplicated)                                                                                                    |
 | `x_search_cost_per_profile`                                   | X Search price per fetched user profile                                                                                                                                                  |
 | `image_generation_tool_model`                                 | Price row (same price source) for images of a built-in `image_generation` tool, e.g. `grok-imagine-image-2.0`                                                                            |
@@ -220,7 +230,7 @@ For reference:
 
 All providers return specialised token counts as **subsets** of the totals:
 
-- `prompt_tokens` (Vertex AI, OpenAI) already includes `audio_input_tokens`, `cached_input_tokens`
+- `prompt_tokens` (Vertex AI, OpenAI) already includes `audio_input_tokens`, `cached_input_tokens`, input `image_tokens` and `video_input_tokens`
 - `completion_tokens` (all providers) already includes `reasoning_tokens`, `audio_output_tokens`, prediction tokens
 - Anthropic reports cache tokens separately; OpenAI-compatible APIs report them in prompt/input token details
 
@@ -228,12 +238,15 @@ To avoid billing the same tokens at two different rates, the calculator first co
 
 ```
 regular_input  = prompt_tokens - audio_input_tokens - cached_input_tokens - cache_creation_tokens
+                               - image_tokens - video_input_tokens
 regular_output = completion_tokens - audio_output_tokens - reasoning_tokens
                                    - accepted_prediction_tokens - rejected_prediction_tokens
 
 total = regular_input  × input_cost_per_token
       + regular_output × output_cost_per_token
       + audio_input_tokens  × input_cost_per_audio_token
+      + image_tokens        × input_cost_per_image_token
+      + video_input_tokens  × input_cost_per_video_token
       + audio_output_tokens × output_cost_per_audio_token
       + cached_text_tokens  × cache_read_input_token_cost
       + cached_audio_tokens × cache_read_input_audio_token_cost
@@ -349,19 +362,19 @@ input_cost = regular_below × input_cost_per_token
 
 The same logic applies to output tokens using `output_cost_per_token_above_200k_tokens`.
 
-Cache prices follow LiteLLM's full-session semantics: when `prompt_tokens > 200_000`, all cache read/write tokens use the matching `*_above_200k_tokens` rate. The 32k/128k/256k/272k full-session cache fields take precedence over the 200k tier whenever configured, with the highest exceeded threshold winning (see "Long-context pricing" below).
+Cache prices follow LiteLLM's full-session semantics: when `prompt_tokens > 200_000`, all cache read/write tokens use the matching `*_above_200k_tokens` rate. The 32k/100k/128k/256k/272k full-session cache fields take precedence over the 200k tier whenever configured, with the highest exceeded threshold winning (see "Long-context pricing" below).
 
 ### Long-context mode (`full_request_200k_inclusive`)
 
 xAI bills the long-context rates for **all** tokens of a request once its prompt **reaches** 200k tokens. A price row opts into that rule with `long_context_pricing_mode: "full_request_200k_inclusive"`: from `prompt_tokens >= 200_000` (cached tokens included) regular input, cached input, output and reasoning are all billed at the `*_above_200k_tokens` rates (reasoning at `output_cost_per_token_above_200k_tokens`, even when the row sets `output_cost_per_reasoning_token`, which then applies below the threshold only), and below it at the base rates. The proportional split above is not used for such a row. The mode belongs to the price row, so it applies to every credential serving the model, an aggregator fallback included. Rows without the mode, or with an unrecognised value, keep the default 200k handling, and Gemini rows keep their exclusive full-session 200k tier. Higher configured full-session tiers (256k/272k/512k) still win.
 
-### Long-context pricing (32k / 128k / 256k / 272k / 512k full-session tiers)
+### Long-context pricing (32k / 100k / 128k / 256k / 272k / 512k full-session tiers)
 
 When the prompt exceeds one of these thresholds, the matching `*_above_<N>k_tokens` rate applies to the **full session** rather than only the tokens beyond the threshold — the prompt size selects the tier for regular input, output, cache reads, and cache writes. At exactly the threshold, base rates still apply (the check is strictly "greater than").
 
-272k was added first for models such as GPT-5.6; 32k/128k/256k were added for Alibaba Cloud models (Qwen 3.x, GLM) whose published pricing is a flat rate per input-length bracket (e.g. 0–32k / 32k–128k / 128k–256k / >256k) rather than an incremental rate for the overflow. 512k was added for MiniMax-M3, whose pricing depends on total input token count with a 512k threshold.
+272k was added first for models such as GPT-5.6; 32k/128k/256k were added for Alibaba Cloud models (Qwen 3.x, GLM) whose published pricing is a flat rate per input-length bracket (e.g. 0–32k / 32k–128k / 128k–256k / >256k) rather than an incremental rate for the overflow. 512k was added for MiniMax-M3, whose pricing depends on total input token count with a 512k threshold. 100k was added for Claude Haiku 5.5, which has two rate cards chosen by prompt length: a prompt longer than 100k tokens (input, cache reads and cache writes together) moves input, output, cache reads and both cache-write TTLs to the second card. It is the only tier with its own 1-hour cache-write rate, `cache_creation_input_token_cost_above_1hr_above_100k_tokens`; the other tiers bill 1-hour writes at their single cache-write rate.
 
-A price entry may configure any subset of these five thresholds (e.g. only 32k and 256k, skipping 128k). For each cost component (input, output, cache read, cache write) independently, AIR picks the **highest configured threshold that the prompt exceeds**, in descending order 512k → 272k → 256k → 128k → 32k, and skips any threshold whose rate field isn't set. If none of the five apply, cost calculation falls back to the 200k proportional tier described above, then to the base rate.
+A price entry may configure any subset of these six thresholds (e.g. only 32k and 256k, skipping 128k). For each cost component (input, output, cache read, cache write) independently, AIR picks the **highest configured threshold that the prompt exceeds**, in descending order 512k → 272k → 256k → 128k → 100k → 32k, and skips any threshold whose rate field isn't set. If none of the six apply, cost calculation falls back to the 200k proportional tier described above, then to the base rate.
 
 Example: a model with only `input_cost_per_token_above_128k_tokens` and `input_cost_per_token_above_256k_tokens` set bills a 150k-token prompt at the 128k rate and a 300k-token prompt at the 256k rate; a 100k-token prompt still uses the base rate.
 
@@ -377,6 +390,8 @@ Example: a model with only `input_cost_per_token_above_128k_tokens` and `input_c
 | Reasoning            | `reasoning_tokens × output_cost_per_reasoning_token` (falls back to regular output rate)                                                                                                                                                                                                                                                                          |
 | Accepted prediction  | `accepted_prediction_tokens × output_cost_per_prediction_token` (falls back to regular output rate)                                                                                                                                                                                                                                                               |
 | Rejected prediction  | `rejected_prediction_tokens × output_cost_per_token` (always at regular output rate)                                                                                                                                                                                                                                                                              |
+| Image input          | `image_tokens × input_cost_per_image_token` (falls back to regular input rate)                                                                                                                                                                                                                                                                                    |
+| Video input          | `video_input_tokens × input_cost_per_video_token` (falls back to the image input rate, then regular input rate)                                                                                                                                                                                                                                                   |
 | Images               | `image_count × output_cost_per_image` OR `output_image_tokens × output_cost_per_image_token`                                                                                                                                                                                                                                                                      |
 | Web Search           | `billable_web_search_count × search_context_cost_per_query[search_context_size]`, with `per_prompt` clamped to one                                                                                                                                                                                                                                                |
 
@@ -421,10 +436,64 @@ Alibaba/Qwen reports explicit-cache mode in `usage.prompt_tokens_details.cache_t
 
 ### Spend storage contract
 
-AIR keeps LiteLLM's upstream PostgreSQL schema unchanged. `LiteLLM_SpendLogs.spend` and the daily user, team, organization, and end-user tables contain the total cost. Cache and Web Search breakdowns are stored in `LiteLLM_SpendLogs.metadata`.
+AIR keeps LiteLLM's upstream PostgreSQL schema unchanged. `LiteLLM_SpendLogs.spend` and the daily user, team, organization, and end-user tables contain the total cost. Cache, Web Search and input modality breakdowns are stored in `LiteLLM_SpendLogs.metadata` (`usage_object.prompt_tokens_details.image_tokens` / `audio_tokens` / `video_tokens`, `cost_breakdown.image_cost` / `audio_input_cost` / `video_input_cost`).
 
 Kafka and ClickHouse expose the same breakdown as typed fields, including `web_search_requests` and `web_search_cost`. Use that analytics path when structured reconciliation by usage type is required.
 
 ### Lookup
 
 When a request completes, the router calls `GetPrice(modelName)` which normalises the name and returns the `*ModelPrice`. If no entry is found, cost calculation is skipped, `spend` is stored as `0`, and the metadata cost breakdown is omitted.
+
+## The router-run DeepSeek Search and Fetch tools
+
+DeepSeek's flash model cannot run the built-in `web_search` tool itself: a Chat Completions request carrying it is rejected (HTTP 422), and `web_fetch` is ignored — the model answers that it cannot search the web. DeepSeek runs both as separate REST endpoints outside the chat protocol:
+
+```
+POST {base_url}/v1/tools/search   {"query": ..., "count": ..., "ori_question": ..., "localization": ..., "need_content": ...}
+POST {base_url}/v1/tools/fetch   {"url": ...}
+```
+
+So for those models the **router** runs the tools. A credential opts in with `deepseek_tools: true`, and the router:
+
+1. replaces the client's built-in `web_search` / `web_fetch` tools with ordinary function tools, so the model can only reach them by calling a function;
+2. runs the tool itself with the credential's key (`Authorization: Bearer …`) and the credential's proxy;
+3. hands the result back as a tool result and asks the model again — the loop is bounded by `server.deepseek_tools.max_steps`;
+4. bills the tool calls apart from the model's tokens.
+
+The takeover happens before the Responses-to-Chat conversion, because the conversion drops every built-in tool: the adapter's replacement is an ordinary function tool, which the conversion keeps.
+
+### What is billed
+
+| Call   | Billed when                              | Price                                                                    |
+| ------ | ---------------------------------------- | ------------------------------------------------------------------------ |
+| Search | HTTP 200 and a non-empty `results` array | `search_context_cost_per_query` (the context size the request asked for) |
+| Fetch  | HTTP 200 and a non-empty `content`       | `tool_cost_per_call.fetch`                                               |
+
+A failed call, a timeout and an empty result cost nothing. `need_content: true` inside a search does **not** create a Fetch charge — a Fetch is billed only for its own successful REST call, so a Search followed by a Fetch costs both. The price is per call, independent of `count` and of the number of pages found. A search's peak/off-peak schedule does not change the tool price.
+
+The model's own tokens are billed as usual, for **every** step of the loop: the steps are separate upstream requests, and the client is charged for all of them. The loop's token counts are summed (the router's own merge helpers replace a counter rather than add to it, which is right for a stream but wrong for a loop), and the tool counters are added to the provider's.
+
+### Limits
+
+DeepSeek counts the limits per account, not per key, and the two tools have separate pools (100 QPS for Search, 25 QPS for Fetch; Fetch is additionally capped per domain). The router keeps the pools per account in Redis, so the limit is shared by the router's replicas and the platforms, and the pools fall back to in-process counters when Redis is unavailable. A 429 or a 5xx is retried with a delay (`server.deepseek_tools.max_retries`); other 4xx answers are not retried.
+
+### Configuration
+
+```yaml
+server:
+  deepseek_tools:
+    request_timeout: 30s
+    search_qps: 100
+    fetch_qps: 25
+    max_steps: 8
+    max_retries: 2
+
+credentials:
+  - name: deepseek-aionov-chatgpt-1@aori.com
+    type: openai
+    base_url: https://api.deepseek.com
+    api_key: os.environ/KEY11
+    deepseek_tools: true   # the provider runs its own Search and Fetch tools
+```
+
+The adapter is off for every request that did not ask for one of the built-in tools, and for every credential without the opt-in.

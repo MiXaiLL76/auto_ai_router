@@ -24,24 +24,22 @@ litellm_db:
 | `enabled`                          | bool     | false   | Enable LiteLLM DB integration                                                  |
 | `is_required`                      | bool     | false   | Fail startup if DB connection fails                                            |
 | `database_url`                     | string   | —       | PostgreSQL connection string (supports env variables)                          |
+| `load_db_models`                   | bool     | false   | Serve deployments from `LiteLLM_ProxyModelTable`                               |
+| `db_model_sync_interval`           | duration | 1m      | How often DB models are reloaded                                               |
 | `max_conns`                        | int      | 25      | Maximum database connections                                                   |
 | `min_conns`                        | int      | 5       | Minimum database connections                                                   |
 | `health_check_interval`            | duration | 10s     | DB health check interval                                                       |
 | `connect_timeout`                  | duration | 5s      | Connection timeout                                                             |
-| `auth_cache_ttl`                   | duration | 20s     | Auth cache TTL                                                                 |
+| `auth_cache_ttl`                   | duration | 5s      | Auth cache TTL                                                                 |
 | `auth_cache_size`                  | int      | 10000   | Auth cache size                                                                |
 | `log_queue_size`                   | int      | 5000    | Spend log queue size                                                           |
 | `log_batch_size`                   | int      | 100     | Spend log batch size                                                           |
 | `log_flush_interval`               | duration | 5s      | Spend log flush interval                                                       |
+| `log_workers`                      | int      | 4       | Parallel spend log writer workers                                              |
+| `disable_spend_logs_write`         | bool     | false   | Skip spend writes to Postgres ([Kafka](kafka_spend_log.md) as the only sink)   |
 | `include_team_spend_in_user_spend` | bool     | true    | Include team-bound events in the cumulative user spend projection              |
-| `log_retry_attempts`               | int      | 3       | Retry attempts on log insert failure                                           |
-| `log_retry_delay`                  | duration | 1s      | Delay between retry attempts                                                   |
 | `daily_spend_timezone`             | string   | UTC     | Timezone the daily spend tables are grouped by                                 |
 | `enable_cost_margin`               | bool     | false   | Apply `metadata.cost_margin_config` markup ([pricing](pricing.md#cost-margin)) |
-
-### Daily aggregation timezone
-
-By default the `date` column of the daily spend tables holds the **UTC** calendar day of the request, the day LiteLLM itself aggregates by. `daily_spend_timezone` moves that boundary to a local day: with `Europe/Moscow`, a request at `2026-03-10T22:30:00Z` counts towards `2026-03-11`. Only that column follows the setting — every table AIR aggregates takes the day from one computed value, so they cannot disagree with each other, and stored timestamps such as `LiteLLM_SpendLogs.startTime` and `created_at`/`updated_at` stay UTC.
 
 ## Features
 
@@ -50,6 +48,15 @@ By default the `date` column of the daily spend tables holds the **UTC** calenda
 - **API key auth** — validates API keys against LiteLLM verification tokens
 - **Batch processing** — logs are batched and flushed periodically for performance
 - **Dead Letter Queue** — failed log inserts are captured for later retry
+
+## Daily aggregation timezone
+
+By default the `date` column of the daily spend tables holds the **UTC** calendar day of the request, the day LiteLLM itself aggregates by. `daily_spend_timezone` moves that boundary to a local day: with `Europe/Moscow`, a request at `2026-03-10T22:30:00Z` counts towards `2026-03-11`. Only that column follows the setting — every table AIR aggregates takes the day from one computed value, so they cannot disagree with each other, and stored timestamps such as `LiteLLM_SpendLogs.startTime` and `created_at`/`updated_at` stay UTC.
+
+## Partitioned `LiteLLM_SpendLogs`
+
+AIR supports a `LiteLLM_SpendLogs` table partitioned by `"startTime"` with the primary key
+`(request_id, "startTime")`, the same way LiteLLM does. No setting is needed.
 
 ## Models from the LiteLLM database
 

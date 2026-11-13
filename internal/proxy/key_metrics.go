@@ -22,13 +22,14 @@ func keyIdentityFromTokenInfo(info *models.TokenInfo) monitoring.KeyIdentity {
 		return monitoring.KeyIdentity{}
 	}
 	return monitoring.KeyIdentity{
-		Key:            info.Token[:monitoring.KeyHashPrefixLen],
-		KeyAlias:       info.KeyAlias,
-		UserID:         info.UserID,
-		UserEmail:      info.UserEmail,
-		TeamID:         info.TeamID,
-		TeamAlias:      info.TeamAlias,
-		OrganizationID: info.OrganizationID,
+		Key:               info.Token[:monitoring.KeyHashPrefixLen],
+		KeyAlias:          info.KeyAlias,
+		UserID:            info.UserID,
+		UserEmail:         info.UserEmail,
+		TeamID:            info.TeamID,
+		TeamAlias:         info.TeamAlias,
+		OrganizationID:    info.OrganizationID,
+		OrganizationAlias: info.OrganizationAlias,
 	}
 }
 

@@ -101,7 +101,8 @@ func TestResponsesRequestToVertex_ReasoningItemNotReplayedAsText(t *testing.T) {
 	assert.NotContains(t, string(raw), "[Reasoning]")
 }
 
-// Reasoning items around function calls add no contents of their own.
+// Reasoning items around function calls add no contents of their own, and the
+// calls of one turn make one model content.
 func TestResponsesRequestToVertex_ReasoningAddsNoContentsAroundCalls(t *testing.T) {
 	contents := vertexContents(t, `[
 		{"role": "user", "content": "q"},
@@ -123,5 +124,8 @@ func TestResponsesRequestToVertex_ReasoningAddsNoContentsAroundCalls(t *testing.
 			assert.NotContains(t, p, "text", "no text part may come from a reasoning item")
 		}
 	}
-	assert.Equal(t, []interface{}{"user", "model", "model", "user"}, roles)
+	// Both calls are answered by one user turn, so they form one model turn.
+	assert.Equal(t, []interface{}{"user", "model", "user"}, roles)
+	modelParts, _ := contents[1]["parts"].([]interface{})
+	assert.Len(t, modelParts, 2)
 }

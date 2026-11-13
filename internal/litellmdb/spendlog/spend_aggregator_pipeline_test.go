@@ -117,6 +117,11 @@ func TestVideoCallTypeUsesVideoDailyEndpoint(t *testing.T) {
 	assert.Equal(t, "/videos", dailyEndpoint("avideo_generation"))
 }
 
+func TestSystemOneCallTypeUsesSystemOneDailyEndpoint(t *testing.T) {
+	assert.Equal(t, "asystemone", LiteLLMCallTypeForPath("/v1/systemone"))
+	assert.Equal(t, "/systemone", dailyEndpoint("asystemone"))
+}
+
 func TestBuildSpendLogRecordsExtractsCacheTokensFromMetadata(t *testing.T) {
 	entry := atomicTestEntry("req-cache")
 	entry.Metadata = `{"usage_object":{

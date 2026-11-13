@@ -436,7 +436,7 @@ func (l *Logger[T]) appendToDLQLocked(dlb *deadLetterBatch[T]) {
 }
 
 // notifyFallback calls config.FallbackNotifier for every event in batch,
-// fire-and-forget, so a batch permanently dropped from the DLQ doesn't block
+// on its own goroutine, so a batch permanently dropped from the DLQ doesn't block
 // the caller (holding dlqMu) on Postgres round-trips. Request IDs are copied
 // upfront since dropped.batch's backing array must not be retained/mutated
 // after appendToDLQLocked returns.
@@ -448,7 +448,11 @@ func (l *Logger[T]) notifyFallback(batch []T, reason string) {
 	for i, event := range batch {
 		requestIDs[i] = string(event.Key())
 	}
+	// Counted in wg so Shutdown waits for the notifier before returning. The
+	// caller is itself a goroutine counted in wg, so this Add can't race Wait.
+	l.wg.Add(1)
 	go func() {
+		defer l.wg.Done()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		for _, requestID := range requestIDs {

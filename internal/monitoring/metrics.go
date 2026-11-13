@@ -34,6 +34,41 @@ var (
 		[]string{"credential", "model", "endpoint", "status"},
 	)
 
+	// HTTP2TransportErrorsTotal is fed by http.HTTP2Config.CountError (see
+	// internal/httputil/client.go), the stdlib's own counter for client-side
+	// HTTP/2 transport errors. The reason label is Go's internal string for
+	// what happened (lowercase, digits, underscores only — see
+	// net/http.HTTP2Config.CountError's doc comment, a small fixed set, not
+	// user input) and despite the metric's name, most reasons do NOT mean a
+	// connection was closed: read_frame_eof/read_frame_unexpected_eof/
+	// read_frame_too_large/read_frame_other/read_frame_conn_error_* fire on
+	// routine frame-read errors (an ordinary EOF when a provider closes a
+	// keep-alive connection lands here too), recv_goaway_* fires whenever a
+	// peer sends GOAWAY (graceful drain, in-flight streams still finish),
+	// and recv_rststream_* fires per reset *stream*, not per connection —
+	// all of this is normal HTTP/2 traffic, unrelated to our ping config.
+	// The one reason this fix's ping check itself produces is
+	// conn_close_lost_ping: the idle-liveness PING went unacked within
+	// http2_ping_timeout and the connection actually was torn down. Filter
+	// on reason="conn_close_lost_ping" specifically when triaging the ping
+	// fix — the total across all reasons is mostly unrelated background
+	// noise, not a signal.
+	//
+	// conn_close_lost_ping itself can also be reported for a connection that
+	// was already closed for an unrelated reason: a known upstream Go bug
+	// (golang/go#80923) leaves healthCheck's AfterFunc timer running past
+	// readLoop's exit, so it can still fire and double-count a close that
+	// already happened. Harmless (the connection's already gone either way),
+	// but worth knowing before reading a small, steady trickle of this
+	// reason as N distinct real ping failures.
+	HTTP2TransportErrorsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_http2_transport_errors_total",
+			Help: "Client-side HTTP/2 transport errors from the Go runtime's own error counters, labeled by its internal reason string. Most reasons are routine protocol/connection-lifecycle events, not failures; reason=\"conn_close_lost_ping\" is the one this router's HTTP/2 ping liveness check itself produces.",
+		},
+		[]string{"reason"},
+	)
+
 	RequestDuration = promauto.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name: "auto_ai_router_requests_duration_seconds",
@@ -91,6 +126,54 @@ var (
 			Help: "Total number of requests aborted by the client while the response was being written",
 		},
 		[]string{"credential", "model", "endpoint"},
+	)
+
+	LoopGateStreamsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_loop_gate_streams_total",
+			Help: "Total number of streamed generations watched by the loop gate detector",
+		},
+		[]string{"credential", "model", "mode"},
+	)
+
+	LoopGateFiringsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_loop_gate_firings_total",
+			Help: "Total number of streamed generations the loop gate detector saw looping, by text channel (content or reasoning)",
+		},
+		[]string{"credential", "model", "channel", "mode"},
+	)
+
+	LoopGateWordsAfterFiringTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_loop_gate_words_after_firing_total",
+			Help: "Total number of words a looping generation produced after the loop gate detector fired",
+		},
+		[]string{"credential", "model", "channel", "mode"},
+	)
+
+	LoopGateCutsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_loop_gate_cuts_total",
+			Help: "Total number of streamed generations the loop gate cut short (enforce mode), by the looping text channel",
+		},
+		[]string{"credential", "model", "channel"},
+	)
+
+	LoopGateRestartsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_loop_gate_restarts_total",
+			Help: "Total number of looping streamed generations the loop gate restarted (enforce mode), by the looping text channel",
+		},
+		[]string{"credential", "model", "channel"},
+	)
+
+	LoopGateRecoveredTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_loop_gate_recovered_total",
+			Help: "Total number of restarted streamed generations that then finished without being cut",
+		},
+		[]string{"credential", "model"},
 	)
 
 	CredentialRPMCurrent = promauto.NewGaugeVec(
@@ -298,6 +381,50 @@ var (
 		prometheus.GaugeOpts{
 			Name: "auto_ai_router_kafka_raw_body_logger_healthy",
 			Help: "Kafka broker connectivity for raw-body publishing (1 = healthy, 0 = unhealthy)",
+		},
+	)
+
+	// Router-response logger stats mirror the raw-body gauges above for the
+	// separate, independently-toggleable router-response write-path.
+	KafkaRouterResponseLoggerQueuedTotal = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_kafka_router_response_logger_queued_total",
+			Help: "Cumulative number of router-response events queued for Kafka publishing",
+		},
+	)
+
+	KafkaRouterResponseLoggerProducedTotal = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_kafka_router_response_logger_produced_total",
+			Help: "Cumulative number of router-response events successfully produced to Kafka",
+		},
+	)
+
+	KafkaRouterResponseLoggerDroppedTotal = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_kafka_router_response_logger_dropped_total",
+			Help: "Cumulative number of router-response events dropped because the producer queue was full",
+		},
+	)
+
+	KafkaRouterResponseLoggerErrorsTotal = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_kafka_router_response_logger_errors_total",
+			Help: "Cumulative number of router-response events that failed to produce after all retries",
+		},
+	)
+
+	KafkaRouterResponseLoggerDLQSize = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_kafka_router_response_logger_dlq_size",
+			Help: "Current number of batches held in the Kafka router-response logger dead letter queue",
+		},
+	)
+
+	KafkaRouterResponseLoggerHealthy = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_kafka_router_response_logger_healthy",
+			Help: "Kafka broker connectivity for router-response publishing (1 = healthy, 0 = unhealthy)",
 		},
 	)
 
@@ -573,6 +700,55 @@ func (m *Metrics) RecordAbortedRequest(credential, endpoint, model string) {
 	AbortedRequestsTotal.WithLabelValues(credential, model, endpoint).Inc()
 }
 
+// RecordLoopGateStream counts a stream watched by the loop gate detector.
+func (m *Metrics) RecordLoopGateStream(credential, model, mode string) {
+	if !m.isEnabled() {
+		return
+	}
+	LoopGateStreamsTotal.WithLabelValues(credential, model, mode).Inc()
+}
+
+// RecordLoopGateFiring counts a loop gate firing on one text channel.
+func (m *Metrics) RecordLoopGateFiring(credential, model, channel, mode string) {
+	if !m.isEnabled() {
+		return
+	}
+	LoopGateFiringsTotal.WithLabelValues(credential, model, channel, mode).Inc()
+}
+
+// RecordLoopGateWordsAfterFiring adds the words a looping channel produced
+// after its firing, recorded once at the end of the stream.
+func (m *Metrics) RecordLoopGateWordsAfterFiring(credential, model, channel, mode string, words int) {
+	if !m.isEnabled() || words <= 0 {
+		return
+	}
+	LoopGateWordsAfterFiringTotal.WithLabelValues(credential, model, channel, mode).Add(float64(words))
+}
+
+// RecordLoopGateCut counts a stream the loop gate cut short.
+func (m *Metrics) RecordLoopGateCut(credential, model, channel string) {
+	if !m.isEnabled() {
+		return
+	}
+	LoopGateCutsTotal.WithLabelValues(credential, model, channel).Inc()
+}
+
+// RecordLoopGateRestart counts a looping generation the loop gate restarted.
+func (m *Metrics) RecordLoopGateRestart(credential, model, channel string) {
+	if !m.isEnabled() {
+		return
+	}
+	LoopGateRestartsTotal.WithLabelValues(credential, model, channel).Inc()
+}
+
+// RecordLoopGateRecovered counts a restarted generation that finished uncut.
+func (m *Metrics) RecordLoopGateRecovered(credential, model string) {
+	if !m.isEnabled() {
+		return
+	}
+	LoopGateRecoveredTotal.WithLabelValues(credential, model).Inc()
+}
+
 func (m *Metrics) UpdateCredentialRPM(credential string, rpm int) {
 	m.updateCredentialMetric(CredentialRPMCurrent, credential, rpm)
 }
@@ -651,6 +827,24 @@ func (m *Metrics) UpdateKafkaSpendLoggerStats(queued, produced, dropped, errors 
 		h = 1.0
 	}
 	KafkaSpendLoggerHealthy.Set(h)
+}
+
+// UpdateKafkaRouterResponseLoggerStats mirrors UpdateKafkaRawBodyLoggerStats
+// for the separate router-response write-path.
+func (m *Metrics) UpdateKafkaRouterResponseLoggerStats(queued, produced, dropped, errors uint64, dlqSize int, healthy bool) {
+	if !m.isEnabled() {
+		return
+	}
+	KafkaRouterResponseLoggerQueuedTotal.Set(float64(queued))
+	KafkaRouterResponseLoggerProducedTotal.Set(float64(produced))
+	KafkaRouterResponseLoggerDroppedTotal.Set(float64(dropped))
+	KafkaRouterResponseLoggerErrorsTotal.Set(float64(errors))
+	KafkaRouterResponseLoggerDLQSize.Set(float64(dlqSize))
+	h := 0.0
+	if healthy {
+		h = 1.0
+	}
+	KafkaRouterResponseLoggerHealthy.Set(h)
 }
 
 // UpdateKafkaRawBodyLoggerStats mirrors UpdateKafkaSpendLoggerStats for the

@@ -67,6 +67,68 @@ func TestScopeContextFromTokenInfo_ForbiddenScopesAlias(t *testing.T) {
 	}
 }
 
+func TestScopeContextFromTokenInfo_TeamMetadataGrantsScope(t *testing.T) {
+	ctx := scopeContextFromTokenInfo(&dbmodels.TokenInfo{
+		KeyName: "ignored",
+		TeamMetadata: map[string]interface{}{
+			"air_scopes": []interface{}{"yandex_search"},
+		},
+	})
+
+	if !ctx.Allows([]string{"yandex_search"}, nil) {
+		t.Fatal("a scope granted at team level must apply even with no key-level air_scopes")
+	}
+}
+
+func TestScopeContextFromTokenInfo_OrganizationMetadataGrantsScope(t *testing.T) {
+	ctx := scopeContextFromTokenInfo(&dbmodels.TokenInfo{
+		OrganizationMetadata: map[string]interface{}{
+			"air_scopes": []interface{}{"yandex_search"},
+		},
+	})
+
+	if !ctx.Allows([]string{"yandex_search"}, nil) {
+		t.Fatal("a scope granted at organization level must apply")
+	}
+}
+
+func TestScopeContextFromTokenInfo_KeyTeamOrgScopesUnion(t *testing.T) {
+	ctx := scopeContextFromTokenInfo(&dbmodels.TokenInfo{
+		Metadata:             map[string]interface{}{"air_scopes": []interface{}{"from-key"}},
+		TeamMetadata:         map[string]interface{}{"air_scopes": []interface{}{"from-team"}},
+		OrganizationMetadata: map[string]interface{}{"air_scopes": []interface{}{"from-org"}},
+	})
+
+	for _, want := range []string{"from-key", "from-team", "from-org"} {
+		if !ctx.Allows([]string{want}, nil) {
+			t.Fatalf("scope %q from any of key/team/org metadata must be allowed", want)
+		}
+	}
+}
+
+func TestScopeContextFromTokenInfo_TeamDeniedScopeAppliesEvenIfKeyAllows(t *testing.T) {
+	ctx := scopeContextFromTokenInfo(&dbmodels.TokenInfo{
+		Metadata:     map[string]interface{}{"air_scopes": []interface{}{"yandex_search"}},
+		TeamMetadata: map[string]interface{}{"air_denied_scopes": []interface{}{"yandex_search"}},
+	})
+
+	if ctx.Allows([]string{"yandex_search"}, nil) {
+		t.Fatal("a team-level denial must win over a key-level allow")
+	}
+}
+
+func TestScopeContextFromTokenInfo_NoScopesAnywhereKeepsKeyNameFallback(t *testing.T) {
+	ctx := scopeContextFromTokenInfo(&dbmodels.TokenInfo{
+		KeyName:              "Team-A",
+		TeamMetadata:         map[string]interface{}{},
+		OrganizationMetadata: map[string]interface{}{},
+	})
+
+	if !ctx.Allows([]string{"team-a"}, nil) {
+		t.Fatal("with no air_scopes set anywhere, the key_name fallback must still apply unchanged")
+	}
+}
+
 func TestScopeContextFromTokenInfo_LiteLLMMasterKeyIsAdmin(t *testing.T) {
 	ctx := scopeContextFromTokenInfo(&dbmodels.TokenInfo{
 		KeyName:     liteLLMMasterKeyIdentity,

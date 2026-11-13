@@ -6,7 +6,7 @@ BUILD_DIR=.
 CMD_DIR=./cmd/server
 GO=go
 GOFLAGS=-v
-GOLANGCI_LINT_VERSION ?= v2.13.1
+GOLANGCI_LINT_VERSION ?= v2.15.0
 GOLANGCI_LINT_VERSION_NO_V=$(patsubst v%,%,$(GOLANGCI_LINT_VERSION))
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
@@ -41,6 +41,7 @@ help:
 	@echo "  fmt                  - Format code"
 	@echo "  vet                  - Run go vet"
 	@echo "  lint                 - Run golangci-lint (requires installation)"
+	@echo "  install-hooks        - Enable automatic format and lint before commits"
 	@echo "  install-lint         - Install pinned golangci-lint"
 	@echo "  vuln                 - Run govulncheck (latest, same as CI)"
 	@echo "  format               - Format code and run pre-commit checks"
@@ -179,7 +180,9 @@ lint:
 ## exactly as it fails the Lint workflow.
 vuln:
 	@echo "Running govulncheck..."
-	export PATH=/usr/local/go/bin:$$PATH && $(GO) run golang.org/x/vuln/cmd/govulncheck@latest ./...
+	# Analyze the same patched standard library as CI and release builds,
+	# including the net/http fix (GO-2026-6859) in Go 1.27.4.
+	export PATH=/usr/local/go/bin:$$PATH && GOTOOLCHAIN=go1.27.4 $(GO) run golang.org/x/vuln/cmd/govulncheck@latest ./...
 	@echo "Vuln check complete"
 
 ## install-lint: Install pinned golangci-lint
@@ -198,6 +201,11 @@ format:
 	@which pre-commit > /dev/null || (echo "pre-commit not installed. Install with: pip install pre-commit" && exit 1)
 	pre-commit run --all-files
 	@echo "Format complete"
+
+## install-hooks: Enable repository pre-commit hook in this clone
+install-hooks:
+	git config --local core.hooksPath .githooks
+	@echo "Git pre-commit hook enabled for this clone"
 
 ## install-deps: Install/update dependencies
 install-deps:

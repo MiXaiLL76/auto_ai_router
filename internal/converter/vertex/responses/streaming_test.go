@@ -358,7 +358,7 @@ func TestTransformVertexStreamToResponses_FunctionCallEmbedsThoughtSignature(t *
 	})
 
 	var out bytes.Buffer
-	require.NoError(t, TransformVertexStreamToResponses(strings.NewReader(stream), &out, "gemini-test", "", nil, nil))
+	require.NoError(t, TransformVertexStreamToResponses(strings.NewReader(stream), &out, "gemini-3-flash", "", nil, nil))
 
 	var callIDs []string
 	for _, e := range parseVertexSSEEvents(out.String()) {

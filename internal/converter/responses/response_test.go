@@ -169,7 +169,7 @@ func TestChatToResponse_Refusal(t *testing.T) {
 	require.NoError(t, json.Unmarshal(result, &resp))
 
 	assert.Len(t, resp.Output, 1)
-	assert.Equal(t, "output_refusal", resp.Output[0].Content[0].Type)
+	assert.Equal(t, "refusal", resp.Output[0].Content[0].Type)
 	assert.Equal(t, "I can not do that", resp.Output[0].Content[0].Refusal)
 }
 

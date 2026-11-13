@@ -18,6 +18,40 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestWriteProxyResponseSynthesizesCacheCreationFromRequestyNaming(t *testing.T) {
+	// Non-streaming via a proxy credential / fallback path (writeProxyResponse):
+	// the upstream (Requesty) reported the cache write only under caching_tokens.
+	// The standard cache_creation_tokens must be synthesized for pricing.
+	originalBody := []byte(`{"id":"rqsty-cmpl-1","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":130,"completion_tokens":10,"total_tokens":140,"prompt_tokens_details":{"cached_tokens":0,"caching_tokens":100,"caching_token_details":{"caching_1h_tokens":0,"caching_5m_tokens":100}}}}`)
+	resp := &ProxyResponse{
+		StatusCode: http.StatusOK,
+		Headers:    http.Header{"Content-Type": []string{"application/json"}},
+		Body:       append([]byte(nil), originalBody...),
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	w := httptest.NewRecorder()
+
+	NewTestProxyBuilder().Build().writeProxyResponse(w, resp, req, &config.CredentialConfig{Name: "test"}, "anthropic/claude-sonnet-4.6", nil)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	var payload struct {
+		Usage struct {
+			PromptTokensDetails struct {
+				CacheCreationTokens      int `json:"cache_creation_tokens"`
+				CachingTokens            int `json:"caching_tokens"`
+				CacheCreationTokenDetail struct {
+					Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens"`
+				} `json:"cache_creation_token_details"`
+			} `json:"prompt_tokens_details"`
+		} `json:"usage"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &payload))
+	d := payload.Usage.PromptTokensDetails
+	assert.Equal(t, 100, d.CacheCreationTokens, "standard name must be synthesized")
+	assert.Equal(t, 100, d.CachingTokens, "Requesty field preserved")
+	assert.Equal(t, 100, d.CacheCreationTokenDetail.Ephemeral5mInputTokens)
+}
+
 func TestWriteProxyResponseNormalizesQwenUsageBeforeCompression(t *testing.T) {
 	originalBody := []byte(`{"id":"chatcmpl-1","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":1370,"completion_tokens":4774,"completion_tokens_details":{"text_tokens":4774,"reasoning_tokens":4417,"provider_detail":"kept"}},"provider_metadata":{"trace":"kept"}}`)
 	resp := &ProxyResponse{
