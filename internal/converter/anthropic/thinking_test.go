@@ -1,6 +1,7 @@
 package anthropic
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -354,5 +355,42 @@ func TestIsKnownClaudeModel(t *testing.T) {
 		"",
 	} {
 		assert.False(t, IsKnownClaudeModel(model), model)
+	}
+}
+
+// Fable 5.2 needs no model-specific code: the version parser classifies every provider
+// spelling as adaptive thinking that can't be turned off, with sampling params removed,
+// and the effort a client sets reaches the upstream on both the chat and the Messages path.
+// Without an explicit effort none is injected, so the model's own default applies.
+func TestFable52ThinkingFromVersionParser(t *testing.T) {
+	for _, model := range []string{"claude-fable-5-2", "claude-fable-5.2", "policy/claude-fable-5.2", "global.anthropic.claude-fable-5-2"} {
+		t.Run(model, func(t *testing.T) {
+			assert.True(t, IsKnownClaudeModel(model))
+			assert.True(t, isAdaptiveThinkingModel(model))
+			assert.True(t, SamplingRemoved(model))
+			assert.Equal(t, thinkingAlwaysOn, thinkingOffModeFor(model))
+
+			for _, effort := range []string{"low", "high", "xhigh", "max"} {
+				body := `{"model":"m","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"` + effort + `","temperature":0,"top_p":0.5}`
+				out, err := OpenAIToAnthropic([]byte(body), model, true)
+				require.NoError(t, err)
+				var req map[string]interface{}
+				require.NoError(t, json.Unmarshal(out, &req))
+				assert.Equal(t, "adaptive", req["thinking"].(map[string]interface{})["type"], effort)
+				assert.Equal(t, effort, req["output_config"].(map[string]interface{})["effort"], effort)
+				assert.NotContains(t, req, "temperature")
+				assert.NotContains(t, req, "top_p")
+
+				got, err := normalizePassthrough(t, model, true, `,"thinking":{"type":"adaptive"},"output_config":{"effort":"`+effort+`"}`)
+				require.NoError(t, err)
+				assert.Equal(t, map[string]interface{}{"effort": effort}, got["output_config"], effort)
+			}
+
+			out, err := OpenAIToAnthropic([]byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`), model, true)
+			require.NoError(t, err)
+			var req map[string]interface{}
+			require.NoError(t, json.Unmarshal(out, &req))
+			assert.NotContains(t, req, "output_config", "no effort injected over the model default")
+		})
 	}
 }
