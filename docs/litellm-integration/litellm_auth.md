@@ -52,11 +52,35 @@ sequenceDiagram
 ```
 
 - The hash (never the raw key) is what's stored in Postgres and used as the cache key.
-- `Validate()` checks, in order: `Blocked` → `Expires` → token budget → team → team-member → org → user → org-member budget (every level compares `Spend >= MaxBudget`; org uses `LiteLLM_BudgetTable`). A `max_budget` of `0` therefore allows no spend at all — unlimited is a `NULL` `max_budget` (for an organization, a missing budget row), never `0`.
-- A budget refusal is `402 Payment Required` with `type: insufficient_quota`. Its message names the budget that refused: the key's own `max_budget` answers `Key budget exceeded`; every level above the key (user, team, team member, organization, organization member) answers `Budget exceeded`. A client can thus tell a per-key cap from a limit of the key's holder. The check order above decides which one a client sees when several are exhausted: the key's. The reservation in §2b answers with the same texts; it can refuse while some budget is still left, when the estimated cost of the request does not fit. Callers inside AIR read the level with `models.BudgetExceededLevel(err)`; `errors.Is(err, ErrBudgetExceeded)` holds for every level. `/v1/search/yandex` keeps its own error body for a refused reservation (`{"error":{"message":...}}`, no `type`) with the same distinction in lower case: `key budget exceeded` / `budget exceeded`.
+- `Validate()` checks, in order: `Blocked` → `Expires` → token budget → token budget windows (when `enforce_key_budget_windows: true`) → team → team-member → org → user → org-member budget (every level compares `Spend >= MaxBudget`; org uses `LiteLLM_BudgetTable`). A `max_budget` of `0` therefore allows no spend at all — unlimited is a `NULL` `max_budget` (for an organization, a missing budget row), never `0`.
+- A budget refusal is `402 Payment Required` with `type: insufficient_quota`. Its message names the budget that refused: the key's own `max_budget` answers `Key budget exceeded`; every level above the key (user, team, team member, organization, organization member) answers `Budget exceeded`. A client can thus tell a per-key cap from a limit of the key's holder. The check order above decides which one a client sees when several are exhausted: the key's. The reservation in §2b answers with the same texts; it can refuse while some budget is still left, when the estimated cost of the request does not fit. A key budget window (§1a) names its duration: `Key 1d budget exceeded`. Callers inside AIR read the level and window with `models.AsBudgetExceeded(err)`; `errors.Is(err, ErrBudgetExceeded)` holds for every level. `/v1/search/yandex` keeps its own error body for a refused reservation (`{"error":{"message":...}}`, no `type`) with the same distinction in lower case: `key budget exceeded` / `key 1d budget exceeded` / `budget exceeded`.
 - The model isn't known yet at this point (`Validate("")` — model check is skipped), so the pre-check here is deliberately budget/expiry-only.
 - Cache invalidation is TTL-only (`auth_cache_ttl`, default 5s). There is no push invalidation from LiteLLM admin actions (`InvalidateToken`/`InvalidateAll` exist but nothing calls them yet) — a blocked/rebudgeted key can stay valid in a hot cache for up to `auth_cache_ttl`.
 - The cache is per-instance, not shared across replicas.
+
+### 1a. Key budget windows (`budget_limits`)
+
+This mechanism is **off by default**. Set `litellm_db.enforce_key_budget_windows: true` to enable the key's window checks, Redis reservation levels (when budget reservation is separately enabled), and window spend writes. With it off, AIR does not read or validate `budget_limits`, query or write `LiteLLM_BudgetWindowSpend`, or refuse keys because of unsupported window durations. The key's lifetime `max_budget` and other existing budget checks still apply. Enabling the flag is independent of `enforce_budget_reservation`; without Redis, the window check uses the database snapshot.
+
+A key can cap its spend per window of time on top of its lifetime `max_budget`: LiteLLM's `LiteLLM_VerificationToken.budget_limits`, a list of `{"budget_duration", "max_budget", "reset_at"}`. AIR reads `budget_duration` the way LiteLLM does (its `hourly`/`daily`/`weekly`/`monthly` spellings included) and enforces every duration LiteLLM resets on a fixed calendar grid, in `litellm_db.budget_timezone` (default UTC):
+
+| `budget_duration`                 | Window                                                      |
+| --------------------------------- | ----------------------------------------------------------- |
+| `1d`                              | a day from `litellm_db.budget_reset_time` (default `00:00`) |
+| `7d`, `1w`, `weekly`              | a week from Monday at `budget_reset_time`                   |
+| `30d`, `1mo`, `monthly`           | a month from the 1st at `budget_reset_time`                 |
+| `24h`, `daily`                    | a day from midnight                                         |
+| `Nh` with N dividing 24, `hourly` | N hours, counted from midnight                              |
+| `Nm` with N dividing 60           | N minutes, counted from the hour                            |
+
+These are the boundaries LiteLLM resets the same durations on. Durations LiteLLM counts from whenever its reset job last ran (`2d`, `14d`, `2w`, `5h`, `48h`), seconds, and anything LiteLLM cannot parse have no such grid: a key with one of them, or with a `budget_limits` AIR cannot read, is refused with `503 Key budget window not supported` rather than left unlimited. Entries with the same `budget_duration` share one row and counter, so they act as one window with the smaller `max_budget`.
+
+- **Spend in a window** comes from `LiteLLM_BudgetWindowSpend`, one row per key and duration. A row on the current window supplies the exact recorded spend; a row on an earlier window starts the new window at zero. If no row exists, AIR conservatively uses the key's cumulative `spend` as an upper bound. This can refuse an older key whose lifetime spend already exceeds a fresh window's limit; the row must be initialized from trusted accounting data before enabling the flag for that key. AIR never aggregates `LiteLLM_SpendLogs` to reconstruct a window.
+- **The window is computed, not stored.** The current window follows from the time, the duration, `budget_timezone` and `budget_reset_time`; AIR does not run LiteLLM's reset job and does not read or move `reset_at`. A window restarted mid-way through LiteLLM's reset-spend action therefore still counts from its calendar start in AIR, and a window without `reset_at` is a calendar window in AIR where LiteLLM counts back from now. A cached token is reloaded once a window it was loaded in has ended.
+- **The window name** in `LiteLLM_BudgetWindowSpend`, in the Redis counter and in `Key <duration> budget exceeded` is the `budget_duration` as stored: `daily` and `24h` keep separate rows, as in LiteLLM.
+- **Writing** happens in the spend log transaction (§3). Each entry counts towards the window its `startTime` falls in: a row on that window gets the spend added; a missing row is seeded from the key's cumulative spend after the batch; a row on an earlier window moves to the new window with the batch's spend. An entry that arrives after its window has ended does not move into the new one — unlike LiteLLM, which adds it to the current row. A key's existing rows keep counting while its limit is off, so putting the limit back within the same window finds the spend made without it.
+- **Reservation (§2b).** Each window is a level of its own, right after the key, with a counter named after the window's start (`token:<hash>:window:<duration>:<start>`): a new window starts a new counter. The video endpoint refuses keys with budget windows like any budgeted key.
+- **Older schemas:** with the flag off, no window table or column is needed. With the flag on, an old schema without `budget_limits` has no key windows; a key with windows needs `LiteLLM_BudgetWindowSpend`, otherwise AIR returns `503 Key budget window not supported` instead of scanning spend logs.
 
 ### Verified organization policy identity
 
@@ -142,7 +166,7 @@ sequenceDiagram
 
 Key properties:
 
-- **Seed-once-per-TTL**: the Redis counter is only seeded from the authoritative DB `spend` value when the key doesn't already exist; after that it's purely Redis-side until the TTL (`budget_reservation_ttl`, default 15m) expires and it reseeds. This bounds staleness after an out-of-band DB change (e.g. an admin resetting budget).
+- **Seed-once-per-TTL**: the Redis counter is only seeded from the authoritative DB `spend` value when the key doesn't already exist; after that it's purely Redis-side until the TTL (`budget_reservation_ttl`, default 15m) expires and it reseeds. This bounds staleness after an out-of-band DB change (e.g. an admin resetting budget) as long as the counter goes idle: every reservation refreshes the TTL, so a busy counter keeps its value. Spend that reaches the DB without a reservation — requests already in flight when a limit is set or put back, a limit that was off for a while — is therefore not in a counter that already exists; the DB-snapshot check in §1 still sees it.
 - **Reconcile exactly once**: guarded by `RequestLogContext.budgetReconciled`. The real call site is `logSpendToLiteLLMDB` (after the true cost is computed); a `defer` in `ProxyRequest` calls it a second time with cost `0` as a safety net for paths that never reach a credential (early failures) — the guard makes that a no-op once real reconciliation already happened.
 - **Fail open on Redis errors**: a `TryReserve` error logs a warning and allows the request — the DB-snapshot check remains the backstop.
 - **RPM/TPM** uses a second `ratelimit.RPMLimiter` instance (namespace `litellmauth:`, separate from the per-credential/provider limiter) keyed by `token:<hash>`, `user:<id>`, `team:<id>`, `org:<id>`, `teammember:<team>:<user>`, `orgmember:<org>:<user>`.
@@ -210,6 +234,7 @@ litellm_db:
   auth_cache_ttl: 20s                        # staleness window for blocked/budget/model changes
   auth_cache_size: 10000
   enforce_budget_reservation: false          # opt-in: Redis atomic budget reservation (§2b)
+  enforce_key_budget_windows: false          # opt-in: key budget_limits checks and window spend writes (§1a)
   enforce_key_rate_limits: false             # opt-in: Redis per-key/user/team/org RPM/TPM (§2b)
   budget_reservation_ttl: 15m                # Redis counter TTL / reseed-from-DB interval
   default_estimated_completion_tokens: 1000  # used when a request has no max_tokens
@@ -227,16 +252,20 @@ redis:
 | `auth_cache_ttl`                      | duration | 5s      | How long a validated token is trusted from the in-memory cache before re-querying Postgres |
 | `auth_cache_size`                     | int      | 10000   | Max entries in the auth LRU cache                                                          |
 | `enforce_budget_reservation`          | bool     | false   | Atomic Redis budget pre-reservation (§2b). No-op if `redis.enabled: false`                 |
+| `enforce_key_budget_windows`          | bool     | false   | Key `budget_limits` checks and window spend writes (§1a)                                   |
 | `enforce_key_rate_limits`             | bool     | false   | Atomic Redis RPM/TPM per key/user/team/org (§2b). No-op if `redis.enabled: false`          |
 | `budget_reservation_ttl`              | duration | 15m     | TTL of a Redis budget counter before it reseeds from DB `spend`                            |
 | `default_estimated_completion_tokens` | int      | 1000    | Completion-token estimate for budget reservation when `max_tokens` is absent               |
 
-Both `enforce_*` flags default to `false`: enabling them changes production enforcement behavior (requests can start failing with 402/429 that previously passed), so it's an explicit opt-in. The model allow-list check (§2a) has no such flag — it is always enforced for non-admin keys once `litellm_db.enabled: true`.
+All three `enforce_*` flags default to `false`: enabling them changes production enforcement behavior (requests can start failing with 402/429/503 that previously passed), so it's an explicit opt-in. The model allow-list check (§2a) has no such flag — it is always enforced for non-admin keys once `litellm_db.enabled: true`.
 
 `redis.hybrid` (see `redis.md`) is a separate, opt-in decision from `enforce_budget_reservation`/`enforce_key_rate_limits`: it only changes *how* an already-enabled reservation/rate-limit talks to Redis (sync direct vs. local-plus-async), not whether it runs at all.
 
 ## Known limitations
 
-- **Cache invalidation is TTL-only.** Blocking a key or lowering its budget in the LiteLLM admin panel takes up to `auth_cache_ttl` to take effect on a given replica (up to 15m for the *spend counter itself* if it's already tracked in Redis — see `budget_reservation_ttl`).
+- **Overspend with a strict reservation.** With `redis.hybrid: false` and a correct seed, concurrent reservations cannot overshoot a limit together; a request can still cost more than its estimate (see `default_estimated_completion_tokens`), and a Redis error fails open (§2b).
+- **`disable_spend_logs_write: true`** stops AIR from updating every spend column in Postgres, the key budget windows included: the checks keep reading Postgres, which only an external writer keeps current.
+- **Cache invalidation is TTL-only.** Blocking a key or lowering its budget in the LiteLLM admin panel takes up to `auth_cache_ttl` to take effect on a given replica. The *spend counter itself*, if it's already tracked in Redis, keeps its value until it has been idle for `budget_reservation_ttl` (see §2b).
+- **A request that starts just before a window boundary** and is authenticated after it reserves against the new window, while its spend log counts towards the window it started in. The new window's Redis counter is then stricter than its Postgres row by that request until the counter goes idle; nothing is under-counted. The shorter the window, the more often this happens.
 - **Streaming reconciliation on error paths.** If a streaming request fails after the provider already produced billable tokens but before the response reaches `logSpendToLiteLLMDB`, the `defer` safety net reconciles the Redis reservation at cost `0` (releases the full reservation). This can't cause overspend (it only makes the Redis counter *more* permissive than reality), but it can let the Redis counter drift below the true DB spend until the next TTL-driven reseed.
 - **No compensating logic for aborted streams** when `drain_upstream_on_abort: false` — cost is billed on estimated/partial usage, with no later reconciliation against the provider's own usage records.

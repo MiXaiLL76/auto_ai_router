@@ -1497,6 +1497,20 @@ type LiteLLMDBConfig struct {
 	// grouped by. Only their date column follows it; every stored timestamp
 	// stays UTC.
 	DailySpendTimezone *time.Location `yaml:"daily_spend_timezone"` // default: UTC
+	// EnforceKeyBudgetWindows enables LiteLLM key budget_limits checks and
+	// window spend projection. Off by default for existing installations.
+	EnforceKeyBudgetWindows bool `yaml:"enforce_key_budget_windows"`
+
+	// BudgetTimezone sets the calendar the key budget windows (LiteLLM
+	// budget_limits) start and end on: midnight, Monday, the 1st of the month.
+	// It plays the role of LiteLLM's litellm_settings.timezone for these
+	// windows. Stored timestamps stay UTC.
+	BudgetTimezone *time.Location `yaml:"budget_timezone"` // default: UTC
+	// BudgetResetTime is the time of day ("HH:MM" or "HH:MM:SS") day, week
+	// and month budget windows reset at, LiteLLM's
+	// litellm_settings.budget_reset_time. Hour and minute windows ignore it,
+	// as in LiteLLM.
+	BudgetResetTime time.Duration `yaml:"budget_reset_time"` // default: 00:00
 
 	// EnableCostMargin applies metadata.cost_margin_config of the key, user,
 	// team and organization on top of the calculated cost. Off by default so an
@@ -1842,6 +1856,9 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 		EnforceKeyRateLimits             string `yaml:"enforce_key_rate_limits"`
 		DefaultEstimatedCompletionTokens string `yaml:"default_estimated_completion_tokens"`
 		DailySpendTimezone               string `yaml:"daily_spend_timezone"`
+		EnforceKeyBudgetWindows          string `yaml:"enforce_key_budget_windows"`
+		BudgetTimezone                   string `yaml:"budget_timezone"`
+		BudgetResetTime                  string `yaml:"budget_reset_time"`
 		EnableCostMargin                 string `yaml:"enable_cost_margin"`
 	}
 
@@ -1874,6 +1891,9 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if l.EnforceKeyRateLimits, err = parseField(temp.EnforceKeyRateLimits, false, strconv.ParseBool, "litellm_db.enforce_key_rate_limits"); err != nil {
+		return err
+	}
+	if l.EnforceKeyBudgetWindows, err = parseField(temp.EnforceKeyBudgetWindows, false, strconv.ParseBool, "litellm_db.enforce_key_budget_windows"); err != nil {
 		return err
 	}
 	if l.EnableCostMargin, err = parseField(temp.EnableCostMargin, false, strconv.ParseBool, "litellm_db.enable_cost_margin"); err != nil {
@@ -1923,6 +1943,12 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 	}
 	// Timezone fields
 	if l.DailySpendTimezone, err = parseField(temp.DailySpendTimezone, time.UTC, time.LoadLocation, "litellm_db.daily_spend_timezone"); err != nil {
+		return err
+	}
+	if l.BudgetTimezone, err = parseField(temp.BudgetTimezone, time.UTC, time.LoadLocation, "litellm_db.budget_timezone"); err != nil {
+		return err
+	}
+	if l.BudgetResetTime, err = parseField(temp.BudgetResetTime, time.Duration(0), parseTimeOfDay, "litellm_db.budget_reset_time"); err != nil {
 		return err
 	}
 
@@ -2303,6 +2329,7 @@ func defaultLiteLLMDBConfig() LiteLLMDBConfig {
 		EnforceKeyRateLimits:             false,
 		DefaultEstimatedCompletionTokens: 1000,
 		DailySpendTimezone:               time.UTC,
+		BudgetTimezone:                   time.UTC,
 		EnableCostMargin:                 false,
 	}
 }

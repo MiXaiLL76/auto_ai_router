@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/queries"
 	"github.com/mixaill76/auto_ai_router/internal/security"
@@ -907,7 +909,7 @@ func TestAuthenticator_TokenFromRow_ReadsEachColumnIntoItsField(t *testing.T) {
 	expires := time.Unix(int64(at("expires")), 0)
 	teamBlocked := true
 
-	info, err := NewAuthenticator(nil, nil, slog.Default()).tokenFromRow(columnRow(columns), "hash")
+	info, err := NewAuthenticator(nil, nil, slog.Default()).WithBudgetWindows(true).tokenFromRow(columnRow(columns), "hash")
 	require.NoError(t, err)
 	assert.Equal(t, &models.TokenInfo{
 		Token:                "token",
@@ -962,5 +964,145 @@ func TestAuthenticator_TokenFromRow_ReadsEachColumnIntoItsField(t *testing.T) {
 		Metadata:             metadata("token_metadata"),
 		TeamMetadata:         metadata("team_metadata"),
 		OrganizationMetadata: metadata("org_metadata"),
+
+		// {"column": "token_budget_limits"} is no budget_limits list: the key
+		// gets one unenforceable window and Validate refuses it.
+		BudgetWindows: []models.BudgetWindow{{}},
 	}, info)
+}
+
+func TestAuthenticator_TokenFromRow_IgnoresBudgetLimitsWhenDisabled(t *testing.T) {
+	info, err := NewAuthenticator(nil, nil, slog.Default()).tokenFromRow(columnRow(tokenQueryColumns(t)), "hash")
+	require.NoError(t, err)
+	assert.Empty(t, info.BudgetWindows)
+}
+
+// A cached token carries the spend of the budget window it was loaded in.
+// Once that window has ended the cache entry is not checked against it: the
+// token is reloaded (here the reload fails, as there is no database).
+func TestAuthenticator_ValidateToken_ReloadsATokenFromAnEndedBudgetWindow(t *testing.T) {
+	cache, err := NewCache(100, time.Hour)
+	require.NoError(t, err)
+	auth := NewAuthenticator(nil, cache, slog.Default()).WithBudgetWindows(true)
+
+	now := time.Now().UTC()
+	day, ok := models.ParseBudgetDuration("1d")
+	require.True(t, ok)
+	current, _ := day.Bounds(now, models.BudgetCalendar{})
+	window := models.BudgetWindow{BudgetLimit: models.BudgetLimit{Duration: "1d", MaxBudget: 10}, Spend: 1}
+
+	window.Start = current
+	cache.Set(HashToken("sk-current-window"), &models.TokenInfo{Token: "current", BudgetWindows: []models.BudgetWindow{window}})
+	info, err := auth.ValidateToken(context.Background(), "sk-current-window")
+	require.NoError(t, err)
+	assert.Equal(t, "current", info.Token)
+
+	window.Start = current.AddDate(0, 0, -1)
+	cache.Set(HashToken("sk-ended-window"), &models.TokenInfo{Token: "ended", BudgetWindows: []models.BudgetWindow{window}})
+	_, err = auth.ValidateToken(context.Background(), "sk-ended-window")
+	assert.ErrorIs(t, err, models.ErrConnectionFailed)
+}
+
+// budgetWindowConn serves only the indexed window-row lookup.
+type budgetWindowConn struct {
+	rows    [][]any
+	rowsErr error
+	queries int
+}
+
+func (c *budgetWindowConn) Query(_ context.Context, sql string, _ ...any) (pgx.Rows, error) {
+	c.queries++
+	if sql != queries.QuerySelectKeyBudgetWindowSpend {
+		return nil, fmt.Errorf("unexpected query %q", sql)
+	}
+	if c.rowsErr != nil {
+		return nil, c.rowsErr
+	}
+	return &budgetWindowRows{rows: c.rows, index: -1}, nil
+}
+
+type budgetWindowRows struct {
+	pgx.Rows
+	rows  [][]any
+	index int
+}
+
+func (r *budgetWindowRows) Next() bool { r.index++; return r.index < len(r.rows) }
+func (r *budgetWindowRows) Close()     {}
+func (r *budgetWindowRows) Err() error { return nil }
+func (r *budgetWindowRows) Scan(dest ...any) error {
+	row := r.rows[r.index]
+	*dest[0].(*string) = row[0].(string)
+	*dest[1].(*time.Time) = row[1].(time.Time)
+	*dest[2].(*float64) = row[2].(float64)
+	return nil
+}
+
+func TestAuthenticator_LoadBudgetWindowSpend(t *testing.T) {
+	moscow, err := time.LoadLocation("Europe/Moscow")
+	require.NoError(t, err)
+	now := time.Date(2026, 3, 10, 22, 30, 0, 0, time.UTC) // 11 March, 01:30 Moscow
+	dayStart := time.Date(2026, 3, 10, 21, 0, 0, 0, time.UTC)
+	monthStart := time.Date(2026, 2, 28, 21, 0, 0, 0, time.UTC)
+	windows := func() []models.BudgetWindow {
+		return []models.BudgetWindow{
+			{BudgetLimit: models.BudgetLimit{Duration: "1d", MaxBudget: 10}},
+			{BudgetLimit: models.BudgetLimit{Duration: "1mo", MaxBudget: 100}},
+			{BudgetLimit: models.BudgetLimit{Duration: "2d", MaxBudget: 1}},
+		}
+	}
+	auth := NewAuthenticator(nil, nil, slog.Default()).WithBudgetCalendar(models.BudgetCalendar{Location: moscow})
+
+	t.Run("row on the current window", func(t *testing.T) {
+		conn := &budgetWindowConn{
+			rows: [][]any{{"1d", dayStart, 4.0}, {"1mo", monthStart, 40.0}},
+		}
+		info := &models.TokenInfo{Token: "tok", BudgetWindows: windows()}
+		require.NoError(t, auth.loadBudgetWindowSpend(context.Background(), conn, info, now))
+		assert.Equal(t, []models.BudgetWindow{
+			{BudgetLimit: models.BudgetLimit{Duration: "1d", MaxBudget: 10}, Start: dayStart, Spend: 4},
+			{BudgetLimit: models.BudgetLimit{Duration: "1mo", MaxBudget: 100}, Start: monthStart, Spend: 40},
+			{BudgetLimit: models.BudgetLimit{Duration: "2d", MaxBudget: 1}},
+		}, info.BudgetWindows)
+		assert.Equal(t, 1, conn.queries)
+	})
+
+	t.Run("earlier row starts at zero; missing row uses cumulative spend", func(t *testing.T) {
+		conn := &budgetWindowConn{
+			rows: [][]any{{"1d", dayStart.AddDate(0, 0, -1), 9.0}},
+		}
+		info := &models.TokenInfo{Token: "tok", Spend: 2.5, BudgetWindows: windows()}
+		require.NoError(t, auth.loadBudgetWindowSpend(context.Background(), conn, info, now))
+		assert.Zero(t, info.BudgetWindows[0].Spend)
+		assert.Equal(t, 2.5, info.BudgetWindows[1].Spend)
+		assert.Equal(t, 1, conn.queries)
+	})
+
+	t.Run("enabled mechanism needs the window table", func(t *testing.T) {
+		conn := &budgetWindowConn{rowsErr: &pgconn.PgError{Code: "42P01"}}
+		info := &models.TokenInfo{Token: "tok", BudgetWindows: windows()}
+		assert.ErrorIs(t, auth.loadBudgetWindowSpend(context.Background(), conn, info, now), models.ErrBudgetWindowUnsupported)
+	})
+
+	t.Run("other database errors fail the lookup", func(t *testing.T) {
+		conn := &budgetWindowConn{rowsErr: &pgconn.PgError{Code: "57P01"}}
+		info := &models.TokenInfo{Token: "tok", BudgetWindows: windows()}
+		assert.Error(t, auth.loadBudgetWindowSpend(context.Background(), conn, info, now))
+	})
+
+	t.Run("a key without windows reads nothing", func(t *testing.T) {
+		conn := &budgetWindowConn{rowsErr: fmt.Errorf("must not be called")}
+		require.NoError(t, auth.loadBudgetWindowSpend(context.Background(), conn, &models.TokenInfo{Token: "tok"}, now))
+		assert.Zero(t, conn.queries)
+	})
+}
+
+func TestAuthenticator_BudgetWindows(t *testing.T) {
+	auth := NewAuthenticator(nil, nil, slog.Default())
+	assert.Nil(t, auth.budgetWindows(nil, "hash"))
+	assert.Nil(t, auth.budgetWindows([]byte(`[]`), "hash"))
+	assert.Equal(t, []models.BudgetWindow{{BudgetLimit: models.BudgetLimit{Duration: "7d", MaxBudget: 5}}},
+		auth.budgetWindows([]byte(`[{"budget_duration":"7d","max_budget":5}]`), "hash"))
+	assert.Equal(t, []models.BudgetWindow{{}}, auth.budgetWindows([]byte(`[{"budget_duration":"7d"}]`), "hash"),
+		"an unreadable budget_limits refuses the key")
 }

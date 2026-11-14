@@ -351,12 +351,15 @@ litellm_db:
   auth_cache_size: 10000  # Auth cache size (default: 10000)
   enforce_budget_reservation: false  # Opt in to Redis-backed atomic budget reservation
   enforce_key_rate_limits: false  # Opt in to Redis-backed key/user/team/org RPM/TPM enforcement
+  enforce_key_budget_windows: false  # Opt in to LiteLLM key budget_limits checks and window spend writes
   log_queue_size: 5000  # Spend log queue size (default: 5000)
   log_batch_size: 100  # Spend log batch size (default: 100)
   log_flush_interval: 5s  # Spend log flush interval (default: 5s)
   log_workers: 4  # Parallel queue-draining writer workers (default: 4)
   disable_spend_logs_write: false  # Skip spend writes to Postgres, e.g. when Kafka is the only spend sink (default: false)
   daily_spend_timezone: "Europe/Moscow"  # Timezone of the daily spend tables (default: UTC)
+  budget_timezone: "Europe/Moscow"  # Calendar of the key budget windows (budget_limits) (default: UTC)
+  budget_reset_time: "00:00"  # Time of day day/week/month key budget windows reset at (default: 00:00)
   enable_cost_margin: false  # Apply metadata.cost_margin_config markup of key/user/team/org (default: false)
 
 # Optional: POST /v1/search/yandex passthrough to Yandex Cloud's Search API

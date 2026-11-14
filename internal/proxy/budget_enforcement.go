@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +19,7 @@ type reservedEntity struct {
 type budgetLevel struct {
 	entity    string
 	level     dbmodels.BudgetLevel
+	window    string // budget_duration of a key budget window, empty for the other levels
 	maxBudget *float64
 	dbSpend   float64
 	rpm       *int64
@@ -33,13 +35,18 @@ func entityKind(entity string) string {
 
 // budgetExceededMessage is the client-facing text of a 402 budget refusal.
 // The key's own limit gets its own wording so a client can tell it from a
-// limit of the key's holder; every level above the key keeps the
+// limit of the key's holder, and a key budget window names its duration
+// ("Key 1d budget exceeded"); every level above the key keeps the
 // long-standing "Budget exceeded".
-func budgetExceededMessage(level dbmodels.BudgetLevel) string {
-	if level == dbmodels.BudgetLevelKey {
+func budgetExceededMessage(level dbmodels.BudgetLevel, window string) string {
+	switch {
+	case level == dbmodels.BudgetLevelKey && window != "":
+		return "Key " + window + " budget exceeded"
+	case level == dbmodels.BudgetLevelKey:
 		return "Key budget exceeded"
+	default:
+		return "Budget exceeded"
 	}
-	return "Budget exceeded"
 }
 
 func dereferenceFloat(value *float64) float64 {
@@ -70,6 +77,7 @@ func budgetLevels(info *dbmodels.TokenInfo) []budgetLevel {
 		rpm:       info.RPMLimit,
 		tpm:       info.TPMLimit,
 	}}
+	levels = append(levels, budgetWindowLevels(info)...)
 	if info.TeamID == "" && info.UserID != "" {
 		levels = append(levels, budgetLevel{
 			entity:    "user:" + info.UserID,
@@ -118,6 +126,26 @@ func budgetLevels(info *dbmodels.TokenInfo) []budgetLevel {
 			dbSpend:   dereferenceFloat(info.OrgMemberSpend),
 			rpm:       info.OrgMemberRPMLimit,
 			tpm:       info.OrgMemberTPMLimit,
+		})
+	}
+	return levels
+}
+
+// budgetWindowLevels are the key's budget windows, each a level of its own.
+// The counter is named after the window's start, so a new window starts a
+// new counter instead of resetting one.
+func budgetWindowLevels(info *dbmodels.TokenInfo) []budgetLevel {
+	var levels []budgetLevel
+	for _, window := range info.BudgetWindows {
+		if window.Start.IsZero() {
+			continue
+		}
+		levels = append(levels, budgetLevel{
+			entity:    "token:" + info.Token + ":window:" + window.Duration + ":" + strconv.FormatInt(window.Start.Unix(), 10),
+			level:     dbmodels.BudgetLevelKey,
+			window:    window.Duration,
+			maxBudget: &window.MaxBudget,
+			dbSpend:   window.Spend,
 		})
 	}
 	return levels
@@ -289,7 +317,7 @@ func (p *Proxy) enforceBudgetAndRateLimits(
 				logCtx.Status = "failure"
 				logCtx.HTTPStatus = http.StatusPaymentRequired
 				logCtx.ErrorMsg = "budget exceeded (" + level.entity + ")"
-				WriteErrorPaymentRequired(w, budgetExceededMessage(level.level))
+				WriteErrorPaymentRequired(w, budgetExceededMessage(level.level, level.window))
 				return false
 			}
 			logCtx.reservedEntities = append(logCtx.reservedEntities, reservedEntity{

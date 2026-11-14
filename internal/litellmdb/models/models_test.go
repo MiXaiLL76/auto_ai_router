@@ -660,39 +660,52 @@ func TestTokenInfo_Validate_TeamBudgetExceeded(t *testing.T) {
 func TestTokenInfo_Validate_BudgetRefusalNamesItsLevel(t *testing.T) {
 	under, over := 50.0, 150.0
 	limit := 100.0
+	start := time.Date(2026, 3, 9, 21, 0, 0, 0, time.UTC)
+	dayWindow := func(spend float64) BudgetWindow {
+		return BudgetWindow{BudgetLimit: BudgetLimit{Duration: "1d", MaxBudget: limit}, Start: start, Spend: spend}
+	}
+	monthWindow := func(spend float64) BudgetWindow {
+		return BudgetWindow{BudgetLimit: BudgetLimit{Duration: "1mo", MaxBudget: limit}, Start: start, Spend: spend}
+	}
 	tests := []struct {
 		name  string
 		token TokenInfo
-		want  BudgetLevel
+		want  BudgetExceededError
 	}{
-		{"key", TokenInfo{Spend: over, MaxBudget: &limit}, BudgetLevelKey},
-		{"team", TokenInfo{TeamID: "t", TeamMaxBudget: &limit, TeamSpend: &over}, BudgetLevelTeam},
-		{"team member", TokenInfo{TeamID: "t", UserID: "u", TeamMemberMaxBudget: &limit, TeamMemberSpend: &over}, BudgetLevelTeamMember},
-		{"organization", TokenInfo{OrgMaxBudget: &limit, OrgSpend: &over}, BudgetLevelOrganization},
-		{"user", TokenInfo{UserID: "u", UserMaxBudget: &limit, UserSpend: &over}, BudgetLevelUser},
-		{"organization member", TokenInfo{OrgMemberMaxBudget: &limit, OrgMemberSpend: &over}, BudgetLevelOrganizationMember},
+		{"key", TokenInfo{Spend: over, MaxBudget: &limit}, BudgetExceededError{Level: BudgetLevelKey}},
+		{"key window", TokenInfo{BudgetWindows: []BudgetWindow{dayWindow(over)}}, BudgetExceededError{Level: BudgetLevelKey, Window: "1d"}},
+		{"key window at its limit", TokenInfo{BudgetWindows: []BudgetWindow{dayWindow(limit)}}, BudgetExceededError{Level: BudgetLevelKey, Window: "1d"}},
+		{"second key window", TokenInfo{BudgetWindows: []BudgetWindow{dayWindow(under), monthWindow(over)}}, BudgetExceededError{Level: BudgetLevelKey, Window: "1mo"}},
+		{"team", TokenInfo{TeamID: "t", TeamMaxBudget: &limit, TeamSpend: &over}, BudgetExceededError{Level: BudgetLevelTeam}},
+		{"team member", TokenInfo{TeamID: "t", UserID: "u", TeamMemberMaxBudget: &limit, TeamMemberSpend: &over}, BudgetExceededError{Level: BudgetLevelTeamMember}},
+		{"organization", TokenInfo{OrgMaxBudget: &limit, OrgSpend: &over}, BudgetExceededError{Level: BudgetLevelOrganization}},
+		{"user", TokenInfo{UserID: "u", UserMaxBudget: &limit, UserSpend: &over}, BudgetExceededError{Level: BudgetLevelUser}},
+		{"organization member", TokenInfo{OrgMemberMaxBudget: &limit, OrgMemberSpend: &over}, BudgetExceededError{Level: BudgetLevelOrganizationMember}},
 		// The key is checked first: with the holder's budget exhausted too,
 		// the refusal still names the key's own limit, as LiteLLM's auth does.
-		{"key before user", TokenInfo{Spend: over, MaxBudget: &limit, UserID: "u", UserMaxBudget: &limit, UserSpend: &over}, BudgetLevelKey},
-		{"user when key has room", TokenInfo{Spend: under, MaxBudget: &limit, UserID: "u", UserMaxBudget: &limit, UserSpend: &over}, BudgetLevelUser},
+		{"key before user", TokenInfo{Spend: over, MaxBudget: &limit, UserID: "u", UserMaxBudget: &limit, UserSpend: &over}, BudgetExceededError{Level: BudgetLevelKey}},
+		{"key before its window", TokenInfo{Spend: over, MaxBudget: &limit, BudgetWindows: []BudgetWindow{dayWindow(over)}}, BudgetExceededError{Level: BudgetLevelKey}},
+		{"key window before team", TokenInfo{BudgetWindows: []BudgetWindow{dayWindow(over)}, TeamID: "t", TeamMaxBudget: &limit, TeamSpend: &over}, BudgetExceededError{Level: BudgetLevelKey, Window: "1d"}},
+		{"user when key has room", TokenInfo{Spend: under, MaxBudget: &limit, UserID: "u", UserMaxBudget: &limit, UserSpend: &over}, BudgetExceededError{Level: BudgetLevelUser}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := tt.token.Validate("")
 			require.ErrorIs(t, err, ErrBudgetExceeded)
-			level, ok := BudgetExceededLevel(err)
+			refusal, ok := AsBudgetExceeded(err)
 			require.True(t, ok)
-			assert.Equal(t, tt.want, level)
+			assert.Equal(t, tt.want, *refusal)
 		})
 	}
 }
 
-func TestBudgetExceededLevel_NotABudgetRefusal(t *testing.T) {
+func TestAsBudgetExceeded_NotABudgetRefusal(t *testing.T) {
 	for _, err := range []error{nil, ErrTokenBlocked, ErrBudgetExceeded, &BudgetExceededError{}} {
-		_, ok := BudgetExceededLevel(err)
+		_, ok := AsBudgetExceeded(err)
 		assert.False(t, ok)
 	}
 	assert.Equal(t, "litellmdb: budget exceeded (key)", (&BudgetExceededError{Level: BudgetLevelKey}).Error())
+	assert.Equal(t, "litellmdb: budget exceeded (key 1d)", (&BudgetExceededError{Level: BudgetLevelKey, Window: "1d"}).Error())
 	assert.Equal(t, "litellmdb: budget exceeded", (&BudgetExceededError{}).Error())
 	assert.Equal(t, ErrBudgetExceeded, errors.Unwrap(&BudgetExceededError{Level: BudgetLevelUser}))
 }

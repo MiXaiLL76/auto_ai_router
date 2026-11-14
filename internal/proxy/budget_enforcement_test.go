@@ -53,6 +53,30 @@ func TestBudgetLevelsNameTheirBudgetLevel(t *testing.T) {
 	assert.Equal(t, dbmodels.BudgetLevelUser, personal[1].level)
 }
 
+// Each key budget window is a level of its own, right after the key, with a
+// counter named after the window's start: a new window starts a new counter.
+// A window AIR cannot enforce (auth refuses its key) gets no level.
+func TestBudgetLevelsIncludeTheKeyBudgetWindows(t *testing.T) {
+	start := time.Date(2026, 3, 10, 21, 0, 0, 0, time.UTC)
+	levels := budgetLevels(&dbmodels.TokenInfo{
+		Token: "token-hash", UserID: "user-1",
+		BudgetWindows: []dbmodels.BudgetWindow{
+			{BudgetLimit: dbmodels.BudgetLimit{Duration: "1d", MaxBudget: 10}, Start: start, Spend: 4},
+			{BudgetLimit: dbmodels.BudgetLimit{Duration: "2d", MaxBudget: 1}},
+		},
+	})
+	require.Len(t, levels, 3)
+	window := levels[1]
+	assert.Equal(t, "token:token-hash:window:1d:"+strconv.FormatInt(start.Unix(), 10), window.entity)
+	assert.Equal(t, dbmodels.BudgetLevelKey, window.level)
+	assert.Equal(t, "1d", window.window)
+	assert.Equal(t, 10.0, *window.maxBudget)
+	assert.Equal(t, 4.0, window.dbSpend)
+	assert.Nil(t, window.rpm)
+	assert.Nil(t, window.tpm)
+	assert.Equal(t, "user:user-1", levels[2].entity)
+}
+
 // TestEnforceBudgetAndRateLimitsReservationRefusalNamesTheKeyLimit covers the
 // pre-request reservation path, which refuses on its own counters before the
 // DB snapshot sees the spend: its 402 must carry the same per-level text as
@@ -80,6 +104,15 @@ func TestEnforceBudgetAndRateLimitsReservationRefusalNamesTheKeyLimit(t *testing
 			name: "user budget",
 			info: &dbmodels.TokenInfo{Token: "tok-user", UserID: "user-1", UserMaxBudget: pointerTo(1.0), UserSpend: pointerTo(0.99)},
 			want: "Budget exceeded",
+		},
+		{
+			name: "key window",
+			info: &dbmodels.TokenInfo{Token: "tok-window", BudgetWindows: []dbmodels.BudgetWindow{{
+				BudgetLimit: dbmodels.BudgetLimit{Duration: "7d", MaxBudget: 1},
+				Start:       time.Date(2026, 3, 8, 21, 0, 0, 0, time.UTC),
+				Spend:       0.99,
+			}}},
+			want: "Key 7d budget exceeded",
 		},
 		{
 			// The key has room and is reserved first; the user level then refuses.

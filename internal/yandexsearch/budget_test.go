@@ -99,10 +99,42 @@ func TestBudgetReserveRejectsOverBudgetAndRollsBack(t *testing.T) {
 
 	res, err := budgetReserve(ctx, r, info, 0.01, nil)
 	require.ErrorIs(t, err, dbmodels.ErrBudgetExceeded)
-	level, ok := dbmodels.BudgetExceededLevel(err)
+	refusal, ok := dbmodels.AsBudgetExceeded(err)
 	require.True(t, ok)
-	assert.Equal(t, dbmodels.BudgetLevelKey, level)
+	assert.Equal(t, dbmodels.BudgetLevelKey, refusal.Level)
 	assert.Equal(t, "key budget exceeded", budgetExceededMessage(err))
+	assert.Nil(t, res)
+}
+
+// The key's budget windows are reserved against like in the LLM path, on the
+// same counters (internal/proxy budgetWindowLevels names them identically).
+func TestBudgetLevelsForIncludeTheKeyBudgetWindows(t *testing.T) {
+	start := time.Date(2026, 3, 10, 21, 0, 0, 0, time.UTC)
+	levels := budgetLevelsFor(&dbmodels.TokenInfo{
+		Token: "tok",
+		BudgetWindows: []dbmodels.BudgetWindow{
+			{BudgetLimit: dbmodels.BudgetLimit{Duration: "1mo", MaxBudget: 3}, Start: start, Spend: 1},
+			{BudgetLimit: dbmodels.BudgetLimit{Duration: "2d", MaxBudget: 1}},
+		},
+	})
+	require.Len(t, levels, 2)
+	assert.Equal(t, "token:tok:window:1mo:"+strconv.FormatInt(start.Unix(), 10), levels[1].entity)
+	assert.Equal(t, "1mo", levels[1].window)
+	assert.Equal(t, 3.0, *levels[1].maxBudget)
+	assert.Equal(t, 1.0, levels[1].dbSpend)
+}
+
+func TestBudgetReserveRefusesOnAKeyBudgetWindow(t *testing.T) {
+	r := reserverForTest(t, "test:yandexsearch:window:")
+	info := &dbmodels.TokenInfo{Token: "tok-window", BudgetWindows: []dbmodels.BudgetWindow{{
+		BudgetLimit: dbmodels.BudgetLimit{Duration: "1d", MaxBudget: 0.005},
+		Start:       time.Date(2026, 3, 10, 21, 0, 0, 0, time.UTC),
+		Spend:       0.003,
+	}}}
+
+	res, err := budgetReserve(context.Background(), r, info, 0.01, nil)
+	require.ErrorIs(t, err, dbmodels.ErrBudgetExceeded)
+	assert.Equal(t, "key 1d budget exceeded", budgetExceededMessage(err))
 	assert.Nil(t, res)
 }
 
@@ -116,9 +148,9 @@ func TestBudgetReserveRollsBackTheKeyWhenAParentLevelRefuses(t *testing.T) {
 
 	res, err := budgetReserve(ctx, r, info, 0.01, nil)
 	require.ErrorIs(t, err, dbmodels.ErrBudgetExceeded)
-	level, ok := dbmodels.BudgetExceededLevel(err)
+	refusal, ok := dbmodels.AsBudgetExceeded(err)
 	require.True(t, ok)
-	assert.Equal(t, dbmodels.BudgetLevelUser, level)
+	assert.Equal(t, dbmodels.BudgetLevelUser, refusal.Level)
 	assert.Equal(t, "budget exceeded", budgetExceededMessage(err))
 	assert.Nil(t, res)
 
@@ -162,6 +194,8 @@ func TestReservationSettleNilReceiverIsNoop(t *testing.T) {
 func TestBudgetExceededMessageNamesOnlyTheKeyLimit(t *testing.T) {
 	assert.Equal(t, "key budget exceeded",
 		budgetExceededMessage(&dbmodels.BudgetExceededError{Level: dbmodels.BudgetLevelKey}))
+	assert.Equal(t, "key 1d budget exceeded",
+		budgetExceededMessage(&dbmodels.BudgetExceededError{Level: dbmodels.BudgetLevelKey, Window: "1d"}))
 	for _, level := range []dbmodels.BudgetLevel{
 		dbmodels.BudgetLevelUser, dbmodels.BudgetLevelTeam, dbmodels.BudgetLevelTeamMember,
 		dbmodels.BudgetLevelOrganization, dbmodels.BudgetLevelOrganizationMember,

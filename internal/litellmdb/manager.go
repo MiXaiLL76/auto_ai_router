@@ -181,7 +181,10 @@ func New(cfg *models.Config) (Manager, error) {
 	}
 
 	// Create authenticator
-	authenticator := auth.NewAuthenticator(pool, cache, cfg.Logger).WithCostMargin(cfg.EnableCostMargin)
+	authenticator := auth.NewAuthenticator(pool, cache, cfg.Logger).
+		WithCostMargin(cfg.EnableCostMargin).
+		WithBudgetWindows(cfg.EnforceKeyBudgetWindows).
+		WithBudgetCalendar(cfg.BudgetCalendar())
 	var logger *spendlog.Logger
 	if !cfg.DisableSpendLogging {
 		logger = spendlog.NewLogger(pool, cfg)
