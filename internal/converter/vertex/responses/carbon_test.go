@@ -205,8 +205,8 @@ func TestResponsesCallIDSignatureOnlyOnCarbon(t *testing.T) {
 	for _, tt := range []struct {
 		name, model, modelVersion, wantCallID string
 	}{
-		{"another model", other, "", "fc-1"},
-		{"another model behind an carbon name", carbon, other, "fc-1"},
+		{"Gemini 3", other, "", signedCallID},
+		{"Gemini 3 behind a carbon name", carbon, other, signedCallID},
 		{"carbon behind an alias", "my-alias", carbon, signedCallID},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -230,7 +230,7 @@ func TestResponsesCallIDSignatureOnlyOnCarbon(t *testing.T) {
 		{"type": "function_call_output", "call_id": signedCallID, "output": "20C"},
 	})
 	require.NoError(t, err)
-	for model, wantSignature := range map[string]string{carbon: "sig", other: "skip_thought_signature_validator"} {
+	for model, wantSignature := range map[string]string{carbon: "sig", other: "sig"} {
 		out, err := ResponsesRequestToVertex([]byte(`{"model": "g", "input": `+string(input)+`}`), model)
 		require.NoError(t, err)
 		var req vertex.VertexRequest

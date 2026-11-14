@@ -251,8 +251,8 @@ func TestResponsesCallIDSignatureOnlyOnArgon(t *testing.T) {
 	for _, tt := range []struct {
 		name, model, modelVersion, wantCallID string
 	}{
-		{"another model", other, "", "fc-1"},
-		{"another model behind an argon name", argon, other, "fc-1"},
+		{"Gemini 3", other, "", signedCallID},
+		{"Gemini 3 behind an argon name", argon, other, signedCallID},
 		{"argon behind an alias", "my-alias", argon, signedCallID},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -276,7 +276,7 @@ func TestResponsesCallIDSignatureOnlyOnArgon(t *testing.T) {
 		{"type": "function_call_output", "call_id": signedCallID, "output": "20C"},
 	})
 	require.NoError(t, err)
-	for model, wantSignature := range map[string]string{argon: "sig", other: "skip_thought_signature_validator"} {
+	for model, wantSignature := range map[string]string{argon: "sig", other: "sig"} {
 		out, err := ResponsesRequestToVertex([]byte(`{"model": "g", "input": `+string(input)+`}`), model)
 		require.NoError(t, err)
 		var req vertex.VertexRequest

@@ -124,7 +124,7 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, isImageEdit bool,
 			// name, see convertToolCallsToGenaiParts.
 			var responseID string
 			if callIDs {
-				responseID = msg.ToolCallID
+				responseID, _ = converterutil.SplitToolCallIDSignature(msg.ToolCallID)
 			}
 			pendingToolParts = append(pendingToolParts, &genai.Part{
 				FunctionResponse: &genai.FunctionResponse{
@@ -292,7 +292,9 @@ func findFunctionNameByToolCallID(messages []openai.OpenAIMessage, toolCallID st
 				continue
 			}
 			id, _ := tcMap["id"].(string)
-			if id != toolCallID {
+			id, _ = converterutil.SplitToolCallIDSignature(id)
+			baseToolCallID, _ := converterutil.SplitToolCallIDSignature(toolCallID)
+			if id != baseToolCallID {
 				continue
 			}
 			// Extract function name from nested or flat structure

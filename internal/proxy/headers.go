@@ -8,6 +8,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	promanutils "github.com/mixaill76/auto_ai_router/internal/converter/proman/utils"
 	"github.com/mixaill76/auto_ai_router/internal/requestid"
+	"golang.org/x/net/http/httpguts"
 )
 
 const accelBufferingHeader = "X-Accel-Buffering"
@@ -288,4 +289,30 @@ func dropRepresentationIntegrityHeaders(headers http.Header) {
 			headers.Del(key)
 		}
 	}
+}
+
+// HeaderSessionID carries the session id to a downstream AIR hop. The body's
+// litellm_session_id/session_id are stripped at ingress, so without it the
+// downstream instance load-balances every turn independently and session-sticky
+// routing (e.g. Gemini 3 thoughtSignatures bound to one credential) breaks.
+const HeaderSessionID = "Session-Id"
+
+const maxForwardedSessionIDLength = 512
+
+// setForwardedSessionHeader propagates the resolved session id to a type: air
+// credential. The downstream reads it via extractSessionIDFromHeaders, where a
+// bare "Session-Id" wins over any client X-*-Session-Id variant, matching the
+// body-first priority used here. RequestID is the spend-log fallback for a
+// missing session (see proxy_log.go), not a real session, and is not forwarded.
+func setForwardedSessionHeader(header http.Header, cred *config.CredentialConfig, logCtx *RequestLogContext) {
+	if cred == nil || cred.Type != config.ProviderTypeAIR || logCtx == nil {
+		return
+	}
+	header.Del(HeaderSessionID)
+	if logCtx.SessionID == "" || logCtx.SessionID == logCtx.RequestID ||
+		len(logCtx.SessionID) > maxForwardedSessionIDLength ||
+		!httpguts.ValidHeaderFieldValue(logCtx.SessionID) {
+		return
+	}
+	header.Set(HeaderSessionID, logCtx.SessionID)
 }

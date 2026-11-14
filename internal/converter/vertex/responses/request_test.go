@@ -638,3 +638,78 @@ func withMaxInlineBase64Size(t *testing.T, n int) {
 	maxInlineBase64Size = n
 	t.Cleanup(func() { maxInlineBase64Size = orig })
 }
+
+// TestResponsesRequestToVertex_FunctionCallThoughtSignature covers #266: a replayed
+// function_call must carry a thoughtSignature (Gemini 3 rejects it otherwise) — the
+// real one from the call_id suffix, else the dummy — and the base id goes upstream.
+func TestResponsesRequestToVertex_FunctionCallThoughtSignature(t *testing.T) {
+	signature := []byte("real-signature")
+	encodedID := converterutil.EncodeToolCallIDWithSignature("call_1", signature)
+
+	for name, tc := range map[string]struct {
+		callID    string
+		wantID    string
+		signature []byte
+	}{
+		"embedded": {callID: encodedID, wantID: "call_1", signature: signature},
+		"missing":  {callID: "call_2", wantID: "call_2", signature: converterutil.SkipThoughtSignatureValidator},
+	} {
+		t.Run(name, func(t *testing.T) {
+			body, err := json.Marshal(map[string]interface{}{
+				"model": "gemini-3-flash",
+				"input": []interface{}{
+					map[string]interface{}{"role": "user", "content": "Call the function"},
+					map[string]interface{}{"type": "function_call", "call_id": tc.callID, "name": "get_weather", "arguments": "{}"},
+					map[string]interface{}{"type": "function_call_output", "call_id": tc.callID, "output": "sunny"},
+				},
+			})
+			require.NoError(t, err)
+
+			result, err := ResponsesRequestToVertex(body, "gemini-3-flash")
+			require.NoError(t, err)
+			var req struct {
+				Contents []*genai.Content `json:"contents"`
+			}
+			require.NoError(t, json.Unmarshal(result, &req))
+			require.Len(t, req.Contents, 3)
+
+			callPart := req.Contents[1].Parts[0]
+			require.NotNil(t, callPart.FunctionCall)
+			assert.Equal(t, tc.wantID, callPart.FunctionCall.ID)
+			assert.Equal(t, tc.signature, callPart.ThoughtSignature)
+
+			respPart := req.Contents[2].Parts[0]
+			require.NotNil(t, respPart.FunctionResponse)
+			assert.Equal(t, tc.wantID, respPart.FunctionResponse.ID)
+			// function_call_output has no name: it must come from the matching call.
+			assert.Equal(t, "get_weather", respPart.FunctionResponse.Name)
+		})
+	}
+}
+
+// TestResponsesRequestToVertex_ParallelFunctionCallsShareModelTurn: consecutive
+// function_call items are one Gemini model turn, answered by one user turn.
+func TestResponsesRequestToVertex_ParallelFunctionCallsShareModelTurn(t *testing.T) {
+	body := `{
+		"model": "gemini-3-flash",
+		"input": [
+			{"role": "user", "content": "Weather in London and Paris"},
+			{"type": "function_call", "call_id": "call_1", "name": "get_weather", "arguments": "{\"city\":\"London\"}"},
+			{"type": "function_call", "call_id": "call_2", "name": "get_weather", "arguments": "{\"city\":\"Paris\"}"},
+			{"type": "function_call_output", "call_id": "call_1", "output": "15"},
+			{"type": "function_call_output", "call_id": "call_2", "output": "18"}
+		]
+	}`
+
+	result, err := ResponsesRequestToVertex([]byte(body), "gemini-3-flash")
+	require.NoError(t, err)
+	var req struct {
+		Contents []*genai.Content `json:"contents"`
+	}
+	require.NoError(t, json.Unmarshal(result, &req))
+	require.Len(t, req.Contents, 3)
+	assert.Equal(t, "model", req.Contents[1].Role)
+	assert.Len(t, req.Contents[1].Parts, 2)
+	assert.Equal(t, "user", req.Contents[2].Role)
+	assert.Len(t, req.Contents[2].Parts, 2)
+}

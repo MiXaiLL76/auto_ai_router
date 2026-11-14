@@ -268,8 +268,15 @@ func UsesFunctionCallIDs(model string) bool {
 	return profile != nil && profile.functionCallIDs
 }
 
+// UsesThoughtSignatures reports whether the model needs a function call's
+// signature when replaying a tool turn.
+func UsesThoughtSignatures(model string) bool {
+	return strings.Contains(strings.ToLower(model), "gemini-3") || UsesFunctionCallIDs(model)
+}
+
 // convertToolCallsToGenaiParts converts OpenAI tool_calls to genai.Part with FunctionCall.
-// Restores thoughtSignature from provider_specific_fields for Gemini 3 multi-turn conversations.
+// Restores thoughtSignature from provider_specific_fields, or from the tool call id
+// suffix, for Gemini 3 multi-turn conversations.
 // keepIDs sends each call's ID back, see UsesFunctionCallIDs.
 func convertToolCallsToGenaiParts(toolCalls []interface{}, keepIDs bool) []*genai.Part {
 	if len(toolCalls) == 0 {
@@ -323,7 +330,7 @@ func convertToolCallsToGenaiParts(toolCalls []interface{}, keepIDs bool) []*gena
 		if keepIDs {
 			// The ID Gemini gave the call (see functionCallID): Gemini 4 checks
 			// that every function response carries its call's ID.
-			part.FunctionCall.ID = converterutil.GetString(toolCallMap, "id")
+			part.FunctionCall.ID, _ = converterutil.SplitToolCallIDSignature(converterutil.GetString(toolCallMap, "id"))
 		}
 
 		// Restore thoughtSignature from provider_specific_fields if present.
@@ -339,11 +346,20 @@ func convertToolCallsToGenaiParts(toolCalls []interface{}, keepIDs bool) []*gena
 			}
 		}
 
+		// Clients (like the OpenAI Agents SDK or LangChain) often drop provider_specific_fields
+		// but keep the id, which carries the signature since the response side embeds it.
+		if !foundThoughtSignature {
+			id, _ := toolCallMap["id"].(string)
+			if _, sig := converterutil.SplitToolCallIDSignature(id); sig != nil {
+				part.ThoughtSignature = sig
+				foundThoughtSignature = true
+			}
+		}
+
 		// Fallback: If no thoughtSignature provided, add dummy value.
-		// Per litellm and Google docs, clients (like LangChain) may not preserve provider_specific_fields.
 		// The dummy validator allows Gemini 3 to accept the request without validation errors.
 		if !foundThoughtSignature {
-			part.ThoughtSignature = []byte("skip_thought_signature_validator")
+			part.ThoughtSignature = converterutil.SkipThoughtSignatureValidator
 		}
 
 		parts = append(parts, part)

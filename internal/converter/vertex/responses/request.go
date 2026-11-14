@@ -178,9 +178,7 @@ func inputToContents(input interface{}, model string) ([]*genai.Content, error) 
 			flushToolParts()
 			callID, _ := itemMap["call_id"].(string)
 			id, signature := decodeCallID(callID)
-			if signature == nil || !vertex.UsesFunctionCallIDs(model) {
-				// Only a model that wants its signatures back put one in a call_id;
-				// another model cannot validate it (the history switched models).
+			if signature == nil || !vertex.UsesThoughtSignatures(model) {
 				signature = skipThoughtSignature
 			}
 			name, _ := itemMap["name"].(string)

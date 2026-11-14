@@ -1207,6 +1207,7 @@ func (p *Proxy) executeProxyRequest(
 	// knows to include the X-Credential-Name response header.
 	proxyReq.Header.Set(HeaderAIRProxyClient, "1")
 	proxyReq.Header.Set(HeaderLegacyAIRProxyClient, "1")
+	setForwardedSessionHeader(proxyReq.Header, cred, logCtx)
 	if carriesCredentialDenylist(cred) {
 		if err := setCredentialDenylistHeader(proxyReq.Header, effectiveCredentialDenylist(r.Context())); err != nil {
 			return nil, err
@@ -1529,6 +1530,9 @@ func (p *Proxy) sendToCredential(
 	attemptedCreds map[string]bool,
 	embedFanOutReplies *embedContentFanOutReplies,
 ) (outcome credentialSendOutcome, done bool, isClientGone bool, shouldRetry bool, retryReason RetryReason, transportErr error) {
+	// A retry or model switch may replay Gemini's signed tool IDs through an
+	// unrelated provider. Keep the suffix only for Gemini and downstream AIR.
+	body = stripThoughtSignaturesForCredential(body, cred.Type)
 	body = p.applyAnthropicDefaultMaxTokens(cred, prepared, realModelID, body)
 
 	// Create converter and build request body / target URL.

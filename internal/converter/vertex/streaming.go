@@ -378,9 +378,13 @@ func convertVertexFunctionCallToStreamingOpenAI(genaiCall *genai.FunctionCall, t
 		}
 	}
 
+	callID := functionCallID(genaiCall, keepID)
+	if !keepID {
+		callID = converterutil.EncodeToolCallIDWithSignature(callID, thoughtSignature)
+	}
 	toolCall := openai.OpenAIStreamingToolCall{
 		Index: index,
-		ID:    functionCallID(genaiCall, keepID),
+		ID:    callID,
 		Type:  "function",
 		Function: &openai.OpenAIStreamingToolFunction{
 			Name:      genaiCall.Name,
