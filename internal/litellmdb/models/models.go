@@ -137,6 +137,9 @@ type Config struct {
 	// DailySpendTimezone sets the calendar day the Daily* spend tables are
 	// grouped by. Nil means UTC. Stored timestamps are unaffected.
 	DailySpendTimezone *time.Location
+	// EnforceKeyBudgetWindows enables key budget_limits enforcement and spend
+	// projection. A zero-value Config leaves the feature disabled.
+	EnforceKeyBudgetWindows bool
 
 	// BudgetTimezone and BudgetResetTime set the calendar the key budget
 	// windows (budget_limits) start and end on: the timezone (nil means UTC)

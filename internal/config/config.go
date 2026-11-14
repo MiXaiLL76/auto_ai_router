@@ -1497,6 +1497,9 @@ type LiteLLMDBConfig struct {
 	// grouped by. Only their date column follows it; every stored timestamp
 	// stays UTC.
 	DailySpendTimezone *time.Location `yaml:"daily_spend_timezone"` // default: UTC
+	// EnforceKeyBudgetWindows enables LiteLLM key budget_limits checks and
+	// window spend projection. Off by default for existing installations.
+	EnforceKeyBudgetWindows bool `yaml:"enforce_key_budget_windows"`
 
 	// BudgetTimezone sets the calendar the key budget windows (LiteLLM
 	// budget_limits) start and end on: midnight, Monday, the 1st of the month.
@@ -1853,6 +1856,7 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 		EnforceKeyRateLimits             string `yaml:"enforce_key_rate_limits"`
 		DefaultEstimatedCompletionTokens string `yaml:"default_estimated_completion_tokens"`
 		DailySpendTimezone               string `yaml:"daily_spend_timezone"`
+		EnforceKeyBudgetWindows          string `yaml:"enforce_key_budget_windows"`
 		BudgetTimezone                   string `yaml:"budget_timezone"`
 		BudgetResetTime                  string `yaml:"budget_reset_time"`
 		EnableCostMargin                 string `yaml:"enable_cost_margin"`
@@ -1887,6 +1891,9 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if l.EnforceKeyRateLimits, err = parseField(temp.EnforceKeyRateLimits, false, strconv.ParseBool, "litellm_db.enforce_key_rate_limits"); err != nil {
+		return err
+	}
+	if l.EnforceKeyBudgetWindows, err = parseField(temp.EnforceKeyBudgetWindows, false, strconv.ParseBool, "litellm_db.enforce_key_budget_windows"); err != nil {
 		return err
 	}
 	if l.EnableCostMargin, err = parseField(temp.EnableCostMargin, false, strconv.ParseBool, "litellm_db.enable_cost_margin"); err != nil {

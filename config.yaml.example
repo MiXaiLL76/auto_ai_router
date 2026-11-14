@@ -351,6 +351,7 @@ litellm_db:
   auth_cache_size: 10000  # Auth cache size (default: 10000)
   enforce_budget_reservation: false  # Opt in to Redis-backed atomic budget reservation
   enforce_key_rate_limits: false  # Opt in to Redis-backed key/user/team/org RPM/TPM enforcement
+  enforce_key_budget_windows: false  # Opt in to LiteLLM key budget_limits checks and window spend writes
   log_queue_size: 5000  # Spend log queue size (default: 5000)
   log_batch_size: 100  # Spend log batch size (default: 100)
   log_flush_interval: 5s  # Spend log flush interval (default: 5s)

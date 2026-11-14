@@ -28,7 +28,8 @@ type Authenticator struct {
 	logger *slog.Logger
 
 	// costMarginEnabled gates loading cost_margin_config (see costMarginConfigs)
-	costMarginEnabled bool
+	costMarginEnabled    bool
+	budgetWindowsEnabled bool
 
 	// budgetCalendar is where the key budget windows start
 	budgetCalendar models.BudgetCalendar
@@ -54,6 +55,12 @@ func (a *Authenticator) WithCostMargin(enabled bool) *Authenticator {
 // on (litellm_db.budget_timezone and budget_reset_time).
 func (a *Authenticator) WithBudgetCalendar(calendar models.BudgetCalendar) *Authenticator {
 	a.budgetCalendar = calendar
+	return a
+}
+
+// WithBudgetWindows enables key budget_limits enforcement. Disabled by default.
+func (a *Authenticator) WithBudgetWindows(enabled bool) *Authenticator {
+	a.budgetWindowsEnabled = enabled
 	return a
 }
 
@@ -142,7 +149,7 @@ func (a *Authenticator) ValidateToken(ctx context.Context, rawToken string) (*mo
 
 	// 2. Check cache. A token loaded in an earlier budget window carries that
 	// window's spend, so it is reloaded instead.
-	if info, ok := a.cache.Get(hashedToken); ok && !info.BudgetWindowsStale(utils.NowUTC(), a.budgetCalendar) {
+	if info, ok := a.cache.Get(hashedToken); ok && (!a.budgetWindowsEnabled || !info.BudgetWindowsStale(utils.NowUTC(), a.budgetCalendar)) {
 		a.logger.Debug("Token found in cache",
 			"token_prefix", security.MaskToken(hashedToken),
 		)
@@ -208,15 +215,21 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 		return nil, models.ErrConnectionFailed
 	}
 	defer conn.Release()
-	info, err := a.tokenFromRow(conn.QueryRow(ctx, queries.QueryValidateTokenWithHierarchy, hashedToken), hashedToken)
+	info, err := a.tokenFromRow(conn.QueryRow(ctx, queries.QueryValidateTokenWithHierarchy, hashedToken, a.budgetWindowsEnabled), hashedToken)
 	if err != nil {
 		return nil, err
+	}
+	if !a.budgetWindowsEnabled {
+		return info, nil
 	}
 	if err := a.loadBudgetWindowSpend(ctx, conn, info, utils.NowUTC()); err != nil {
 		a.logger.Error("Failed to load key budget window spend",
 			"error", err,
 			"token_prefix", security.MaskToken(hashedToken),
 		)
+		if errors.Is(err, models.ErrBudgetWindowUnsupported) {
+			return nil, err
+		}
 		return nil, models.ErrConnectionFailed
 	}
 	return info, nil
@@ -380,7 +393,9 @@ func (a *Authenticator) tokenFromRow(row pgx.Row, hashedToken string) (*models.T
 	}
 
 	info.MaxBudget = tokenMaxBudget
-	info.BudgetWindows = a.budgetWindows(tokenBudgetLimits, hashedToken)
+	if a.budgetWindowsEnabled {
+		info.BudgetWindows = a.budgetWindows(tokenBudgetLimits, hashedToken)
+	}
 	info.Expires = expires
 	info.TPMLimit = tokenTPMLimit
 	info.RPMLimit = tokenRPMLimit
@@ -472,14 +487,11 @@ func (a *Authenticator) budgetWindows(raw []byte, hashedToken string) []models.B
 // reads through.
 type budgetWindowQuerier interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-// loadBudgetWindowSpend sets each window's current start and the key's spend
-// in it: the window row's spend when the row is on that window, else the sum
-// of the key's accounted spend logs since the start (a window nothing has
-// written yet, or a row still on an earlier window). A schema without
-// LiteLLM_BudgetWindowSpend reads every window from the spend logs.
+// loadBudgetWindowSpend sets each window's current start and spend. A missing
+// row uses the key's cumulative spend as a conservative upper bound; a row
+// from an earlier window means the current window has no recorded spend yet.
 func (a *Authenticator) loadBudgetWindowSpend(ctx context.Context, conn budgetWindowQuerier, info *models.TokenInfo, now time.Time) error {
 	if len(info.BudgetWindows) == 0 {
 		return nil
@@ -490,23 +502,27 @@ func (a *Authenticator) loadBudgetWindowSpend(ctx context.Context, conn budgetWi
 	}
 	stored := map[string]windowRow{}
 	rows, err := conn.Query(ctx, queries.QuerySelectKeyBudgetWindowSpend, info.Token)
-	if err != nil && !isUndefinedTable(err) {
+	if isUndefinedTable(err) {
+		return models.ErrBudgetWindowUnsupported
+	}
+	if err != nil {
 		return err
 	}
-	if err == nil {
-		for rows.Next() {
-			var duration string
-			var row windowRow
-			if err := rows.Scan(&duration, &row.start, &row.spend); err != nil {
-				rows.Close()
-				return err
-			}
-			stored[duration] = row
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil && !isUndefinedTable(err) {
+	for rows.Next() {
+		var duration string
+		var row windowRow
+		if err := rows.Scan(&duration, &row.start, &row.spend); err != nil {
+			rows.Close()
 			return err
 		}
+		stored[duration] = row
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		if isUndefinedTable(err) {
+			return models.ErrBudgetWindowUnsupported
+		}
+		return err
 	}
 
 	for i := range info.BudgetWindows {
@@ -515,14 +531,16 @@ func (a *Authenticator) loadBudgetWindowSpend(ctx context.Context, conn budgetWi
 		if !ok {
 			continue
 		}
-		start, end := duration.Bounds(now, a.budgetCalendar)
+		start, _ := duration.Bounds(now, a.budgetCalendar)
 		window.Start = start
 		if row, ok := stored[window.Duration]; ok && row.start.Equal(start) {
 			window.Spend = row.spend
 			continue
 		}
-		if err := conn.QueryRow(ctx, queries.QuerySumKeyWindowSpendLogs, info.Token, start, end).Scan(&window.Spend); err != nil {
-			return err
+		if row, ok := stored[window.Duration]; ok && row.start.Before(start) {
+			window.Spend = 0
+		} else {
+			window.Spend = info.Spend
 		}
 	}
 	return nil

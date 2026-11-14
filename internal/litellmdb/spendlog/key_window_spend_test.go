@@ -33,6 +33,7 @@ func (tx noWindowTableTx) Query(ctx context.Context, sql string, args ...any) (p
 func TestUpdateKeyBudgetWindows_SchemaWithoutWindowTable(t *testing.T) {
 	t.Cleanup(func() { schemaHasKeyBudgetWindows.Store(true) })
 	logger := newAtomicTestLogger()
+	logger.config.EnforceKeyBudgetWindows = true
 	tx := noWindowTableTx{&atomicTestTx{}}
 	entries := []*models.SpendLogEntry{atomicTestEntry("req-old-schema")}
 
@@ -43,6 +44,13 @@ func TestUpdateKeyBudgetWindows_SchemaWithoutWindowTable(t *testing.T) {
 	// The retry writes the batch without the window projection.
 	tx.queries = nil
 	require.NoError(t, logger.updateKeyBudgetWindows(context.Background(), tx, entries))
+	assert.Empty(t, tx.queries)
+}
+
+func TestUpdateKeyBudgetWindows_DisabledDoesNotQuery(t *testing.T) {
+	logger := newAtomicTestLogger()
+	tx := noWindowTableTx{&atomicTestTx{}}
+	require.NoError(t, logger.updateKeyBudgetWindows(context.Background(), tx, []*models.SpendLogEntry{atomicTestEntry("disabled")}))
 	assert.Empty(t, tx.queries)
 }
 
@@ -164,14 +172,16 @@ func TestUpdateKeyBudgetWindows_Postgres(t *testing.T) {
 	moscow, err := time.LoadLocation("Europe/Moscow")
 	require.NoError(t, err)
 	logger := newAtomicTestLogger()
+	logger.config.EnforceKeyBudgetWindows = true
 	logger.config.BudgetTimezone = moscow
 
 	// 11 March 2026 in Moscow runs from 10 March 21:00 UTC.
 	day := time.Date(2026, 3, 10, 21, 0, 0, 0, time.UTC)
 	nextDay := day.AddDate(0, 0, 1)
 
-	t.Run("first write seeds the window from the accounted spend logs", func(t *testing.T) {
+	t.Run("first write seeds conservatively from cumulative key spend", func(t *testing.T) {
 		db.exec(`INSERT INTO "LiteLLM_VerificationToken" (token, budget_limits) VALUES ('seed', '[{"budget_duration":"1d","max_budget":10}]')`)
+		db.exec(`UPDATE "LiteLLM_VerificationToken" SET spend = 2.5 WHERE token = 'seed'`)
 		db.spendLog(pool, "seed", 2, day.Add(time.Hour), "{}")
 		db.spendLog(pool, "seed", 5, day.Add(-time.Minute), "{}")                                                   // previous day
 		db.spendLog(pool, "seed", 7, day.Add(2*time.Hour), `{"spend_logs_metadata":{"accounting_eligible":false}}`) // never accounted
@@ -182,7 +192,7 @@ func TestUpdateKeyBudgetWindows_Postgres(t *testing.T) {
 		start, spend, ok := db.row("seed", "1d")
 		require.True(t, ok)
 		assert.Equal(t, day, start)
-		assert.InDelta(t, 3.75, spend, 1e-9, "2 + 0.5 already logged + the batch's own 1.25, counted once")
+		assert.InDelta(t, 3.75, spend, 1e-9, "the lifetime counter includes the batch but SpendLogs are never scanned")
 
 		db.write(logger, windowTestEntry("seed", 1, day.Add(5*time.Hour)))
 		_, spend, _ = db.row("seed", "1d")

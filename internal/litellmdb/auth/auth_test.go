@@ -909,7 +909,7 @@ func TestAuthenticator_TokenFromRow_ReadsEachColumnIntoItsField(t *testing.T) {
 	expires := time.Unix(int64(at("expires")), 0)
 	teamBlocked := true
 
-	info, err := NewAuthenticator(nil, nil, slog.Default()).tokenFromRow(columnRow(columns), "hash")
+	info, err := NewAuthenticator(nil, nil, slog.Default()).WithBudgetWindows(true).tokenFromRow(columnRow(columns), "hash")
 	require.NoError(t, err)
 	assert.Equal(t, &models.TokenInfo{
 		Token:                "token",
@@ -971,13 +971,19 @@ func TestAuthenticator_TokenFromRow_ReadsEachColumnIntoItsField(t *testing.T) {
 	}, info)
 }
 
+func TestAuthenticator_TokenFromRow_IgnoresBudgetLimitsWhenDisabled(t *testing.T) {
+	info, err := NewAuthenticator(nil, nil, slog.Default()).tokenFromRow(columnRow(tokenQueryColumns(t)), "hash")
+	require.NoError(t, err)
+	assert.Empty(t, info.BudgetWindows)
+}
+
 // A cached token carries the spend of the budget window it was loaded in.
 // Once that window has ended the cache entry is not checked against it: the
 // token is reloaded (here the reload fails, as there is no database).
 func TestAuthenticator_ValidateToken_ReloadsATokenFromAnEndedBudgetWindow(t *testing.T) {
 	cache, err := NewCache(100, time.Hour)
 	require.NoError(t, err)
-	auth := NewAuthenticator(nil, cache, slog.Default())
+	auth := NewAuthenticator(nil, cache, slog.Default()).WithBudgetWindows(true)
 
 	now := time.Now().UTC()
 	day, ok := models.ParseBudgetDuration("1d")
@@ -997,17 +1003,15 @@ func TestAuthenticator_ValidateToken_ReloadsATokenFromAnEndedBudgetWindow(t *tes
 	assert.ErrorIs(t, err, models.ErrConnectionFailed)
 }
 
-// budgetWindowConn serves QuerySelectKeyBudgetWindowSpend from rows (or
-// rowsErr) and QuerySumKeyWindowSpendLogs from sum, recording each sum's
-// window bounds.
+// budgetWindowConn serves only the indexed window-row lookup.
 type budgetWindowConn struct {
 	rows    [][]any
 	rowsErr error
-	sum     float64
-	sums    [][2]time.Time
+	queries int
 }
 
 func (c *budgetWindowConn) Query(_ context.Context, sql string, _ ...any) (pgx.Rows, error) {
+	c.queries++
 	if sql != queries.QuerySelectKeyBudgetWindowSpend {
 		return nil, fmt.Errorf("unexpected query %q", sql)
 	}
@@ -1015,14 +1019,6 @@ func (c *budgetWindowConn) Query(_ context.Context, sql string, _ ...any) (pgx.R
 		return nil, c.rowsErr
 	}
 	return &budgetWindowRows{rows: c.rows, index: -1}, nil
-}
-
-func (c *budgetWindowConn) QueryRow(_ context.Context, sql string, args ...any) pgx.Row {
-	if sql != queries.QuerySumKeyWindowSpendLogs {
-		return errRow{fmt.Errorf("unexpected query %q", sql)}
-	}
-	c.sums = append(c.sums, [2]time.Time{args[1].(time.Time), args[2].(time.Time)})
-	return floatRow(c.sum)
 }
 
 type budgetWindowRows struct {
@@ -1042,22 +1038,12 @@ func (r *budgetWindowRows) Scan(dest ...any) error {
 	return nil
 }
 
-type floatRow float64
-
-func (r floatRow) Scan(dest ...any) error { *dest[0].(*float64) = float64(r); return nil }
-
-type errRow struct{ err error }
-
-func (r errRow) Scan(...any) error { return r.err }
-
 func TestAuthenticator_LoadBudgetWindowSpend(t *testing.T) {
 	moscow, err := time.LoadLocation("Europe/Moscow")
 	require.NoError(t, err)
 	now := time.Date(2026, 3, 10, 22, 30, 0, 0, time.UTC) // 11 March, 01:30 Moscow
 	dayStart := time.Date(2026, 3, 10, 21, 0, 0, 0, time.UTC)
-	dayEnd := time.Date(2026, 3, 11, 21, 0, 0, 0, time.UTC)
 	monthStart := time.Date(2026, 2, 28, 21, 0, 0, 0, time.UTC)
-	monthEnd := time.Date(2026, 3, 31, 21, 0, 0, 0, time.UTC)
 	windows := func() []models.BudgetWindow {
 		return []models.BudgetWindow{
 			{BudgetLimit: models.BudgetLimit{Duration: "1d", MaxBudget: 10}},
@@ -1078,27 +1064,24 @@ func TestAuthenticator_LoadBudgetWindowSpend(t *testing.T) {
 			{BudgetLimit: models.BudgetLimit{Duration: "1mo", MaxBudget: 100}, Start: monthStart, Spend: 40},
 			{BudgetLimit: models.BudgetLimit{Duration: "2d", MaxBudget: 1}},
 		}, info.BudgetWindows)
-		assert.Empty(t, conn.sums)
+		assert.Equal(t, 1, conn.queries)
 	})
 
-	t.Run("row on an earlier window or no row reads the spend logs", func(t *testing.T) {
+	t.Run("earlier row starts at zero; missing row uses cumulative spend", func(t *testing.T) {
 		conn := &budgetWindowConn{
 			rows: [][]any{{"1d", dayStart.AddDate(0, 0, -1), 9.0}},
-			sum:  2.5,
 		}
-		info := &models.TokenInfo{Token: "tok", BudgetWindows: windows()}
+		info := &models.TokenInfo{Token: "tok", Spend: 2.5, BudgetWindows: windows()}
 		require.NoError(t, auth.loadBudgetWindowSpend(context.Background(), conn, info, now))
-		assert.Equal(t, 2.5, info.BudgetWindows[0].Spend)
+		assert.Zero(t, info.BudgetWindows[0].Spend)
 		assert.Equal(t, 2.5, info.BudgetWindows[1].Spend)
-		assert.Equal(t, [][2]time.Time{{dayStart, dayEnd}, {monthStart, monthEnd}}, conn.sums)
+		assert.Equal(t, 1, conn.queries)
 	})
 
-	t.Run("schema without the window table reads the spend logs", func(t *testing.T) {
-		conn := &budgetWindowConn{rowsErr: &pgconn.PgError{Code: "42P01"}, sum: 3}
+	t.Run("enabled mechanism needs the window table", func(t *testing.T) {
+		conn := &budgetWindowConn{rowsErr: &pgconn.PgError{Code: "42P01"}}
 		info := &models.TokenInfo{Token: "tok", BudgetWindows: windows()}
-		require.NoError(t, auth.loadBudgetWindowSpend(context.Background(), conn, info, now))
-		assert.Equal(t, 3.0, info.BudgetWindows[0].Spend)
-		assert.Len(t, conn.sums, 2)
+		assert.ErrorIs(t, auth.loadBudgetWindowSpend(context.Background(), conn, info, now), models.ErrBudgetWindowUnsupported)
 	})
 
 	t.Run("other database errors fail the lookup", func(t *testing.T) {
@@ -1110,6 +1093,7 @@ func TestAuthenticator_LoadBudgetWindowSpend(t *testing.T) {
 	t.Run("a key without windows reads nothing", func(t *testing.T) {
 		conn := &budgetWindowConn{rowsErr: fmt.Errorf("must not be called")}
 		require.NoError(t, auth.loadBudgetWindowSpend(context.Background(), conn, &models.TokenInfo{Token: "tok"}, now))
+		assert.Zero(t, conn.queries)
 	})
 }
 

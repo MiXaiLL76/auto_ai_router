@@ -14,9 +14,17 @@ func TestLiteLLMDBBudgetEnforcementIsOptIn(t *testing.T) {
 	require.NoError(t, yaml.Unmarshal([]byte("enabled: false\n"), &cfg))
 	assert.False(t, cfg.EnforceBudgetReservation)
 	assert.False(t, cfg.EnforceKeyRateLimits)
+	assert.False(t, cfg.EnforceKeyBudgetWindows)
 	assert.Equal(t, 15*time.Minute, cfg.BudgetReservationTTL)
 	assert.Equal(t, 1000, cfg.DefaultEstimatedCompletionTokens)
 	assert.True(t, cfg.IncludeTeamSpendInUserSpend)
+}
+
+func TestLiteLLMDBKeyBudgetWindowsAreOptIn(t *testing.T) {
+	var cfg LiteLLMDBConfig
+	require.NoError(t, yaml.Unmarshal([]byte("enforce_key_budget_windows: true\n"), &cfg))
+	assert.True(t, cfg.EnforceKeyBudgetWindows)
+	assert.Error(t, yaml.Unmarshal([]byte("enforce_key_budget_windows: perhaps\n"), &cfg))
 }
 
 func TestLiteLLMDBTeamSpendProjectionParsesExplicitSetting(t *testing.T) {

@@ -43,9 +43,8 @@ type keyBudgetWindow struct {
 //
 // Each entry counts towards the window its StartTime falls in:
 //   - a row on that window gets the entry's spend added;
-//   - a missing row, or one on an earlier window, is set to the sum of the
-//     key's accounted spend logs in the window, which already holds this
-//     transaction's own rows;
+//   - a missing row is seeded conservatively from the key's cumulative spend;
+//   - a row on an earlier window moves to the new window with this batch's spend;
 //   - a row already on a later window is left alone (a late entry of an
 //     earlier window; its spend stays in LiteLLM_SpendLogs).
 //
@@ -53,6 +52,9 @@ type keyBudgetWindow struct {
 // so a limit taken off and put back within a window finds a row that kept
 // counting.
 func (sl *Logger) updateKeyBudgetWindows(ctx context.Context, tx pgx.Tx, entries []*models.SpendLogEntry) error {
+	if sl.config == nil || !sl.config.EnforceKeyBudgetWindows {
+		return nil
+	}
 	if !schemaHasKeyBudgetWindows.Load() {
 		return nil
 	}
@@ -71,7 +73,7 @@ func (sl *Logger) updateKeyBudgetWindows(ctx context.Context, tx pgx.Tx, entries
 	}
 	slices.Sort(keys)
 
-	durations, stored, err := sl.readKeyBudgetWindows(ctx, tx, keys)
+	durations, stored, cumulative, err := sl.readKeyBudgetWindows(ctx, tx, keys)
 	if err != nil {
 		if isUndefinedTable(err) || isColumnNotExist(err) {
 			schemaHasKeyBudgetWindows.Store(false)
@@ -85,15 +87,15 @@ func (sl *Logger) updateKeyBudgetWindows(ctx context.Context, tx pgx.Tx, entries
 			window := keyBudgetWindow{key: key, duration: duration}
 			grid, _ := models.ParseBudgetDuration(duration)
 			type windowSpend struct {
-				start, end time.Time
-				spend      float64
+				start time.Time
+				spend float64
 			}
 			var spends []windowSpend
 			for _, entry := range entriesByKey[key] {
-				start, end := grid.Bounds(entry.StartTime, calendar)
+				start, _ := grid.Bounds(entry.StartTime, calendar)
 				i := slices.IndexFunc(spends, func(s windowSpend) bool { return s.start.Equal(start) })
 				if i < 0 {
-					spends = append(spends, windowSpend{start: start, end: end})
+					spends = append(spends, windowSpend{start: start})
 					i = len(spends) - 1
 				}
 				spends[i].spend += entry.Spend
@@ -113,9 +115,11 @@ func (sl *Logger) updateKeyBudgetWindows(ctx context.Context, tx pgx.Tx, entries
 				case hasRow && current.After(s.start):
 					continue
 				default:
-					var total float64
-					if err := tx.QueryRow(ctx, queries.QuerySumKeyWindowSpendLogs, key, s.start, s.end).Scan(&total); err != nil {
-						return err
+					total := s.spend
+					if !hasRow {
+						// On first use, the lifetime counter is an upper bound on
+						// this window's spend, including any pre-existing usage.
+						total = cumulative[key]
 					}
 					if _, err := tx.Exec(ctx, queries.QuerySetKeyBudgetWindowSpend, key, duration, s.start, total); err != nil {
 						return err
@@ -129,22 +133,23 @@ func (sl *Logger) updateKeyBudgetWindows(ctx context.Context, tx pgx.Tx, entries
 }
 
 // readKeyBudgetWindows returns, per key, the durations of its budget_limits
-// and of its existing window rows that ParseBudgetDuration accepts, and the
-// window each row is on. A budget_limits AIR cannot read keeps only the existing rows; auth
-// refuses such a key anyway.
+// and of its existing window rows that ParseBudgetDuration accepts, the
+// window each row is on, and the key's cumulative spend. Unreadable
+// budget_limits keep only existing rows; auth refuses that key.
 func (sl *Logger) readKeyBudgetWindows(
 	ctx context.Context,
 	tx pgx.Tx,
 	keys []string,
-) (map[string][]string, map[keyBudgetWindow]time.Time, error) {
+) (map[string][]string, map[keyBudgetWindow]time.Time, map[string]float64, error) {
 	rows, err := tx.Query(ctx, queries.QuerySelectKeysBudgetWindows, keys)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	defer rows.Close()
 
 	durations := make(map[string][]string)
 	stored := make(map[keyBudgetWindow]time.Time)
+	cumulative := make(map[string]float64)
 	limitsRead := make(map[string]bool)
 	addDuration := func(key, duration string) {
 		if _, ok := models.ParseBudgetDuration(duration); ok && !slices.Contains(durations[key], duration) {
@@ -153,12 +158,14 @@ func (sl *Logger) readKeyBudgetWindows(
 	}
 	for rows.Next() {
 		var key string
+		var keySpend float64
 		var rawLimits []byte
 		var duration *string
 		var start *time.Time
-		if err := rows.Scan(&key, &rawLimits, &duration, &start); err != nil {
-			return nil, nil, err
+		if err := rows.Scan(&key, &keySpend, &rawLimits, &duration, &start); err != nil {
+			return nil, nil, nil, err
 		}
+		cumulative[key] = keySpend
 		if !limitsRead[key] {
 			limitsRead[key] = true
 			limits, err := models.ParseBudgetLimits(rawLimits)
@@ -178,10 +185,10 @@ func (sl *Logger) readKeyBudgetWindows(
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	for key := range durations {
 		slices.Sort(durations[key])
 	}
-	return durations, stored, nil
+	return durations, stored, cumulative, nil
 }
