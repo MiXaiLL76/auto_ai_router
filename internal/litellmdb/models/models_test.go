@@ -1,6 +1,7 @@
 package models
 
 import (
+	"errors"
 	"log/slog"
 	"testing"
 	"time"
@@ -654,6 +655,46 @@ func TestTokenInfo_Validate_TeamBudgetExceeded(t *testing.T) {
 
 	err := token.Validate("")
 	assert.ErrorIs(t, err, ErrBudgetExceeded)
+}
+
+func TestTokenInfo_Validate_BudgetRefusalNamesItsLevel(t *testing.T) {
+	under, over := 50.0, 150.0
+	limit := 100.0
+	tests := []struct {
+		name  string
+		token TokenInfo
+		want  BudgetLevel
+	}{
+		{"key", TokenInfo{Spend: over, MaxBudget: &limit}, BudgetLevelKey},
+		{"team", TokenInfo{TeamID: "t", TeamMaxBudget: &limit, TeamSpend: &over}, BudgetLevelTeam},
+		{"team member", TokenInfo{TeamID: "t", UserID: "u", TeamMemberMaxBudget: &limit, TeamMemberSpend: &over}, BudgetLevelTeamMember},
+		{"organization", TokenInfo{OrgMaxBudget: &limit, OrgSpend: &over}, BudgetLevelOrganization},
+		{"user", TokenInfo{UserID: "u", UserMaxBudget: &limit, UserSpend: &over}, BudgetLevelUser},
+		{"organization member", TokenInfo{OrgMemberMaxBudget: &limit, OrgMemberSpend: &over}, BudgetLevelOrganizationMember},
+		// The key is checked first: with the holder's budget exhausted too,
+		// the refusal still names the key's own limit, as LiteLLM's auth does.
+		{"key before user", TokenInfo{Spend: over, MaxBudget: &limit, UserID: "u", UserMaxBudget: &limit, UserSpend: &over}, BudgetLevelKey},
+		{"user when key has room", TokenInfo{Spend: under, MaxBudget: &limit, UserID: "u", UserMaxBudget: &limit, UserSpend: &over}, BudgetLevelUser},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.token.Validate("")
+			require.ErrorIs(t, err, ErrBudgetExceeded)
+			level, ok := BudgetExceededLevel(err)
+			require.True(t, ok)
+			assert.Equal(t, tt.want, level)
+		})
+	}
+}
+
+func TestBudgetExceededLevel_NotABudgetRefusal(t *testing.T) {
+	for _, err := range []error{nil, ErrTokenBlocked, ErrBudgetExceeded, &BudgetExceededError{}} {
+		_, ok := BudgetExceededLevel(err)
+		assert.False(t, ok)
+	}
+	assert.Equal(t, "litellmdb: budget exceeded (key)", (&BudgetExceededError{Level: BudgetLevelKey}).Error())
+	assert.Equal(t, "litellmdb: budget exceeded", (&BudgetExceededError{}).Error())
+	assert.Equal(t, ErrBudgetExceeded, errors.Unwrap(&BudgetExceededError{Level: BudgetLevelUser}))
 }
 
 func TestTokenInfo_Validate_ModelNotAllowed(t *testing.T) {

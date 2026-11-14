@@ -17,6 +17,7 @@ type reservedEntity struct {
 
 type budgetLevel struct {
 	entity    string
+	level     dbmodels.BudgetLevel
 	maxBudget *float64
 	dbSpend   float64
 	rpm       *int64
@@ -28,6 +29,17 @@ func entityKind(entity string) string {
 		return kind
 	}
 	return "key"
+}
+
+// budgetExceededMessage is the client-facing text of a 402 budget refusal.
+// The key's own limit gets its own wording so a client can tell it from a
+// limit of the key's holder; every level above the key keeps the
+// long-standing "Budget exceeded".
+func budgetExceededMessage(level dbmodels.BudgetLevel) string {
+	if level == dbmodels.BudgetLevelKey {
+		return "Key budget exceeded"
+	}
+	return "Budget exceeded"
 }
 
 func dereferenceFloat(value *float64) float64 {
@@ -52,6 +64,7 @@ func budgetLevels(info *dbmodels.TokenInfo) []budgetLevel {
 	}
 	levels := []budgetLevel{{
 		entity:    "token:" + info.Token,
+		level:     dbmodels.BudgetLevelKey,
 		maxBudget: info.MaxBudget,
 		dbSpend:   info.Spend,
 		rpm:       info.RPMLimit,
@@ -60,6 +73,7 @@ func budgetLevels(info *dbmodels.TokenInfo) []budgetLevel {
 	if info.TeamID == "" && info.UserID != "" {
 		levels = append(levels, budgetLevel{
 			entity:    "user:" + info.UserID,
+			level:     dbmodels.BudgetLevelUser,
 			maxBudget: info.UserMaxBudget,
 			dbSpend:   dereferenceFloat(info.UserSpend),
 			rpm:       info.UserRPMLimit,
@@ -69,6 +83,7 @@ func budgetLevels(info *dbmodels.TokenInfo) []budgetLevel {
 	if info.TeamID != "" {
 		levels = append(levels, budgetLevel{
 			entity:    "team:" + info.TeamID,
+			level:     dbmodels.BudgetLevelTeam,
 			maxBudget: info.TeamMaxBudget,
 			dbSpend:   dereferenceFloat(info.TeamSpend),
 			rpm:       info.TeamRPMLimit,
@@ -78,6 +93,7 @@ func budgetLevels(info *dbmodels.TokenInfo) []budgetLevel {
 	if info.OrganizationID != "" {
 		levels = append(levels, budgetLevel{
 			entity:    "org:" + info.OrganizationID,
+			level:     dbmodels.BudgetLevelOrganization,
 			maxBudget: info.OrgMaxBudget,
 			dbSpend:   dereferenceFloat(info.OrgSpend),
 			rpm:       info.OrgRPMLimit,
@@ -87,6 +103,7 @@ func budgetLevels(info *dbmodels.TokenInfo) []budgetLevel {
 	if info.TeamID != "" && info.UserID != "" {
 		levels = append(levels, budgetLevel{
 			entity:    "teammember:" + info.TeamID + ":" + info.UserID,
+			level:     dbmodels.BudgetLevelTeamMember,
 			maxBudget: info.TeamMemberMaxBudget,
 			dbSpend:   dereferenceFloat(info.TeamMemberSpend),
 			rpm:       info.TeamMemberRPMLimit,
@@ -96,6 +113,7 @@ func budgetLevels(info *dbmodels.TokenInfo) []budgetLevel {
 	if info.OrganizationID != "" && info.UserID != "" {
 		levels = append(levels, budgetLevel{
 			entity:    "orgmember:" + info.OrganizationID + ":" + info.UserID,
+			level:     dbmodels.BudgetLevelOrganizationMember,
 			maxBudget: info.OrgMemberMaxBudget,
 			dbSpend:   dereferenceFloat(info.OrgMemberSpend),
 			rpm:       info.OrgMemberRPMLimit,
@@ -271,7 +289,7 @@ func (p *Proxy) enforceBudgetAndRateLimits(
 				logCtx.Status = "failure"
 				logCtx.HTTPStatus = http.StatusPaymentRequired
 				logCtx.ErrorMsg = "budget exceeded (" + level.entity + ")"
-				WriteErrorPaymentRequired(w, "Budget exceeded")
+				WriteErrorPaymentRequired(w, budgetExceededMessage(level.level))
 				return false
 			}
 			logCtx.reservedEntities = append(logCtx.reservedEntities, reservedEntity{

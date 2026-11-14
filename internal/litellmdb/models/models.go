@@ -32,7 +32,9 @@ var (
 	// ErrTokenExpired is returned when token has expired
 	ErrTokenExpired = errors.New("litellmdb: token expired")
 
-	// ErrBudgetExceeded is returned when spend >= max_budget
+	// ErrBudgetExceeded is returned when spend >= max_budget. Validate returns
+	// it wrapped in a *BudgetExceededError naming the level that refused, so
+	// errors.Is(err, ErrBudgetExceeded) keeps matching.
 	ErrBudgetExceeded = errors.New("litellmdb: budget exceeded")
 
 	// ErrModelNotAllowed is returned when model is not in allowed list
@@ -44,6 +46,50 @@ var (
 	// ErrQueueFull is returned when spend log queue is full and timeout reached
 	ErrQueueFull = errors.New("litellmdb: spend log queue full - timeout reached")
 )
+
+// BudgetLevel names one level of the LiteLLM budget hierarchy. The values are
+// LiteLLM's own Litellm_EntityType names for these entities.
+type BudgetLevel string
+
+const (
+	BudgetLevelKey                BudgetLevel = "key"
+	BudgetLevelUser               BudgetLevel = "user"
+	BudgetLevelTeam               BudgetLevel = "team"
+	BudgetLevelTeamMember         BudgetLevel = "team_member"
+	BudgetLevelOrganization       BudgetLevel = "organization"
+	BudgetLevelOrganizationMember BudgetLevel = "organization_member"
+)
+
+// BudgetExceededError is ErrBudgetExceeded together with the level whose
+// budget refused, so a caller can tell the key's own limit from a limit of
+// the key's holder — LiteLLM likewise raises one BudgetExceededError with a
+// per-level message.
+type BudgetExceededError struct {
+	Level BudgetLevel
+}
+
+func (e *BudgetExceededError) Error() string {
+	if e == nil || e.Level == "" {
+		return ErrBudgetExceeded.Error()
+	}
+	return ErrBudgetExceeded.Error() + " (" + string(e.Level) + ")"
+}
+
+// Unwrap exposes ErrBudgetExceeded, so errors.Is(err, ErrBudgetExceeded)
+// holds for every level.
+func (e *BudgetExceededError) Unwrap() error {
+	return ErrBudgetExceeded
+}
+
+// BudgetExceededLevel returns the level carried by a budget refusal, and
+// false when err is not one or names no level.
+func BudgetExceededLevel(err error) (BudgetLevel, bool) {
+	var budgetErr *BudgetExceededError
+	if errors.As(err, &budgetErr) && budgetErr.Level != "" {
+		return budgetErr.Level, true
+	}
+	return "", false
+}
 
 // ==================== Config ====================
 
@@ -660,22 +706,22 @@ func (t *TokenInfo) Validate(model string) error {
 
 	// Check budget hierarchy (embedded first, then external)
 	if t.IsBudgetExceeded() {
-		return ErrBudgetExceeded
+		return &BudgetExceededError{Level: BudgetLevelKey}
 	}
 	if t.checkTeamBudget() {
-		return ErrBudgetExceeded
+		return &BudgetExceededError{Level: BudgetLevelTeam}
 	}
 	if t.checkTeamMemberBudget() {
-		return ErrBudgetExceeded
+		return &BudgetExceededError{Level: BudgetLevelTeamMember}
 	}
 	if t.checkOrganizationBudget() {
-		return ErrBudgetExceeded
+		return &BudgetExceededError{Level: BudgetLevelOrganization}
 	}
 	if t.checkUserBudget() {
-		return ErrBudgetExceeded
+		return &BudgetExceededError{Level: BudgetLevelUser}
 	}
 	if t.checkOrganizationMemberBudget() {
-		return ErrBudgetExceeded
+		return &BudgetExceededError{Level: BudgetLevelOrganizationMember}
 	}
 
 	// Check model access
