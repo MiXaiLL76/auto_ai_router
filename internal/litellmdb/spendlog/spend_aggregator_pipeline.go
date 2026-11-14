@@ -72,6 +72,11 @@ var spendRoutes = []spendRoute{
 	{"aspeech", "/audio/speech", "/audio/speech"},
 	{"amoderation", "/moderations", "/moderations"},
 	{"arerank", "/rerank", "/rerank"},
+	// The native System One API (/v1/systemone) has no LiteLLM counterpart, so
+	// its call_type and endpoint follow LiteLLM's naming rather than mirror a
+	// value LiteLLM writes; without a row here its spend would skip the daily
+	// aggregation (unknown path -> empty call_type).
+	{"asystemone", "/systemone", "/systemone"},
 	{"atext_completion", "/completions", "/completions"},
 }
 
@@ -114,9 +119,8 @@ func dailyEndpoint(callType string) string {
 // writer owns every column it inserted.
 //
 // The date bucket is the wall-clock date of StartTime in timezone (UTC when
-// nil), matching TO_CHAR("startTime", 'YYYY-MM-DD') on the UTC wall clock
-// LiteLLM stores in the timestamp-without-time-zone column only while it
-// stays UTC.
+// nil). "startTime" is stored in UTC, so the bucket matches LiteLLM's
+// TO_CHAR("startTime", 'YYYY-MM-DD') only while timezone is UTC.
 func buildSpendLogRecords(
 	inserted []insertedSpendEntry,
 	logger *slog.Logger,

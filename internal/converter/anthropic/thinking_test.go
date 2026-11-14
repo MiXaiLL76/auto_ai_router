@@ -1,6 +1,7 @@
 package anthropic
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -239,7 +240,7 @@ func TestMapThinkingConfig_AdaptiveBlockBindingAndDefaultEffort(t *testing.T) {
 	_, oc = mapThinkingConfig(map[string]interface{}{"type": "adaptive"}, "high", model)
 	assert.Equal(t, &AnthropicOutputConfig{Effort: "high"}, oc, "reasoning_effort fills a missing effort")
 
-	_, betas, _ := applyThinkingSideEffects(tc, nil, 100, []string{"x"})
+	_, betas, _ := applyThinkingSideEffects(tc, nil, model, 100, []string{"x"})
 	assert.Equal(t, []string{"x", thinkingBindingBeta}, betas)
 }
 
@@ -325,6 +326,71 @@ func TestThinkingOff(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.model+"/"+tt.effort, func(t *testing.T) {
 			assert.Equal(t, tt.want, thinkingOff(tt.model, tt.effort))
+		})
+	}
+}
+
+func TestIsKnownClaudeModel(t *testing.T) {
+	for _, model := range []string{
+		"claude-opus-5-5",
+		"claude-sonnet-5-5",
+		"claude-haiku-4-5",
+		"claude-fable-5-1",
+		"claude-opus-4-5-20251101",
+		"claude-sonnet-4-20250514",
+		"us.anthropic.claude-opus-4-7-v1:0",
+		"anthropic.claude-sonnet-4-6",
+		"claude-mythos-preview",
+		"Claude-Opus-5.5",
+	} {
+		assert.True(t, IsKnownClaudeModel(model), model)
+	}
+	for _, model := range []string{
+		"gemini-3.5-flash",
+		"gpt-5",
+		"qwen3.8-max",
+		"claude-3-haiku-20240307",
+		"claude-3-5-sonnet-20241022",
+		"claude",
+		"",
+	} {
+		assert.False(t, IsKnownClaudeModel(model), model)
+	}
+}
+
+// Fable 5.2 needs no model-specific code: the version parser classifies every provider
+// spelling as adaptive thinking that can't be turned off, with sampling params removed,
+// and the effort a client sets reaches the upstream on both the chat and the Messages path.
+// Without an explicit effort none is injected, so the model's own default applies.
+func TestFable52ThinkingFromVersionParser(t *testing.T) {
+	for _, model := range []string{"claude-fable-5-2", "claude-fable-5.2", "policy/claude-fable-5.2", "global.anthropic.claude-fable-5-2"} {
+		t.Run(model, func(t *testing.T) {
+			assert.True(t, IsKnownClaudeModel(model))
+			assert.True(t, isAdaptiveThinkingModel(model))
+			assert.True(t, SamplingRemoved(model))
+			assert.Equal(t, thinkingAlwaysOn, thinkingOffModeFor(model))
+
+			for _, effort := range []string{"low", "high", "xhigh", "max"} {
+				body := `{"model":"m","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"` + effort + `","temperature":0,"top_p":0.5}`
+				out, err := OpenAIToAnthropic([]byte(body), model, true)
+				require.NoError(t, err)
+				var req map[string]interface{}
+				require.NoError(t, json.Unmarshal(out, &req))
+				assert.Equal(t, "adaptive", req["thinking"].(map[string]interface{})["type"], effort)
+				assert.Equal(t, effort, req["output_config"].(map[string]interface{})["effort"], effort)
+				assert.NotContains(t, req, "temperature")
+				assert.NotContains(t, req, "top_p")
+
+				got, err := normalizePassthrough(t, model, true, `,"thinking":{"type":"adaptive"},"output_config":{"effort":"`+effort+`"}`)
+				require.NoError(t, err)
+				assert.Equal(t, map[string]interface{}{"effort": effort}, got["output_config"], effort)
+			}
+
+			out, err := OpenAIToAnthropic([]byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`), model, true)
+			require.NoError(t, err)
+			var req map[string]interface{}
+			require.NoError(t, json.Unmarshal(out, &req))
+			assert.NotContains(t, req, "output_config", "no effort injected over the model default")
 		})
 	}
 }

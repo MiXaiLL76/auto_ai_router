@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"log/slog"
+	"net/http"
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/auth"
@@ -9,6 +10,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/fail2ban"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
+	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
@@ -99,6 +101,7 @@ type TestProxyConfig struct {
 	MaxBodySizeMB          int
 	ResponseBodyMultiplier int
 	RequestTimeout         time.Duration
+	ResponseHeaderTimeout  time.Duration
 	Version                string
 	Commit                 string
 	ServiceName            string
@@ -114,6 +117,9 @@ type TestProxyConfig struct {
 	CredentialNameAsTeamID bool
 	OrganizationPolicies   *models.OrganizationPolicyRegistry
 	VisionFallback         config.VisionFallbackConfig
+	LoopGate               config.LoopGateConfig
+	RouterResponseLog      kafkalog.RouterResponseManager
+	RouterResponseRedact   bool
 }
 
 // NewTestProxyBuilder creates a builder with default configuration.
@@ -225,6 +231,15 @@ func (b *TestProxyBuilder) WithRequestTimeout(timeout time.Duration) *TestProxyB
 	return b
 }
 
+// WithResponseHeaderTimeout sets the per-attempt response-header budget. A
+// value > 0 also enables the attempt_timeout ban (the feature is opt-in: with
+// it unset the transport falls back to request_timeout, and a timeout then
+// means "the provider needed longer", not "the provider never answered").
+func (b *TestProxyBuilder) WithResponseHeaderTimeout(timeout time.Duration) *TestProxyBuilder {
+	b.config.ResponseHeaderTimeout = timeout
+	return b
+}
+
 // WithSessionSticky enables session-sticky credential routing with the given TTL.
 func (b *TestProxyBuilder) WithSessionSticky(ttl time.Duration) *TestProxyBuilder {
 	b.config.SessionStickyEnabled = true
@@ -295,6 +310,14 @@ func (b *TestProxyBuilder) WithCredentialNameAsTeamID(enabled bool) *TestProxyBu
 	return b
 }
 
+// WithRouterResponseLog sets the router-response write-path for the proxy
+// under test, so a test can assert on what the router would publish.
+func (b *TestProxyBuilder) WithRouterResponseLog(mgr kafkalog.RouterResponseManager, redact bool) *TestProxyBuilder {
+	b.config.RouterResponseLog = mgr
+	b.config.RouterResponseRedact = redact
+	return b
+}
+
 // Build creates and returns a Proxy instance with the configured settings.
 func (b *TestProxyBuilder) Build() *Proxy {
 	if b.config.RateLimiter == nil {
@@ -307,12 +330,13 @@ func (b *TestProxyBuilder) Build() *Proxy {
 		f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 		b.config.Balancer = balancer.New(b.config.Credentials, f2b, b.config.RateLimiter)
 	}
-	return New(&Config{
+	prx := New(&Config{
 		Balancer:               b.config.Balancer,
 		Logger:                 b.config.Logger,
 		MaxBodySizeMB:          b.config.MaxBodySizeMB,
 		ResponseBodyMultiplier: b.config.ResponseBodyMultiplier,
 		RequestTimeout:         b.config.RequestTimeout,
+		ResponseHeaderTimeout:  b.config.ResponseHeaderTimeout,
 		Metrics:                b.config.Metrics,
 		MasterKey:              b.config.MasterKey,
 		RateLimiter:            b.config.RateLimiter,
@@ -333,7 +357,29 @@ func (b *TestProxyBuilder) Build() *Proxy {
 		CredentialNameAsTeamID: b.config.CredentialNameAsTeamID,
 		OrganizationPolicies:   b.config.OrganizationPolicies,
 		VisionFallback:         b.config.VisionFallback,
+		LoopGate:               b.config.LoopGate,
+		RouterResponseLog:      b.config.RouterResponseLog,
+		RouterResponseRedact:   b.config.RouterResponseRedact,
 	})
+	// No streamingClient collapse needed here (unlike before streamingClients
+	// became a lazily-built per-timeout map): attemptClient already returns
+	// prx.client itself whenever the effective ResponseHeaderTimeout is <= 0,
+	// which is every credential's default with nothing configured -- exactly
+	// the case most tests mock prx.client.Transport for. A test that wants to
+	// exercise the short-timeout path uses streamingClientForTest below.
+	return prx
+}
+
+// streamingClientForTest returns (building it on first use, exactly like a
+// real request would via attemptClient) the *http.Client a streaming attempt
+// for cred would use. Pass nil for cred to get the client a credential with
+// no override of its own resolves to (the server-level default). Tests use
+// this to install a mock Transport on the client an attempt will actually
+// run on, now that it is not a fixed field but one entry in a lazily-built
+// map keyed by the effective timeout.
+func (p *Proxy) streamingClientForTest(cred *config.CredentialConfig) *http.Client {
+	client, _ := p.attemptClient(cred, true)
+	return client
 }
 
 // ============================================================================

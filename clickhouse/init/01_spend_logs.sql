@@ -26,12 +26,21 @@ CREATE DATABASE IF NOT EXISTS air;
 CREATE TABLE air.spend_logs_kafka
 (
     request_id String,
+    trace_id String,
     start_time DateTime64(3),
     end_time DateTime64(3),
     completion_start_time Nullable(DateTime64(3)),
     duration_ms UInt32,
     ttft_ms Nullable(UInt32),
     upstream_send_ms Nullable(UInt32),
+    retry_ms Nullable(UInt32),
+    conn_wait_ms Nullable(UInt32),
+    conn_reused Nullable(UInt8),
+    ttfb_ms Nullable(UInt32),
+    upstream_attempts UInt8,
+    exit LowCardinality(String),
+    exit_rtt_ms Nullable(UInt32),
+    exit_connect_ms Nullable(UInt32),
 
     call_type String,
     api_base String,
@@ -66,6 +75,7 @@ CREATE TABLE air.spend_logs_kafka
     cache_creation_tokens UInt32,
     cache_creation_5m_tokens UInt32,
     cache_creation_1h_tokens UInt32,
+    cache_creation_12h_tokens UInt32,
     cache_type LowCardinality(Nullable(String)),
     cached_output_tokens UInt32,
     reasoning_tokens UInt32,
@@ -163,12 +173,21 @@ SETTINGS
 CREATE TABLE air.spend_logs
 (
     request_id String,
+    trace_id String,
     start_time DateTime64(3),
     end_time DateTime64(3),
     completion_start_time Nullable(DateTime64(3)),
     duration_ms UInt32,
     ttft_ms Nullable(UInt32),
     upstream_send_ms Nullable(UInt32),
+    retry_ms Nullable(UInt32),
+    conn_wait_ms Nullable(UInt32),
+    conn_reused Nullable(UInt8),
+    ttfb_ms Nullable(UInt32),
+    upstream_attempts UInt8,
+    exit LowCardinality(String),
+    exit_rtt_ms Nullable(UInt32),
+    exit_connect_ms Nullable(UInt32),
 
     call_type String,
     api_base String,
@@ -203,6 +222,7 @@ CREATE TABLE air.spend_logs
     cache_creation_tokens UInt32,
     cache_creation_5m_tokens UInt32,
     cache_creation_1h_tokens UInt32,
+    cache_creation_12h_tokens UInt32,
     cache_type LowCardinality(Nullable(String)),
     cached_output_tokens UInt32,
     reasoning_tokens UInt32,
@@ -289,6 +309,15 @@ FROM air.spend_logs_kafka;
 -- the client. They're equal only when a mid-stream error was detected after
 -- the response had already committed -- nothing left to mask, the client
 -- already got those exact bytes live.
+--
+-- response_body itself holds the provider's OWN error text verbatim -- it is
+-- the only field that says WHY a request failed ("usage limit reached",
+-- "content policy violation", ...), so it is published as the provider wrote
+-- it. The one exception: CometAPI/ProMan credentials have been seen to echo
+-- the caller's own credential back inside their error body, so for those two
+-- it is reduced to "[REDACTED body bytes=N]".
+-- client_response_body -- what the client actually received -- stays masked
+-- by default (kafka.raw_bodies.redact_sensitive_fields=true).
 -- Named air.raw_bodies_kafka/air.raw_bodies, not air.error_bodies_kafka/
 -- air.error_bodies: neither table is error-only once
 -- kafka.raw_bodies.store_only_errors is set to false (they can then carry a

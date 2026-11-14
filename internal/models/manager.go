@@ -125,6 +125,13 @@ type ModelPrice struct {
 	CacheCreationInputTokenCostAbove1hrAbove200k float64 `json:"cache_creation_input_token_cost_above_1hr_above_200k_tokens,omitempty"`
 	CacheReadInputTokenCostAbove272k             float64 `json:"cache_read_input_token_cost_above_272k_tokens,omitempty"`
 	CacheCreationInputTokenCostAbove272k         float64 `json:"cache_creation_input_token_cost_above_272k_tokens,omitempty"`
+	// 12-hour cache-retention writes (OpenAI's prompt_cache_retention:"12h")
+	// are a separate tier from the 30m/1h writes and priced apart; the
+	// _above_272k rate is the same tier once the prompt crosses the
+	// long-context threshold. A request may carry both a 30m and a 12h write at
+	// once, so the tiers bill independently rather than one rate by top TTL.
+	CacheCreationInputTokenCost12h          float64 `json:"cache_creation_input_token_cost_12h,omitempty"`
+	CacheCreationInputTokenCost12hAbove272k float64 `json:"cache_creation_input_token_cost_12h_above_272k_tokens,omitempty"`
 	// Explicit Cache (Alibaba/Qwen) read tokens are billed at their own rate,
 	// separate from Implicit Cache Read (cache_read_input_token_cost). A request
 	// runs in explicit cache mode when usage.prompt_tokens_details.cache_type ==
@@ -400,6 +407,7 @@ type Manager struct {
 	modelRealNamesPerCred           map[string]map[string]string                     // credential -> alias -> real model name (for credential-specific entries)
 	modelDefaultParams              map[string]map[string]map[string]any             // credential -> alias -> request-body defaults (DB-sourced vLLM deployments only)
 	modelReasoningEffortMaps        map[string]map[string]*config.ReasoningEffortMap // alias -> credential ("" = every credential) -> reasoning_effort_map from config.yaml
+	modelLoopGates                  map[string]map[string]*config.LoopGateOverride   // alias -> credential ("" = every credential) -> loop_gate from config.yaml
 	staticVisionSupport             map[string]bool                                  // model name -> supports_vision from config.yaml
 	modelVisionSupport              map[string]bool                                  // model name -> effective supports_vision (static + DB model_info)
 	credentialMappingsReady         bool                                             // true after static/DB credential mappings have been initialized
@@ -435,6 +443,7 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 		modelRealNamesPerCred:           make(map[string]map[string]string),
 		modelDefaultParams:              make(map[string]map[string]map[string]any),
 		modelReasoningEffortMaps:        make(map[string]map[string]*config.ReasoningEffortMap),
+		modelLoopGates:                  make(map[string]map[string]*config.LoopGateOverride),
 		staticVisionSupport:             collectVisionSupport(staticModels),
 		modelWebSocketResponses:         make(map[string]bool),
 		modelPassthroughResponses:       make(map[string]*bool),
@@ -492,6 +501,12 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 					m.modelReasoningEffortMaps[staticModel.Name] = make(map[string]*config.ReasoningEffortMap)
 				}
 				m.modelReasoningEffortMaps[staticModel.Name][staticModel.Credential] = staticModel.ReasoningEffortMap
+			}
+			if staticModel.LoopGate != nil {
+				if m.modelLoopGates[staticModel.Name] == nil {
+					m.modelLoopGates[staticModel.Name] = make(map[string]*config.LoopGateOverride)
+				}
+				m.modelLoopGates[staticModel.Name][staticModel.Credential] = staticModel.LoopGate
 			}
 			// Register explicit passthrough_responses override if set
 			if staticModel.PassthroughResponses != nil {
@@ -637,6 +652,19 @@ func (m *Manager) GetReasoningEffortMap(alias, credential string) *config.Reason
 	byCred := m.modelReasoningEffortMaps[alias]
 	if rem, ok := byCred[credential]; ok {
 		return rem
+	}
+	return byCred[""]
+}
+
+// GetLoopGateOverride returns the loop_gate block configured for a model alias
+// served by a credential: the entry bound to that credential, else the entry
+// without a credential. nil when the model has none.
+func (m *Manager) GetLoopGateOverride(alias, credential string) *config.LoopGateOverride {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	byCred := m.modelLoopGates[alias]
+	if o, ok := byCred[credential]; ok {
+		return o
 	}
 	return byCred[""]
 }

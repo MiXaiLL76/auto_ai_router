@@ -49,6 +49,7 @@ var proxiedPublicPaths = map[string]struct{}{
 	"/v1/images/edits":       {},
 	"/v1/messages":           {},
 	"/v1/responses":          {},
+	"/v1/systemone":          {},
 }
 
 var legacyPublicPathAliases = map[string]string{
@@ -61,6 +62,7 @@ var legacyPublicPathAliases = map[string]string{
 	"/messages":           "/v1/messages",
 	"/models":             "/v1/models",
 	"/responses":          "/v1/responses",
+	"/systemone":          "/v1/systemone",
 }
 
 func canonicalPublicPath(path string) string {

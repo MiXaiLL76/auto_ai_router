@@ -82,7 +82,8 @@ func buildAnthropicRequest(req *responses.Request, model string) (*anthropic.Ant
 			ar.Thinking = tc
 			ar.OutputConfig = oc
 			ar.MaxTokens = anthropic.EnsureMaxTokensForThinking(ar.MaxTokens, tc)
-			if oc != nil {
+			// A native adaptive model takes the effort as its own control, without the beta.
+			if oc != nil && !anthropic.IsNativeAdaptiveModel(ar.Model) {
 				ar.AnthropicBeta = appendUnique(ar.AnthropicBeta, "effort-2025-11-24")
 			} else if tc.Type == "enabled" {
 				ar.AnthropicBeta = appendUnique(ar.AnthropicBeta, "interleaved-thinking-2025-05-14")

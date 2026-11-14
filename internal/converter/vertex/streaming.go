@@ -75,6 +75,33 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 				"error", err, "json_prefix", jsonData[:min(len(jsonData), 200)])
 			continue // Skip malformed chunks
 		}
+		// A prompt-level refusal: Vertex/Gemini answer HTTP 200 with only
+		// promptFeedback and no candidates at all (the genai SDK documents this
+		// field as sent only in the first stream chunk, and only when no
+		// candidate was generated because the prompt violated content policy).
+		// Without this branch the chunk yields nothing, the whole stream carries
+		// no choices, and the caller sees a content-free 200 -- indistinguishable
+		// from a provider-side failure (a generic 502) and never reported as the
+		// content refusal it actually is. Emit the same terminal error-event
+		// shape a mid-stream provider error uses, so the proxy's existing
+		// classification, its content-policy non-retryable marker and its error
+		// masking all apply unchanged.
+		//
+		// Presence of promptFeedback is the signal, not a particular BlockReason
+		// value: the SDK sends it only on a content violation, so gating on a
+		// non-unspecified reason would silently re-open the 502 for a block that
+		// reports BLOCKED_REASON_UNSPECIFIED. The remaining two conditions keep
+		// that honest against the documented shape (promptFeedback arrives only
+		// in the first chunk, and only when no candidate was generated):
+		// isFirstChunk is still true only while nothing has been written, and
+		// len(Candidates) == 0 matches "no candidate". Together they mean a
+		// promptFeedback can never append an error event onto a partial answer
+		// already streamed to the client -- a chunk carrying both feedback and
+		// real candidates (which the contract says does not happen) keeps the
+		// content and is handled normally instead.
+		if pf := vertexChunk.PromptFeedback; pf != nil && isFirstChunk && len(vertexChunk.Candidates) == 0 {
+			return writePromptBlockedEvent(output, string(pf.BlockReason), pf.BlockReasonMessage)
+		}
 		toolUse.Add(vertexChunk.Candidates, vertexChunk.ModelVersion)
 		answeringModel := toolUse.AnsweringModel(model)
 		keepCallIDs := UsesFunctionCallIDs(answeringModel)
@@ -247,6 +274,44 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 	return scanner.Err()
 }
 
+// writePromptBlockedEvent writes a terminal error event for a prompt the
+// provider refused at the content-policy level (promptFeedback.blockReason),
+// then ends the stream. The shape is the OpenAI mid-stream error event the
+// proxy already recognizes (extractStreamErrorEvent / statusCodeFromProviderStreamError),
+// with a message that carries the "content policy" marker the retry policy
+// treats as non-retryable — every credential would refuse the same prompt, so
+// replaying it only multiplies the delay. blockReasonMessage is the provider's
+// own readable explanation when present (Vertex sends one); it is only used as
+// the event's message suffix, never forwarded verbatim to the client (the
+// proxy masks the body).
+func writePromptBlockedEvent(output io.Writer, blockReason, blockReasonMessage string) error {
+	message := "The prompt was blocked by the provider's content policy"
+	if blockReason != "" {
+		message += " (reason: " + blockReason + ")"
+	}
+	if blockReasonMessage != "" {
+		message += ": " + blockReasonMessage
+	}
+	event := map[string]any{
+		"error": map[string]any{
+			"type":    "invalid_request_error",
+			"code":    "content_policy_violation",
+			"message": message,
+		},
+	}
+	eventJSON, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("marshal prompt-blocked event: %w", err)
+	}
+	if _, werr := fmt.Fprintf(output, "data: %s\n\n", eventJSON); werr != nil {
+		return fmt.Errorf("write prompt-blocked event: %w", werr)
+	}
+	if _, werr := fmt.Fprintf(output, "data: [DONE]\n\n"); werr != nil {
+		return fmt.Errorf("write [DONE] after prompt-blocked event: %w", werr)
+	}
+	return nil
+}
+
 // writeUncontinuedFinish closes, with finish reason "length", the choices whose
 // upstream request stopped with CONTINUATION when no further request followed.
 func writeUncontinuedFinish(output io.Writer, continuing map[int]bool, chatID string, timestamp int64, model string) error {
@@ -313,9 +378,13 @@ func convertVertexFunctionCallToStreamingOpenAI(genaiCall *genai.FunctionCall, t
 		}
 	}
 
+	callID := functionCallID(genaiCall, keepID)
+	if !keepID {
+		callID = converterutil.EncodeToolCallIDWithSignature(callID, thoughtSignature)
+	}
 	toolCall := openai.OpenAIStreamingToolCall{
 		Index: index,
-		ID:    functionCallID(genaiCall, keepID),
+		ID:    callID,
 		Type:  "function",
 		Function: &openai.OpenAIStreamingToolFunction{
 			Name:      genaiCall.Name,

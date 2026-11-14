@@ -21,7 +21,18 @@ server:
   strict_all_team_models_acl: false  # Enforce key/team/user model ACLs (default: false)
   credential_name_as_team_id: false  # Use provider credential name as team_id when auth has no team_id (default: false)
   tiktoken_enabled: true  # Local fallback token estimation when a provider omits usage (default: true)
+  # anthropic_default_max_tokens: 32000  # max_tokens sent to a Claude model when the client sends none (default: 32000, 0 = default)
   # force_stream_for_ttft: false  # Force "stream": true upstream for chat-shaped non-streaming requests (/v1/chat/completions, /v1/messages, converted /v1/responses) and reassemble the response back into non-stream JSON, so every request gets a measurable TTFT. Native/passthrough Responses API and responses_only requests are exempt. (default: false)
+  # The router-run Search/Fetch adapter: for a model whose provider runs its own
+  # search and fetch tools (DeepSeek's /v1/tools/search and /v1/tools/fetch),
+  # the router calls them with the credential's key and bills the calls apart
+  # from the model's tokens. A credential opts in with `deepseek_tools: true`.
+  # deepseek_tools:
+  #   request_timeout: 30s  # Timeout of one Search or Fetch call (default: 30s)
+  #   search_qps: 100  # Per-account Search limit (default: 100, the provider's own limit)
+  #   fetch_qps: 25  # Per-account Fetch limit (default: 25, the provider's own limit)
+  #   max_steps: 8  # Bound of the router-run tool loop (default: 8)
+  #   max_retries: 2  # Retries of a Search or Fetch call after a 429 or 5xx (default: 2)
   model_prices_link: ""  # Optional: URL or file path to model prices JSON (supports os.environ/VAR_NAME)
   model_prices_sync_interval: 5m  # How often model prices are re-fetched from model_prices_link (default: 5m)
   response_headers:
@@ -291,6 +302,21 @@ models:
 #       openai/gpt-5.5-pro: gpt-5.5-pro
 #     credential_denylist:
 #       - untrusted-provider-credential
+#     # Optional: return the request's billed cost to the client in response
+#     # headers. off (default): none; total: X-Total-Cost; breakdown: X-Total-Cost
+#     # and X-Cost-Breakdown (per-component JSON). Legacy: return_response_cost:
+#     # true is the same as response_cost_mode: total.
+#     response_cost_mode: total
+#     # Optional: add the same billed cost to the response body's "usage"
+#     # object instead (usage.cost, or response.usage.cost for the native
+#     # Responses API) -- OpenRouter's usage.cost convention. Independent of
+#     # response_cost_mode above: can be set alone, or together with it, and
+#     # unlike the header it also works for streaming responses.
+#     response_cost_in_body: true
+#     # Optional: opt this organization out of the router's automatic
+#     # Anthropic prompt-cache cache_control injection (session_sticky_auto_
+#     # cache_control). The client's own cache_control markers are kept.
+#     disable_auto_cache_control: true
 
 # Optional: Redis/Valkey backend for distributed rate limiting and response storage.
 # When enabled, all replicas share a single counter namespace — RPM/TPM limits are
@@ -315,11 +341,13 @@ litellm_db:
   enabled: false  # Set to true to enable LiteLLM DB integration
   is_required: false  # Set to true to fail startup if DB connection fails
   database_url: "os.environ/LITELLM_DATABASE_URL"  # PostgreSQL connection string (supports env variables)
+  load_db_models: false  # Serve deployments from LiteLLM_ProxyModelTable (default: false)
+  db_model_sync_interval: 1m  # How often DB models are reloaded (default: 1m)
   max_conns: 25  # Maximum database connections (default: 25, optimized for ~1000 RPM)
   min_conns: 5  # Minimum database connections (default: 5)
   health_check_interval: 10s  # Health check interval (default: 10s)
   connect_timeout: 5s  # Connection timeout (default: 5s)
-  auth_cache_ttl: 20s  # Auth cache TTL (default: 20s)
+  auth_cache_ttl: 5s  # Auth cache TTL (default: 5s)
   auth_cache_size: 10000  # Auth cache size (default: 10000)
   enforce_budget_reservation: false  # Opt in to Redis-backed atomic budget reservation
   enforce_key_rate_limits: false  # Opt in to Redis-backed key/user/team/org RPM/TPM enforcement
@@ -327,8 +355,7 @@ litellm_db:
   log_batch_size: 100  # Spend log batch size (default: 100)
   log_flush_interval: 5s  # Spend log flush interval (default: 5s)
   log_workers: 4  # Parallel queue-draining writer workers (default: 4)
-  log_retry_attempts: 3  # Spend log retry attempts (default: 3)
-  log_retry_delay: 1s  # Spend log retry delay (default: 1s)
+  disable_spend_logs_write: false  # Skip spend writes to Postgres, e.g. when Kafka is the only spend sink (default: false)
   daily_spend_timezone: "Europe/Moscow"  # Timezone of the daily spend tables (default: UTC)
   enable_cost_margin: false  # Apply metadata.cost_margin_config markup of key/user/team/org (default: false)
 

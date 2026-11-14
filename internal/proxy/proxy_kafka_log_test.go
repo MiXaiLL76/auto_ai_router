@@ -10,12 +10,14 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
+	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	pricingmodels "github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // stubKafkaManager is a minimal kafkalog.Manager test double that records
@@ -150,6 +152,67 @@ func TestBuildKafkaSpendEvent_UsesClientResponseID(t *testing.T) {
 		"", "", "", "", "api.openai.com", "success", 0, nil, 0, logCtx.StartTime)
 
 	assert.Equal(t, "chatcmpl-client-123", event.RequestID)
+}
+
+func TestBuildKafkaSpendEvent_TraceID(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	logCtx := testLogCtx(t)
+	endTime := logCtx.StartTime.Add(time.Second)
+	build := func() *kafkalog.SpendEvent {
+		return prx.buildKafkaSpendEvent(logCtx, "openai_primary", "openai_primary:gpt-4o-mini", "hashed-token",
+			"", "", "", "", "api.openai.com", "success", 0, nil, 0, endTime)
+	}
+
+	event := build()
+	assert.Empty(t, event.TraceID, "no span on the request, no trace id")
+	payload, err := json.Marshal(event)
+	require.NoError(t, err)
+	assert.NotContains(t, string(payload), "trace_id")
+
+	sc := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID: trace.TraceID{0x4b, 0xf9, 0x2f, 0x35, 0x77, 0xb3, 0x4d, 0xa6, 0xa3, 0xce, 0x92, 0x9d, 0x0e, 0x0e, 0x47, 0x36},
+		SpanID:  trace.SpanID{0x00, 0xf0, 0x67, 0xaa, 0x0b, 0xa9, 0x02, 0xb7},
+	})
+	logCtx.Request = logCtx.Request.WithContext(trace.ContextWithSpanContext(logCtx.Request.Context(), sc))
+	assert.Equal(t, "4bf92f3577b34da6a3ce929d0e0e4736", build().TraceID,
+		"the request's span names the trace, sampled or not")
+}
+
+func TestBuildKafkaSpendEvent_UpstreamAttemptsAndExit(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	logCtx := testLogCtx(t)
+	endTime := logCtx.StartTime.Add(time.Second)
+	build := func() *kafkalog.SpendEvent {
+		return prx.buildKafkaSpendEvent(logCtx, "openai_primary", "openai_primary:gpt-4o-mini", "hashed-token",
+			"", "", "", "", "api.openai.com", "success", 0, nil, 0, endTime)
+	}
+
+	event := build()
+	assert.Zero(t, event.UpstreamAttempts, "a request that was never sent upstream")
+	assert.Empty(t, event.Exit)
+	payload, err := json.Marshal(event)
+	require.NoError(t, err)
+	assert.Contains(t, string(payload), `"upstream_attempts":0`)
+	assert.NotContains(t, string(payload), `"exit"`)
+	for _, stage := range []string{"retry_ms", "conn_wait_ms", "ttfb_ms"} {
+		assert.NotContains(t, string(payload), stage, "no attempt, no stages")
+	}
+
+	logCtx.Request = logCtx.Request.WithContext(httputil.WithAttempts(logCtx.Request.Context()))
+	attempts := httputil.AttemptsFrom(logCtx.Request.Context())
+	attempts.Begin("azure_first")
+	time.Sleep(15 * time.Millisecond)
+	attempts.Next(httputil.AttemptRetry, string(RetryReasonRateLimit))
+	attempts.Begin("openai_primary")
+	event = build()
+	assert.Equal(t, 2, event.UpstreamAttempts)
+	assert.Empty(t, event.Exit, "the serving credential's attempt named no exit")
+	require.NotNil(t, event.RetryMs)
+	assert.GreaterOrEqual(t, *event.RetryMs, int64(15), "what the attempt before the serving one cost")
+	assert.Nil(t, event.ConnWaitMs, "no round trip measured a wait")
+	assert.Nil(t, event.ConnReused)
+	assert.Nil(t, event.TTFBMs)
+	assert.Nil(t, event.ExitRTTMs)
 }
 
 func TestBuildKafkaSpendEvent_NilTokenUsage(t *testing.T) {
@@ -316,6 +379,115 @@ func TestBuildRawBodyEvent_MapsRawBodies(t *testing.T) {
 	assert.Equal(t, "BadRequestError", event.ErrorClass)
 	assert.Equal(t, rawResponse, event.ResponseBody)
 	assert.Empty(t, event.RequestBody, "RequestBody must stay empty when rawBodyStoreRawBody is off, even if logCtx captured one")
+}
+
+func TestBuildRawBodyEventPublishesProviderErrorTextVerbatim(t *testing.T) {
+	// The provider's own error text is what says WHY a request failed, so
+	// raw_bodies publishes it as it is -- reducing it to a byte count makes
+	// the topic useless for its stated purpose. The bodies that can carry
+	// client-side content (the client's own request, and the answer the
+	// client received) stay masked.
+	prx := NewTestProxyBuilder().Build()
+	prx.rawBodyRedactSensitiveFields = true
+	logCtx := testLogCtx(t)
+	logCtx.HTTPStatus = 400
+	logCtx.ErrorBodyRaw = `{"error":{"message":"synthetic-provider-text"}}`
+	logCtx.ClientResponseBody = "synthetic-client-facing-body"
+	prx.rawBodyStoreRawBody = true
+	logCtx.RequestBodyRaw = `{"messages":"[REDACTED]"}`
+
+	event := prx.buildRawBodyEvent(logCtx, "failure", logCtx.StartTime)
+	assert.Equal(t, logCtx.ErrorBodyRaw, event.ResponseBody,
+		"the provider's own error text is published verbatim")
+	assert.NotContains(t, event.ClientResponseBody, "synthetic-client-facing-body",
+		"what the client received is the model's own output and stays masked")
+	assert.Contains(t, event.ClientResponseBody, "REDACTED")
+	assert.Equal(t, logCtx.RequestBodyRaw, event.RequestBody)
+	assert.Equal(t, "BadRequestError", event.ErrorClass)
+}
+
+func TestBuildRawBodyEventKeepsProviderTextWhenRedactionIsOff(t *testing.T) {
+	// The provider's error text is published verbatim either way; the toggle
+	// only governs the CLIENT-side bodies.
+	prx := NewTestProxyBuilder().Build()
+	prx.rawBodyRedactSensitiveFields = false
+	logCtx := testLogCtx(t)
+	logCtx.HTTPStatus = 400
+	logCtx.ErrorBodyRaw = `{"error":{"message":"synthetic-provider-text"}}`
+	logCtx.ClientResponseBody = "synthetic-client-facing-body"
+
+	event := prx.buildRawBodyEvent(logCtx, "failure", logCtx.StartTime)
+	assert.Equal(t, logCtx.ErrorBodyRaw, event.ResponseBody)
+	assert.Equal(t, logCtx.ClientResponseBody, event.ClientResponseBody,
+		"with redaction off the client-facing body is published verbatim too")
+}
+
+func TestBuildRawBodyEventMasksProviderTextThatEchoesTheCredential(t *testing.T) {
+	// CometAPI and ProMan have been seen to echo the caller's own credential
+	// back in their error text, so their provider body is masked even though
+	// every other provider's is published verbatim -- and even with the
+	// redaction toggle turned OFF: that toggle is a debugging override for
+	// the client's own bodies, never a licence to publish a credential.
+	for _, cred := range []*config.CredentialConfig{
+		{Name: "cometapi-01", Type: config.ProviderTypeCometAPI},
+		{Name: "proman-01", Type: config.ProviderTypeProMan},
+	} {
+		for _, redact := range []bool{true, false} {
+			t.Run(cred.Name, func(t *testing.T) {
+				prx := NewTestProxyBuilder().Build()
+				prx.rawBodyRedactSensitiveFields = redact
+				logCtx := testLogCtx(t)
+				logCtx.HTTPStatus = 400
+				logCtx.Credential = cred
+				logCtx.ErrorBodyRaw = `{"error":{"message":"synthetic-oauth-secret"}}`
+				logCtx.ClientResponseBody = "synthetic-oauth-secret in provider text"
+
+				event := prx.buildRawBodyEvent(logCtx, "failure", logCtx.StartTime)
+				assert.NotContains(t, event.ResponseBody, "synthetic-oauth-secret",
+					"a credential echoed back by the provider must not be published")
+				assert.Contains(t, event.ResponseBody, "REDACTED")
+			})
+		}
+	}
+}
+
+func TestProviderBodyCannotEscapeViaSpendErrorMessage(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	logCtx := testLogCtx(t)
+	logCtx.HTTPStatus = 400
+	logCtx.ErrorMsg = "synthetic-provider-secret"
+	logCtx.ErrorBodyRaw = `{"error":"synthetic-provider-secret"}`
+	event := prx.buildKafkaSpendEvent(logCtx, "cred", "model", "hash", "user", "team", "org", "", "", "failure", 0, nil, 0, logCtx.StartTime)
+	assert.NotContains(t, event.ErrorMessage, "synthetic-provider-secret")
+	assert.Equal(t, classifiedErrorMessage(400, nil), errorMessageForLog(logCtx))
+	assert.Equal(t, "synthetic-provider-secret", logCtx.ErrorMsg, "do not mutate response-path state")
+	logCtx.ErrorBodyRaw = ""
+	logCtx.ErrorMsg = "LiteLLM DB unavailable"
+	assert.Equal(t, "LiteLLM DB unavailable", errorMessageForLog(logCtx))
+}
+
+func TestSpendErrorMessageKeepsSafeBadRequestClassification(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{"context window", `{"error":{"message":"This model's maximum context length is exceeded by the request. secret-suffix"}}`, "This model's maximum context length is exceeded by the request"},
+		{"required parameter", `{"error":{"message":"Missing required parameter 'prompt'. secret-suffix","param":"prompt"}}`, "Missing required parameter"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logCtx := testLogCtx(t)
+			logCtx.HTTPStatus = http.StatusBadRequest
+			logCtx.ErrorBodyRaw = tc.body
+			logCtx.ErrorMsg = tc.body
+			message := errorMessageForLog(logCtx)
+			assert.Contains(t, message, tc.want)
+			assert.NotContains(t, message, "secret-suffix")
+			event := prx.buildKafkaSpendEvent(logCtx, "cred", "model", "hash", "user", "team", "org", "", "", "failure", 0, nil, 0, logCtx.StartTime)
+			assert.Equal(t, message, event.ErrorMessage)
+		})
+	}
 }
 
 // TestBuildRawBodyEvent_ErrorOriginSetWhenResponseBodyEmpty reproduces the

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
+	"github.com/mixaill76/auto_ai_router/internal/deepseektools"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/auth"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
@@ -72,6 +74,10 @@ type orchestratedRequest struct {
 	responsesMetadata    *responses.ResponsesMetadata // non-nil for Responses API requests
 	messagesMetadata     anthropicconv.MessagesAdapterMetadata
 	stickyCacheEligible  bool
+	// autoCacheControlDisabled mirrors logCtx.OrganizationPolicy.DisablesAutoCacheControl():
+	// an organization-level opt-out of InjectCacheControl, independent of
+	// stickyCacheEligible and the global session_sticky_auto_cache_control switch.
+	autoCacheControlDisabled bool
 }
 
 type credentialPreparedRequest struct {
@@ -106,6 +112,7 @@ func (p *Proxy) orchestrateRequest(
 	if !p.authenticateRequest(w, r, logCtx, isLiteLLMHealthy) {
 		return nil, false
 	}
+	logCtx.mark(markAuthenticated)
 	markerPresent := credentialDenylistState(r.Context()).markerPresent
 	masterKeyAuthenticated := p.isMasterKey(logCtx.Token)
 	logCtx.IsProxyRequest = markerPresent && masterKeyAuthenticated
@@ -132,8 +139,10 @@ func (p *Proxy) orchestrateRequest(
 	if !ok {
 		return nil, false
 	}
+	r = withClientServiceTiers(r, logCtx.clientServiceTiers)
 
 	logCtx.RequestEndpoint = r.URL.Path
+	logCtx.IsSystemOne = isSystemOnePath(r.URL.Path)
 	logCtx.ReasoningRequested, logCtx.ReasoningSource, logCtx.ThinkingMode = requestReasoningDetails(body)
 	var policyDenylist []string
 	if logCtx.OrganizationPolicy != nil {
@@ -151,6 +160,19 @@ func (p *Proxy) orchestrateRequest(
 			routingExclusions = make(map[string]bool)
 		}
 		routingExclusions[credentialName] = true
+	}
+	// The System One API and every other endpoint are served by disjoint
+	// credentials (system_one); a model that has none for this endpoint is
+	// refused here rather than reported as out of credentials.
+	systemOneExcluded := p.systemOneExclusions(logCtx.IsSystemOne)
+	if !p.admitSystemOneRequest(w, logCtx, modelID, streaming, logCtx.IsSystemOne, systemOneExcluded) {
+		return nil, false
+	}
+	for name := range systemOneExcluded {
+		if routingExclusions == nil {
+			routingExclusions = make(map[string]bool)
+		}
+		routingExclusions[name] = true
 	}
 	triedCreds := GetTried(r.Context())
 	for name := range routingExclusions {
@@ -259,6 +281,7 @@ func (p *Proxy) orchestrateRequest(
 	if !ok {
 		return nil, false
 	}
+	logCtx.mark(markRouted)
 
 	p.logger.DebugContext(r.Context(), "Responses API detection",
 		"is_responses_api", isResponsesAPI,
@@ -269,6 +292,7 @@ func (p *Proxy) orchestrateRequest(
 		"url_path", r.URL.Path)
 
 	stickyCacheEligible := logCtx.SessionID != "" || preferredCredentialName != ""
+	autoCacheControlDisabled := logCtx.OrganizationPolicy.DisablesAutoCacheControl()
 	credentialReq, prepErr := p.prepareRequestForCredential(
 		r,
 		baseBody,
@@ -281,6 +305,7 @@ func (p *Proxy) orchestrateRequest(
 		isResponsesAPI,
 		prevEntryHandled,
 		stickyCacheEligible,
+		autoCacheControlDisabled,
 	)
 	if prepErr != nil {
 		var validationErr *converterutil.RequestValidationError
@@ -313,6 +338,7 @@ func (p *Proxy) orchestrateRequest(
 	body = credentialReq.body
 	realModelID = credentialReq.realModelID
 	r.URL.Path = credentialReq.path
+	logCtx.mark(markRequestPrepared)
 
 	logCtx.Credential = cred
 	r = markCredentialAsTried(r, cred.Name)
@@ -346,6 +372,7 @@ func (p *Proxy) orchestrateRequest(
 		responsesMetadata:          responsesMetadata,
 		messagesMetadata:           credentialReq.messagesMetadata,
 		stickyCacheEligible:        stickyCacheEligible,
+		autoCacheControlDisabled:   autoCacheControlDisabled,
 	}, true
 }
 
@@ -367,9 +394,10 @@ func (p *Proxy) prepareRequestForCredential(
 	isResponsesAPI bool,
 	prevEntryHandled bool,
 	stickyCacheEligible bool,
+	autoCacheControlDisabled bool,
 ) (credentialPreparedRequest, error) {
 	req, err := p.buildCredentialRequest(r, baseBody, baseProxyBody, modelID, baseRealModelID,
-		basePath, streaming, cred, isResponsesAPI, prevEntryHandled, stickyCacheEligible)
+		basePath, streaming, cred, isResponsesAPI, prevEntryHandled, stickyCacheEligible, autoCacheControlDisabled)
 	if err != nil {
 		return req, err
 	}
@@ -426,9 +454,71 @@ func (p *Proxy) sanitizeClientParams(r *http.Request, modelID string, cred *conf
 		}
 	}
 	if chatShaped {
-		return openai.ReplaceBodyParam(req.realModelID, body)
+		body = openai.ReplaceBodyParam(req.realModelID, body)
+	} else {
+		body = openai.ReplaceResponsesBodyParam(req.realModelID, body)
 	}
-	return openai.ReplaceResponsesBodyParam(req.realModelID, body)
+	// DeepSeek's flash model cannot run the built-in web search/fetch tools
+	// itself (web_search is rejected outright, web_fetch is ignored), so the
+	// router takes them over: the built-in tools become function tools the
+	// model can call, and the router runs them itself.
+	//
+	// This runs after the conversion above, so the body is Chat-shaped for
+	// both client shapes (/v1/chat/completions and a /v1/responses request
+	// converted to Chat), which is the shape the model actually answers in.
+	return p.applyDeepSeekToolTools(r, modelID, cred, body)
+}
+
+// applyDeepSeekToolTools replaces the built-in search/fetch tools with the
+// adapter's function tools, when the request and the credential call for it.
+//
+// It returns the body unchanged for every other request: a model that can
+// run the tools itself, a request without them, or a credential that is not
+// DeepSeek's.
+func (p *Proxy) applyDeepSeekToolTools(r *http.Request, modelID string, cred *config.CredentialConfig, body []byte) []byte {
+	if !deepSeekToolsEnabledFor(modelID, cred) {
+		return body
+	}
+	plan := deepseektools.PlanTools(body)
+	if plan.Empty() {
+		return body
+	}
+	rewritten, rewrittenPlan, err := deepseektools.RewriteRequest(body)
+	if err != nil {
+		p.logger.WarnContext(r.Context(), "Could not rewrite the built-in search tools for the router-run adapter",
+			"model", modelID, "credential", cred.Name, "error", err)
+		return body
+	}
+	p.logger.DebugContext(r.Context(), "Router will run the built-in search/fetch tools itself",
+		"model", modelID, "credential", cred.Name, "plan", describeToolPlan(rewrittenPlan))
+	return rewritten
+}
+
+// applyAnthropicDefaultMaxTokens gives a Claude request the default max_tokens when the
+// client sent no limit (null counts as none): the converter's 4096 is spent on thinking
+// and leaves no answer. It runs after the key budget check, which keeps its own
+// estimate. Only Claude models on Anthropic-wire providers; /v1/messages bodies and
+// requests relayed to another router are left as they are.
+func (p *Proxy) applyAnthropicDefaultMaxTokens(cred *config.CredentialConfig, prepared *orchestratedRequest, realModelID string, body []byte) []byte {
+	if prepared.passthroughMessages || prepared.passthroughResponses || prepared.convertedToResponses ||
+		prepared.completionsPath || !anthropicconv.IsKnownClaudeModel(realModelID) {
+		return body
+	}
+	switch cred.EffectiveProviderType() {
+	case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI, config.ProviderTypeProMan, config.ProviderTypeBedrock:
+	default:
+		return body
+	}
+	maxTokens := p.anthropicDefaultMaxTokens
+	if maxTokens <= 0 {
+		maxTokens = config.AnthropicDefaultMaxTokens
+	}
+	defaults := map[string]any{"max_tokens": maxTokens}
+	if prepared.nativeResponses {
+		defaults = openai.ResponsesDefaultParams(defaults)
+	}
+	body = openai.DropNullParams(body, "max_tokens", "max_completion_tokens", "max_output_tokens")
+	return openai.ApplyDefaultParams(body, defaults)
 }
 
 func (p *Proxy) buildCredentialRequest(
@@ -443,9 +533,10 @@ func (p *Proxy) buildCredentialRequest(
 	isResponsesAPI bool,
 	prevEntryHandled bool,
 	stickyCacheEligible bool,
+	autoCacheControlDisabled bool,
 ) (credentialPreparedRequest, error) {
 	req, err := p.buildCredentialRequestInner(r, baseBody, baseProxyBody, modelID, baseRealModelID,
-		basePath, streaming, cred, isResponsesAPI, prevEntryHandled, stickyCacheEligible)
+		basePath, streaming, cred, isResponsesAPI, prevEntryHandled, stickyCacheEligible, autoCacheControlDisabled)
 	if err != nil {
 		return req, err
 	}
@@ -559,6 +650,7 @@ func (p *Proxy) buildCredentialRequestInner(
 	isResponsesAPI bool,
 	prevEntryHandled bool,
 	stickyCacheEligible bool,
+	autoCacheControlDisabled bool,
 ) (credentialPreparedRequest, error) {
 	body := baseBody
 	proxyBody := baseProxyBody
@@ -582,6 +674,18 @@ func (p *Proxy) buildCredentialRequestInner(
 			realModelID = credRealName
 		}
 	}
+	if isSystemOnePath(basePath) {
+		// Native System One: the body goes upstream as the client sent it, with
+		// only the model id swapped above. None of the chat/messages/responses
+		// conversions or chat-only cleanups below apply.
+		return credentialPreparedRequest{
+			body:        body,
+			proxyBody:   proxyBody,
+			proxyPath:   basePath,
+			realModelID: realModelID,
+			path:        basePath,
+		}, nil
+	}
 	requestAPI := anthropicconv.ChatAPI
 	if basePath == "/v1/messages" {
 		requestAPI = anthropicconv.MessagesAPI
@@ -591,10 +695,19 @@ func (p *Proxy) buildCredentialRequestInner(
 	if err := anthropicconv.ValidateToolChoice(body, realModelID, requestAPI); err != nil {
 		return credentialPreparedRequest{}, err
 	}
+	if err := anthropicconv.ValidateThinkingControls(body, realModelID, requestAPI); err != nil {
+		return credentialPreparedRequest{}, err
+	}
+	for _, tier := range clientServiceTiers(r.Context()) {
+		if err := anthropicconv.ValidateServiceTier(tier, realModelID); err != nil {
+			return credentialPreparedRequest{}, err
+		}
+	}
 
 	effectiveType := cred.EffectiveProviderType()
 	if p.stickyAutoCacheCtrl &&
 		stickyCacheEligible &&
+		!autoCacheControlDisabled &&
 		(effectiveType == config.ProviderTypeAnthropic || effectiveType == config.ProviderTypeCometAPI || effectiveType == config.ProviderTypeProMan || effectiveType == config.ProviderTypeBedrock) {
 		body = anthropicconv.InjectCacheControl(body)
 	}
@@ -801,6 +914,26 @@ func (p *Proxy) buildCredentialRequestInner(
 			p.logger.WarnContext(r.Context(), "responses_only set on a credential that cannot serve native Responses API passthrough; converting to Chat Completions instead",
 				"model", modelID, "credential", cred.Name, "provider", string(cred.Type))
 		}
+		// The router-run DeepSeek Search/Fetch tools are taken over BEFORE
+		// the conversion: the conversion drops every built-in tool (they
+		// have no Chat Completions equivalent), so a web_search the client
+		// asked for would be gone by the time the adapter could see it. The
+		// adapter's replacement is an ordinary function tool, which the
+		// conversion keeps.
+		if p.deepSeekToolsEnabled && deepSeekToolsEnabledFor(modelID, cred) {
+			rewritten, plan, rewriteErr := deepseektools.RewriteResponsesRequest(body)
+			switch {
+			case rewriteErr != nil:
+				p.logger.WarnContext(r.Context(), "Could not rewrite the built-in search tools for the router-run adapter",
+					"model", modelID, "credential", cred.Name, "error", rewriteErr)
+			case plan != nil:
+				// Only the request body changes: the proxy body is rebuilt from
+				// it right below, so assigning it here would be overwritten.
+				body = rewritten
+				p.logger.DebugContext(r.Context(), "Router will run the built-in search/fetch tools itself",
+					"model", modelID, "credential", cred.Name, "plan", describeToolPlan(plan))
+			}
+		}
 		chatBody, err := responses.RequestToChat(body)
 		if err != nil {
 			return req, err
@@ -838,6 +971,24 @@ func markCredentialAsTried(r *http.Request, credentialName string) *http.Request
 	triedCreds[credentialName] = true
 	ctx = SetTried(ctx, triedCreds)
 	return r.WithContext(ctx)
+}
+
+type clientServiceTiersContextKey struct{}
+
+// withClientServiceTiers carries the client's service tiers, which the ingress
+// sanitizer strips from the body, to buildCredentialRequestInner. They are
+// checked there against the model the credential serves: before alias
+// resolution the client's model name says nothing about it.
+func withClientServiceTiers(r *http.Request, tiers []string) *http.Request {
+	if len(tiers) == 0 {
+		return r
+	}
+	return r.WithContext(context.WithValue(r.Context(), clientServiceTiersContextKey{}, tiers))
+}
+
+func clientServiceTiers(ctx context.Context) []string {
+	tiers, _ := ctx.Value(clientServiceTiersContextKey{}).([]string)
+	return tiers
 }
 
 func (p *Proxy) isLiteLLMHealthy() bool {
@@ -1014,6 +1165,9 @@ func (p *Proxy) authenticateCaller(
 		p.logger.WarnContext(r.Context(), "Invalid master key",
 			"error_code", http.StatusUnauthorized,
 			"provided_key_prefix", security.MaskAPIKey(token))
+		logCtx.Status = "failure"
+		logCtx.HTTPStatus = http.StatusUnauthorized
+		logCtx.ErrorMsg = "Invalid master key"
 		WriteErrorUnauthorized(w, "Invalid master key")
 		return false
 	}
@@ -1054,6 +1208,7 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		WriteErrorBadRequest(w, "Failed to read request body")
 		return nil, "", "", false, false
 	}
+	logCtx.mark(markBodyRead)
 	if closeErr := r.Body.Close(); closeErr != nil {
 		p.logger.WarnContext(r.Context(), "Failed to close request body", "error", closeErr)
 	}
@@ -1086,6 +1241,7 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		return nil, "", "", false, false
 	}
 	body = sanitized.Body
+	logCtx.clientServiceTiers = sanitized.ServiceTiers
 	if p.rawBodyStoreRawBody {
 		// Opt-in only (kafka.raw_bodies.store_raw_body, default false) --
 		// this is the client's own request body, e.g. the prompt, a

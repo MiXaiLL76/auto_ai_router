@@ -200,6 +200,11 @@ type ModelRPMConfig struct {
 	// From the database it is read from LiteLLM's model_info.supports_vision.
 	SupportsVision *bool `yaml:"supports_vision,omitempty"`
 
+	// LoopGate overrides the loop_gate settings for this model (on its
+	// credential, or on every credential when the entry has none). Wins over
+	// the credential's loop_gate block.
+	LoopGate *LoopGateOverride `yaml:"loop_gate,omitempty"`
+
 	// DefaultParams are request-body defaults applied to a vLLM deployment when the
 	// client did not send the same key (LiteLLM deployment litellm_params such as
 	// chat_template_kwargs, temperature, top_k). Populated only by the database
@@ -222,6 +227,7 @@ func (m *ModelRPMConfig) UnmarshalYAML(value *yaml.Node) error {
 		ResponsesOnly        string              `yaml:"responses_only,omitempty"`
 		ReasoningEffortMap   *ReasoningEffortMap `yaml:"reasoning_effort_map,omitempty"`
 		SupportsVision       string              `yaml:"supports_vision,omitempty"`
+		LoopGate             *LoopGateOverride   `yaml:"loop_gate,omitempty"`
 	}
 
 	var temp tempConfig
@@ -232,6 +238,7 @@ func (m *ModelRPMConfig) UnmarshalYAML(value *yaml.Node) error {
 	m.Name = resolveEnvString(temp.Name)
 	m.Model = resolveEnvString(temp.Model)
 	m.Credential = resolveEnvString(temp.Credential)
+	m.LoopGate = temp.LoopGate
 	m.ReasoningEffortMap = nil
 	if !temp.ReasoningEffortMap.IsEmpty() {
 		m.ReasoningEffortMap = temp.ReasoningEffortMap
@@ -291,6 +298,7 @@ type Config struct {
 	Video          VideoConfig          `yaml:"video,omitempty"`
 	YandexSearch   YandexSearchConfig   `yaml:"yandex_search,omitempty"`
 	VisionFallback VisionFallbackConfig `yaml:"vision_fallback,omitempty"`
+	LoopGate       LoopGateConfig       `yaml:"loop_gate,omitempty"`
 	// ModelTemplates stores x-model-templates entries as raw interface{} so that
 	// both single-model mappings and lists of models can be defined as YAML anchors
 	// without type errors. The actual model data is extracted via anchor expansion.
@@ -327,6 +335,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		Video                VideoConfig                `yaml:"video,omitempty"`
 		YandexSearch         YandexSearchConfig         `yaml:"yandex_search,omitempty"`
 		VisionFallback       VisionFallbackConfig       `yaml:"vision_fallback,omitempty"`
+		LoopGate             LoopGateConfig             `yaml:"loop_gate,omitempty"`
 		ModelTemplates       map[string]interface{}     `yaml:"x-model-templates,omitempty"`
 	}
 
@@ -355,6 +364,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.Video = raw.Video
 	c.YandexSearch = raw.YandexSearch
 	c.VisionFallback = raw.VisionFallback
+	c.LoopGate = raw.LoopGate
 	c.ModelTemplates = raw.ModelTemplates
 
 	return nil
@@ -454,6 +464,48 @@ func resolveAliasesInNode(node *yaml.Node, anchors map[string]*yaml.Node) {
 		resolveAliasesInNode(child, anchors)
 	}
 }
+
+// DeepSeekToolsConfig holds the settings of the router-run DeepSeek
+// Search/Fetch adapter.
+//
+// DeepSeek's flash model cannot run the built-in web_search/web_fetch tools
+// itself, so the router runs them: it calls DeepSeek's own
+// /v1/tools/search and /v1/tools/fetch endpoints with the credential's key
+// and bills the calls separately from the model's tokens.
+type DeepSeekToolsConfig struct {
+	// Enabled turns the adapter on (default: true when the section is
+	// present; the adapter only ever engages for a DeepSeek credential that
+	// was asked for one of the built-in tools).
+	Enabled bool `yaml:"enabled"`
+	// RequestTimeout bounds one Search or Fetch call (default: 30s).
+	RequestTimeout time.Duration `yaml:"request_timeout"`
+	// SearchQPS is the per-account Search limit (default: 100, the
+	// provider's own limit). The limit is per DeepSeek account, shared by
+	// the account's keys and platforms.
+	SearchQPS int `yaml:"search_qps"`
+	// FetchQPS is the per-account Fetch limit (default: 25, the provider's
+	// own limit).
+	FetchQPS int `yaml:"fetch_qps"`
+	// MaxSteps bounds the router-run tool loop (default: 8): the model may
+	// call the tools this many times before the router stops and returns
+	// the last answer.
+	MaxSteps int `yaml:"max_steps"`
+	// MaxRetries is how many times a Search or Fetch call is retried after
+	// a 429 or a 5xx (default: 2). Other 4xx answers are not retried.
+	MaxRetries int `yaml:"max_retries"`
+}
+
+// DefaultDeepSeekToolsRequestTimeout is the default timeout of one
+// Search/Fetch call.
+const DefaultDeepSeekToolsRequestTimeout = 30 * time.Second
+
+// DefaultDeepSeekToolsMaxSteps is the default bound of the router-run tool
+// loop.
+const DefaultDeepSeekToolsMaxSteps = 8
+
+// DefaultDeepSeekToolsMaxRetries is the default number of retries of a
+// Search/Fetch call.
+const DefaultDeepSeekToolsMaxRetries = 2
 
 // RedisConfig holds configuration for Redis/Valkey-backed distributed rate limiting.
 // When Enabled=false the rate limiter falls back to in-process counters.
@@ -666,6 +718,11 @@ func (r *RedisConfig) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
+// AnthropicDefaultMaxTokens is the max_tokens sent to a Claude model when the client
+// sends no limit. A small limit is spent on thinking before the answer starts; 32000
+// fits the output limit of every Claude the router serves (Opus 4 / 4.1: 32000).
+const AnthropicDefaultMaxTokens = 32000
+
 type ServerConfig struct {
 	Port                       int                   `yaml:"port"`
 	MaxBodySizeMB              int                   `yaml:"max_body_size_mb"`
@@ -679,6 +736,7 @@ type ServerConfig struct {
 	MaxIdleConns               int                   `yaml:"max_idle_conns"`
 	MaxIdleConnsPerHost        int                   `yaml:"max_idle_conns_per_host"`
 	IdleConnTimeout            time.Duration         `yaml:"idle_conn_timeout"`
+	ResponseHeaderTimeout      time.Duration         `yaml:"response_header_timeout"`           // Max time to wait for a provider's response headers on one upstream attempt, not counting body/stream read. Only enforced for attempts actually sent upstream with "stream": true (see Proxy.streamingClient) — a credential that misses this is retried with the next one and, when external ban decisions aren't wired, banned for this model for 30s. Opt-in: unset (default 0) falls back to request_timeout, i.e. no behavior change — a short value (e.g. 4s) is only safe to pick with enough fallback credentials per model that one false-positive retry doesn't surface as an error. A negative duration, e.g. -1s, is the same as unset but explicit.
 	HTTP2IdlePingTimeout       time.Duration         `yaml:"http2_idle_ping_timeout"`           // How long a provider HTTP/2 connection may go without any frame before a liveness PING is sent (default: 15s; a negative duration, e.g. -1s, disables the check — either this or http2_ping_timeout alone turns it off)
 	HTTP2PingTimeout           time.Duration         `yaml:"http2_ping_timeout"`                // How long to wait for a liveness PING to be acked before closing the connection (default: 10s; a negative duration, e.g. -1s, disables the check — same as http2_idle_ping_timeout, either field alone turns it off)
 	MaxConnectionLifetime      time.Duration         `yaml:"max_connection_lifetime"`           // How long a provider connection takes new requests; it closes once its last request ends (default: 0, reused for as long as requests come)
@@ -687,6 +745,8 @@ type ServerConfig struct {
 	IdleTimeout                time.Duration         `yaml:"idle_timeout"`                      // HTTP server idle timeout (default: 2*write_timeout)
 	MaxProviderRetries         int                   `yaml:"max_provider_retries"`              // Max same-type credential retries on provider errors (default: 2, meaning 3 total attempts)
 	MaxFallbackAttempts        int                   `yaml:"max_fallback_attempts"`             // Max fallback proxy hops per request chain (default: 5)
+	AnthropicDefaultMaxTokens  int                   `yaml:"anthropic_default_max_tokens"`      // max_tokens sent to a Claude model when the client sends none (default: 32000, 0 = default)
+	DeepSeekTools              DeepSeekToolsConfig   `yaml:"deepseek_tools,omitempty"`          // The router-run DeepSeek Search/Fetch adapter (see DeepSeekToolsConfig)
 	SessionStickyEnabled       bool                  `yaml:"session_sticky_enabled"`            // Enable session-sticky credential routing (default: true)
 	SessionStickyTTL           int                   `yaml:"session_sticky_ttl_minutes"`        // Session binding TTL in minutes (0 = default 6)
 	SessionStickyAutoCacheCtrl bool                  `yaml:"session_sticky_auto_cache_control"` // Auto-inject Anthropic cache_control when session is active (default: true)
@@ -701,6 +761,15 @@ type ServerConfig struct {
 	CredentialNameAsTeamID     bool                  `yaml:"credential_name_as_team_id"`        // Use provider credential name as team_id when auth has no team_id (default: false)
 	ProxyHealthTimeout         time.Duration         `yaml:"proxy_health_timeout"`              // Timeout for fetching /health from remote proxy credentials (default: 15s)
 	ResponseHeaders            ResponseHeadersConfig `yaml:"response_headers"`
+	// MirrorCacheWriteTokens mirrors a cache write reported only under a
+	// provider's own naming (Anthropic-type credentials' cache_creation_tokens,
+	// Requesty's caching_tokens) into cache_write_tokens and the Alibaba-spelled
+	// cache_creation too, so a client whose own accounting reads only one of
+	// those names still sees the write (default: true — this is the behavior
+	// PR #355 already shipped unconditionally for Anthropic-type credentials;
+	// this flag only adds Requesty to it and gives deployments a way to turn
+	// the whole thing off, not a way to opt in from a stricter default).
+	MirrorCacheWriteTokens bool `yaml:"mirror_cache_write_tokens"`
 }
 
 type ResponseHeaderMode string
@@ -787,6 +856,7 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		MaxIdleConns               string                `yaml:"max_idle_conns"`
 		MaxIdleConnsPerHost        string                `yaml:"max_idle_conns_per_host"`
 		IdleConnTimeout            string                `yaml:"idle_conn_timeout"`
+		ResponseHeaderTimeout      string                `yaml:"response_header_timeout"`
 		HTTP2IdlePingTimeout       string                `yaml:"http2_idle_ping_timeout"`
 		HTTP2PingTimeout           string                `yaml:"http2_ping_timeout"`
 		MaxConnectionLifetime      string                `yaml:"max_connection_lifetime"`
@@ -794,6 +864,7 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		IdleTimeout                string                `yaml:"idle_timeout"`
 		MaxProviderRetries         string                `yaml:"max_provider_retries"`
 		MaxFallbackAttempts        string                `yaml:"max_fallback_attempts"`
+		AnthropicDefaultMaxTokens  string                `yaml:"anthropic_default_max_tokens"`
 		SessionStickyEnabled       string                `yaml:"session_sticky_enabled"`
 		SessionStickyTTL           string                `yaml:"session_sticky_ttl_minutes"`
 		SessionStickyAutoCacheCtrl string                `yaml:"session_sticky_auto_cache_control"`
@@ -808,6 +879,7 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		CredentialNameAsTeamID     string                `yaml:"credential_name_as_team_id"`
 		ProxyHealthTimeout         string                `yaml:"proxy_health_timeout"`
 		ResponseHeaders            ResponseHeadersConfig `yaml:"response_headers"`
+		MirrorCacheWriteTokens     string                `yaml:"mirror_cache_write_tokens"`
 	}
 
 	var temp tempConfig
@@ -849,6 +921,9 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 	if s.IdleConnTimeout, err = parseField(temp.IdleConnTimeout, 120*time.Second, time.ParseDuration, "idle_conn_timeout"); err != nil {
 		return err
 	}
+	if s.ResponseHeaderTimeout, err = parseField(temp.ResponseHeaderTimeout, 0, time.ParseDuration, "response_header_timeout"); err != nil {
+		return err
+	}
 	if s.HTTP2IdlePingTimeout, err = parseField(temp.HTTP2IdlePingTimeout, 15*time.Second, time.ParseDuration, "http2_idle_ping_timeout"); err != nil {
 		return err
 	}
@@ -873,6 +948,10 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 	if s.MaxFallbackAttempts, err = parseField(temp.MaxFallbackAttempts, 5, strconv.Atoi, "max_fallback_attempts"); err != nil {
 		return err
 	}
+	// max_tokens for a Claude model when the client sends none (default: 32000)
+	if s.AnthropicDefaultMaxTokens, err = parseField(temp.AnthropicDefaultMaxTokens, AnthropicDefaultMaxTokens, strconv.Atoi, "anthropic_default_max_tokens"); err != nil {
+		return err
+	}
 	if s.SessionStickyEnabled, err = parseField(temp.SessionStickyEnabled, true, strconv.ParseBool, "session_sticky_enabled"); err != nil {
 		return err
 	}
@@ -880,6 +959,9 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if s.SessionStickyAutoCacheCtrl, err = parseField(temp.SessionStickyAutoCacheCtrl, true, strconv.ParseBool, "session_sticky_auto_cache_control"); err != nil {
+		return err
+	}
+	if s.MirrorCacheWriteTokens, err = parseField(temp.MirrorCacheWriteTokens, true, strconv.ParseBool, "mirror_cache_write_tokens"); err != nil {
 		return err
 	}
 	if s.StdoutLogsEnabled, err = parseField(temp.StdoutLogsEnabled, true, strconv.ParseBool, "stdout_logs_enabled"); err != nil {
@@ -949,6 +1031,28 @@ type CredentialConfig struct {
 	// Priority is the primary-selection priority group (lower selects first).
 	// See EffectivePriority for the resolution chain against FallbackPriority.
 	Priority int `yaml:"priority,omitempty"`
+	// DeepSeekTools marks the credential as one whose provider runs its own
+	// Search and Fetch tools (POST {base_url}/v1/tools/search and
+	// /v1/tools/fetch). The router calls them with this credential's key and
+	// bills the calls apart from the model's tokens.
+	//
+	// It is an explicit opt-in rather than a guess from the base URL: the
+	// router must not start calling a provider's endpoints because its
+	// address happens to look like DeepSeek's.
+	DeepSeekTools bool `yaml:"deepseek_tools,omitempty"`
+
+	// ResponseHeaderTimeout overrides server.response_header_timeout for this
+	// one credential. Unset (0) inherits the server-level value (itself 0 by
+	// default, i.e. no per-attempt header budget at all). The fleet-wide
+	// distribution of this credential's own successful time-to-first-token
+	// is the thing to check before setting this: pick a value above its own
+	// p99, not a borrowed number from another credential or model -- a 20-30x
+	// spread between credentials' normal latency is common here, so there is
+	// no one value safe for all of them (see the 2026-11-06 gpt-6-luna
+	// incident, caused by exactly that). A negative duration, e.g. -1s,
+	// explicitly opts this credential out even if the server-level default
+	// is ever turned on fleet-wide.
+	ResponseHeaderTimeout time.Duration `yaml:"response_header_timeout,omitempty"`
 
 	ReasoningOnly           bool              `yaml:"reasoning_only,omitempty"`
 	Scopes                  []string          `yaml:"scopes,omitempty"`
@@ -970,6 +1074,13 @@ type CredentialConfig struct {
 	// Proxy/AIR remote-router specific fields
 	IsFallback bool `yaml:"is_fallback,omitempty"`
 
+	// SystemOne marks a credential that speaks only the native System One API
+	// (POST /v1/systemone). Such a credential serves nothing else, and
+	// /v1/systemone requests go only to credentials with this flag (or to
+	// proxy-like credentials, whose peer router decides). Only OpenAI-wire
+	// credentials (openai, vllm) may set it: they forward the request path as is.
+	SystemOne bool `yaml:"system_one,omitempty"`
+
 	// RequestHeaders are set on every upstream request sent with this direct
 	// provider credential (not air/proxy), replacing whatever the client sent
 	// under the same name; an empty value removes the header instead. Keys are
@@ -977,6 +1088,10 @@ type CredentialConfig struct {
 	// Typical use: a fixed User-Agent for a provider whose WAF rejects some
 	// client User-Agents (Novita's Cloudflare answers Python-urllib with 403/1010).
 	RequestHeaders map[string]string `yaml:"request_headers,omitempty"`
+
+	// LoopGate overrides the loop_gate settings for every model of this
+	// credential. A model's own loop_gate block wins over it.
+	LoopGate *LoopGateOverride `yaml:"loop_gate,omitempty"`
 }
 
 func (c CredentialConfig) VisibleTo(visibility scope.Context) bool {
@@ -1079,31 +1194,35 @@ func (c CredentialConfig) SameProviderIdentity(other CredentialConfig) bool {
 func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 	// Create a temporary struct with all string fields
 	type tempConfig struct {
-		Name             string           `yaml:"name"`
-		Type             string           `yaml:"type"`
-		APIKey           string           `yaml:"api_key"`
-		BaseURL          string           `yaml:"base_url"`
-		ProxyURL         string           `yaml:"proxy_url,omitempty"`
-		AuthType         string           `yaml:"auth_type,omitempty"`
-		OpenAIProtocol   string           `yaml:"openai_proto,omitempty"`
-		GoogleProtocol   string           `yaml:"google_proto,omitempty"`
-		RPM              string           `yaml:"rpm"`
-		TPM              string           `yaml:"tpm"`
-		Weight           string           `yaml:"weight"`
-		FallbackPriority string           `yaml:"fallback_priority,omitempty"`
-		Priority         string           `yaml:"priority,omitempty"`
-		ReasoningOnly    string           `yaml:"reasoning_only,omitempty"`
-		Scopes           []string         `yaml:"scopes,omitempty"`
-		DeniedScopes     []string         `yaml:"denied_scopes,omitempty"`
-		ForbiddenScopes  []string         `yaml:"forbidden_scopes,omitempty"`
-		ProjectID        string           `yaml:"project_id,omitempty"`
-		Location         string           `yaml:"location,omitempty"`
-		CredentialsFile  string           `yaml:"credentials_file,omitempty"`
-		CredentialsJSON  string           `yaml:"credentials_json,omitempty"`
-		IsFallback       string           `yaml:"is_fallback,omitempty"`
-		Models           []ModelRPMConfig `yaml:"models,omitempty"`
+		Name                  string           `yaml:"name"`
+		Type                  string           `yaml:"type"`
+		APIKey                string           `yaml:"api_key"`
+		BaseURL               string           `yaml:"base_url"`
+		ProxyURL              string           `yaml:"proxy_url,omitempty"`
+		AuthType              string           `yaml:"auth_type,omitempty"`
+		OpenAIProtocol        string           `yaml:"openai_proto,omitempty"`
+		GoogleProtocol        string           `yaml:"google_proto,omitempty"`
+		RPM                   string           `yaml:"rpm"`
+		TPM                   string           `yaml:"tpm"`
+		Weight                string           `yaml:"weight"`
+		FallbackPriority      string           `yaml:"fallback_priority,omitempty"`
+		Priority              string           `yaml:"priority,omitempty"`
+		ReasoningOnly         string           `yaml:"reasoning_only,omitempty"`
+		SystemOne             string           `yaml:"system_one,omitempty"`
+		DeepSeekTools         string           `yaml:"deepseek_tools,omitempty"`
+		ResponseHeaderTimeout string           `yaml:"response_header_timeout,omitempty"`
+		Scopes                []string         `yaml:"scopes,omitempty"`
+		DeniedScopes          []string         `yaml:"denied_scopes,omitempty"`
+		ForbiddenScopes       []string         `yaml:"forbidden_scopes,omitempty"`
+		ProjectID             string           `yaml:"project_id,omitempty"`
+		Location              string           `yaml:"location,omitempty"`
+		CredentialsFile       string           `yaml:"credentials_file,omitempty"`
+		CredentialsJSON       string           `yaml:"credentials_json,omitempty"`
+		IsFallback            string           `yaml:"is_fallback,omitempty"`
+		Models                []ModelRPMConfig `yaml:"models,omitempty"`
 
 		RequestHeaders map[string]string `yaml:"request_headers,omitempty"`
+		LoopGate       *LoopGateOverride `yaml:"loop_gate,omitempty"`
 	}
 
 	var temp tempConfig
@@ -1154,6 +1273,15 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 	if c.ReasoningOnly, err = parseField(temp.ReasoningOnly, false, strconv.ParseBool, "reasoning_only for credential '"+c.Name+"'"); err != nil {
 		return err
 	}
+	if c.DeepSeekTools, err = parseField(temp.DeepSeekTools, false, strconv.ParseBool, "deepseek_tools for credential '"+c.Name+"'"); err != nil {
+		return err
+	}
+	if c.ResponseHeaderTimeout, err = parseField(temp.ResponseHeaderTimeout, 0, time.ParseDuration, "response_header_timeout for credential '"+c.Name+"'"); err != nil {
+		return err
+	}
+	if c.SystemOne, err = parseField(temp.SystemOne, false, strconv.ParseBool, "system_one for credential '"+c.Name+"'"); err != nil {
+		return err
+	}
 	if c.OpenAIProtocol, err = parseField(temp.OpenAIProtocol, false, strconv.ParseBool, "openai_proto for credential '"+c.Name+"'"); err != nil {
 		return err
 	}
@@ -1170,6 +1298,7 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 	}
 	// Copy models decoded via YAML anchors / inline definitions
 	c.Models = temp.Models
+	c.LoopGate = temp.LoopGate
 
 	if c.RequestHeaders, err = parseCredentialRequestHeaders(c.Name, c.Type, temp.RequestHeaders); err != nil {
 		return err
@@ -1312,15 +1441,15 @@ type LiteLLMDBConfig struct {
 	// IsRequired specifies whether LiteLLM DB is mandatory (fail startup on error)
 	// or optional (degrade to NoopManager with warning on error)
 	IsRequired bool `yaml:"is_required"` // default: false
-	// IsRequired specifies whether LiteLLM DB is mandatory (fail startup on error)
-	// or optional (degrade to NoopManager with warning on error)
+	// LoadLitellmDBModels serves deployments from LiteLLM_ProxyModelTable,
+	// reloaded every LitellmDBSyncInterval.
 	LoadLitellmDBModels   bool          `yaml:"load_db_models"`         // default: false
 	LitellmDBSyncInterval time.Duration `yaml:"db_model_sync_interval"` // default: 1m
 
 	// Database connection postgresql://[user[:password]@][netloc][:port][/dbname][?param1=value1&...]
 	DatabaseURL string `yaml:"database_url"` // os.environ/LITELLM_DATABASE_URL
-	MaxConns    int    `yaml:"max_conns"`    // default: 10
-	MinConns    int    `yaml:"min_conns"`    // default: 2
+	MaxConns    int    `yaml:"max_conns"`    // default: 25
+	MinConns    int    `yaml:"min_conns"`    // default: 5
 
 	// Health check
 	HealthCheckInterval time.Duration `yaml:"health_check_interval"` // default: 10s
@@ -1331,7 +1460,7 @@ type LiteLLMDBConfig struct {
 	AuthCacheSize int           `yaml:"auth_cache_size"` // default: 10000
 
 	// Spend logging
-	LogQueueSize     int           `yaml:"log_queue_size"`     // default: 10000
+	LogQueueSize     int           `yaml:"log_queue_size"`     // default: 5000
 	LogBatchSize     int           `yaml:"log_batch_size"`     // default: 100
 	LogFlushInterval time.Duration `yaml:"log_flush_interval"` // default: 5s
 	// LogWorkers is the number of goroutines concurrently draining the spend-log
@@ -1416,6 +1545,10 @@ type KafkaConfig struct {
 	// field on the spend event, precisely so it can be enabled/disabled and
 	// retained independently of spend-log analytics.
 	RawBodies KafkaRawBodiesConfig `yaml:"raw_bodies,omitempty"`
+
+	// RouterResponses configures the separate, independently-toggleable
+	// write-path for the bodies the router sent back to the client.
+	RouterResponses KafkaRouterResponsesConfig `yaml:"router_responses,omitempty"`
 }
 
 // KafkaRawBodiesConfig configures the raw-body Kafka write-path
@@ -1443,19 +1576,67 @@ type KafkaRawBodiesConfig struct {
 	// generally, not just alongside errors.
 	StoreOnlyErrors bool `yaml:"store_only_errors"` // default: true
 
-	// RedactSensitiveFields controls whether StoreRawBody's captured
-	// request body has prompt/message content stripped before publishing
-	// (see redactRequestBodyForLogging: messages/system/prompt/input/
+	// RedactSensitiveFields governs the CLIENT-side bodies published by this
+	// path: it omits the captured client-facing response body before
+	// publishing and controls whether StoreRawBody's captured request body has
+	// prompt/message content stripped before publishing (see
+	// redactRequestBodyForLogging: messages/system/prompt/input/
 	// contents/instructions replaced with a role/count-preserving
 	// placeholder, every other client-written string -- tool descriptions,
 	// user, metadata, ... -- masked, while model, tool names, parameter
-	// shape and allowlisted numbers/booleans are kept). Defaults to true; only
-	// meaningful when StoreRawBody is
-	// also on. Set to false to capture the request body verbatim instead --
+	// shape and allowlisted numbers/booleans are kept). Defaults to true.
+	// The client's response body is omitted even when StoreRawBody is off.
+	// Set to false to capture those bodies verbatim instead --
 	// e.g. for a short-lived, access-controlled debugging session where the
 	// actual prompt is genuinely needed. This is a deliberate, explicit
 	// escape hatch, not a recommended default: turning it off reintroduces
 	// exactly the privacy exposure StoreRawBody's redaction exists to avoid.
+	//
+	// It does NOT govern the provider's own error text (the event's
+	// response_body), which is published verbatim either way: it is the
+	// provider describing its own failure and nothing else says WHY a request
+	// failed. The one exception is a credential whose error text echoes the
+	// caller's own credential back (CometAPI, ProMan) -- that body is reduced
+	// to a byte count regardless of this toggle.
+	RedactSensitiveFields bool `yaml:"redact_sensitive_fields"` // default: true
+}
+
+// KafkaRouterResponsesConfig configures the router-response write-path: the
+// bodies the router sends back to the client, published to their own Kafka
+// topic (default "router-responses") and their own ClickHouse table.
+//
+// It is a separate path from raw_bodies for a reason: raw-bodies carries
+// the bodies of FAILED requests, and this one carries what the router
+// ANSWERED. Mixing them would put a heavy, high-volume stream (every
+// successful request) into a topic whose consumers -- and retention -- are
+// sized for the rare error path. Keeping them apart also lets an operator
+// enable the response capture without touching the debugging path they
+// already rely on, and vice versa.
+//
+// The captured body is the response the CLIENT received, after the router's
+// own transformations (model alias resolution, the Responses/Chat shape
+// conversion, the cost injection). It is what an operator needs to answer
+// "what did this key actually get", which the request body alone cannot.
+type KafkaRouterResponsesConfig struct {
+	// Enabled turns the write-path on. Off by default: the bodies are bulky
+	// and they carry the model's own output, which for many providers is
+	// the customer's data.
+	Enabled bool `yaml:"enabled"`
+
+	// Topic is the Kafka topic the response events are published to.
+	Topic string `yaml:"topic"` // default: "router-responses"
+
+	// RedactSensitiveFields masks the model's own text before publishing,
+	// keeping the response's STRUCTURE (shape, model, usage, ids, finish
+	// reasons) intact: the content fields become "REDACTED", everything the
+	// provider reported about the exchange survives. That is the difference
+	// from raw-bodies' redaction, which replaces the whole body with a
+	// "[REDACTED body bytes=N]" placeholder -- fine for a provider's error
+	// text, useless for a response whose whole point is its shape.
+	//
+	// Set to false to capture the bodies verbatim. That is a deliberate,
+	// explicit escape hatch for a short-lived, access-controlled debugging
+	// session: it ships the model's output -- the customer's data -- off-box.
 	RedactSensitiveFields bool `yaml:"redact_sensitive_fields"` // default: true
 }
 
@@ -1758,6 +1939,15 @@ type tempKafkaRawBodiesConfig struct {
 	RedactSensitiveFields string `yaml:"redact_sensitive_fields"`
 }
 
+// tempKafkaRouterResponsesConfig mirrors KafkaRouterResponsesConfig with
+// string fields, the same env-variable-resolution convention as KafkaConfig
+// itself.
+type tempKafkaRouterResponsesConfig struct {
+	Enabled               string `yaml:"enabled"`
+	Topic                 string `yaml:"topic"`
+	RedactSensitiveFields string `yaml:"redact_sensitive_fields"`
+}
+
 // UnmarshalYAML implements custom unmarshaling for KafkaConfig with env variable support.
 func (k *KafkaConfig) UnmarshalYAML(value *yaml.Node) error {
 	type tempConfig struct {
@@ -1775,6 +1965,8 @@ func (k *KafkaConfig) UnmarshalYAML(value *yaml.Node) error {
 		SASLPassword     string                   `yaml:"sasl_password,omitempty"`
 		TLSCACert        string                   `yaml:"tls_ca_cert,omitempty"`
 		RawBodies        tempKafkaRawBodiesConfig `yaml:"raw_bodies,omitempty"`
+
+		RouterResponses tempKafkaRouterResponsesConfig `yaml:"router_responses,omitempty"`
 	}
 
 	var temp tempConfig
@@ -1846,6 +2038,21 @@ func (k *KafkaConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if k.RawBodies.RedactSensitiveFields, err = parseField(temp.RawBodies.RedactSensitiveFields, true, strconv.ParseBool, "kafka.raw_bodies.redact_sensitive_fields"); err != nil {
+		return err
+	}
+
+	if k.RouterResponses.Enabled, err = parseField(temp.RouterResponses.Enabled, false, strconv.ParseBool, "kafka.router_responses.enabled"); err != nil {
+		return err
+	}
+	// Same as RawBodies.Topic: the default is applied here, not in a later
+	// ApplyDefaults pass -- Validate runs against this struct directly, so
+	// an unresolved empty topic must fall back to the documented default
+	// rather than fail "topic is required" at startup.
+	k.RouterResponses.Topic = resolveEnvString(temp.RouterResponses.Topic)
+	if k.RouterResponses.Topic == "" {
+		k.RouterResponses.Topic = "router-responses"
+	}
+	if k.RouterResponses.RedactSensitiveFields, err = parseField(temp.RouterResponses.RedactSensitiveFields, true, strconv.ParseBool, "kafka.router_responses.redact_sensitive_fields"); err != nil {
 		return err
 	}
 	return nil
@@ -1941,6 +2148,11 @@ func Load(path string) (*Config, error) {
 		cfg.VisionFallback = defaultVisionFallbackConfig()
 	}
 	cfg.VisionFallback.ApplyDefaults()
+
+	if !hasMappingKey(&root, "loop_gate") || mappingValueIsNull(&root, "loop_gate") {
+		cfg.LoopGate = DefaultLoopGateConfig()
+	}
+	cfg.LoopGate.ApplyDefaults()
 
 	// Ensure HealthCheckPath is always set regardless of whether monitoring section exists.
 	// MonitoringConfig.UnmarshalYAML is only called when a "monitoring:" key is present in YAML.
@@ -2183,6 +2395,48 @@ func mappingValueIsNull(node *yaml.Node, key string) bool {
 	return false
 }
 
+// validateLoopGateCombinations resolves the loop gate settings of every
+// credential and model pair, so a credential or model override that is valid
+// alone but not together with the inherited values (cut_min_ratio below the
+// effective min_ratio) fails at startup instead of disabling the gate at
+// request time. A model's loop_gate is looked up as at request time
+// (models.Manager.GetLoopGateOverride): a model entry without a credential
+// serves every credential, except one with its own entry for that model and a
+// loop_gate of its own, which wins there.
+func (c *Config) validateLoopGateCombinations() error {
+	// model name -> credential ("" = every credential) -> the entry, the last
+	// one winning as in the models manager.
+	gates := make(map[string]map[string]ModelRPMConfig)
+	var names []string
+	for _, model := range c.Models {
+		if model.LoopGate == nil {
+			continue
+		}
+		if gates[model.Name] == nil {
+			gates[model.Name] = make(map[string]ModelRPMConfig)
+			names = append(names, model.Name)
+		}
+		gates[model.Name][model.Credential] = model
+	}
+	for _, cred := range c.Credentials {
+		if _, err := c.LoopGate.Resolve(cred.Type, cred.LoopGate); err != nil {
+			return fmt.Errorf("credential %s: %w", cred.Name, err)
+		}
+		for _, name := range names {
+			model, ok := gates[name][cred.Name]
+			if !ok {
+				if model, ok = gates[name][""]; !ok {
+					continue
+				}
+			}
+			if _, err := c.LoopGate.Resolve(cred.Type, cred.LoopGate, model.LoopGate); err != nil {
+				return fmt.Errorf("model %s on credential %s: %w", model.Name, cred.Name, err)
+			}
+		}
+	}
+	return nil
+}
+
 // Normalize cleans up configuration values
 func (c *Config) Normalize() {
 	// Remove /v1 suffix from base_url to avoid duplication
@@ -2199,6 +2453,22 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := c.VisionFallback.Validate(); err != nil {
+		return err
+	}
+	if err := c.LoopGate.Validate(); err != nil {
+		return err
+	}
+	for _, cred := range c.Credentials {
+		if err := cred.LoopGate.Validate("credential " + cred.Name + " loop_gate"); err != nil {
+			return err
+		}
+	}
+	for _, model := range c.Models {
+		if err := model.LoopGate.Validate("model " + model.Name + " loop_gate"); err != nil {
+			return err
+		}
+	}
+	if err := c.validateLoopGateCombinations(); err != nil {
 		return err
 	}
 	if c.VisionFallback.Mode == VisionFallbackDescribe {
@@ -2274,6 +2544,11 @@ func (c *Config) Validate() error {
 
 	// ReadTimeout equals RequestTimeout (not configurable via YAML)
 	c.Server.ReadTimeout = c.Server.RequestTimeout
+
+	// Validate AnthropicDefaultMaxTokens (0 = use default of 32000)
+	if c.Server.AnthropicDefaultMaxTokens < 0 {
+		return fmt.Errorf("invalid anthropic_default_max_tokens: %d (must be >= 0)", c.Server.AnthropicDefaultMaxTokens)
+	}
 
 	// Validate MaxProviderRetries
 	if c.Server.MaxProviderRetries < 0 {
@@ -2352,6 +2627,9 @@ func (c *Config) Validate() error {
 		}
 		if cred.OpenAIProtocol && cred.GoogleProtocol {
 			return fmt.Errorf("credential %s: openai_proto and google_proto are mutually exclusive", cred.Name)
+		}
+		if cred.SystemOne && cred.EffectiveProviderType() != ProviderTypeOpenAI {
+			return fmt.Errorf("credential %s: system_one needs an OpenAI-wire credential (openai, vllm), got: %s", cred.Name, cred.Type)
 		}
 		if err := validateCredentialRequestHeaders(cred.Name, cred.Type, cred.RequestHeaders); err != nil {
 			return err
@@ -2571,6 +2849,25 @@ func (c *Config) Validate() error {
 		}
 		if c.Kafka.RawBodies.Topic == c.Kafka.Topic {
 			return fmt.Errorf("kafka.raw_bodies.topic must differ from kafka.topic")
+		}
+	}
+
+	if c.Kafka.RouterResponses.Enabled {
+		if !c.Kafka.Enabled {
+			return fmt.Errorf("kafka.router_responses.enabled requires kafka.enabled=true")
+		}
+		if c.Kafka.RouterResponses.Topic == "" {
+			return fmt.Errorf("kafka.router_responses.topic is required when kafka.router_responses is enabled")
+		}
+		// Its own topic, distinct from the spend-log topic and from the
+		// raw-bodies topic: the three carry different streams with different
+		// retention, and a shared topic would mix a response body into the
+		// spend log (which is billed on and kept for years).
+		if c.Kafka.RouterResponses.Topic == c.Kafka.Topic {
+			return fmt.Errorf("kafka.router_responses.topic must differ from kafka.topic")
+		}
+		if c.Kafka.RouterResponses.Topic == c.Kafka.RawBodies.Topic {
+			return fmt.Errorf("kafka.router_responses.topic must differ from kafka.raw_bodies.topic")
 		}
 	}
 

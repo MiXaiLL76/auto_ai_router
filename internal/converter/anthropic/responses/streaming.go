@@ -47,6 +47,7 @@ type anthropicStreamAccumulator struct {
 	// Usage
 	inputTokens           int
 	outputTokens          int
+	reasoningTokens       int // the thinking share of outputTokens, when the provider reports it
 	cachedTokens          int
 	cacheCreationTokens   int
 	cacheCreation5mTokens int
@@ -60,6 +61,7 @@ type anthropicStreamAccumulator struct {
 
 	// Stream status
 	stopReason         string
+	refusalItem        *responses.OutputItem
 	headerEmitted      bool
 	messageStarted     bool
 	messageItemID      string
@@ -134,6 +136,7 @@ func processAnthropicEvent(w io.Writer, acc *anthropicStreamAccumulator, event *
 		if event.Message != nil {
 			if event.Message.Usage != nil {
 				acc.inputTokens = event.Message.Usage.InputTokens
+				acc.reasoningTokens = event.Message.Usage.ReasoningTokens()
 				acc.cachedTokens = event.Message.Usage.CacheReadInputTokens
 				acc.cacheCreationTokens, acc.cacheCreation5mTokens, acc.cacheCreation1hTokens = anthropic.NormalizeCacheCreationUsage(
 					event.Message.Usage.CacheCreationInputTokens, event.Message.Usage.CacheCreation,
@@ -283,6 +286,7 @@ func processAnthropicEvent(w io.Writer, acc *anthropicStreamAccumulator, event *
 	case "message_delta":
 		if event.Delta != nil && event.Delta.StopReason != "" {
 			acc.stopReason = event.Delta.StopReason
+			acc.refusalItem = anthropicRefusalItem(event.Delta.StopReason, event.Delta.StopDetails)
 		}
 		if event.Usage != nil {
 			// Anthropic reports the real input_tokens in message_start and normally omits
@@ -301,6 +305,9 @@ func processAnthropicEvent(w io.Writer, acc *anthropicStreamAccumulator, event *
 			}
 			if event.Usage.OutputTokens != nil {
 				acc.outputTokens = *event.Usage.OutputTokens
+			}
+			if event.Usage.OutputTokensDetails != nil {
+				acc.reasoningTokens = nonNegativeAnthropicStreamTokenCount(event.Usage.OutputTokensDetails.ThinkingTokens)
 			}
 			if event.Usage.CacheReadInputTokens != nil {
 				acc.cachedTokens = nonNegativeAnthropicStreamTokenCount(*event.Usage.CacheReadInputTokens)
@@ -616,8 +623,15 @@ func emitAnthropicCompletionEvents(w io.Writer, acc *anthropicStreamAccumulator)
 		outputIdx++
 	}
 
-	return writeAnthropicSSE(w, "response.completed",
-		responses.BuildResponseEvent("response.completed", buildAnthropicCompletedResponse(acc)), acc)
+	if err := emitAnthropicRefusal(w, acc, outputIdx); err != nil {
+		return err
+	}
+	eventType := "response.completed"
+	if acc.stopReason == "refusal" {
+		eventType = "response.incomplete"
+	}
+	return writeAnthropicSSE(w, eventType,
+		responses.BuildResponseEvent(eventType, buildAnthropicCompletedResponse(acc)), acc)
 }
 
 func buildAnthropicInProgressResponse(acc *anthropicStreamAccumulator) map[string]interface{} {
@@ -644,6 +658,9 @@ func buildAnthropicCompletedResponse(acc *anthropicStreamAccumulator) *responses
 		output = append(output, anthropicMessageItem(acc))
 	}
 	output = append(output, acc.outputItems[msgIdx:]...)
+	if acc.refusalItem != nil {
+		output = append(output, *acc.refusalItem)
+	}
 
 	if len(output) == 0 {
 		output = []responses.OutputItem{{
@@ -665,6 +682,7 @@ func buildAnthropicCompletedResponse(acc *anthropicStreamAccumulator) *responses
 			CacheCreationTokens: acc.cacheCreationTokens,
 			CacheType:           acc.cacheType,
 		},
+		OutputTokensDetails: responses.OutputDetails{ReasoningTokens: acc.reasoningTokens},
 	}
 	if acc.cacheCreation5mTokens > 0 || acc.cacheCreation1hTokens > 0 {
 		usage.InputTokensDetails.CacheCreationTokenDetails = &responses.CacheCreationTokenDetails{

@@ -202,8 +202,14 @@ func convertGenaiToOpenAIFunctionCall(genaiCall *genai.FunctionCall, thoughtSign
 		}
 	}
 
+	callID := functionCallID(genaiCall, keepID)
+	if !keepID {
+		callID = converterutil.EncodeToolCallIDWithSignature(callID, thoughtSignature)
+	}
 	toolCall := openai.OpenAIToolCall{
-		ID:   functionCallID(genaiCall, keepID),
+		// Clients may drop provider_specific_fields, so Gemini 3 also carries
+		// the signature in the ID they replay. Gemini 4 keeps its exact call ID.
+		ID:   callID,
 		Type: "function",
 		Function: openai.OpenAIToolFunction{
 			Name:      genaiCall.Name,
