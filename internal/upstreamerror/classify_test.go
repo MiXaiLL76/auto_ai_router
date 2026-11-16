@@ -200,6 +200,52 @@ func TestClassifyBadRequest(t *testing.T) {
 			wantParam:   stringPtr("temperature"),
 		},
 		{
+			// A real production body (Google Vertex / Gemini, 1,050 requests
+			// in one fortnight): the provider states the client's value AND
+			// the range it accepts. The client's next action is a concrete
+			// number, so the message carries one -- "ask for 65536, not
+			// 200000" -- which "Invalid max_output_tokens" alone would not
+			// tell it. Only the NUMBERS are taken from the provider's text;
+			// the wording around them is this package's own, so no provider
+			// free text reaches the client.
+			name:        "output token value outside the supported range",
+			body:        `{"error":{"code":400,"message":"Unable to submit request because it has a maxOutputTokens value of 200000 but the supported range is from 1 (inclusive) to 65537 (exclusive). Update the value and try again.","status":"INVALID_ARGUMENT"}}`,
+			wantMessage: "Invalid max_output_tokens: requested 200000, but the supported range is from 1 to 65537.",
+			wantCode:    "invalid_max_tokens",
+			wantParam:   stringPtr("max_output_tokens"),
+			notContains: []string{"Unable to submit", "Update the value", "inclusive", "exclusive"},
+		},
+		{
+			// The same wording with a different requested value -- the
+			// message must report the value the client actually sent, not a
+			// fixed one.
+			name:        "output token value outside the range, other value",
+			body:        `{"error":{"code":400,"message":"Unable to submit request because it has a maxOutputTokens value of 115000 but the supported range is from 1 (inclusive) to 65537 (exclusive). Update the value and try again.","status":"INVALID_ARGUMENT"}}`,
+			wantMessage: "Invalid max_output_tokens: requested 115000, but the supported range is from 1 to 65537.",
+			wantCode:    "invalid_max_tokens",
+			wantParam:   stringPtr("max_output_tokens"),
+		},
+		{
+			// The provider's wording belongs to the PARAMETER it named, not
+			// to any parameter: one production request used the very same
+			// "the supported range is from N to K" phrasing for temperature.
+			// Matching on the phrase alone would report that one as an
+			// output-token problem.
+			name:        "supported range wording for a different parameter",
+			body:        `{"error":{"message":"it has a temperature value of 5 but the supported range is from 1 to 65537"}}`,
+			wantMessage: "Invalid request",
+			wantCode:    "invalid_request",
+		},
+		{
+			// No parsable numbers: the parameter is still named, so the
+			// client learns what to fix even though it does not learn the
+			// range.
+			name:        "output token range without parsable numbers",
+			body:        `{"error":{"message":"maxOutputTokens is unsupported for this model"}}`,
+			wantMessage: "Invalid request",
+			wantCode:    "invalid_request",
+		},
+		{
 			// The parameter name comes out of the provider's own free text,
 			// so it must not be passed through unchecked: an unknown name
 			// is not reported at all, rather than smuggled into the
@@ -399,6 +445,7 @@ func TestClassifyBadRequest_IsIdempotent(t *testing.T) {
 		`{"error":{"message":"Invalid 'output[1].type': 'input_file'.","type":"InvalidParameter"}}`,
 		`{"error":{"message":"5 is greater than the maximum of 2","param":"temperature","code":"decimal_above_max_value"}}`,
 		`{"detail":{"error_type":"max_tokens_exceeded"}}`,
+		`{"error":{"code":400,"message":"Unable to submit request because it has a maxOutputTokens value of 200000 but the supported range is from 1 (inclusive) to 65537 (exclusive). Update the value and try again.","status":"INVALID_ARGUMENT"}}`,
 		`{"error":{"message":"invalid temperature: only 1 is allowed for this model","type":"invalid_request_error"}}`,
 		`{"error":{"message":"Your request was rejected by the safety system. contact us at help.openai.com","type":"invalid_request_error"}}`,
 		`vendor stack id 012345`,

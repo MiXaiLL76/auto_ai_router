@@ -57,6 +57,40 @@ func ClassifyBadRequest(rawBody []byte) BadRequest {
 		result.Message = "Invalid tool_choice"
 		result.Code = "invalid_tool_choice"
 		result.Param = &param
+	case hasSignal(joined, "maxoutputtokens value of", "maxoutputtokens of",
+		"invalid max_output_tokens"):
+		// A provider that pins an output-token ceiling states the client's
+		// value AND the range it will accept: "Unable to submit request
+		// because it has a maxOutputTokens value of 200000 but the supported
+		// range is from 1 (inclusive) to 65537 (exclusive). Update the value
+		// and try again."
+		//
+		// The message is assembled here rather than echoed, because the
+		// client's next action is a concrete number: "ask for 65536 instead
+		// of 200000". "Invalid max_tokens" alone would not tell it what to
+		// ask for. Only the NUMBERS are taken from the provider's text --
+		// they are re-validated as digits and re-rendered by this package's
+		// own wording, so no provider free text reaches the client.
+		//
+		// Same shape as the context-length message above (contextLengthMessage),
+		// which already reports the provider's own numbers to the client for
+		// the same reason.
+		//
+		// "supported range is" is matched alongside the provider's own
+		// phrasing because this branch must also recognize the router's own
+		// output: litellm compatibility mode re-classifies the body the
+		// router already wrote (see normalizeError), so the message this
+		// branch produces has to land back in this branch, with the same
+		// numbers, on the second pass. Without it the re-classified message
+		// would lose the range and the two modes would disagree.
+		//
+		// The parameter name is the provider's camelCase "maxOutputTokens",
+		// normalized to the snake_case spelling the rest of the classifier
+		// uses (and the one OpenAI's own API documents).
+		param := "max_output_tokens"
+		result.Message = maxOutputTokensMessage(joined)
+		result.Code = "invalid_max_tokens"
+		result.Param = &param
 	case hasSignal(joined, "max_tokens_exceeded", "max tokens exceeded", "maxtokens exceeded"):
 		// A provider's own machine-readable name for "the generation ran into
 		// the output-token limit" -- it arrives as a bare error_type
@@ -166,7 +200,81 @@ var (
 	contextMaxTokensRe    = regexp.MustCompile(`maximum context length is (\d+)`)
 	contextOutputTokensRe = regexp.MustCompile(`requested (\d+) output tokens|(\d+) in the completion`)
 	contextInputTokensRe  = regexp.MustCompile(`(\d+) input tokens|(\d+) in the messages`)
+
+	// maxOutputTokensRequestedRe / maxOutputTokensMinRe / maxOutputTokensMaxRe
+	// pull the three numbers out of a provider's "it has a maxOutputTokens
+	// value of N but the supported range is from M to K" message.
+	//
+	// The numbers are matched as digit runs and re-validated as digits by
+	// firstNumber, so what reaches the client is a number this package
+	// parsed -- never a slice of the provider's own sentence. The wording
+	// around them is this package's.
+	maxOutputTokensRequestedRe = regexp.MustCompile(`maxoutputtokens value of (\d+)`)
+	maxOutputTokensMinRe       = regexp.MustCompile(`supported range is from (\d+)`)
+	maxOutputTokensMaxRe       = regexp.MustCompile(`to (\d+) \(exclusive\)|to (\d+)`)
 )
+
+// maxOutputTokensMessage rebuilds an out-of-range output-token message from
+// the numbers in the provider text (digits only -- never the provider's own
+// wording).
+//
+// The client's next action is a concrete number, so the message carries one:
+// which value it asked for, and the range that would be accepted. "Invalid
+// max_tokens" on its own leaves the client guessing what to put there
+// instead.
+//
+// When the provider's text carries no parsable numbers the generic message
+// is returned, so the client still learns WHICH parameter was rejected even
+// though it does not learn the range.
+func maxOutputTokensMessage(joined string) string {
+	requested := firstNumber(maxOutputTokensRequestedRe, joined)
+	lower := firstNumber(maxOutputTokensMinRe, joined)
+	upper := firstNumber(maxOutputTokensMaxRe, joined)
+
+	// The router's own message (litellm compatibility mode re-classifies the
+	// body the router already wrote) carries the same three numbers in this
+	// package's own wording -- read them back out of it so the second pass
+	// rebuilds the identical message instead of the generic one.
+	if requested == "" || upper == "" {
+		if own, ok := maxOutputTokensMessageFromOwnOutput(joined); ok {
+			return own
+		}
+		return "Invalid max_output_tokens"
+	}
+	msg := "Invalid max_output_tokens: requested " + requested + ", but the supported range is "
+	if lower != "" {
+		msg += "from " + lower + " to "
+	}
+	msg += upper + "."
+	return msg
+}
+
+// maxOutputTokensMessageRe extracts the three numbers back out of the message
+// this package produces, so that re-classifying the router's own body
+// (litellm compatibility mode does exactly that -- see normalizeError)
+// rebuilds the identical message instead of falling back to the generic one.
+//
+// The "supported range is" phrasing is what the branch above matches on, so
+// the numbers are read back out of the same words.
+var maxOutputTokensMessageRe = regexp.MustCompile(
+	`requested (\d+), but the supported range is (?:from (\d+) )?to (\d+)\.`)
+
+func maxOutputTokensMessageFromOwnOutput(joined string) (string, bool) {
+	m := maxOutputTokensMessageRe.FindStringSubmatch(joined)
+	if m == nil {
+		return "", false
+	}
+	requested, lower, upper := m[1], m[2], m[3]
+	if requested == "" || upper == "" {
+		return "", false
+	}
+	msg := "Invalid max_output_tokens: requested " + requested + ", but the supported range is "
+	if lower != "" {
+		msg += "from " + lower + " to "
+	}
+	msg += upper + "."
+	return msg, true
+}
 
 // contextLengthMessage rebuilds a context-overflow message from the numbers
 // in the provider text (digits only — never the provider's own wording).
