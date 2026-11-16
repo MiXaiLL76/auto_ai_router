@@ -150,6 +150,87 @@ func TestClassifyBadRequest(t *testing.T) {
 			wantCode:    "max_tokens_exceeded",
 		},
 		{
+			// A machine-readable reason code must not outrank a specific
+			// message. This body carries error_type="invalid_value" -- a
+			// generic reason -- next to a message that names the model
+			// group explicitly. The model-group diagnosis is the specific
+			// one and has to win; a generic reason code that happens to
+			// sit in the same body must not displace it.
+			name:        "generic error_type does not shadow the model-group message",
+			body:        `{"error":{"error_type":"invalid_value","message":"litellm.BadRequestError: Received Model Group=secret/internal Available Model Group Fallbacks=None"}}`,
+			wantMessage: "Invalid model",
+			wantCode:    "invalid_model",
+			wantParam:   stringPtr("model"),
+			notContains: []string{"secret/internal", "Fallbacks"},
+		},
+		{
+			// The model-group wording and the pinned-parameter wording
+			// overlap in the wild: this body contains both "not allowed for
+			// this model" and "model group". The model diagnosis is the
+			// more specific one -- the client asked for a model that does
+			// not exist here -- and must not be reported as a parameter
+			// problem.
+			name:        "model group wording wins over the pinned-parameter wording",
+			body:        `{"error":{"message":"gpt-5 is not allowed for this model group, please use a supported model."}}`,
+			wantMessage: "Invalid model",
+			wantCode:    "invalid_model",
+			wantParam:   stringPtr("model"),
+		},
+		{
+			// A provider that rejects an explicit max_tokens VALUE says so
+			// in the message AND names the parameter in the structured
+			// "param" field. That is the client's-value rejection, not the
+			// generation-limit case: the fix is to lower the value, and
+			// dropping the parameter would leave the client unable to act.
+			name:        "max tokens exceeded with an explicit parameter is a value rejection",
+			body:        `{"error":{"message":"Max tokens exceeded: requested 100000, but the maximum allowed is 8192.","param":"max_tokens"}}`,
+			wantMessage: "Invalid max_tokens",
+			wantCode:    "invalid_max_tokens",
+			wantParam:   stringPtr("max_tokens"),
+		},
+		{
+			// The parameter name is matched case-insensitively: providers
+			// capitalize it freely, and a capitalized name is the same
+			// parameter.
+			name:        "capitalized parameter name",
+			body:        `{"error":{"message":"Invalid Temperature: only 1 is allowed for this model"}}`,
+			wantMessage: "Invalid temperature",
+			wantCode:    "invalid_field",
+			wantParam:   stringPtr("temperature"),
+		},
+		{
+			// The parameter name is located in a lowercased copy of the
+			// message but cut out of the original, and the two are
+			// reconciled by RUNE count: a Unicode lowering can change a
+			// string's byte length, so a byte offset would point at the
+			// wrong place in the original.
+			name:        "parameter name after a multi-byte character",
+			body:        `{"error":{"message":"İnvalid temperature: only 1 is allowed for this model"}}`,
+			wantMessage: "Invalid temperature",
+			wantCode:    "invalid_field",
+			wantParam:   stringPtr("temperature"),
+		},
+		{
+			// The shorter phrasing of the same message ("maxOutputTokens
+			// of 200000" rather than "maxOutputTokens value of 200000")
+			// must still yield the numbers -- the whole point of the
+			// branch is to tell the client what to ask for.
+			name:        "output token range in the shorter phrasing",
+			body:        `{"error":{"message":"...has a maxOutputTokens of 200000 but the maximum allowed is up to 65537 (exclusive)..."}}`,
+			wantMessage: "Invalid max_output_tokens: requested 200000, but the supported range is up to 65537.",
+			wantCode:    "invalid_max_tokens",
+			wantParam:   stringPtr("max_output_tokens"),
+		},
+		{
+			// A provider body with no parsable numbers still names the
+			// parameter, so the client learns what to fix even though it
+			// does not learn the range.
+			name:        "output token range without parsable numbers",
+			body:        `{"error":{"message":"maxOutputTokens is unsupported for this model"}}`,
+			wantMessage: "Invalid request",
+			wantCode:    "invalid_request",
+		},
+		{
 			// The client's OWN max_tokens value being rejected stays a
 			// separate thing: "the value you sent is not allowed, change
 			// it" is a different failure with a different fix from "the
@@ -509,6 +590,82 @@ func TestClassifyBadRequest_IsIdempotent(t *testing.T) {
 			assert.Equal(t, first.Message, second.Message, "message must survive a second classification pass")
 			assert.Equal(t, first.Code, second.Code, "code must survive a second classification pass")
 			assert.True(t, equalStringPtr(first.Param, second.Param), "param must survive a second classification pass: first=%v second=%v", first.Param, second.Param)
+		})
+	}
+}
+
+// TestExtractRouterClassificationRecognizesOurOwnBodies pins the central
+// mechanism that makes the classifier idempotent: a body this package
+// already produced is recognized by its SHAPE and returned as it is.
+//
+// Before this, every branch had to recognize its own canonical output --
+// an obligation that grew with every branch and had already leaked once,
+// when a branch whose message did not round-trip (a range with no lower
+// bound) degraded to the generic one on the second pass, so the client saw
+// different text for the same error depending on which mode served the
+// response. Recognition by shape removes that obligation for every branch
+// at once.
+func TestExtractRouterClassificationRecognizesOurOwnBodies(t *testing.T) {
+	bodies := []string{
+		`{"error":{"message":"Invalid request","type":"invalid_request_error","param":null,"code":"invalid_request"}}`,
+		`{"error":{"message":"Invalid model","type":"invalid_request_error","param":"model","code":"invalid_model"}}`,
+		`{"error":{"message":"Max tokens exceeded","type":"invalid_request_error","param":null,"code":"max_tokens_exceeded"}}`,
+		`{"error":{"message":"Invalid max_output_tokens: requested 200000, but the supported range is from 1 to 65537.","type":"invalid_request_error","param":"max_output_tokens","code":"invalid_max_tokens"}}`,
+		`{"error":{"message":"Invalid max_output_tokens: requested 200000, but the supported range is up to 65537.","type":"invalid_request_error","param":"max_output_tokens","code":"invalid_max_tokens"}}`,
+		`{"error":{"message":"This model's maximum context length is 409600 tokens. However, you requested 32000 output tokens and your prompt contains at least 377601 input tokens.","type":"invalid_request_error","param":"input_tokens","code":"context_length_exceeded"}}`,
+		`{"error":{"message":"The prompt was blocked by the provider's content policy","type":"invalid_request_error","param":null,"code":"content_policy_violation"}}`,
+		`{"error":{"message":"Reasoning is required and cannot be disabled","type":"invalid_request_error","param":"reasoning_effort","code":"reasoning_required"}}`,
+		`{"error":{"message":"Invalid temperature","type":"invalid_request_error","param":"temperature","code":"invalid_field"}}`,
+	}
+	for _, body := range bodies {
+		t.Run(body, func(t *testing.T) {
+			got, ok := ExtractRouterClassification([]byte(body))
+			require.True(t, ok, "a body this package produced must be recognized")
+
+			var want struct {
+				Error struct {
+					Message string  `json:"message"`
+					Type    string  `json:"type"`
+					Param   *string `json:"param"`
+					Code    string  `json:"code"`
+				} `json:"error"`
+			}
+			require.NoError(t, json.Unmarshal([]byte(body), &want))
+			assert.Equal(t, want.Error.Message, got.Message, "message must be returned as it was")
+			assert.Equal(t, want.Error.Code, got.Code, "code must be returned as it was")
+			assert.True(t, equalStringPtr(want.Error.Param, got.Param),
+				"param must be returned as it was: want=%v got=%v", want.Error.Param, got.Param)
+		})
+	}
+}
+
+// TestExtractRouterClassificationRejectsProviderBodies is the other half of
+// the mechanism: a body that is NOT ours must be classified from scratch.
+//
+// The recognition is what decides whether the provider's own message text
+// reaches the client, so a body that borrows our shape but carries the
+// provider's text must be rejected -- otherwise the provider's free text
+// would go out verbatim, which is exactly what this package exists to
+// prevent.
+func TestExtractRouterClassificationRejectsProviderBodies(t *testing.T) {
+	bodies := []string{
+		// A provider body that borrows our code but appends its own text.
+		`{"error":{"message":"Invalid sk-secret123 at api.internal","type":"invalid_request_error","param":"sk-secret123","code":"invalid_field"}}`,
+		// A context-length message with free text behind the number.
+		`{"error":{"message":"This model's maximum context length is 409600 tokens. secret","type":"invalid_request_error","code":"context_length_exceeded"}}`,
+		// A max-tokens message with free text behind the numbers.
+		`{"error":{"message":"Invalid max_output_tokens: requested 1, but the supported range is up to 2. secret","type":"invalid_request_error","param":"max_output_tokens","code":"invalid_max_tokens"}}`,
+		// A type this package never emits.
+		`{"error":{"message":"Invalid model","type":"provider_error","code":"invalid_model"}}`,
+		// A code this package never emits.
+		`{"error":{"message":"Invalid model","type":"invalid_request_error","code":"some_provider_code"}}`,
+		// Not an error envelope at all.
+		`{"detail":{"error_type":"max_tokens_exceeded"}}`,
+	}
+	for _, body := range bodies {
+		t.Run(body, func(t *testing.T) {
+			_, ok := ExtractRouterClassification([]byte(body))
+			assert.False(t, ok, "a provider body must not be taken for one of ours")
 		})
 	}
 }

@@ -85,8 +85,18 @@ var ContentPolicyMarkers = []string{
 	// matches the response body against it as a plain lowercase substring.
 	// The prose form ("rejected by the safety system") is what the
 	// providers actually write.
+	//
+	// "content safety system" is deliberately NOT here. The retry policy
+	// matches these markers against the response body for ANY status, not
+	// just 400s, so a generic phrase would also catch an infrastructure
+	// failure that merely mentions the subsystem -- "An internal error
+	// occurred while the content safety system was processing your
+	// request" -- and mark a retryable 5xx non-retryable across the whole
+	// credential pool. The refusal itself is named tightly enough without
+	// it: in production "rejected by the safety system" covers 3,380
+	// requests, and the bare subsystem name added only 46 more, nearly all
+	// of them overlapping with it.
 	"rejected by the safety system",
-	"content safety system",
 }
 
 // IsContentPolicySignal reports whether a provider signal describes a
