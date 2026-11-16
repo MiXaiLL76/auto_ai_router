@@ -770,6 +770,28 @@ func classifyValidationError(joined string, param *string, signals []string) (Ba
 		result.Message, result.Code = "Invalid multipart form data", "invalid_multipart"
 	case hasSignal(joined, "invalid_value", "invalid value", "invalid parameter value"):
 		result.Message, result.Code = "Invalid parameter value", "invalid_value"
+	case hasSignal(joined, "reasoning is mandatory", "thinking is mandatory",
+		"reasoning is required and cannot be disabled"):
+		// A provider that serves only reasoning models refuses a request
+		// that turns reasoning off: "Reasoning is mandatory for this
+		// endpoint and cannot be disabled." The client had sent
+		// reasoning_effort=none (all 468 production requests did exactly
+		// that), so the refusal is about the parameter the client set --
+		// not about the request in general.
+		//
+		// The parameter is named here rather than read out of the message:
+		// the provider's wording says "reasoning", while the parameter the
+		// client actually sends is "reasoning_effort" (OpenAI's spelling)
+		// or "thinking" (Anthropic's). Reporting the client's own spelling
+		// is what makes the error actionable -- the client can go change
+		// the field it set.
+		//
+		// The message says what to do rather than only what went wrong:
+		// the fix is to enable reasoning, not to "fix" a parameter.
+		result.Message = "Reasoning is required and cannot be disabled"
+		result.Code = "reasoning_required"
+		param := "reasoning_effort"
+		result.Param = &param
 	case hasSignal(joined, "is allowed for this model", "not allowed for this model"):
 		// A provider that pins a sampling parameter to one value ("invalid
 		// temperature: only 1 is allowed for this model") names the

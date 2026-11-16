@@ -226,6 +226,44 @@ func TestClassifyBadRequest(t *testing.T) {
 			wantParam:   stringPtr("max_output_tokens"),
 		},
 		{
+			// A real production body (OpenRouter, 468 requests in one
+			// fortnight, all of them carrying reasoning_effort=none): a
+			// provider that serves only reasoning models refuses a request
+			// that turns reasoning off. The wording matches none of the
+			// switch's keyword signals, so the request fell through to the
+			// generic "Invalid request" and the client was told nothing --
+			// while the fix (enable reasoning) was a single field it had
+			// set to "none".
+			name:        "reasoning cannot be disabled",
+			body:        `{"error":{"code":400,"message":"Reasoning is mandatory for this endpoint and cannot be disabled."}}`,
+			wantMessage: "Reasoning is required and cannot be disabled",
+			wantCode:    "reasoning_required",
+			wantParam:   stringPtr("reasoning_effort"),
+			notContains: []string{"mandatory for this endpoint"},
+		},
+		{
+			// The same refusal in Anthropic's spelling. The parameter the
+			// client sets is named in the CLIENT's spelling too -- it is
+			// the field the client has to change.
+			name:        "thinking cannot be disabled",
+			body:        `{"error":{"message":"Thinking is mandatory for this endpoint and cannot be disabled."}}`,
+			wantMessage: "Reasoning is required and cannot be disabled",
+			wantCode:    "reasoning_required",
+			wantParam:   stringPtr("reasoning_effort"),
+		},
+		{
+			// A DIFFERENT refusal that mentions reasoning: the model does
+			// not support the parameter at all. That is the opposite
+			// problem -- the client asked for reasoning on a model that
+			// refuses it -- and must not be reported as "reasoning is
+			// required".
+			name:        "reasoning not supported is not reasoning required",
+			body:        `{"error":{"message":"reasoning_effort is not supported for this model","param":"reasoning_effort"}}`,
+			wantMessage: "Invalid request parameter",
+			wantCode:    "invalid_parameter",
+			wantParam:   stringPtr("reasoning_effort"),
+		},
+		{
 			// The provider's wording belongs to the PARAMETER it named, not
 			// to any parameter: one production request used the very same
 			// "the supported range is from N to K" phrasing for temperature.
@@ -446,6 +484,7 @@ func TestClassifyBadRequest_IsIdempotent(t *testing.T) {
 		`{"error":{"message":"5 is greater than the maximum of 2","param":"temperature","code":"decimal_above_max_value"}}`,
 		`{"detail":{"error_type":"max_tokens_exceeded"}}`,
 		`{"error":{"code":400,"message":"Unable to submit request because it has a maxOutputTokens value of 200000 but the supported range is from 1 (inclusive) to 65537 (exclusive). Update the value and try again.","status":"INVALID_ARGUMENT"}}`,
+		`{"error":{"code":400,"message":"Reasoning is mandatory for this endpoint and cannot be disabled."}}`,
 		`{"error":{"message":"invalid temperature: only 1 is allowed for this model","type":"invalid_request_error"}}`,
 		`{"error":{"message":"Your request was rejected by the safety system. contact us at help.openai.com","type":"invalid_request_error"}}`,
 		`vendor stack id 012345`,
