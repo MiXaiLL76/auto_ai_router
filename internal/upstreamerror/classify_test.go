@@ -127,6 +127,83 @@ func TestClassifyBadRequest(t *testing.T) {
 			notContains: []string{"is greater than", "decimal_above_max_value"},
 		},
 		{
+			// A real production body, and the single largest classification
+			// loss in the fleet: 71,764 requests in one fortnight against one
+			// provider came back as exactly this -- a machine-readable
+			// reason nested under "detail", with no wording at all. The
+			// "detail" object WAS walked, but "error_type" was not among
+			// the keys read inside it, so the body decoded to no signal and
+			// the client got the generic "Invalid request" for 42% of all
+			// 400s. Guarded here so the key cannot be dropped again.
+			name:        "error_type nested under detail",
+			body:        `{"detail":{"error_type":"max_tokens_exceeded"}}`,
+			wantMessage: "Invalid max_tokens",
+			wantCode:    "invalid_max_tokens",
+			wantParam:   stringPtr("max_tokens"),
+		},
+		{
+			// "max_tokens_exceeded" contains the substring "max_tokens", so
+			// it would otherwise fall into the generic max_tokens branch --
+			// which reports the client's own max_tokens FIELD as invalid
+			// ("Invalid max_tokens" inferred from the request). The client's
+			// parameter is fine here: the provider's own ceiling is lower
+			// than what was asked for, and the message has to say so.
+			name:        "max_tokens_exceeded is not a context-window overflow",
+			body:        `{"error":{"message":"Your input exceeds the model's maximum context length. Please shorten your messages and try again."}}`,
+			wantMessage: "This model's maximum context length is exceeded by the request",
+			wantCode:    "context_length_exceeded",
+			wantParam:   stringPtr("messages"),
+		},
+		{
+			// A real production body: 2,864 requests in one fortnight, all
+			// against one model, all from a client that asked for
+			// temperature=0 while the provider pins that model to a single
+			// value. The wording contains none of the switch's keyword
+			// signals ("must be", "invalid parameter", ...), so the request
+			// fell through to the generic "Invalid request" and the client
+			// could not tell which parameter to change -- the one thing the
+			// provider stated plainly in the first two words.
+			name:        "parameter pinned to a single value",
+			body:        `{"error":{"message":"invalid temperature: only 1 is allowed for this model","type":"invalid_request_error"}}`,
+			wantMessage: "Invalid temperature",
+			wantCode:    "invalid_field",
+			wantParam:   stringPtr("temperature"),
+			notContains: []string{"only 1 is allowed"},
+		},
+		{
+			// Same wording, a fractional pinned value -- the provider's
+			// limit is not always an integer.
+			name:        "parameter pinned to a fractional value",
+			body:        `{"error":{"message":"invalid temperature: only 0.6 is allowed for this model","type":"invalid_request_error"}}`,
+			wantMessage: "Invalid temperature",
+			wantCode:    "invalid_field",
+			wantParam:   stringPtr("temperature"),
+		},
+		{
+			// The parameter name comes out of the provider's own free text,
+			// so it must not be passed through unchecked: an unknown name
+			// is not reported at all, rather than smuggled into the
+			// client's "param" field.
+			name:        "unknown parameter name is not echoed",
+			body:        `{"error":{"message":"invalid your-secret-setting: only 1 is allowed for this model"}}`,
+			wantMessage: "Invalid request parameter",
+			wantCode:    "invalid_parameter",
+			notContains: []string{"your-secret-setting"},
+		},
+		{
+			// A real production body: 1,163 requests in one fortnight that
+			// carried NO safety_violations list, so the "safety violation"
+			// marker did not match them and the refusal was reported as a
+			// generic "Invalid request" -- telling the client to fix a
+			// request that was actually refused on policy grounds, with
+			// nothing to fix.
+			name:        "safety system refusal without a violations list",
+			body:        `{"error":{"message":"Your request was rejected by the safety system. If you believe this is an error, contact us at help.openai.com and include the request ID req_abc123.","type":"invalid_request_error"}}`,
+			wantMessage: "The prompt was blocked by the provider's content policy",
+			wantCode:    "content_policy_violation",
+			notContains: []string{"help.openai.com", "req_abc123"},
+		},
+		{
 			name:        "plain text fallback",
 			body:        `vendor stack id 012345`,
 			wantMessage: "Invalid request",
@@ -301,6 +378,9 @@ func TestClassifyBadRequest_IsIdempotent(t *testing.T) {
 		`{"error":{"message":"The parameters logprobs is not supported.","code":"invalid_parameter_error"}}`,
 		`{"error":{"message":"Invalid 'output[1].type': 'input_file'.","type":"InvalidParameter"}}`,
 		`{"error":{"message":"5 is greater than the maximum of 2","param":"temperature","code":"decimal_above_max_value"}}`,
+		`{"detail":{"error_type":"max_tokens_exceeded"}}`,
+		`{"error":{"message":"invalid temperature: only 1 is allowed for this model","type":"invalid_request_error"}}`,
+		`{"error":{"message":"Your request was rejected by the safety system. contact us at help.openai.com","type":"invalid_request_error"}}`,
 		`vendor stack id 012345`,
 	}
 

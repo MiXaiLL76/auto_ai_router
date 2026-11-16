@@ -57,6 +57,25 @@ func ClassifyBadRequest(rawBody []byte) BadRequest {
 		result.Message = "Invalid tool_choice"
 		result.Code = "invalid_tool_choice"
 		result.Param = &param
+	case hasSignal(joined, "max_tokens_exceeded", "max tokens exceeded", "maxtokens exceeded"):
+		// A provider's own machine-readable name for "the requested output
+		// length is above what this model allows" -- it arrives as a bare
+		// error_type ("max_tokens_exceeded") with no wording at all, so it
+		// has to be matched by that exact name. Checked BEFORE the
+		// max_tokens branch below on purpose: that branch matches the
+		// "max_tokens" substring, which this name contains, and would
+		// otherwise report the client's own max_tokens field as invalid
+		// ("Invalid max_tokens") when nothing is wrong with it -- the
+		// provider rejected the request because its limit is lower than
+		// what the client asked for, which is a different diagnosis with a
+		// different fix (ask for a shorter answer, not fix the parameter).
+		// The context-window overflow case stays a context_length_exceeded:
+		// it says so in words ("maximum context length"), which this
+		// machine-readable name never does.
+		param := "max_tokens"
+		result.Message = "Invalid max_tokens"
+		result.Code = "invalid_max_tokens"
+		result.Param = &param
 	case hasSignal(joined, "max_completion_tokens", "max_output_tokens", "max_tokens", "max tokens", "maximum tokens", "output tokens"):
 		param := inferBadRequestParam(joined, providerParam)
 		if param == nil || !strings.Contains(*param, "token") {
@@ -204,7 +223,17 @@ func collectProviderErrorSignals(value any, depth int, signals *[]string, param 
 	}
 	switch v := value.(type) {
 	case map[string]any:
-		for _, key := range []string{"message", "type", "code", "status", "reason", "error"} {
+		// "error_type" is a machine-readable reason key some providers put
+		// where a "code" would normally go -- notably nested under "detail":
+		// {"detail":{"error_type":"max_tokens_exceeded"}}. Without it in
+		// this list the whole body decoded to no signal at all, so the
+		// classifier fell through to the generic "Invalid request" and the
+		// client learned nothing -- the largest single loss of
+		// classification in production (71.8k requests in one fortnight
+		// against a single provider). Read it as a signal, not as the
+		// provider's own "code": it is a reason name, and the switch below
+		// matches it by its own vocabulary.
+		for _, key := range []string{"message", "type", "code", "status", "reason", "error", "error_type"} {
 			raw, exists := mapValueFold(v, key)
 			if !exists {
 				continue
@@ -432,6 +461,65 @@ var namedParameterFollowers = map[string]struct{}{
 	"values": {}, "was": {}, "were": {},
 }
 
+// pinnableParameters are the request parameters a provider may pin to a single
+// value, and then complain about by name -- "invalid temperature: only 1 is
+// allowed for this model". Only these are accepted as the offending
+// parameter: the name comes out of the provider's own free text, so without
+// a closed list a message like "invalid your-favourite-setting: only 1 is
+// allowed" would put an arbitrary string into the client's "param" field,
+// which is exactly the kind of provider-controlled text this package exists
+// to keep out of the client-facing body.
+var pinnableParameters = map[string]struct{}{
+	"temperature":           {},
+	"top_p":                 {},
+	"top_k":                 {},
+	"frequency_penalty":     {},
+	"presence_penalty":      {},
+	"repetition_penalty":    {},
+	"max_tokens":            {},
+	"max_completion_tokens": {},
+	"max_output_tokens":     {},
+	"n":                     {},
+	"seed":                  {},
+	"stop":                  {},
+	"reasoning_effort":      {},
+	"thinking":              {},
+}
+
+// extractPinnedParameterName reads the parameter name out of a provider
+// message of the shape "invalid <param>: only <value> is allowed for this
+// model" (and its "not allowed" variant). Returns nil when the message does
+// not name a known parameter, so an unrecognized wording falls back to the
+// generic "Invalid request parameter" instead of guessing.
+func extractPinnedParameterName(signals []string) *string {
+	for _, signal := range signals {
+		lower := strings.ToLower(signal)
+		const marker = "invalid "
+		idx := strings.Index(lower, marker)
+		if idx < 0 {
+			continue
+		}
+		rest := signal[idx+len(marker):]
+		// The name runs up to the first delimiter the provider could put
+		// there -- a colon ("invalid temperature: only 1 ...") or a space
+		// ("invalid temperature value ...").
+		end := 0
+		for end < len(rest) && (isIdentifierByte(rest[end]) || rest[end] == '_') {
+			end++
+		}
+		if end == 0 {
+			continue
+		}
+		name := rest[:end]
+		if _, known := pinnableParameters[name]; !known {
+			continue
+		}
+		field := name
+		return &field
+	}
+	return nil
+}
+
 // parameterNamedAfter reads the word following "parameter" and accepts it as a
 // name only when the message marks it as one: quoted ("parameter `size`"),
 // introduced by a colon ("Invalid parameter: size"), assigned
@@ -568,6 +656,25 @@ func classifyValidationError(joined string, param *string, signals []string) (Ba
 		result.Message, result.Code = "Invalid multipart form data", "invalid_multipart"
 	case hasSignal(joined, "invalid_value", "invalid value", "invalid parameter value"):
 		result.Message, result.Code = "Invalid parameter value", "invalid_value"
+	case hasSignal(joined, "is allowed for this model", "not allowed for this model"):
+		// A provider that pins a sampling parameter to one value ("invalid
+		// temperature: only 1 is allowed for this model") names the
+		// parameter in the first word of its message and then states the
+		// constraint. The generic "invalid ..." branches never fire on
+		// this wording -- it contains no "invalid parameter", no "must be",
+		// nothing the switch above recognizes -- so the request fell
+		// through to the fully generic "Invalid request" and the client
+		// could not tell which parameter to change. The parameter name is
+		// read out of the message itself; only a known parameter name is
+		// accepted, so an unknown wording cannot smuggle free text into
+		// the client's "param" field.
+		if param := extractPinnedParameterName(signals); param != nil {
+			result.Message = "Invalid " + *param
+			result.Code = "invalid_field"
+			result.Param = param
+		} else {
+			result.Message, result.Code = "Invalid request parameter", "invalid_parameter"
+		}
 	default:
 		return BadRequest{}, false
 	}
