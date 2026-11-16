@@ -62,7 +62,7 @@ All standard Responses API parameters are supported. The table below lists the f
 | `top_logprobs`           | integer          | Number of log probabilities to return                   |
 | `stop`                   | string \| array  | Stop sequences                                          |
 | `stream`                 | boolean          | Enable SSE streaming                                    |
-| `background`             | boolean          | Run as a background job                                 |
+| `background`             | boolean          | `true` is ignored and removed (see note below)          |
 | `tools`                  | array            | Tools available to the model                            |
 | `tool_choice`            | string \| object | Tool selection mode                                     |
 | `reasoning`              | object           | Reasoning/thinking configuration                        |
@@ -84,6 +84,11 @@ Not all providers support every parameter. See the [Provider Support](#provider-
 !!! note "Service tier is router-controlled"
 `service_tier` is ignored and removed by Auto AI Router. Clients cannot select an upstream
 service tier. The effective tier is controlled by the router/provider configuration.
+
+!!! note "Background mode is not supported"
+`background: true` is ignored and removed by Auto AI Router, so the request runs as a
+regular one, streamed or not. A provider-side background job could not be retrieved,
+resumed or billed through the router. The Images API's string `background` is kept.
 
 ## Content Types
 
