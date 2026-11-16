@@ -58,24 +58,30 @@ func ClassifyBadRequest(rawBody []byte) BadRequest {
 		result.Code = "invalid_tool_choice"
 		result.Param = &param
 	case hasSignal(joined, "max_tokens_exceeded", "max tokens exceeded", "maxtokens exceeded"):
-		// A provider's own machine-readable name for "the requested output
-		// length is above what this model allows" -- it arrives as a bare
-		// error_type ("max_tokens_exceeded") with no wording at all, so it
-		// has to be matched by that exact name. Checked BEFORE the
-		// max_tokens branch below on purpose: that branch matches the
-		// "max_tokens" substring, which this name contains, and would
-		// otherwise report the client's own max_tokens field as invalid
-		// ("Invalid max_tokens") when nothing is wrong with it -- the
-		// provider rejected the request because its limit is lower than
-		// what the client asked for, which is a different diagnosis with a
-		// different fix (ask for a shorter answer, not fix the parameter).
+		// A provider's own machine-readable name for "the generation ran into
+		// the output-token limit" -- it arrives as a bare error_type
+		// ("max_tokens_exceeded") with no wording at all, so it has to be
+		// matched by that exact name. Checked BEFORE the max_tokens branch
+		// below on purpose: that branch matches the "max_tokens" substring,
+		// which this name contains, and would otherwise report the client's
+		// own max_tokens field as invalid ("Invalid max_tokens") -- blaming
+		// a parameter for a limit that was reached rather than rejected.
+		//
+		// The two are different failures with different fixes. "Invalid
+		// max_tokens" means "the value you sent is not allowed, change it".
+		// This one means "the answer was cut off because it ran long" --
+		// the request was accepted and the model started producing output.
+		// In production all 71,764 of these came from an agent loop: every
+		// one carried a tool_calls history and none of them set max_tokens
+		// at all (the string appeared only as the NAME of a tool-schema
+		// property), so there was no client-side parameter to fix. The
+		// client's only lever is to ask for a shorter answer.
+		//
 		// The context-window overflow case stays a context_length_exceeded:
 		// it says so in words ("maximum context length"), which this
 		// machine-readable name never does.
-		param := "max_tokens"
-		result.Message = "Invalid max_tokens"
-		result.Code = "invalid_max_tokens"
-		result.Param = &param
+		result.Message = "Max tokens exceeded"
+		result.Code = "max_tokens_exceeded"
 	case hasSignal(joined, "max_completion_tokens", "max_output_tokens", "max_tokens", "max tokens", "maximum tokens", "output tokens"):
 		param := inferBadRequestParam(joined, providerParam)
 		if param == nil || !strings.Contains(*param, "token") {

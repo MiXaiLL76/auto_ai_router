@@ -135,8 +135,28 @@ func TestClassifyBadRequest(t *testing.T) {
 			// the keys read inside it, so the body decoded to no signal and
 			// the client got the generic "Invalid request" for 42% of all
 			// 400s. Guarded here so the key cannot be dropped again.
+			//
+			// The code is "max_tokens_exceeded" and not "invalid_max_tokens":
+			// every one of those 71,764 requests was an agent-loop turn
+			// carrying a tool_calls history, and NOT ONE of them set
+			// max_tokens -- the string appeared only as the NAME of a
+			// tool-schema property. So there is no client-side parameter
+			// that was wrong; the generation simply ran into the output
+			// limit. Reporting "Invalid max_tokens" would point the client
+			// at a parameter it never sent and never has to change.
 			name:        "error_type nested under detail",
 			body:        `{"detail":{"error_type":"max_tokens_exceeded"}}`,
+			wantMessage: "Max tokens exceeded",
+			wantCode:    "max_tokens_exceeded",
+		},
+		{
+			// The client's OWN max_tokens value being rejected stays a
+			// separate thing: "the value you sent is not allowed, change
+			// it" is a different failure with a different fix from "the
+			// answer was cut off because it ran long". The two must not
+			// collapse into one code.
+			name:        "client max_tokens value rejected stays invalid_max_tokens",
+			body:        `{"error":{"message":"max_tokens is too large: 128000. Maximum allowed is 4096.","param":"max_tokens"}}`,
 			wantMessage: "Invalid max_tokens",
 			wantCode:    "invalid_max_tokens",
 			wantParam:   stringPtr("max_tokens"),
