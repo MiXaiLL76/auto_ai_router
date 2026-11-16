@@ -339,13 +339,21 @@ func (p *Proxy) buildRawBodyEvent(logCtx *RequestLogContext, status string, endT
 	// error log already does for every credential but CometAPI/ProMan (see
 	// appendResponseBodyForLogs).
 	//
-	// The two bodies that CAN carry client-side content stay masked:
+	// ClientResponseBody -- what the router actually sent the client -- is
+	// published verbatim too, for the same reason: it is the other half of
+	// the same question ("what did the client actually get, and how did it
+	// differ from what the provider said?"). The router already masked this
+	// body before writing it to the client (maskedUpstreamErrorBody ->
+	// classifiedBadRequestError -> upstreamerror.ClassifyBadRequest), so what
+	// lands here is a classified message from a fixed list ("Invalid
+	// tool_choice", "Invalid request", "The prompt was blocked by the
+	// provider's content policy"), a code, and a param -- never the
+	// provider's free text. Publishing it verbatim therefore adds the
+	// client's view of the failure without adding provider internals.
 	//
-	//   - ClientResponseBody: what the router sent the client, which for
-	//     an error is the router's own masked body (maskedUpstreamErrorBody
-	//     never echoes provider text) but for a SUCCESS is the provider's
-	//     answer -- the client's data, and the model output itself.
-	//   - RequestBody: the client's own request, prompt included.
+	// The one body that CAN carry client-side content is RequestBody: the
+	// client's own request, prompt included. It stays redacted (see
+	// redactRequestBodyForLogging) and stays opt-in behind store_raw_body.
 	//
 	// A provider whose error text echoes the caller's credential (CometAPI,
 	// ProMan -- see shouldMaskUpstreamErrors) is the one exception: its
@@ -353,10 +361,17 @@ func (p *Proxy) buildRawBodyEvent(logCtx *RequestLogContext, status string, endT
 	// publish the credential with it. That exception is NOT gated on the
 	// redaction toggle: turning redaction off is a debugging override for
 	// the client's own bodies, never a licence to publish a credential.
+	//
+	// ClientResponseBody needs the same exception, and for one concrete
+	// reason: on a mid-stream failure the router had already relayed the
+	// provider's raw error bytes to the client before it could mask them
+	// (see markProxyProviderStreamError's clientSaw and stream.go's
+	// "already streamed to the client live" branch), so there
+	// ClientResponseBody IS the provider's raw text -- the same bytes as
+	// ResponseBody. Masking one and publishing the other would publish the
+	// credential through the back door.
 	if shouldMaskUpstreamErrors(logCtx.Credential) {
 		event.ResponseBody = security.RedactBodyForLog(event.ResponseBody)
-	}
-	if p.rawBodyRedactSensitiveFields {
 		event.ClientResponseBody = security.RedactBodyForLog(event.ClientResponseBody)
 	}
 	if status == "failure" {

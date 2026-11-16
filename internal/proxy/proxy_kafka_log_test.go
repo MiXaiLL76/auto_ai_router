@@ -3,8 +3,10 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -384,42 +386,39 @@ func TestBuildRawBodyEvent_MapsRawBodies(t *testing.T) {
 func TestBuildRawBodyEventPublishesProviderErrorTextVerbatim(t *testing.T) {
 	// The provider's own error text is what says WHY a request failed, so
 	// raw_bodies publishes it as it is -- reducing it to a byte count makes
-	// the topic useless for its stated purpose. The bodies that can carry
-	// client-side content (the client's own request, and the answer the
-	// client received) stay masked.
+	// the topic useless for its stated purpose. The client's own request
+	// body stays redacted (that one carries the prompt).
 	prx := NewTestProxyBuilder().Build()
 	prx.rawBodyRedactSensitiveFields = true
 	logCtx := testLogCtx(t)
 	logCtx.HTTPStatus = 400
 	logCtx.ErrorBodyRaw = `{"error":{"message":"synthetic-provider-text"}}`
-	logCtx.ClientResponseBody = "synthetic-client-facing-body"
+	logCtx.ClientResponseBody = `{"error":{"message":"Invalid request","code":"invalid_request"}}`
 	prx.rawBodyStoreRawBody = true
 	logCtx.RequestBodyRaw = `{"messages":"[REDACTED]"}`
 
 	event := prx.buildRawBodyEvent(logCtx, "failure", logCtx.StartTime)
 	assert.Equal(t, logCtx.ErrorBodyRaw, event.ResponseBody,
 		"the provider's own error text is published verbatim")
-	assert.NotContains(t, event.ClientResponseBody, "synthetic-client-facing-body",
-		"what the client received is the model's own output and stays masked")
-	assert.Contains(t, event.ClientResponseBody, "REDACTED")
+	assert.Equal(t, logCtx.ClientResponseBody, event.ClientResponseBody,
+		"what the client received is published verbatim too -- the router already masked it")
 	assert.Equal(t, logCtx.RequestBodyRaw, event.RequestBody)
 	assert.Equal(t, "BadRequestError", event.ErrorClass)
 }
 
 func TestBuildRawBodyEventKeepsProviderTextWhenRedactionIsOff(t *testing.T) {
-	// The provider's error text is published verbatim either way; the toggle
-	// only governs the CLIENT-side bodies.
+	// Both bodies are published verbatim either way; the toggle only governs
+	// the client's own REQUEST body.
 	prx := NewTestProxyBuilder().Build()
 	prx.rawBodyRedactSensitiveFields = false
 	logCtx := testLogCtx(t)
 	logCtx.HTTPStatus = 400
 	logCtx.ErrorBodyRaw = `{"error":{"message":"synthetic-provider-text"}}`
-	logCtx.ClientResponseBody = "synthetic-client-facing-body"
+	logCtx.ClientResponseBody = `{"error":{"message":"Invalid request","code":"invalid_request"}}`
 
 	event := prx.buildRawBodyEvent(logCtx, "failure", logCtx.StartTime)
 	assert.Equal(t, logCtx.ErrorBodyRaw, event.ResponseBody)
-	assert.Equal(t, logCtx.ClientResponseBody, event.ClientResponseBody,
-		"with redaction off the client-facing body is published verbatim too")
+	assert.Equal(t, logCtx.ClientResponseBody, event.ClientResponseBody)
 }
 
 func TestBuildRawBodyEventMasksProviderTextThatEchoesTheCredential(t *testing.T) {
@@ -446,9 +445,67 @@ func TestBuildRawBodyEventMasksProviderTextThatEchoesTheCredential(t *testing.T)
 				assert.NotContains(t, event.ResponseBody, "synthetic-oauth-secret",
 					"a credential echoed back by the provider must not be published")
 				assert.Contains(t, event.ResponseBody, "REDACTED")
+				// The client-facing body needs the same treatment: on a
+				// mid-stream failure it IS the provider's raw text (the router
+				// had already relayed those bytes before it could mask them),
+				// so publishing it verbatim would publish the credential too.
+				assert.NotContains(t, event.ClientResponseBody, "synthetic-oauth-secret",
+					"the client-facing body must not carry the credential either")
+				assert.Contains(t, event.ClientResponseBody, "REDACTED")
 			})
 		}
 	}
+}
+
+// TestProxyRequest_PublishesBothBodiesVerbatim is the end-to-end version of
+// the two "published verbatim" rules: through a real request against a mock
+// upstream, the raw-body event must carry the provider's own error text AND
+// the body the client actually received -- byte for byte what the client
+// got. Both were previously reduced to "[REDACTED body bytes=N]", which made
+// the topic unable to answer "what did the provider say, and what did the
+// client get instead?".
+func TestProxyRequest_PublishesBothBodiesVerbatim(t *testing.T) {
+	providerBody := `{"error":{"code":"invalid_request_error","message":"The tool_choice parameter does not support being set to required or object in thinking mode","type":"invalid_request_error"}}`
+	mockServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, providerBody)
+	}))
+	defer mockServer.Close()
+
+	stub := &stubKafkaRawBodyManager{enabled: true}
+	prx := NewTestProxyBuilder().
+		WithSingleCredential("openai-main", config.ProviderTypeOpenAI, mockServer.URL, "upstream-key-1").
+		Build()
+	prx.rawBodyLog = stub
+	prx.kafkaLog = &stubKafkaManager{enabled: true}
+	prx.rawBodyStoreRawBody = true
+	// The production default (kafka.raw_bodies.redact_sensitive_fields:
+	// true): the client's own request body keeps its shape but loses its
+	// content, while both response bodies are published verbatim.
+	prx.rawBodyRedactSensitiveFields = true
+	setTestModelPrice(prx, "deepseek-v4-flash-0731", &pricingmodels.ModelPrice{})
+
+	reqBody := `{"model":"deepseek-v4-flash-0731","messages":[{"role":"user","content":"Hello"}]}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Len(t, stub.events, 1)
+	// The provider's own text, verbatim.
+	assert.Equal(t, providerBody, stub.events[0].ResponseBody)
+	// What the client actually received, verbatim -- and the router's own
+	// masked body, so the provider's free text did NOT reach the client.
+	assert.JSONEq(t, w.Body.String(), stub.events[0].ClientResponseBody)
+	assert.NotContains(t, stub.events[0].ClientResponseBody, "thinking mode",
+		"the client's own body must be the router's masked one, not the provider's text")
+	assert.Contains(t, stub.events[0].ClientResponseBody, "Invalid tool_choice")
+	// The client's request body is the one that stays redacted.
+	assert.Contains(t, stub.events[0].RequestBody, "[REDACTED]")
 }
 
 func TestProviderBodyCannotEscapeViaSpendErrorMessage(t *testing.T) {

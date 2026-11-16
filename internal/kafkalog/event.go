@@ -239,10 +239,12 @@ type RawBodyEvent struct {
 	// (nothing left to mask at that point -- the client already received
 	// those exact bytes as they streamed through).
 	//
-	// Masked to a byte count by default
-	// (KafkaRawBodiesConfig.RedactSensitiveFields): on a success this is the
-	// model's answer -- the client's own data -- and on a failure it is the
-	// router's already-masked error body.
+	// Published verbatim: the router masked this body before writing it to
+	// the client, so what lands here is a classified message from a fixed
+	// list, a code and a param -- never the provider's free text. The
+	// CometAPI/ProMan exception of ResponseBody applies here as well: on a
+	// mid-stream failure this body IS the provider's raw bytes, so
+	// publishing it verbatim would publish the credential with them.
 	ClientResponseBody string `json:"client_response_body,omitempty"`
 }
 
