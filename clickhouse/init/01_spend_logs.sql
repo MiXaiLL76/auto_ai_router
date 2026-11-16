@@ -316,8 +316,15 @@ FROM air.spend_logs_kafka;
 -- it. The one exception: CometAPI/ProMan credentials have been seen to echo
 -- the caller's own credential back inside their error body, so for those two
 -- it is reduced to "[REDACTED body bytes=N]".
--- client_response_body -- what the client actually received -- stays masked
--- by default (kafka.raw_bodies.redact_sensitive_fields=true).
+-- client_response_body -- what the client actually received -- is published
+-- verbatim too: the router already masked that body before writing it to the
+-- client (maskedUpstreamErrorBody -> classifiedBadRequestError ->
+-- upstreamerror.ClassifyBadRequest), so it holds a classified message from a
+-- fixed list, a code and a param -- never the provider's free text. The
+-- CometAPI/ProMan exception applies here as well: on a mid-stream failure
+-- the client-facing body IS the provider's raw bytes (they were relayed
+-- before the router could mask them), so publishing it verbatim would
+-- publish the credential with them.
 -- Named air.raw_bodies_kafka/air.raw_bodies, not air.error_bodies_kafka/
 -- air.error_bodies: neither table is error-only once
 -- kafka.raw_bodies.store_only_errors is set to false (they can then carry a

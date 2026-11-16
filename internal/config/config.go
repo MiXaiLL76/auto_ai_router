@@ -1590,28 +1590,29 @@ type KafkaRawBodiesConfig struct {
 	// generally, not just alongside errors.
 	StoreOnlyErrors bool `yaml:"store_only_errors"` // default: true
 
-	// RedactSensitiveFields governs the CLIENT-side bodies published by this
-	// path: it omits the captured client-facing response body before
-	// publishing and controls whether StoreRawBody's captured request body has
-	// prompt/message content stripped before publishing (see
-	// redactRequestBodyForLogging: messages/system/prompt/input/
-	// contents/instructions replaced with a role/count-preserving
-	// placeholder, every other client-written string -- tool descriptions,
-	// user, metadata, ... -- masked, while model, tool names, parameter
-	// shape and allowlisted numbers/booleans are kept). Defaults to true.
-	// The client's response body is omitted even when StoreRawBody is off.
-	// Set to false to capture those bodies verbatim instead --
-	// e.g. for a short-lived, access-controlled debugging session where the
-	// actual prompt is genuinely needed. This is a deliberate, explicit
-	// escape hatch, not a recommended default: turning it off reintroduces
-	// exactly the privacy exposure StoreRawBody's redaction exists to avoid.
+	// RedactSensitiveFields governs the CLIENT'S OWN REQUEST body: it controls
+	// whether StoreRawBody's captured request body has prompt/message content
+	// stripped before publishing (see redactRequestBodyForLogging:
+	// messages/system/prompt/input/contents/instructions replaced with a
+	// role/count-preserving placeholder, every other client-written string --
+	// tool descriptions, user, metadata, ... -- masked, while model, tool
+	// names, parameter shape and allowlisted numbers/booleans are kept).
+	// Defaults to true. Set to false to capture the request verbatim, prompt
+	// included -- e.g. for a short-lived, access-controlled debugging session
+	// where the actual prompt is genuinely needed. This is a deliberate,
+	// explicit escape hatch, not a recommended default: turning it off
+	// reintroduces exactly the privacy exposure StoreRawBody's redaction
+	// exists to avoid.
 	//
-	// It does NOT govern the provider's own error text (the event's
-	// response_body), which is published verbatim either way: it is the
-	// provider describing its own failure and nothing else says WHY a request
-	// failed. The one exception is a credential whose error text echoes the
-	// caller's own credential back (CometAPI, ProMan) -- that body is reduced
-	// to a byte count regardless of this toggle.
+	// It does NOT govern the two RESPONSE bodies (the event's response_body
+	// and client_response_body), which are published verbatim either way:
+	// response_body is the provider describing its own failure -- nothing else
+	// says WHY a request failed -- and client_response_body is what the
+	// client received, which the router had already masked into a classified
+	// message before writing it to the client. The one exception is a
+	// credential whose error text echoes the caller's own credential back
+	// (CometAPI, ProMan) -- those bodies are reduced to a byte count
+	// regardless of this toggle.
 	RedactSensitiveFields bool `yaml:"redact_sensitive_fields"` // default: true
 }
 
