@@ -280,7 +280,7 @@ const (
 	invalidFieldPrefix         = "Invalid "
 	unsupportedParameterPrefix = "Unsupported parameter: "
 	outputTokenRangePrefix     = ": requested "
-	outputTokenRangeSeparator  = ", but the supported range is "
+	rangeMessageSeparator      = ", but the supported range is "
 	exclusiveBoundSuffix       = " (exclusive)"
 	pinnedValuePrefix          = ": only "
 	pinnedValueSuffix          = " is allowed for this model"
@@ -340,7 +340,7 @@ func maxOutputTokensMessage(joined string) string {
 	if requested == "" || upper == nil {
 		return "Invalid max_output_tokens"
 	}
-	msg := invalidFieldPrefix + "max_output_tokens" + outputTokenRangePrefix + requested + outputTokenRangeSeparator
+	msg := invalidFieldPrefix + "max_output_tokens" + outputTokenRangePrefix + requested + rangeMessageSeparator
 	if lower != nil {
 		msg += "from " + lower[1]
 		if lower[2] != "" {

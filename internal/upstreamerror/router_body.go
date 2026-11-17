@@ -69,7 +69,7 @@ var routerContextLengthMessageRe = regexp.MustCompile(
 
 var (
 	routerPinnedParameterSuffix  = regexp.MustCompile("^" + pinnedValuePrefix + `\d+(?:\.\d+)?` + pinnedValueSuffix + "$")
-	routerOutputTokenRangeSuffix = regexp.MustCompile("^" + outputTokenRangePrefix + `\d+` + outputTokenRangeSeparator +
+	routerOutputTokenRangeSuffix = regexp.MustCompile("^" + outputTokenRangePrefix + `\d+` + rangeMessageSeparator +
 		`(?:from \d+(?:` + regexp.QuoteMeta(exclusiveBoundSuffix) + `)? to |up to )\d+(?:` + regexp.QuoteMeta(exclusiveBoundSuffix) + `)?\.$`)
 )
 
