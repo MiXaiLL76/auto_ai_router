@@ -763,10 +763,44 @@ func TestAuthenticator_ValidateToken_NonSKToken(t *testing.T) {
 	hashedToken := "pre-hashed-token" // Not prefixed with sk-
 	cache.Set(hashedToken, tokenInfo)
 
-	// Validate should find it using the same hashing logic (no-op for non-sk-)
+	// A non-sk- token is rejected even when the cache holds it
 	info, err := auth.ValidateToken(context.Background(), "pre-hashed-token")
-	assert.NoError(t, err)
+	assert.ErrorIs(t, err, models.ErrTokenNotFound)
+	assert.Nil(t, info)
+}
+
+func TestAuthenticator_ValidateToken_RejectsKeyHash(t *testing.T) {
+	cache, err := NewCache(100, time.Minute)
+	require.NoError(t, err)
+
+	auth := NewAuthenticator(nil, cache, slog.Default())
+
+	hashedToken := HashToken("sk-test-token-123")
+	cache.Set(hashedToken, &models.TokenInfo{Token: hashedToken, UserID: "user1"})
+
+	info, err := auth.ValidateToken(context.Background(), "sk-test-token-123")
+	require.NoError(t, err)
 	assert.Equal(t, "user1", info.UserID)
+
+	info, err = auth.ValidateToken(context.Background(), hashedToken)
+	assert.ErrorIs(t, err, models.ErrTokenNotFound)
+	assert.Nil(t, info)
+}
+
+func TestAuthenticator_ValidateToken_RejectsMasterKeyHash(t *testing.T) {
+	cache, err := NewCache(100, time.Minute)
+	require.NoError(t, err)
+
+	auth := NewAuthenticator(nil, cache, slog.Default())
+	require.NoError(t, auth.FetchMasterKey(context.Background(), "sk-master-key"))
+
+	info, err := auth.ValidateToken(context.Background(), "sk-master-key")
+	require.NoError(t, err)
+	assert.True(t, info.IsMasterKey)
+
+	info, err = auth.ValidateToken(context.Background(), HashToken("sk-master-key"))
+	assert.ErrorIs(t, err, models.ErrTokenNotFound)
+	assert.Nil(t, info)
 }
 
 func TestAuthenticator_CacheHitRate(t *testing.T) {
