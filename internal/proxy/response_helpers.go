@@ -326,6 +326,9 @@ func streamOptionsRaw(reqBody map[string]goccyjson.RawMessage) map[string]goccyj
 //     router sees carries no usage to charge;
 //   - search_parameters: xAI's legacy Live Search, billed per source by xAI
 //     but not priced by the router.
+//
+// Responses background mode is the same kind of parameter; see
+// deleteBackgroundMode.
 var clientControlledBillingParams = []string{"service_tier", "deferred", "search_parameters"}
 
 // isClientControlledBillingFormField reports whether a multipart field name
@@ -340,9 +343,10 @@ func isClientControlledBillingFormField(name string) bool {
 }
 
 // deleteClientControlledBillingParams removes clientControlledBillingParams
-// from one JSON object level, reporting whether anything was removed.
+// and Responses background mode from one JSON object level, reporting whether
+// anything was removed.
 func deleteClientControlledBillingParams(object map[string]goccyjson.RawMessage) bool {
-	changed := false
+	changed := deleteBackgroundMode(object)
 	for _, param := range clientControlledBillingParams {
 		if _, exists := object[param]; exists {
 			delete(object, param)
@@ -350,6 +354,21 @@ func deleteClientControlledBillingParams(object map[string]goccyjson.RawMessage)
 		}
 	}
 	return changed
+}
+
+// deleteBackgroundMode removes a Responses API "background": true from one
+// JSON object level, reporting whether it was removed. A background response
+// comes back "queued" with no usage while the provider still runs and bills
+// the generation, which the router can neither fetch nor charge for; without
+// the flag the request runs as a regular one. Only the boolean is removed:
+// the Images API has its own string "background", so it cannot be a
+// clientControlledBillingParams entry.
+func deleteBackgroundMode(object map[string]goccyjson.RawMessage) bool {
+	if background, ok := rawJSONBool(object["background"]); !ok || !background {
+		return false
+	}
+	delete(object, "background")
+	return true
 }
 
 // appendServiceTier appends object's service_tier to tiers when it is a
@@ -362,11 +381,11 @@ func appendServiceTier(tiers []string, object map[string]goccyjson.RawMessage) [
 }
 
 // stripClientControlledBillingParams removes clientControlledBillingParams
-// from the two request locations through which clients may set them: the
-// top level and extra_body. It is intentionally not recursive: the same names
-// in metadata, messages, or tool schemas are user data and must be preserved.
-// It returns the service tiers it removed, so they can still be checked
-// against the model they reach (see clientServiceTiers).
+// and Responses background mode from the two request locations through which
+// clients may set them: the top level and extra_body. It is intentionally not
+// recursive: the same names in metadata, messages, or tool schemas are user
+// data and must be preserved. It returns the service tiers it removed, so they
+// can still be checked against the model they reach (see clientServiceTiers).
 func stripClientControlledBillingParams(reqBody map[string]goccyjson.RawMessage) (bool, []string, error) {
 	serviceTiers := appendServiceTier(nil, reqBody)
 	changed := deleteClientControlledBillingParams(reqBody)
