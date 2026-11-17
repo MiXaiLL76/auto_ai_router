@@ -155,24 +155,6 @@ func (p *Proxy) moonshotToolsClient(cred *config.CredentialConfig) *moonshottool
 	})
 }
 
-// toTokenUsage converts the loop's accumulated usage into the router's own
-// usage shape, so the regular billing path prices it like any other
-// response's.
-func (u *moonshotToolUsage) toTokenUsage() *converter.TokenUsage {
-	return &converter.TokenUsage{
-		PromptTokens:              u.promptTokens,
-		CompletionTokens:          u.completionTokens,
-		CachedInputTokens:         u.cachedInputTokens,
-		ReasoningTokens:           u.reasoningTokens,
-		WebSearchRequests:         u.webSearchRequests,
-		WebFetchRequests:          u.webFetchRequests,
-		WebSearchContextSize:      u.webSearchContextSize,
-		MoonshotSearchRequests:    u.webSearchRequests,
-		MoonshotSearchProRequests: u.webSearchProRequests,
-		MoonshotFetchRequests:     u.webFetchRequests,
-	}
-}
-
 // runResult is the loop's outcome: the body so far, the usage every step
 // accumulated, and the tool counters.
 //

@@ -582,3 +582,5 @@ credentials:
 ```
 
 The adapter is off for every request that did not ask for one of the built-in tools, and for every credential without the opt-in.
+
+The whole exchange — the client's request, the router's call to Moonshot, the tool result going back to the model and the spend row — is shown with real bodies in [docs/moonshot-tools.md](../moonshot-tools.md).

@@ -168,12 +168,20 @@ func moonshotTestProxy(t *testing.T, fake *moonshotFake) (*Proxy, *stubLiteLLMMa
 	// is converted to Chat Completions for it -- the same shape the adapter
 	// works in.
 	noPassthrough := false
-	prx.modelManager = models.New(prx.logger, 50, []config.ModelRPMConfig{{
-		Name:                 "kimi-k2",
-		Model:                "kimi-k2",
-		Credential:           "moonshot",
-		PassthroughResponses: &noPassthrough,
-	}})
+	prx.modelManager = models.New(prx.logger, 50, []config.ModelRPMConfig{
+		{
+			Name:                 "kimi-k2",
+			Model:                "kimi-k2",
+			Credential:           "moonshot",
+			PassthroughResponses: &noPassthrough,
+		},
+		{
+			Name:                 "kimi-k3.1-pro",
+			Model:                "kimi-k3.1-pro",
+			Credential:           "moonshot",
+			PassthroughResponses: &noPassthrough,
+		},
+	})
 	prx.modelManager.LoadModelsFromConfig([]config.CredentialConfig{{
 		Name: "moonshot", Type: config.ProviderTypeOpenAI, APIKey: "ms-key",
 	}})
@@ -184,10 +192,16 @@ func moonshotTestProxy(t *testing.T, fake *moonshotFake) (*Proxy, *stubLiteLLMMa
 		FetchCostPerCall:     0.013,
 		Rate:                 1.3,
 	})
-	prx.priceRegistry.Update(map[string]*models.ModelPrice{"kimi-k2": {
-		InputCostPerToken:  1e-6,
-		OutputCostPerToken: 2e-6,
-	}})
+	prx.priceRegistry.Update(map[string]*models.ModelPrice{
+		"kimi-k2": {
+			InputCostPerToken:  1e-6,
+			OutputCostPerToken: 2e-6,
+		},
+		"kimi-k3.1-pro": {
+			InputCostPerToken:  1e-6,
+			OutputCostPerToken: 2e-6,
+		},
+	})
 	return prx, dbStub
 }
 
@@ -1204,5 +1218,76 @@ func TestMoonshotBasicProAndFetchCostTheSame(t *testing.T) {
 	got := prices.SearchCostPerCall + prices.SearchProCostPerCall + prices.FetchCostPerCall
 	if diff := got - wantTotal; diff > 1e-9 || diff < -1e-9 {
 		t.Errorf("the three tools cost %v together, want %v", got, wantTotal)
+	}
+}
+
+// TestMoonshotCallsAreNotCountedAsTheBuiltInTools checks that the router's
+// own calls are counted only as Moonshot's: the built-in tools' counters
+// belong to the model, and counting the router's calls in both would charge
+// the client twice -- once by Moonshot's tariff and once by the model's.
+func TestMoonshotCallsAreNotCountedAsTheBuiltInTools(t *testing.T) {
+	fake := &moonshotFake{
+		searchResults: []map[string]any{{
+			"title": "Kimi K2 released",
+			"url":   "https://example.com/k2",
+		}},
+	}
+	server := httptest.NewServer(fake.handler())
+	defer server.Close()
+	fake.baseURL = server.URL
+
+	prx, dbStub := moonshotTestProxy(t, fake)
+
+	body := `{
+		"model": "kimi-k2",
+		"messages": [{"role": "user", "content": "What is new in Kimi K2?"}],
+		"tools": [{"type": "web_search"}]
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	prx.ProxyRequest(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if len(dbStub.loggedEntries) != 1 {
+		t.Fatalf("got %d spend rows, want 1", len(dbStub.loggedEntries))
+	}
+	entry := dbStub.loggedEntries[0]
+
+	// The built-in tools' counters belong to the model: the provider never
+	// reported a built-in search here, so they must stay at zero.
+	var envelope struct {
+		UsageObject struct {
+			ServerToolUse struct {
+				WebSearchRequests      int `json:"web_search_requests"`
+				WebFetchRequests       int `json:"web_fetch_requests"`
+				MoonshotSearchRequests int `json:"moonshot_search_requests"`
+				MoonshotFetchRequests  int `json:"moonshot_fetch_requests"`
+			} `json:"server_tool_use"`
+		} `json:"usage_object"`
+	}
+	if err := json.Unmarshal([]byte(entry.Metadata), &envelope); err != nil {
+		t.Fatalf("decoding the spend metadata: %v", err)
+	}
+	use := envelope.UsageObject.ServerToolUse
+	if use.WebSearchRequests != 0 {
+		t.Errorf("web_search_requests = %d, want 0 (the router's search is Moonshot's, not the model's)",
+			use.WebSearchRequests)
+	}
+	if use.WebFetchRequests != 0 {
+		t.Errorf("web_fetch_requests = %d, want 0", use.WebFetchRequests)
+	}
+	if use.MoonshotSearchRequests != 1 {
+		t.Errorf("moonshot_search_requests = %d, want 1", use.MoonshotSearchRequests)
+	}
+
+	// The price is the tool's own: one search at $0.013, and nothing for the
+	// built-in web search.
+	wantSpend := 300*1e-6 + 30*2e-6 + 0.013
+	if diff := entry.Spend - wantSpend; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("Spend = %v, want %v", entry.Spend, wantSpend)
 	}
 }

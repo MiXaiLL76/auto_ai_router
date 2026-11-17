@@ -175,7 +175,7 @@ func (p *Proxy) runMoonshotStreamToolLoop(
 		streamUsage := usageFromMoonshotStreamUsage(usage)
 		return &moonshotStreamCycleResult{
 			body:        raw,
-			usage:       streamUsage.toMoonshotTokenUsage(),
+			usage:       streamUsage.toTokenUsage(),
 			totalTokens: streamUsage.totalTokens,
 			lastChunk:   lastChunkOf(raw),
 		}, nil
@@ -194,7 +194,7 @@ func (p *Proxy) runMoonshotStreamToolLoop(
 		streamUsage := usageFromMoonshotStreamUsage(usage)
 		return &moonshotStreamCycleResult{
 			body:        raw,
-			usage:       streamUsage.toMoonshotTokenUsage(),
+			usage:       streamUsage.toTokenUsage(),
 			totalTokens: streamUsage.totalTokens,
 			lastChunk:   lastChunkOf(raw),
 		}, nil

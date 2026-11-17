@@ -129,8 +129,6 @@ type moonshotToolUsage struct {
 	webSearchProRequests int
 	// webFetchRequests counts the billable fetches.
 	webFetchRequests int
-	// webSearchContextSize is the search context size the request asked for.
-	webSearchContextSize string
 }
 
 // add folds one step's usage into the accumulator.
@@ -185,18 +183,21 @@ func (u *moonshotToolUsage) toMoonshotToolUsage() *moonshotToolUsage {
 	}
 }
 
-// toMoonshotTokenUsage converts the loop's accumulated usage into the
+// toTokenUsage converts the loop's accumulated usage into the
 // router's own usage shape, so the regular billing path prices it like any
 // other response's.
-func (u *moonshotToolUsage) toMoonshotTokenUsage() *converter.TokenUsage {
+//
+// The tool counters go into the Moonshot fields alone: they are Moonshot's
+// own calls, priced by the tool price document, and the built-in tools'
+// counters (WebSearchRequests, WebFetchRequests) are the model's own -- the
+// provider never reported a built-in search here, so counting the router's
+// calls in both would charge the client twice.
+func (u *moonshotToolUsage) toTokenUsage() *converter.TokenUsage {
 	return &converter.TokenUsage{
 		PromptTokens:              u.promptTokens,
 		CompletionTokens:          u.completionTokens,
 		CachedInputTokens:         u.cachedInputTokens,
 		ReasoningTokens:           u.reasoningTokens,
-		WebSearchRequests:         u.webSearchRequests,
-		WebFetchRequests:          u.webFetchRequests,
-		WebSearchContextSize:      u.webSearchContextSize,
 		MoonshotSearchRequests:    u.webSearchRequests,
 		MoonshotSearchProRequests: u.webSearchProRequests,
 		MoonshotFetchRequests:     u.webFetchRequests,
