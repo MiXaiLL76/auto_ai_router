@@ -1,133 +1,18 @@
 package proxy
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
-	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	"github.com/mixaill76/auto_ai_router/internal/deepseektools"
+	"github.com/mixaill76/auto_ai_router/internal/sse"
+	"github.com/mixaill76/auto_ai_router/internal/toolloop"
 )
-
-// deepSeekStreamToolCall is the tool call a streaming model asked for.
-type deepSeekStreamToolCall struct {
-	ID        string
-	Name      string
-	Arguments string
-}
-
-// collectDeepSeekStreamToolCalls reads a Chat Completions SSE stream and
-// returns the tool calls the model made in it.
-//
-// The stream is read whole: the router has to know whether the model asked
-// for a tool before it can decide whether to relay the stream to the client
-// as it is or to run the tool first. A stream that ends without a tool call
-// is replayed to the client byte for byte, so the client sees exactly what
-// the provider sent.
-//
-// It returns the stream's bytes, the tool calls and the usage the stream
-// carried.
-func collectDeepSeekStreamToolCalls(resp *http.Response) ([]byte, []deepSeekStreamToolCall, *openai.OpenAIUsage, error) {
-	if resp == nil || resp.Body == nil {
-		return nil, nil, nil, errors.New("deepseektools: no stream to read")
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	var buffered bytes.Buffer
-	if _, err := io.Copy(&buffered, resp.Body); err != nil {
-		return nil, nil, nil, err
-	}
-	raw := buffered.Bytes()
-
-	calls := map[string]*deepSeekStreamToolCall{}
-	var order []string
-	usage := &openai.OpenAIUsage{}
-	for _, payload := range splitSSEPayloads(raw, nil) {
-		var chunk struct {
-			Choices []struct {
-				Delta struct {
-					ToolCalls []struct {
-						Index    int    `json:"index"`
-						ID       string `json:"id"`
-						Type     string `json:"type"`
-						Function struct {
-							Name      string `json:"name"`
-							Arguments string `json:"arguments"`
-						} `json:"function"`
-					} `json:"tool_calls"`
-				} `json:"delta"`
-			} `json:"choices"`
-			Usage *openai.OpenAIUsage `json:"usage"`
-		}
-		if err := json.Unmarshal(payload, &chunk); err != nil {
-			continue
-		}
-		if chunk.Usage != nil {
-			usage = chunk.Usage
-		}
-		for _, choice := range chunk.Choices {
-			for _, delta := range choice.Delta.ToolCalls {
-				// A streamed tool call's pieces arrive under the same index:
-				// the id and the name only on the first piece, the arguments
-				// split across the rest. The index is therefore the key --
-				// the id is not (a later piece may carry it empty, and two
-				// calls may share one id in a provider's stream).
-				key := strconv.Itoa(delta.Index)
-				call, seen := calls[key]
-				if !seen {
-					call = &deepSeekStreamToolCall{ID: delta.ID}
-					calls[key] = call
-					order = append(order, key)
-				}
-				if delta.ID != "" {
-					call.ID = delta.ID
-				}
-				if delta.Function.Name != "" {
-					call.Name = delta.Function.Name
-				}
-				call.Arguments += delta.Function.Arguments
-			}
-		}
-	}
-
-	var owned []deepSeekStreamToolCall
-	for _, key := range order {
-		call := calls[key]
-		if call.Name == deepseektools.SearchToolName || call.Name == deepseektools.FetchToolName {
-			owned = append(owned, *call)
-		}
-	}
-	return raw, owned, usage, nil
-}
-
-// replayDeepSeekStream writes a buffered stream to the client unchanged.
-func replayDeepSeekStream(w http.ResponseWriter, resp *http.Response, raw []byte) {
-	header := w.Header()
-	for name, values := range resp.Header {
-		if strings.EqualFold(name, "Content-Length") {
-			continue
-		}
-		for _, value := range values {
-			header.Add(name, value)
-		}
-	}
-	header.Set("Content-Type", "text/event-stream")
-	header.Set("Cache-Control", "no-cache")
-	header.Set("Connection", "keep-alive")
-	header.Del("Content-Length")
-	w.WriteHeader(http.StatusOK)
-	// The provider's own SSE, relayed byte for byte: the client asked for a
-	// stream and expects exactly what the provider sent. It is not content the
-	// router composes, so it is not an XSS sink here.
-	_, _ = w.Write(raw) //nolint:gosec // G705: the provider's stream, relayed verbatim
-}
 
 // deepSeekStreamCycleResult is what the streaming loop produced.
 type deepSeekStreamCycleResult struct {
@@ -168,63 +53,56 @@ func (p *Proxy) runDeepSeekStreamToolLoop(
 	if !deepSeekToolsEnabledFor(modelID, cred) {
 		return nil, nil
 	}
-	raw, calls, usage, err := collectDeepSeekStreamToolCalls(resp)
+	runner := p.newDeepSeekToolRunner(cred)
+	raw, calls, usage, err := toolloop.CollectStreamToolCalls(resp)
 	if err != nil {
 		return nil, err
 	}
 	if len(calls) == 0 {
 		// No tool call: the client gets the provider's stream as it is.
-		replayDeepSeekStream(w, resp, raw)
-		streamUsage := usageFromStreamUsage(usage)
+		replayToolStream(w, resp, raw)
+		streamUsage := toolloop.UsageFromStreamUsage(usage)
 		return &deepSeekStreamCycleResult{
 			body:        raw,
-			usage:       streamUsage.toTokenUsage(),
-			totalTokens: streamUsage.totalTokens,
-			lastChunk:   lastChunkOf(raw),
+			usage:       deepSeekUsageOf(streamUsage, nil),
+			totalTokens: streamUsage.TotalTokens,
+			lastChunk:   sse.LastPayload(raw),
 		}, nil
-	}
-
-	runner := &deepSeekToolRunner{
-		client:  p.deepSeekToolsClient(cred),
-		logger:  p.logger,
-		quota:   p.deepSeekToolsQuota,
-		account: deepSeekAccountKey(cred),
-		state:   newDeepSeekToolState(),
 	}
 	if runner.client == nil {
 		// No key: the tool cannot be run, so the stream is relayed as it is.
-		replayDeepSeekStream(w, resp, raw)
-		streamUsage := usageFromStreamUsage(usage)
+		replayToolStream(w, resp, raw)
+		streamUsage := toolloop.UsageFromStreamUsage(usage)
 		return &deepSeekStreamCycleResult{
 			body:        raw,
-			usage:       streamUsage.toTokenUsage(),
-			totalTokens: streamUsage.totalTokens,
-			lastChunk:   lastChunkOf(raw),
+			usage:       deepSeekUsageOf(streamUsage, nil),
+			totalTokens: streamUsage.TotalTokens,
+			lastChunk:   sse.LastPayload(raw),
 		}, nil
 	}
 
-	cycle, err := newDeepSeekToolCycle(body, runner)
+	cycle, err := toolloop.NewCycle(body, runner)
 	if err != nil {
 		return nil, err
 	}
-	total := usageFromStreamUsage(usage)
+	total := toolloop.UsageFromStreamUsage(usage)
 	current := raw
 
 	for step := 1; step < p.deepSeekToolsMaxSteps; step++ {
-		next, err := cycle.nextBodyFromToolCalls(calls)
+		next, err := cycle.NextBodyFromToolCalls(r.Context(), calls)
 		if err != nil {
-			return nil, err
+			return deepSeekStreamResult(current, total, runner), err
 		}
 		stepBody, stepUsage, err := p.runDeepSeekStreamToolStep(r, w, logCtx, prepared, cred, modelID, realModelID, next, start, attemptedCreds)
 		if err != nil {
-			return nil, err
+			// A tool that already ran and returned results is billed even
+			// though the model that followed it failed, so the result is
+			// returned with the error rather than dropped.
+			return deepSeekStreamResult(current, total, runner), err
 		}
-		total.add(stepUsage)
+		total.Add(stepUsage)
 		current = stepBody
-		nextCalls, err := deepSeekToolCallsFromStream(stepBody)
-		if err != nil {
-			return nil, err
-		}
+		nextCalls := toolloop.CallsFromStream(stepBody, runner)
 		if len(nextCalls) == 0 {
 			break
 		}
@@ -232,15 +110,8 @@ func (p *Proxy) runDeepSeekStreamToolLoop(
 	}
 
 	// The final step's stream is what the client gets.
-	replayDeepSeekStream(w, resp, current)
-	total.webSearchRequests = runner.state.billableSearch
-	total.webFetchRequests = runner.state.billableFetch
-	return &deepSeekStreamCycleResult{
-		body:        current,
-		usage:       total.toTokenUsage(),
-		totalTokens: total.totalTokens,
-		lastChunk:   lastChunkOf(current),
-	}, nil
+	replayToolStream(w, resp, current)
+	return deepSeekStreamResult(current, total, runner), nil
 }
 
 // runDeepSeekStreamToolStep sends one upstream request of the streaming loop
@@ -255,7 +126,7 @@ func (p *Proxy) runDeepSeekStreamToolStep(
 	body []byte,
 	start time.Time,
 	attemptedCreds map[string]bool,
-) ([]byte, *deepSeekToolUsage, error) {
+) ([]byte, *toolloop.Usage, error) {
 	embedFanOutReplies := &embedContentFanOutReplies{}
 	outcome, done, isClientGone, shouldRetry, _, transportErr := p.sendToCredential(
 		r, w, logCtx, cred, prepared, modelID, realModelID, body,
@@ -277,97 +148,63 @@ func (p *Proxy) runDeepSeekStreamToolStep(
 		}
 		return nil, nil, &upstreamStatusError{status: outcome.resp.StatusCode, body: responseBody}
 	}
-	raw, _, usage, err := collectDeepSeekStreamToolCalls(outcome.resp)
+	raw, _, usage, err := toolloop.CollectStreamToolCalls(outcome.resp)
 	if err != nil {
 		return nil, nil, err
 	}
-	return raw, usageFromStreamUsage(usage), nil
+	return raw, toolloop.UsageFromStreamUsage(usage), nil
 }
 
-// deepSeekToolCallsFromStream reads the tool calls out of a buffered stream.
-func deepSeekToolCallsFromStream(raw []byte) ([]deepSeekStreamToolCall, error) {
-	// The pieces of one streamed tool call arrive under the same index: the id
-	// and the name only on the first piece, the arguments split across the
-	// rest. The collector folds them back into one call per index.
-	_, calls, _, err := collectDeepSeekStreamToolCalls(&http.Response{Body: io.NopCloser(bytes.NewReader(raw))})
-	if err != nil {
-		return nil, err
-	}
-	return calls, nil
-}
-
-// usageFromStreamUsage converts a stream's usage into the loop's shape.
-func usageFromStreamUsage(usage *openai.OpenAIUsage) *deepSeekToolUsage {
-	out := &deepSeekToolUsage{}
-	if usage == nil {
-		return out
-	}
-	out.promptTokens = usage.PromptTokens
-	out.completionTokens = usage.CompletionTokens
-	out.totalTokens = usage.TotalTokens
-	if usage.CompletionTokensDetails != nil {
-		out.reasoningTokens = usage.CompletionTokensDetails.ReasoningTokens
-	}
-	if usage.PromptTokensDetails != nil {
-		out.cachedInputTokens = usage.PromptTokensDetails.CachedTokens
-	}
-	return out
-}
-
-// nextBodyFromToolCalls builds the next request body from a streamed tool
-// call, the streaming counterpart of the cycle's nextBody.
-func (cycle *deepSeekToolCycle) nextBodyFromToolCalls(calls []deepSeekStreamToolCall) ([]byte, error) {
-	assistant := map[string]any{"role": "assistant"}
-	toolCalls := make([]map[string]any, 0, len(calls))
-	results := make([]map[string]any, 0, len(calls))
-	for _, call := range calls {
-		if call.Name != deepseektools.SearchToolName && call.Name != deepseektools.FetchToolName {
+// replayToolStream writes a buffered stream to the client unchanged.
+func replayToolStream(w http.ResponseWriter, resp *http.Response, raw []byte) {
+	header := w.Header()
+	for name, values := range resp.Header {
+		if strings.EqualFold(name, "Content-Length") {
 			continue
 		}
-		toolCalls = append(toolCalls, map[string]any{
-			"id":   call.ID,
-			"type": "function",
-			"function": map[string]any{
-				"name":      call.Name,
-				"arguments": call.Arguments,
-			},
-		})
-		content, ok := cycle.runner.state.toolResults[call.ID]
-		if !ok {
-			content = cycle.runToolByName(call.Name, call.Arguments)
-			cycle.runner.state.toolResults[call.ID] = content
+		for _, value := range values {
+			header.Add(name, value)
 		}
-		results = append(results, toolResultMessage(call.ID, call.Name, content))
 	}
-	if len(toolCalls) == 0 {
-		return cycle.body, nil
-	}
-	assistant["tool_calls"] = toolCalls
-	cycle.messages = appendToolResults(cycle.messages, assistant, results)
-
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(cycle.body, &fields); err != nil {
-		return nil, err
-	}
-	encodedMessages, err := json.Marshal(cycle.messages)
-	if err != nil {
-		return nil, err
-	}
-	fields["messages"] = encodedMessages
-	next, err := json.Marshal(fields)
-	if err != nil {
-		return nil, err
-	}
-	cycle.body = next
-	return next, nil
+	header.Set("Content-Type", "text/event-stream")
+	header.Set("Cache-Control", "no-cache")
+	header.Set("Connection", "keep-alive")
+	header.Del("Content-Length")
+	w.WriteHeader(http.StatusOK)
+	// The provider's own SSE, relayed byte for byte: the client asked for a
+	// stream and expects exactly what the provider sent. It is not content the
+	// router composes, so it is not an XSS sink here.
+	_, _ = w.Write(raw) //nolint:gosec // G705: the provider's stream, relayed verbatim
 }
 
-// lastChunkOf returns the last SSE payload of a buffered stream, which the
-// streaming log reads its figures from.
-func lastChunkOf(raw []byte) []byte {
-	payloads := splitSSEPayloads(raw, nil)
-	if len(payloads) == 0 {
-		return nil
+// deepSeekUsageOf converts the loop's usage into the router's own usage
+// shape, with the billable tool counts.
+func deepSeekUsageOf(total *toolloop.Usage, billable map[string]int) *converter.TokenUsage {
+	usage := &converter.TokenUsage{
+		PromptTokens:      total.PromptTokens,
+		CompletionTokens:  total.CompletionTokens,
+		CachedInputTokens: total.CachedInputTokens,
+		ReasoningTokens:   total.ReasoningTokens,
 	}
-	return payloads[len(payloads)-1]
+	if billable != nil {
+		usage.WebSearchRequests = billable[deepseektools.SearchToolName]
+		usage.WebFetchRequests = billable[deepseektools.FetchToolName]
+	}
+	return usage
+}
+
+// deepSeekStreamResult is the streaming loop's outcome.
+func deepSeekStreamResult(body []byte, total *toolloop.Usage, runner *deepSeekToolRunner) *deepSeekStreamCycleResult {
+	return &deepSeekStreamCycleResult{
+		body:        body,
+		usage:       deepSeekUsageOf(total, runner.Billable()),
+		totalTokens: total.TotalTokens,
+		lastChunk:   sse.LastPayload(body),
+	}
+}
+
+// readAndCloseResponseBody reads a response body and closes it.
+func readAndCloseResponseBody(resp *http.Response) ([]byte, error) {
+	defer func() { _ = resp.Body.Close() }()
+	return io.ReadAll(resp.Body)
 }

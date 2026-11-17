@@ -19,6 +19,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
 	"github.com/mixaill76/auto_ai_router/internal/loopgate"
 	"github.com/mixaill76/auto_ai_router/internal/proxy/modelutils"
+	"github.com/mixaill76/auto_ai_router/internal/sse"
 )
 
 // loopGateUpstreamFormat returns the wire format of an attempt's upstream
@@ -400,7 +401,7 @@ func (o *loopGateObserver) maxLine() int {
 // stream's aggregator; an enforced Responses stream once for the detector
 // and its output.
 func (o *loopGateObserver) observeLine(line []byte) {
-	payload, ok := sseLinePayload(line)
+	payload, ok := sse.LinePayload(line)
 	if !ok {
 		return
 	}

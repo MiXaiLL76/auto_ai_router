@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
+	"github.com/mixaill76/auto_ai_router/internal/toolretry"
 )
 
 // Logger is the optional logger of a Client: it records every Search and
@@ -77,6 +78,11 @@ type ClientConfig struct {
 	MaxRetries int
 	// Logger, when set, records every call this client makes.
 	Logger Logger
+	// HTTPClient, when set, is the client the calls go out through. The
+	// router hands in a cached one, so the connections to DeepSeek survive
+	// between the requests instead of being opened and dropped each time.
+	// Unset, the client builds its own.
+	HTTPClient *http.Client
 }
 
 // Client calls DeepSeek's Search and Fetch endpoints.
@@ -91,11 +97,14 @@ type Client struct {
 // NewClient builds a Client over the shared HTTP transport (connection
 // pooling, HTTP/2 keepalive) so this feature does not hand-roll its own.
 func NewClient(cfg ClientConfig) *Client {
-	httpCfg := httputil.DefaultHTTPClientConfig()
-	httpCfg.Timeout = cfg.Timeout
-	client := httputil.NewHTTPClient(httpCfg)
-	if cfg.ProxyURL != "" {
-		client = httputil.WithClientProxy(client, cfg.ProxyURL)
+	client := cfg.HTTPClient
+	if client == nil {
+		httpCfg := httputil.DefaultHTTPClientConfig()
+		httpCfg.Timeout = cfg.Timeout
+		client = httputil.NewHTTPClient(httpCfg)
+		if cfg.ProxyURL != "" {
+			client = httputil.WithClientProxy(client, cfg.ProxyURL)
+		}
 	}
 	return &Client{
 		baseURL:    strings.TrimSuffix(cfg.BaseURL, "/"),
@@ -231,20 +240,11 @@ func (c *Client) Search(ctx context.Context, req SearchRequest) (int, *SearchRes
 
 // searchWithRetry runs a search, retrying a transient failure.
 func (c *Client) searchWithRetry(ctx context.Context, req SearchRequest, retries int) (int, *SearchResponse, []byte, error) {
-	var status int
-	var body []byte
-	var err error
-	for attempt := 0; ; attempt++ {
-		status, body, err = c.do(ctx, SearchPath, req)
-		if err != nil {
-			return 0, nil, nil, err
-		}
-		if !isRetryableStatus(status) || attempt >= retries {
-			break
-		}
-		if waitErr := SleepWithContext(ctx, retryDelay(status, attempt)); waitErr != nil {
-			return status, nil, body, waitErr
-		}
+	status, body, err := toolretry.Do(ctx, retries, func() (int, []byte, error) {
+		return c.do(ctx, SearchPath, req)
+	})
+	if err != nil {
+		return status, nil, body, err
 	}
 	if status < 200 || status >= 300 {
 		return status, nil, body, nil
@@ -266,20 +266,11 @@ func (c *Client) Fetch(ctx context.Context, req FetchRequest) (int, *FetchRespon
 
 // fetchWithRetry fetches a page, retrying a transient failure.
 func (c *Client) fetchWithRetry(ctx context.Context, req FetchRequest, retries int) (int, *FetchResponse, []byte, error) {
-	var status int
-	var body []byte
-	var err error
-	for attempt := 0; ; attempt++ {
-		status, body, err = c.do(ctx, FetchPath, req)
-		if err != nil {
-			return 0, nil, nil, err
-		}
-		if !isRetryableStatus(status) || attempt >= retries {
-			break
-		}
-		if waitErr := SleepWithContext(ctx, retryDelay(status, attempt)); waitErr != nil {
-			return status, nil, body, waitErr
-		}
+	status, body, err := toolretry.Do(ctx, retries, func() (int, []byte, error) {
+		return c.do(ctx, FetchPath, req)
+	})
+	if err != nil {
+		return status, nil, body, err
 	}
 	if status < 200 || status >= 300 {
 		return status, nil, body, nil
@@ -289,35 +280,4 @@ func (c *Client) fetchWithRetry(ctx context.Context, req FetchRequest, retries i
 		return status, nil, body, fmt.Errorf("deepseektools: decoding fetch response: %w", err)
 	}
 	return status, &parsed, body, nil
-}
-
-// isRetryableStatus reports whether a status is worth retrying: the provider
-// asks for a retry after a 429 (its QPS limit) and after a 5xx.
-func isRetryableStatus(status int) bool {
-	return status == http.StatusTooManyRequests || status >= 500
-}
-
-// retryDelay is how long to wait before the next attempt: the provider's
-// Retry-After when it gave one, otherwise a growing delay.
-func retryDelay(status int, attempt int) time.Duration {
-	if status == http.StatusTooManyRequests {
-		return time.Duration(attempt+1) * 500 * time.Millisecond
-	}
-	return time.Duration(attempt+1) * time.Second
-}
-
-// SleepWithContext waits for the given duration, or until the context is
-// done. It returns the context's error when the wait was cut short.
-func SleepWithContext(ctx context.Context, d time.Duration) error {
-	if d <= 0 {
-		return nil
-	}
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
 }

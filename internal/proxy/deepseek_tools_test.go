@@ -740,42 +740,6 @@ func TestDeepSeekForceStreamToolLoopRunsSearch(t *testing.T) {
 	}
 }
 
-// TestDeepSeekStreamToolCallPiecesAreFolded checks that a tool call whose
-// arguments arrive in pieces is one call, not one per piece: a provider sends
-// the id and the name with the first piece and the arguments split across the
-// rest, under the same index.
-func TestDeepSeekStreamToolCallPiecesAreFolded(t *testing.T) {
-	raw := []byte("data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"deepseek_web_search","arguments":"{\"query\":"}}]}}]}` + "\n\n" +
-		"data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"deepseek"}}]}}]}` + "\n\n" +
-		"data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":" v4\"}"}}]}}]}` + "\n\n" +
-		"data: [DONE]\n\n")
-
-	calls, err := deepSeekToolCallsFromStream(raw)
-	if err != nil {
-		t.Fatalf("deepSeekToolCallsFromStream: %v", err)
-	}
-	if len(calls) != 1 {
-		t.Fatalf("got %d calls, want 1: %+v", len(calls), calls)
-	}
-	if calls[0].ID != "call_1" {
-		t.Errorf("id = %q, want call_1", calls[0].ID)
-	}
-	if calls[0].Name != "deepseek_web_search" {
-		t.Errorf("name = %q, want deepseek_web_search", calls[0].Name)
-	}
-	if calls[0].Arguments != `{"query":"deepseek v4"}` {
-		t.Errorf("arguments = %q, want the folded JSON", calls[0].Arguments)
-	}
-	// The folded arguments must parse as the tool's arguments.
-	args, err := deepseektools.ParseSearchArguments(calls[0].Arguments)
-	if err != nil {
-		t.Fatalf("the folded arguments do not parse: %v", err)
-	}
-	if args.Query != "deepseek v4" {
-		t.Errorf("query = %q, want %q", args.Query, "deepseek v4")
-	}
-}
-
 // TestDeepSeekEmptySearchIsNotBilledInSpendRow проверяет правило "пустые
 // результаты — $0": строка spend получает нулевой счётчик поисков.
 func TestDeepSeekEmptySearchIsNotBilledInSpendRow(t *testing.T) {

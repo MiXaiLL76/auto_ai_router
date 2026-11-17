@@ -104,6 +104,14 @@ type SpendEvent struct {
 	// WebFetchRequests counts the billable web fetches the router executed
 	// (a fetch that returned page content).
 	WebFetchRequests int `json:"web_fetch_requests"`
+	// MoonshotSearchRequests, MoonshotSearchProRequests and
+	// MoonshotFetchRequests count the router's own Moonshot calls that
+	// succeeded and produced something: a Basic search, a Pro search, and a
+	// fetch that returned page content. A failed or empty call is not
+	// counted -- and not charged.
+	MoonshotSearchRequests    int `json:"moonshot_search_requests"`
+	MoonshotSearchProRequests int `json:"moonshot_search_pro_requests"`
+	MoonshotFetchRequests     int `json:"moonshot_fetch_requests"`
 	// Built-in server-side tool usage beyond web search (xAI).
 	XSearchCalls           int `json:"x_search_calls"`
 	XSearchPosts           int `json:"x_search_posts"`

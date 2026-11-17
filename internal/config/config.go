@@ -473,10 +473,11 @@ func resolveAliasesInNode(node *yaml.Node, anchors map[string]*yaml.Node) {
 // /v1/tools/search and /v1/tools/fetch endpoints with the credential's key
 // and bills the calls separately from the model's tokens.
 type DeepSeekToolsConfig struct {
-	// Enabled turns the adapter on (default: true when the section is
-	// present; the adapter only ever engages for a DeepSeek credential that
-	// was asked for one of the built-in tools).
-	Enabled bool `yaml:"enabled"`
+	// Enabled turns the adapter on. Unset means on: the adapter only ever
+	// engages for a DeepSeek credential that was asked for one of the
+	// built-in tools, so it costs nothing on every other request. False is
+	// the kill-switch -- for a provider outage or a runaway cost.
+	Enabled *bool `yaml:"enabled"`
 	// RequestTimeout bounds one Search or Fetch call (default: 30s).
 	RequestTimeout time.Duration `yaml:"request_timeout"`
 	// SearchQPS is the per-account Search limit (default: 100, the
@@ -495,6 +496,116 @@ type DeepSeekToolsConfig struct {
 	MaxRetries int `yaml:"max_retries"`
 }
 
+// UnmarshalYAML implements custom unmarshaling for DeepSeekToolsConfig with
+// env variable support.
+func (d *DeepSeekToolsConfig) UnmarshalYAML(value *yaml.Node) error {
+	type temp struct {
+		Enabled        string `yaml:"enabled"`
+		RequestTimeout string `yaml:"request_timeout"`
+		SearchQPS      string `yaml:"search_qps"`
+		FetchQPS       string `yaml:"fetch_qps"`
+		MaxSteps       string `yaml:"max_steps"`
+		MaxRetries     string `yaml:"max_retries"`
+	}
+	var t temp
+	if err := value.Decode(&t); err != nil {
+		return err
+	}
+	var err error
+	if d.Enabled, err = parseOptionalBool(t.Enabled, "deepseek_tools.enabled"); err != nil {
+		return err
+	}
+	if d.RequestTimeout, err = parseField(t.RequestTimeout, DefaultDeepSeekToolsRequestTimeout, time.ParseDuration, "deepseek_tools.request_timeout"); err != nil {
+		return err
+	}
+	if d.SearchQPS, err = parseField(t.SearchQPS, DefaultDeepSeekSearchQPS, strconv.Atoi, "deepseek_tools.search_qps"); err != nil {
+		return err
+	}
+	if d.FetchQPS, err = parseField(t.FetchQPS, DefaultDeepSeekFetchQPS, strconv.Atoi, "deepseek_tools.fetch_qps"); err != nil {
+		return err
+	}
+	if d.MaxSteps, err = parseField(t.MaxSteps, DefaultDeepSeekToolsMaxSteps, strconv.Atoi, "deepseek_tools.max_steps"); err != nil {
+		return err
+	}
+	if d.MaxRetries, err = parseField(t.MaxRetries, DefaultDeepSeekToolsMaxRetries, strconv.Atoi, "deepseek_tools.max_retries"); err != nil {
+		return err
+	}
+	return nil
+}
+
+// MoonshotToolsConfig holds the settings of the router-run Moonshot
+// Search/Search Pro/Fetch adapter.
+//
+// The built-in $web_search was switched off on 2026-10-20; its replacement is
+// Moonshot's own REST APIs, which a model cannot reach by itself. So the
+// router runs them: it calls /v1/tools/search, /v1/tools/search_pro and
+// /v1/tools/fetch with the credential's key and bills the calls separately
+// from the model's tokens.
+type MoonshotToolsConfig struct {
+	// Enabled turns the adapter on. Unset means on: the adapter only ever
+	// engages for a Moonshot credential that was asked for one of the
+	// built-in tools, so it costs nothing on every other request. False is
+	// the kill-switch -- for a provider outage or a runaway cost.
+	Enabled *bool `yaml:"enabled"`
+	// RequestTimeout bounds one Search, Search Pro or Fetch call
+	// (default: 30s).
+	RequestTimeout time.Duration `yaml:"request_timeout"`
+	// SearchQPS is the per-account Basic search limit (default: 100).
+	SearchQPS int `yaml:"search_qps"`
+	// SearchProQPS is the per-account Pro search limit (default: 100).
+	SearchProQPS int `yaml:"search_pro_qps"`
+	// FetchQPS is the per-account Fetch limit (default: 25).
+	FetchQPS int `yaml:"fetch_qps"`
+	// MaxSteps bounds the router-run tool loop (default: 8): the model may
+	// call the tools this many times before the router stops and returns
+	// the last answer.
+	MaxSteps int `yaml:"max_steps"`
+	// MaxRetries is how many times a call is retried after a 429 or a 5xx
+	// (default: 2). Other 4xx answers are not retried.
+	MaxRetries int `yaml:"max_retries"`
+}
+
+// UnmarshalYAML implements custom unmarshaling for MoonshotToolsConfig with
+// env variable support.
+func (m *MoonshotToolsConfig) UnmarshalYAML(value *yaml.Node) error {
+	type temp struct {
+		Enabled        string `yaml:"enabled"`
+		RequestTimeout string `yaml:"request_timeout"`
+		SearchQPS      string `yaml:"search_qps"`
+		SearchProQPS   string `yaml:"search_pro_qps"`
+		FetchQPS       string `yaml:"fetch_qps"`
+		MaxSteps       string `yaml:"max_steps"`
+		MaxRetries     string `yaml:"max_retries"`
+	}
+	var t temp
+	if err := value.Decode(&t); err != nil {
+		return err
+	}
+	var err error
+	if m.Enabled, err = parseOptionalBool(t.Enabled, "moonshot_tools.enabled"); err != nil {
+		return err
+	}
+	if m.RequestTimeout, err = parseField(t.RequestTimeout, DefaultMoonshotToolsRequestTimeout, time.ParseDuration, "moonshot_tools.request_timeout"); err != nil {
+		return err
+	}
+	if m.SearchQPS, err = parseField(t.SearchQPS, DefaultMoonshotSearchQPS, strconv.Atoi, "moonshot_tools.search_qps"); err != nil {
+		return err
+	}
+	if m.SearchProQPS, err = parseField(t.SearchProQPS, DefaultMoonshotSearchProQPS, strconv.Atoi, "moonshot_tools.search_pro_qps"); err != nil {
+		return err
+	}
+	if m.FetchQPS, err = parseField(t.FetchQPS, DefaultMoonshotFetchQPS, strconv.Atoi, "moonshot_tools.fetch_qps"); err != nil {
+		return err
+	}
+	if m.MaxSteps, err = parseField(t.MaxSteps, DefaultMoonshotToolsMaxSteps, strconv.Atoi, "moonshot_tools.max_steps"); err != nil {
+		return err
+	}
+	if m.MaxRetries, err = parseField(t.MaxRetries, DefaultMoonshotToolsMaxRetries, strconv.Atoi, "moonshot_tools.max_retries"); err != nil {
+		return err
+	}
+	return nil
+}
+
 // DefaultDeepSeekToolsRequestTimeout is the default timeout of one
 // Search/Fetch call.
 const DefaultDeepSeekToolsRequestTimeout = 30 * time.Second
@@ -503,9 +614,33 @@ const DefaultDeepSeekToolsRequestTimeout = 30 * time.Second
 // loop.
 const DefaultDeepSeekToolsMaxSteps = 8
 
+// DefaultMoonshotToolsRequestTimeout is the default timeout of one
+// Search/Search Pro/Fetch call.
+const DefaultMoonshotToolsRequestTimeout = 30 * time.Second
+
+// DefaultMoonshotToolsMaxSteps is the default bound of the router-run tool
+// loop: the model may call the tools this many times before the router
+// stops and returns the last answer.
+const DefaultMoonshotToolsMaxSteps = 8
+
+// DefaultMoonshotToolsMaxRetries is the default number of retries of a
+// call after a 429 or a 5xx. Other 4xx answers are not retried.
+const DefaultMoonshotToolsMaxRetries = 2
+
 // DefaultDeepSeekToolsMaxRetries is the default number of retries of a
 // Search/Fetch call.
 const DefaultDeepSeekToolsMaxRetries = 2
+
+// The per-account QPS limits the providers themselves publish: DeepSeek's
+// 100 for Search and 25 for Fetch, Moonshot's 100 for Search, 100 for Search
+// Pro and 25 for Fetch.
+const (
+	DefaultDeepSeekSearchQPS    = 100
+	DefaultDeepSeekFetchQPS     = 25
+	DefaultMoonshotSearchQPS    = 100
+	DefaultMoonshotSearchProQPS = 100
+	DefaultMoonshotFetchQPS     = 25
+)
 
 // RedisConfig holds configuration for Redis/Valkey-backed distributed rate limiting.
 // When Enabled=false the rate limiter falls back to in-process counters.
@@ -747,11 +882,13 @@ type ServerConfig struct {
 	MaxFallbackAttempts        int                   `yaml:"max_fallback_attempts"`             // Max fallback proxy hops per request chain (default: 5)
 	AnthropicDefaultMaxTokens  int                   `yaml:"anthropic_default_max_tokens"`      // max_tokens sent to a Claude model when the client sends none (default: 32000, 0 = default)
 	DeepSeekTools              DeepSeekToolsConfig   `yaml:"deepseek_tools,omitempty"`          // The router-run DeepSeek Search/Fetch adapter (see DeepSeekToolsConfig)
+	MoonshotTools              MoonshotToolsConfig   `yaml:"moonshot_tools,omitempty"`          // The router-run Moonshot Search/Search Pro/Fetch adapter (see MoonshotToolsConfig)
 	SessionStickyEnabled       bool                  `yaml:"session_sticky_enabled"`            // Enable session-sticky credential routing (default: true)
 	SessionStickyTTL           int                   `yaml:"session_sticky_ttl_minutes"`        // Session binding TTL in minutes (0 = default 6)
 	SessionStickyAutoCacheCtrl bool                  `yaml:"session_sticky_auto_cache_control"` // Auto-inject Anthropic cache_control when session is active (default: true)
 	ModelPricesLink            string                `yaml:"model_prices_link,omitempty"`       // URL or file path to model prices JSON - supports os.environ/VAR_NAME
 	ModelPricesSyncInterval    time.Duration         `yaml:"model_prices_sync_interval"`        // How often model prices are re-fetched from model_prices_link (default: 5m)
+	ToolPricesPath             string                `yaml:"tool_prices_path,omitempty"`        // Path to the tool price document: the price of the tools the ROUTER runs on the model's behalf (the provider's own Search/Fetch APIs), as opposed to the model's token prices. Supports os.environ/VAR_NAME
 	ShutdownDelay              time.Duration         `yaml:"shutdown_delay"`                    // Delay between readiness=false and server.Shutdown (default: 5s)
 	ShutdownTimeout            time.Duration         `yaml:"shutdown_timeout"`                  // How long server.Shutdown waits for in-flight requests before the rest are cancelled (default: 30s)
 	DrainUpstreamOnAbort       bool                  `yaml:"drain_upstream_on_abort"`           // When true, keep reading upstream after client disconnect to capture real usage chunk (default: false — estimate from delta text)
@@ -869,6 +1006,7 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		SessionStickyTTL           string                `yaml:"session_sticky_ttl_minutes"`
 		SessionStickyAutoCacheCtrl string                `yaml:"session_sticky_auto_cache_control"`
 		ModelPricesLink            string                `yaml:"model_prices_link,omitempty"`
+		ToolPricesPath             string                `yaml:"tool_prices_path,omitempty"`
 		ModelPricesSyncInterval    string                `yaml:"model_prices_sync_interval"`
 		ShutdownDelay              string                `yaml:"shutdown_delay"`
 		ShutdownTimeout            string                `yaml:"shutdown_timeout"`
@@ -880,11 +1018,27 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		ProxyHealthTimeout         string                `yaml:"proxy_health_timeout"`
 		ResponseHeaders            ResponseHeadersConfig `yaml:"response_headers"`
 		MirrorCacheWriteTokens     string                `yaml:"mirror_cache_write_tokens"`
+		DeepSeekTools              DeepSeekToolsConfig   `yaml:"deepseek_tools,omitempty"`
+		MoonshotTools              MoonshotToolsConfig   `yaml:"moonshot_tools,omitempty"`
 	}
 
 	var temp tempConfig
 	if err := value.Decode(&temp); err != nil {
 		return err
+	}
+
+	// The router-run tool adapters' own sections: each has its own
+	// unmarshaling (the kill-switch and the limits), so they are decoded
+	// from the node directly.
+	if node := mappingValue(value, "deepseek_tools"); node != nil {
+		if err := node.Decode(&s.DeepSeekTools); err != nil {
+			return err
+		}
+	}
+	if node := mappingValue(value, "moonshot_tools"); node != nil {
+		if err := node.Decode(&s.MoonshotTools); err != nil {
+			return err
+		}
 	}
 
 	// Resolve and parse each field
@@ -1001,6 +1155,7 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 	s.LoggingLevel = resolveEnvString(temp.LoggingLevel)
 	s.MasterKey = resolveEnvString(temp.MasterKey)
 	s.ModelPricesLink = resolveEnvString(temp.ModelPricesLink)
+	s.ToolPricesPath = resolveEnvString(temp.ToolPricesPath)
 	s.ResponseCompatibility = strings.ToLower(strings.TrimSpace(resolveEnvString(temp.ResponseCompatibility)))
 
 	return nil
@@ -1040,6 +1195,19 @@ type CredentialConfig struct {
 	// router must not start calling a provider's endpoints because its
 	// address happens to look like DeepSeek's.
 	DeepSeekTools bool `yaml:"deepseek_tools,omitempty"`
+
+	// MoonshotTools marks the credential as one whose provider runs its own
+	// Search, Search Pro and Fetch tools (POST {base_url}/v1/tools/search,
+	// /v1/tools/search_pro and /v1/tools/fetch). The router calls them
+	// with this credential's key and bills the calls apart from the model's
+	// tokens.
+	//
+	// The built-in $web_search was switched off on 2026-10-20 and its
+	// replacement is these separate REST APIs, which a model cannot reach by
+	// itself -- so the router has to run them.
+	//
+	// It is an explicit opt-in, for the same reason as DeepSeekTools above.
+	MoonshotTools bool `yaml:"moonshot_tools,omitempty"`
 
 	// ResponseHeaderTimeout overrides server.response_header_timeout for this
 	// one credential. Unset (0) inherits the server-level value (itself 0 by
@@ -1210,6 +1378,7 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 		ReasoningOnly         string           `yaml:"reasoning_only,omitempty"`
 		SystemOne             string           `yaml:"system_one,omitempty"`
 		DeepSeekTools         string           `yaml:"deepseek_tools,omitempty"`
+		MoonshotTools         string           `yaml:"moonshot_tools,omitempty"`
 		ResponseHeaderTimeout string           `yaml:"response_header_timeout,omitempty"`
 		Scopes                []string         `yaml:"scopes,omitempty"`
 		DeniedScopes          []string         `yaml:"denied_scopes,omitempty"`
@@ -1271,6 +1440,9 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if c.ReasoningOnly, err = parseField(temp.ReasoningOnly, false, strconv.ParseBool, "reasoning_only for credential '"+c.Name+"'"); err != nil {
+		return err
+	}
+	if c.MoonshotTools, err = parseField(temp.MoonshotTools, false, strconv.ParseBool, "moonshot_tools for credential '"+c.Name+"'"); err != nil {
 		return err
 	}
 	if c.DeepSeekTools, err = parseField(temp.DeepSeekTools, false, strconv.ParseBool, "deepseek_tools for credential '"+c.Name+"'"); err != nil {
@@ -2401,6 +2573,26 @@ func hasMappingKey(node *yaml.Node, key string) bool {
 		}
 	}
 	return false
+}
+
+// mappingValue returns the value node of key in the top-level mapping, or
+// nil when the key is absent.
+func mappingValue(node *yaml.Node, key string) *yaml.Node {
+	if node == nil {
+		return nil
+	}
+	if node.Kind == yaml.DocumentNode && len(node.Content) > 0 {
+		node = node.Content[0]
+	}
+	if node.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == key {
+			return node.Content[i+1]
+		}
+	}
+	return nil
 }
 
 // mappingValueIsNull reports whether key is present in the top-level mapping with an

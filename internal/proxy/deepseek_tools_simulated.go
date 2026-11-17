@@ -6,6 +6,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
+	"github.com/mixaill76/auto_ai_router/internal/toolloop"
 )
 
 // deepSeekSimulatedLoop runs the router-run tool loop over the simulated
@@ -35,17 +36,10 @@ func (p *Proxy) deepSeekSimulatedLoop(
 	if !deepSeekToolsEnabledFor(modelID, cred) {
 		return assembled, nil, 0, 0, nil
 	}
-	calls := deepSeekToolCallsFromResponse(assembled)
+	runner := p.newDeepSeekToolRunner(cred)
+	calls := toolloop.CallsFromResponse(assembled, runner)
 	if len(calls) == 0 {
 		return assembled, nil, 0, 0, nil
-	}
-
-	runner := &deepSeekToolRunner{
-		client:  p.deepSeekToolsClient(cred),
-		logger:  p.logger,
-		quota:   p.deepSeekToolsQuota,
-		account: deepSeekAccountKey(cred),
-		state:   newDeepSeekToolState(),
 	}
 	if runner.client == nil {
 		// No key: the tool cannot be run, so the client's answer is the
@@ -53,42 +47,41 @@ func (p *Proxy) deepSeekSimulatedLoop(
 		return assembled, nil, 0, 0, nil
 	}
 
-	cycle, err := newDeepSeekToolCycle(requestBody, runner)
+	cycle, err := toolloop.NewCycle(requestBody, runner)
 	if err != nil {
 		return assembled, nil, 0, 0, err
 	}
-	total := usageFromResponse(assembled)
+	total := toolloop.UsageFromResponse(assembled)
 	current := assembled
 
 	for step := 1; step < p.deepSeekToolsMaxSteps; step++ {
-		next, err := cycle.nextBody(current)
+		next, err := cycle.NextBody(r.Context(), current)
 		if err != nil {
-			return cycle.result(current, total, runner, err)
+			return deepSeekSimulatedResult(current, total, runner, err)
 		}
 		body, usage, err := p.deepSeekSimulatedStep(r, w, logCtx, prepared, cred, modelID, realModelID, next, start, attemptedCreds)
 		if err != nil {
-			return cycle.result(current, total, runner, err)
+			return deepSeekSimulatedResult(current, total, runner, err)
 		}
-		total.add(usage)
+		total.Add(usage)
 		current = body
-		if len(deepSeekToolCallsFromResponse(body)) == 0 {
+		if len(toolloop.CallsFromResponse(body, runner)) == 0 {
 			break
 		}
 	}
-	return cycle.result(current, total, runner, nil)
+	return deepSeekSimulatedResult(current, total, runner, nil)
 }
 
-// result is the loop's outcome: the body so far, the usage every step
-// accumulated, and the tool counters.
+// deepSeekSimulatedResult is the loop's outcome: the reassembled body, the
+// summed usage, and the tool counters.
 //
 // The counters are read from the runner, not from the accumulated usage, so
 // a step that fails leaves the loop early and the search that already ran
 // and returned results is still billed -- "a successful tool counts even when
 // the model that follows it fails".
-func (cycle *deepSeekToolCycle) result(body []byte, total *deepSeekToolUsage, runner *deepSeekToolRunner, err error) ([]byte, *converter.TokenUsage, int, int, error) {
-	total.webSearchRequests = runner.state.billableSearch
-	total.webFetchRequests = runner.state.billableFetch
-	return body, total.toTokenUsage(), runner.state.billableSearch, runner.state.billableFetch, err
+func deepSeekSimulatedResult(body []byte, total *toolloop.Usage, runner *deepSeekToolRunner, err error) ([]byte, *converter.TokenUsage, int, int, error) {
+	usage := deepSeekUsageOf(total, runner.Billable())
+	return body, usage, usage.WebSearchRequests, usage.WebFetchRequests, err
 }
 
 // deepSeekSimulatedStep sends one upstream request of the simulated loop and
@@ -107,7 +100,7 @@ func (p *Proxy) deepSeekSimulatedStep(
 	body []byte,
 	start time.Time,
 	attemptedCreds map[string]bool,
-) ([]byte, *deepSeekToolUsage, error) {
+) ([]byte, *toolloop.Usage, error) {
 	embedFanOutReplies := embedContentFanOutReplies{}
 	outcome, done, isClientGone, shouldRetry, _, transportErr := p.sendToCredential(
 		r, w, logCtx, cred, prepared, modelID, realModelID, body,
@@ -141,5 +134,5 @@ func (p *Proxy) deepSeekSimulatedStep(
 	if len(assembled) == 0 {
 		return nil, nil, errDeepSeekToolCycleAborted
 	}
-	return assembled, usageFromResponse(assembled), nil
+	return assembled, toolloop.UsageFromResponse(assembled), nil
 }

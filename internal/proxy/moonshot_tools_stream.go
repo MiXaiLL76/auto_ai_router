@@ -1,0 +1,192 @@
+package proxy
+
+import (
+	"errors"
+	"net/http"
+	"time"
+
+	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/converter"
+	"github.com/mixaill76/auto_ai_router/internal/moonshottools"
+	"github.com/mixaill76/auto_ai_router/internal/sse"
+	"github.com/mixaill76/auto_ai_router/internal/toolloop"
+)
+
+// errMoonshotToolCycleAborted ends the cycle when the client went away.
+//
+// It is the shared sentinel (internal/toolloop.ErrAborted), so the router's
+// dispatch checks it once for every provider's loop: a disconnect is not a
+// failure of the loop.
+var errMoonshotToolCycleAborted = toolloop.ErrAborted
+
+// moonshotStreamCycleResult is what the streaming loop produced.
+type moonshotStreamCycleResult struct {
+	// body is the final answer's stream, in the upstream's own SSE form.
+	body []byte
+	// usage is the summed usage of every step.
+	usage *converter.TokenUsage
+	// totalTokens is the steps' token count, the streaming handler's own
+	// accounting figure.
+	totalTokens int
+	// lastChunk is the last chunk of the final stream, which the streaming
+	// log reads its figures from.
+	lastChunk []byte
+}
+
+// runMoonshotStreamToolLoop drives the router-run tool loop for a streaming
+// request.
+//
+// A stream that asks for one of the router's tools cannot be relayed to the
+// client as it is: the client would see a tool call for a tool it never
+// declared. So the router runs the tool, asks the model again, and relays
+// the final stream.
+//
+// The steps' streams are not relayed (the client asked for an answer, not
+// for the tool calls), so only the last step's stream reaches the client.
+func (p *Proxy) runMoonshotStreamToolLoop(
+	r *http.Request,
+	w http.ResponseWriter,
+	logCtx *RequestLogContext,
+	prepared *orchestratedRequest,
+	cred *config.CredentialConfig,
+	modelID, realModelID string,
+	body []byte,
+	resp *http.Response,
+	start time.Time,
+	attemptedCreds map[string]bool,
+) (*moonshotStreamCycleResult, error) {
+	if !moonshotToolsEnabledFor(modelID, cred) {
+		return nil, nil
+	}
+	runner := p.newMoonshotToolRunner(cred)
+	raw, _, usage, err := toolloop.CollectStreamToolCalls(resp)
+	if err != nil {
+		return nil, err
+	}
+	owned := toolloop.CallsFromStream(raw, runner)
+	if len(owned) == 0 {
+		// No tool call: the client gets the provider's stream as it is.
+		replayToolStream(w, resp, raw)
+		streamUsage := toolloop.UsageFromStreamUsage(usage)
+		return &moonshotStreamCycleResult{
+			body:        raw,
+			usage:       moonshotUsageOf(streamUsage, nil),
+			totalTokens: streamUsage.TotalTokens,
+			lastChunk:   sse.LastPayload(raw),
+		}, nil
+	}
+	if runner.client == nil {
+		// No key: the tool cannot be run, so the stream is relayed as it is.
+		replayToolStream(w, resp, raw)
+		streamUsage := toolloop.UsageFromStreamUsage(usage)
+		return &moonshotStreamCycleResult{
+			body:        raw,
+			usage:       moonshotUsageOf(streamUsage, nil),
+			totalTokens: streamUsage.TotalTokens,
+			lastChunk:   sse.LastPayload(raw),
+		}, nil
+	}
+
+	cycle, err := toolloop.NewCycle(body, runner)
+	if err != nil {
+		return nil, err
+	}
+	total := toolloop.UsageFromStreamUsage(usage)
+	current := raw
+
+	for step := 1; step < p.moonshotToolsMaxSteps; step++ {
+		next, err := cycle.NextBodyFromToolCalls(r.Context(), owned)
+		if err != nil {
+			return moonshotStreamResult(current, total, runner), err
+		}
+		stepBody, stepUsage, err := p.runMoonshotStreamToolStep(r, w, logCtx, prepared, cred, modelID, realModelID, next, start, attemptedCreds)
+		if err != nil {
+			// A tool that already ran and returned results is billed even
+			// though the model that followed it failed, so the result is
+			// returned with the error rather than dropped.
+			return moonshotStreamResult(current, total, runner), err
+		}
+		total.Add(stepUsage)
+		current = stepBody
+		owned = toolloop.CallsFromStream(stepBody, runner)
+		if len(owned) == 0 {
+			break
+		}
+	}
+
+	// The final step's stream is what the client gets.
+	replayToolStream(w, resp, current)
+	return moonshotStreamResult(current, total, runner), nil
+}
+
+// runMoonshotStreamToolStep sends one upstream request of the streaming loop
+// and returns the response's stream and its usage.
+func (p *Proxy) runMoonshotStreamToolStep(
+	r *http.Request,
+	w http.ResponseWriter,
+	logCtx *RequestLogContext,
+	prepared *orchestratedRequest,
+	cred *config.CredentialConfig,
+	modelID, realModelID string,
+	body []byte,
+	start time.Time,
+	attemptedCreds map[string]bool,
+) ([]byte, *toolloop.Usage, error) {
+	embedFanOutReplies := &embedContentFanOutReplies{}
+	outcome, done, isClientGone, shouldRetry, _, transportErr := p.sendToCredential(
+		r, w, logCtx, cred, prepared, modelID, realModelID, body,
+		true, false, false, 0, start, attemptedCreds, embedFanOutReplies,
+	)
+	if done || isClientGone {
+		return nil, nil, errMoonshotToolCycleAborted
+	}
+	if shouldRetry {
+		return nil, nil, errors.New("moonshottools: the upstream call failed: " + transportErr.Error())
+	}
+	if outcome.resp == nil {
+		return nil, nil, errors.New("moonshottools: the upstream returned no response")
+	}
+	if outcome.resp.StatusCode < 200 || outcome.resp.StatusCode >= 300 {
+		responseBody, err := readAndCloseResponseBody(outcome.resp)
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, nil, &upstreamStatusError{status: outcome.resp.StatusCode, body: responseBody}
+	}
+	raw, _, usage, err := toolloop.CollectStreamToolCalls(outcome.resp)
+	if err != nil {
+		return nil, nil, err
+	}
+	return raw, toolloop.UsageFromStreamUsage(usage), nil
+}
+
+// moonshotUsageOf converts the loop's usage into the router's own usage
+// shape, with the billable tool counts.
+func moonshotUsageOf(total *toolloop.Usage, billable map[string]int) *converter.TokenUsage {
+	usage := &converter.TokenUsage{
+		PromptTokens:      total.PromptTokens,
+		CompletionTokens:  total.CompletionTokens,
+		CachedInputTokens: total.CachedInputTokens,
+		ReasoningTokens:   total.ReasoningTokens,
+	}
+	if billable != nil {
+		// The tool counters go into the Moonshot fields alone: they are
+		// Moonshot's own calls, priced by the tool price document, and the
+		// built-in tools' counters are the model's own -- counting the
+		// router's calls in both would charge the client twice.
+		usage.MoonshotSearchRequests = billable[moonshottools.SearchToolName]
+		usage.MoonshotSearchProRequests = billable[moonshottools.SearchProToolName]
+		usage.MoonshotFetchRequests = billable[moonshottools.FetchToolName]
+	}
+	return usage
+}
+
+// moonshotStreamResult is the streaming loop's outcome.
+func moonshotStreamResult(body []byte, total *toolloop.Usage, runner *moonshotToolRunner) *moonshotStreamCycleResult {
+	return &moonshotStreamCycleResult{
+		body:        body,
+		usage:       moonshotUsageOf(total, runner.Billable()),
+		totalTokens: total.TotalTokens,
+		lastChunk:   sse.LastPayload(body),
+	}
+}

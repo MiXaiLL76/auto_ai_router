@@ -496,4 +496,91 @@ credentials:
     deepseek_tools: true   # the provider runs its own Search and Fetch tools
 ```
 
-The adapter is off for every request that did not ask for one of the built-in tools, and for every credential without the opt-in.
+The adapter is off for every request that did not ask for one of the built-in tools, and for every credential without the opt-in. `server.deepseek_tools.enabled: false` is the kill-switch: the adapter stops entirely, for a provider outage or a runaway cost.
+
+## The router-run Moonshot Search, Search Pro and Fetch tools
+
+Moonshot's models cannot run the built-in search tools themselves: the built-in `$web_search` was switched off on 2026-10-20, and its replacement is Moonshot's own REST APIs, which are outside the chat protocol and which a model cannot reach by itself:
+
+```
+POST {base_url}/v1/tools/search       {"text_query": ..., "limit": ..., "timeout_seconds": ..., "include_content": ...}
+POST {base_url}/v1/tools/search_pro   {"text_query": ..., "limit": ..., "timeout_seconds": ..., "include_content": ..., "sites": [...], "time_window": ...}
+POST {base_url}/v1/tools/fetch        {"url": ...}
+```
+
+So for those models the **router** runs the tools. A credential opts in with `moonshot_tools: true`, and the router:
+
+1. replaces the client's built-in `web_search` / `web_search_pro` / `web_fetch` tools with ordinary function tools, so the model can only reach them by calling a function;
+2. runs the tool itself with the credential's key (`Authorization: Bearer …`) and the credential's proxy;
+3. hands the result back as a tool result and asks the model again — the loop is bounded by `server.moonshot_tools.max_steps`;
+4. bills the tool calls apart from the model's tokens.
+
+The takeover happens before the Responses-to-Chat conversion, because the conversion drops every built-in tool: the adapter's replacement is an ordinary function tool, which the conversion keeps.
+
+The client's own function tools are left alone: the upstream serves them, and the router does not run a client's tools on its behalf.
+
+### What is billed
+
+| Call       | Billed when                                          | Price                      |
+| ---------- | ---------------------------------------------------- | -------------------------- |
+| Search     | HTTP 200 and a non-empty `search_results` array      | `search_cost_per_call`     |
+| Search Pro | HTTP 200 and a non-empty `search_results` array      | `search_pro_cost_per_call` |
+| Fetch      | HTTP 200 and a non-empty `markdown` (after trimming) | `fetch_cost_per_call`      |
+
+A failed call, a timeout, an empty result and the provider's own error code (`markdown_not_found`) cost nothing. `include_content: true` inside a search does **not** create a Fetch charge — a Fetch is billed only for its own successful REST call, so a Search followed by a Fetch costs both. The price is per call, independent of `limit` and of the number of pages found.
+
+The operation's type is decided by the call the router actually made, which is why the three counters are kept apart: `moonshot_search_requests`, `moonshot_search_pro_requests` and `moonshot_fetch_requests`.
+
+The model's own tokens are billed as usual, for **every** step of the loop: the steps are separate upstream requests, and the client is charged for all of them. The loop's token counts are summed, and the tool counters are added to the provider's.
+
+### The tool price document
+
+The prices of the tools the router runs are **not** the model's token prices: they answer a different question ("what does the router's own call to a provider's search API cost") and are billed from different counters. They therefore live in a separate document, named by `server.tool_prices_path`:
+
+```json
+{
+  "tool_prices": {
+    "moonshot": {
+      "search_cost_per_call": 0.013,
+      "search_pro_cost_per_call": 0.013,
+      "fetch_cost_per_call": 0.013,
+      "rate": 1.3
+    }
+  }
+}
+```
+
+The three `cost_per_call` values are the **final client prices**: the rate is already folded into them and is **not** applied again. The rate is kept in the document because it is what the tariff is derived from — the same shape the model prices use — so that a reader can see that $0.013 is $0.01 × 1.3 and not a typo.
+
+One successful Basic search, one Pro search and one Fetch cost $0.039 between them, plus the tokens of every step of the loop.
+
+Without the document the router's tool calls are free: an absent `tool_prices_path` is not an error.
+
+### Limits
+
+Moonshot counts the limits per account, not per key, and the three tools have separate pools (100 QPS for Search, 100 QPS for Search Pro, 25 QPS for Fetch). The router keeps the pools per account in Redis, so the limit is shared by the router's replicas and the platforms, and the pools fall back to in-process counters when Redis is unavailable. A 429 or a 5xx is retried with a delay (`server.moonshot_tools.max_retries`); other 4xx answers are not retried.
+
+### Configuration
+
+```yaml
+server:
+  moonshot_tools:
+    request_timeout: 30s
+    search_qps: 100
+    search_pro_qps: 100
+    fetch_qps: 25
+    max_steps: 8
+    max_retries: 2
+  tool_prices_path: /app/tool_prices.json
+
+credentials:
+  - name: moonshotai-nzhuchenko-01
+    type: openai
+    base_url: https://api.moonshot.ai/v1
+    api_key: os.environ/KEY02
+    moonshot_tools: true   # the provider runs its own Search, Search Pro and Fetch tools
+```
+
+The adapter is off for every request that did not ask for one of the built-in tools, and for every credential without the opt-in. `server.moonshot_tools.enabled: false` is the kill-switch: the adapter stops entirely, for a provider outage or a runaway cost.
+
+The whole exchange — the client's request, the router's call to Moonshot, the tool result going back to the model and the spend row — is shown with real bodies in [docs/moonshot-tools.md](../moonshot-tools.md).

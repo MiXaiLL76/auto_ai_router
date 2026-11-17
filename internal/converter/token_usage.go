@@ -65,6 +65,18 @@ type TokenUsage struct {
 	// router executed that returned page content. A failed or empty fetch is
 	// not billable and is not counted here.
 	WebFetchRequests int
+	// MoonshotSearchRequests counts the router's own successful, non-empty
+	// Moonshot Basic searches. It is separate from WebSearchRequests because
+	// the two are priced apart (Moonshot's own tariff, not the model's
+	// built-in search tariff) and because the operation's type must be known
+	// from the call the router actually made.
+	MoonshotSearchRequests int
+	// MoonshotSearchProRequests counts the router's own successful,
+	// non-empty Moonshot Pro searches.
+	MoonshotSearchProRequests int
+	// MoonshotFetchRequests counts the router's own successful Moonshot
+	// fetches -- the ones that returned page content.
+	MoonshotFetchRequests int
 	// ImageBilling carries per-image pricing inputs for image generation/edit
 	// requests (nil otherwise). A pointer keeps TokenUsage comparable.
 	ImageBilling *ImageBillingDetails
@@ -196,6 +208,9 @@ func (tu *TokenUsage) Normalize() *TokenUsage {
 	tu.OutputImageTokens = converterutil.NonNegativeTokenCount(tu.OutputImageTokens)
 	tu.WebSearchRequests = converterutil.NonNegativeTokenCount(tu.WebSearchRequests)
 	tu.WebFetchRequests = converterutil.NonNegativeTokenCount(tu.WebFetchRequests)
+	tu.MoonshotSearchRequests = converterutil.NonNegativeTokenCount(tu.MoonshotSearchRequests)
+	tu.MoonshotSearchProRequests = converterutil.NonNegativeTokenCount(tu.MoonshotSearchProRequests)
+	tu.MoonshotFetchRequests = converterutil.NonNegativeTokenCount(tu.MoonshotFetchRequests)
 	if tu.WebSearchRequests > 0 || tu.WebSearchContextSize != "" {
 		tu.WebSearchContextSize = NormalizeWebSearchContextSize(tu.WebSearchContextSize)
 	}
@@ -368,6 +383,13 @@ func (tu *TokenUsage) mergeToolUsage(src *TokenUsage) {
 	// a provider's zero must not erase the fetches the router already billed
 	// for, and two sources of the same figure must not add up to twice it.
 	tu.WebFetchRequests += converterutil.NonNegativeTokenCount(src.WebFetchRequests)
+	// The Moonshot counters are the router's own counts of the calls it
+	// executed, never provider-reported ones, so they are added rather than
+	// replaced: a provider's zero must not erase the calls the router
+	// already billed.
+	tu.MoonshotSearchRequests += converterutil.NonNegativeTokenCount(src.MoonshotSearchRequests)
+	tu.MoonshotSearchProRequests += converterutil.NonNegativeTokenCount(src.MoonshotSearchProRequests)
+	tu.MoonshotFetchRequests += converterutil.NonNegativeTokenCount(src.MoonshotFetchRequests)
 	srcCounters := src.serverToolCounters()
 	for i, counter := range tu.serverToolCounters() {
 		mergeToolCounter(counter, *srcCounters[i], replace)
@@ -409,6 +431,15 @@ type TokenCosts struct {
 	// call (a fetch that returned page content), never by tokens, and part of
 	// TotalCost exactly once.
 	WebFetchCost float64
+	// MoonshotSearchCost is the charge for the router's own Moonshot Basic
+	// searches, at the tool price table's search_cost_per_call.
+	MoonshotSearchCost float64
+	// MoonshotSearchProCost is the charge for the router's own Moonshot Pro
+	// searches, at the tool price table's search_pro_cost_per_call.
+	MoonshotSearchProCost float64
+	// MoonshotFetchCost is the charge for the router's own Moonshot fetches,
+	// at the tool price table's fetch_cost_per_call.
+	MoonshotFetchCost float64
 	// Built-in server-side tool charges other than web search. Each is billed
 	// per unit (call, fetched X post/profile, generated image), never by
 	// tokens, and is part of TotalCost exactly once.

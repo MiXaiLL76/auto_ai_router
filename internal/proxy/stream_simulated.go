@@ -644,11 +644,26 @@ func (p *Proxy) handleSimulatedNonStream(
 	// through this path when the router forces stream:true upstream, and the
 	// tool call only becomes visible after the reassembly.
 	if result.streamErr == nil && len(result.finalChatBody) > 0 {
-		assembled, loopUsage, searches, fetches, loopErr := p.deepSeekSimulatedLoop(
-			r, w, logCtx, prepared, cred, modelID, realModelID, requestBody,
-			result.finalChatBody, start, attemptedCreds)
+		// The two adapters never overlap: each engages only for its own
+		// provider's credential, so exactly one of them runs.
+		var assembled []byte
+		var loopUsage *converter.TokenUsage
+		var searches, searchProCalls, fetches int
+		var loopErr error
+		if p.moonshotToolsEnabled && moonshotToolsEnabledFor(modelID, cred) {
+			assembled, loopUsage, searches, searchProCalls, fetches, loopErr = p.moonshotSimulatedLoop(
+				r, w, logCtx, prepared, cred, modelID, realModelID, requestBody,
+				result.finalChatBody, start, attemptedCreds)
+		} else {
+			assembled, loopUsage, searches, fetches, loopErr = p.deepSeekSimulatedLoop(
+				r, w, logCtx, prepared, cred, modelID, realModelID, requestBody,
+				result.finalChatBody, start, attemptedCreds)
+		}
 		switch {
-		case errors.Is(loopErr, errDeepSeekToolCycleAborted):
+		case errToolLoopAborted(loopErr):
+			// The client went away (or the provider's response was already
+			// handled): the loop stops here, and the router must not write
+			// anything else to the dead connection.
 			return
 		case loopErr != nil:
 			p.logger.WarnContext(r.Context(), "The router-run search/fetch loop failed",
@@ -657,10 +672,10 @@ func (p *Proxy) handleSimulatedNonStream(
 			// A tool that already ran and returned results is billed even
 			// though the model that followed it failed, so the loop's usage
 			// rides along here too.
-			if searches > 0 || fetches > 0 {
+			if searches > 0 || searchProCalls > 0 || fetches > 0 {
 				logCtx.DeepSeekToolUsage = loopUsage
 			}
-		case searches > 0 || fetches > 0:
+		case searches > 0 || searchProCalls > 0 || fetches > 0:
 			result.finalChatBody = []byte(assembled)
 			// The loop's steps are separate upstream requests: their tokens
 			// are summed, and the router's own tool counters ride along.
@@ -670,7 +685,7 @@ func (p *Proxy) handleSimulatedNonStream(
 			logCtx.DeepSeekToolUsage = loopUsage
 			p.logger.DebugContext(r.Context(), "The router ran the model's search/fetch tools",
 				"model", modelID, "credential", cred.Name,
-				"search_calls", searches, "fetch_calls", fetches)
+				"search_calls", searches, "search_pro_calls", searchProCalls, "fetch_calls", fetches)
 		}
 	}
 

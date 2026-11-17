@@ -8,18 +8,34 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
 	"github.com/mixaill76/auto_ai_router/internal/deepseektools"
+	"github.com/mixaill76/auto_ai_router/internal/toolloop"
 )
 
 // deepSeekToolRun is the outcome of the router-run tool loop.
 type deepSeekToolRun struct {
-	// body is the model's final answer, in the upstream's own Chat shape.
-	body []byte
-	// usage is the summed usage of every step of the loop.
-	usage *converter.TokenUsage
-	// searchCalls and fetchCalls are the billable tool counts.
-	searchCalls int
-	fetchCalls  int
+	// bodyBytes is the model's final answer, in the upstream's own Chat shape.
+	bodyBytes []byte
+	// usageValue is the summed usage of every step of the loop.
+	usageValue *converter.TokenUsage
+	// searchCount and fetchCount are the billable tool counts.
+	searchCount int
+	fetchCount  int
 }
+
+// body is the model's final answer.
+func (r *deepSeekToolRun) body() []byte { return r.bodyBytes }
+
+// usage is the summed usage of every step of the loop.
+func (r *deepSeekToolRun) usage() *converter.TokenUsage { return r.usageValue }
+
+// searchCalls is the billable Basic search count.
+func (r *deepSeekToolRun) searchCalls() int { return r.searchCount }
+
+// searchProCalls is the billable Pro search count: DeepSeek has none.
+func (r *deepSeekToolRun) searchProCalls() int { return 0 }
+
+// fetchCalls is the billable fetch count.
+func (r *deepSeekToolRun) fetchCalls() int { return r.fetchCount }
 
 // runDeepSeekToolLoop drives the router-run search/fetch loop for a
 // non-streaming request.
@@ -46,17 +62,10 @@ func (p *Proxy) runDeepSeekToolLoop(
 	if !deepSeekToolsEnabledFor(modelID, cred) {
 		return nil, nil
 	}
-	calls := deepSeekToolCallsFromResponse(firstResponse)
+	runner := p.newDeepSeekToolRunner(cred)
+	calls := toolloop.CallsFromResponse(firstResponse, runner)
 	if len(calls) == 0 {
 		return nil, nil
-	}
-
-	runner := &deepSeekToolRunner{
-		client:  p.deepSeekToolsClient(cred),
-		logger:  p.logger,
-		quota:   p.deepSeekToolsQuota,
-		account: deepSeekAccountKey(cred),
-		state:   newDeepSeekToolState(),
 	}
 	if runner.client == nil {
 		// No DeepSeek client could be built for this credential (no key):
@@ -65,33 +74,44 @@ func (p *Proxy) runDeepSeekToolLoop(
 		return nil, nil
 	}
 
-	cycle, err := newDeepSeekToolCycle(firstBody, runner)
+	cycle, err := toolloop.NewCycle(firstBody, runner)
 	if err != nil {
 		return nil, err
 	}
-	total := usageFromResponse(firstResponse)
+	total := toolloop.UsageFromResponse(firstResponse)
 	current := firstResponse
 
-	for step := 1; step < maxDeepSeekToolSteps; step++ {
-		next, err := cycle.nextBody(current)
+	for step := 1; step < p.deepSeekToolsMaxSteps; step++ {
+		next, err := cycle.NextBody(r.Context(), current)
 		if err != nil {
-			return cycle.runResult(current, total, runner), err
+			return deepSeekRunResult(current, total, runner), err
 		}
 		responseBody, err := p.runDeepSeekToolStep(r, w, logCtx, prepared, cred, modelID, realModelID, next, start, attemptedCreds)
 		if err != nil {
 			// A tool that already ran and returned results is billed even
 			// though the model that followed it failed, so the result is
 			// returned with the error rather than dropped.
-			return cycle.runResult(current, total, runner), err
+			return deepSeekRunResult(current, total, runner), err
 		}
-		total.add(usageFromResponse(responseBody))
+		total.Add(toolloop.UsageFromResponse(responseBody))
 		current = responseBody
-		if len(deepSeekToolCallsFromResponse(responseBody)) == 0 {
+		if len(toolloop.CallsFromResponse(responseBody, runner)) == 0 {
 			break
 		}
 	}
 
-	return cycle.runResult(current, total, runner), nil
+	return deepSeekRunResult(current, total, runner), nil
+}
+
+// newDeepSeekToolRunner builds the runner for a credential.
+func (p *Proxy) newDeepSeekToolRunner(cred *config.CredentialConfig) *deepSeekToolRunner {
+	return &deepSeekToolRunner{
+		client:  p.deepSeekToolsClient(cred),
+		logger:  p.logger,
+		quota:   p.deepSeekToolsQuota,
+		account: deepSeekAccountKey(cred),
+		state:   newDeepSeekToolState(),
+	}
 }
 
 // runDeepSeekToolStep sends one upstream request of the loop and returns the
@@ -148,38 +168,33 @@ func (p *Proxy) deepSeekToolsClient(cred *config.CredentialConfig) *deepseektool
 		ProxyURL:   cred.ProxyURL,
 		MaxRetries: p.deepSeekToolsMaxRetries,
 		Logger:     p.logger,
+		// The cached client: the connections to DeepSeek survive between
+		// the requests instead of being opened and dropped each time.
+		HTTPClient: p.deepSeekToolsClients.Client(cred.BaseURL, cred.ProxyURL, p.deepSeekToolsTimeout),
 	})
 }
 
-// toTokenUsage converts the loop's accumulated usage into the router's own
-// usage shape, so the regular billing path prices it like any other
-// response's.
-func (u *deepSeekToolUsage) toTokenUsage() *converter.TokenUsage {
-	return &converter.TokenUsage{
-		PromptTokens:         u.promptTokens,
-		CompletionTokens:     u.completionTokens,
-		CachedInputTokens:    u.cachedInputTokens,
-		ReasoningTokens:      u.reasoningTokens,
-		WebSearchRequests:    u.webSearchRequests,
-		WebFetchRequests:     u.webFetchRequests,
-		WebSearchContextSize: u.webSearchContextSize,
-	}
-}
-
-// runResult is the loop's outcome: the body so far, the usage every step
-// accumulated, and the tool counters.
+// deepSeekRunResult is the loop's outcome: the body so far, the usage every
+// step accumulated, and the tool counters.
 //
 // The counters are read from the runner, not from the accumulated usage, so
 // a step that fails leaves the loop early and the search that already ran
 // and returned results is still billed -- "a successful tool counts even when
 // the model that follows it fails".
-func (cycle *deepSeekToolCycle) runResult(body []byte, total *deepSeekToolUsage, runner *deepSeekToolRunner) *deepSeekToolRun {
-	total.webSearchRequests = runner.state.billableSearch
-	total.webFetchRequests = runner.state.billableFetch
+func deepSeekRunResult(body []byte, total *toolloop.Usage, runner *deepSeekToolRunner) *deepSeekToolRun {
+	billable := runner.Billable()
+	usage := &converter.TokenUsage{
+		PromptTokens:      total.PromptTokens,
+		CompletionTokens:  total.CompletionTokens,
+		CachedInputTokens: total.CachedInputTokens,
+		ReasoningTokens:   total.ReasoningTokens,
+		WebSearchRequests: billable[deepseektools.SearchToolName],
+		WebFetchRequests:  billable[deepseektools.FetchToolName],
+	}
 	return &deepSeekToolRun{
-		body:        body,
-		usage:       total.toTokenUsage(),
-		searchCalls: runner.state.billableSearch,
-		fetchCalls:  runner.state.billableFetch,
+		bodyBytes:   body,
+		usageValue:  usage,
+		searchCount: usage.WebSearchRequests,
+		fetchCount:  usage.WebFetchRequests,
 	}
 }
