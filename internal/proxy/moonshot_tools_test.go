@@ -1291,3 +1291,118 @@ func TestMoonshotCallsAreNotCountedAsTheBuiltInTools(t *testing.T) {
 		t.Errorf("Spend = %v, want %v", entry.Spend, wantSpend)
 	}
 }
+
+// TestMoonshotLoopKeepsTheModelState checks that the model's own state
+// survives the round trip: the reasoning content of the step that asked for
+// the tool, and the tool call's id (the tool result is matched by it).
+func TestMoonshotLoopKeepsTheModelState(t *testing.T) {
+	fake := &moonshotFake{
+		searchResults: []map[string]any{{
+			"title": "Kimi K2 released",
+			"url":   "https://example.com/k2",
+		}},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/tools/search":
+			_, _ = io.ReadAll(r.Body)
+			fake.mu.Lock()
+			fake.searchCalls++
+			results := fake.searchResults
+			fake.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"search_results": results})
+		case "/v1/chat/completions":
+			raw, _ := io.ReadAll(r.Body)
+			fake.mu.Lock()
+			fake.chatCalls++
+			call := fake.chatCalls
+			var parsed map[string]json.RawMessage
+			_ = json.Unmarshal(raw, &parsed)
+			fake.lastChatBody = parsed
+			fake.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			if call == 1 {
+				_, _ = fmt.Fprintf(w, `{
+					"id":"chatcmpl-1","object":"chat.completion","model":"kimi-k2",
+					"choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":"",
+						"reasoning_content":"The user asks about Kimi K2; I should search.",
+						"tool_calls":[{"id":"call_42","type":"function","function":{"name":%q,"arguments":"{\"text_query\":\"kimi k2\"}"}}]}}],
+					"usage":{"prompt_tokens":100,"completion_tokens":10,"total_tokens":110}
+				}`, moonshottools.SearchToolName)
+				return
+			}
+			_, _ = w.Write([]byte(`{
+				"id":"chatcmpl-2","object":"chat.completion","model":"kimi-k2",
+				"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"Found it."}}],
+				"usage":{"prompt_tokens":200,"completion_tokens":20,"total_tokens":220}
+			}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	fake.baseURL = server.URL
+
+	prx, _ := moonshotTestProxy(t, fake)
+
+	body := `{
+		"model": "kimi-k2",
+		"messages": [{"role": "user", "content": "When was Kimi K2 released?"}],
+		"tools": [{"type": "web_search"}]
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	prx.ProxyRequest(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	rawMessages, ok := fake.lastChatBody["messages"]
+	if !ok {
+		t.Fatal("the second request has no messages")
+	}
+	var messages []map[string]any
+	if err := json.Unmarshal(rawMessages, &messages); err != nil {
+		t.Fatalf("decoding the messages: %v", err)
+	}
+
+	// The assistant's message keeps its reasoning content and its tool call's
+	// id: the model continues from where it was.
+	var assistant map[string]any
+	for _, message := range messages {
+		if message["role"] == "assistant" {
+			assistant = message
+		}
+	}
+	if assistant == nil {
+		t.Fatal("the conversation has no assistant message")
+	}
+	if assistant["reasoning_content"] != "The user asks about Kimi K2; I should search." {
+		t.Errorf("the reasoning content was lost: %v", assistant["reasoning_content"])
+	}
+	calls, _ := assistant["tool_calls"].([]any)
+	if len(calls) != 1 {
+		t.Fatalf("the assistant message has %d tool calls, want 1", len(calls))
+	}
+	call, _ := calls[0].(map[string]any)
+	if call["id"] != "call_42" {
+		t.Errorf("the tool call's id = %v, want call_42", call["id"])
+	}
+
+	// The tool result is matched by that id.
+	toolMessage := messages[len(messages)-1]
+	if toolMessage["role"] != "tool" {
+		t.Fatalf("the last message is %v, want a tool message", toolMessage["role"])
+	}
+	if toolMessage["tool_call_id"] != "call_42" {
+		t.Errorf("the tool message carries the call id %v, want call_42", toolMessage["tool_call_id"])
+	}
+
+	// The history is intact: the client's own first message is still there.
+	if messages[0]["role"] != "user" {
+		t.Errorf("the conversation's first message is %v, want the client's own", messages[0]["role"])
+	}
+}
