@@ -39,6 +39,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/loopgate"
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
+	"github.com/mixaill76/auto_ai_router/internal/moonshottools"
 	"github.com/mixaill76/auto_ai_router/internal/proxy/modelutils"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
 	"github.com/mixaill76/auto_ai_router/internal/requestid"
@@ -613,7 +614,16 @@ type Config struct {
 	// nil client keeps the pools in-process.
 	DeepSeekToolsRedisClient valkey.Client
 	// DeepSeekToolsKeyPrefix namespaces the adapter's Redis keys.
-	DeepSeekToolsKeyPrefix     string
+	DeepSeekToolsKeyPrefix string
+	// MoonshotTools is the router-run Moonshot Search/Search Pro/Fetch
+	// adapter's settings.
+	MoonshotTools config.MoonshotToolsConfig
+	// MoonshotToolsRedisClient, when set, backs the adapter's per-account
+	// QPS pools so the limit is shared by the router's replicas and
+	// platforms. A nil client keeps the pools in-process.
+	MoonshotToolsRedisClient valkey.Client
+	// MoonshotToolsKeyPrefix namespaces the adapter's Redis keys.
+	MoonshotToolsKeyPrefix     string
 	Retry                      config.RetryConfig  // Which upstream errors are replayed on another credential (zero value = built-in policy)
 	ResponseStore              responsestore.Store // Optional: Responses API store (bbolt or Redis)
 	SessionStickyEnabled       bool
@@ -676,40 +686,49 @@ type Proxy struct {
 	// server-level default): a credential without its own override falls
 	// back to this. <= 0 means off, same convention as the per-credential
 	// field.
-	globalResponseHeaderTimeout      time.Duration
-	logger                           *slog.Logger
-	maxBodySizeMB                    int
-	maxResponseBodySize              int64 // Pre-computed max response body size in bytes
-	requestTimeout                   time.Duration
-	metrics                          *monitoring.Metrics
-	masterKey                        string
-	rateLimiter                      *ratelimit.RPMLimiter
-	tokenManager                     *auth.VertexTokenManager
-	routerID                         string                         // Identifier for this router used in /trace responses
-	modelManager                     *models.Manager                // Model manager for getting configured models
-	LiteLLMDB                        litellmdb.Manager              // LiteLLM database integration
-	kafkaLog                         kafkalog.Manager               // Kafka spend-log publishing (optional, analytics write-path)
-	rawBodyLog                       kafkalog.RawBodyManager        // Kafka raw-body publishing (optional, separate topic, failure-only)
-	routerResponseLog                kafkalog.RouterResponseManager // Kafka router-response publishing (optional, separate topic, every request)
-	routerResponsesEnabled           bool                           // Whether the router-response write-path is on (the manager says so too; this is the cheap check on the hot path)
-	routerResponsesRedact            bool                           // Mirrors KafkaRouterResponsesConfig.RedactSensitiveFields
-	rawBodyStoreRawBody              bool                           // Mirrors KafkaRawBodiesConfig.StoreRawBody
-	rawBodyStoreOnlyErrors           bool                           // Mirrors KafkaRawBodiesConfig.StoreOnlyErrors
-	rawBodyRedactSensitiveFields     bool                           // Mirrors KafkaRawBodiesConfig.RedactSensitiveFields
-	healthChecker                    HealthChecker                  // Cached DB health status (optional)
-	events                           *accountevents.Publisher       // Account outcome events publisher (kafka; nil when disabled)
-	banDecisionsExternal             bool                           // external ban source wired (see recordBanSignal)
-	priceRegistry                    *models.ModelPriceRegistry     // Model pricing information (optional)
-	organizationPolicies             *models.OrganizationPolicyRegistry
-	maxProviderRetries               int                  // Max same-type credential retries on provider errors
-	retryPolicy                      *retryPolicy         // compiled Config.Retry
-	maxFallbackAttempts              int                  // Max fallback proxy hops per request chain
-	anthropicDefaultMaxTokens        int                  // max_tokens sent to a Claude model when the client sends none (0 = config.AnthropicDefaultMaxTokens)
-	deepSeekToolsEnabled             bool                 // the router runs DeepSeek's own Search/Fetch tools for models that cannot
-	deepSeekToolsTimeout             time.Duration        // timeout of one Search/Fetch call
-	deepSeekToolsMaxSteps            int                  // bound of the router-run tool loop
-	deepSeekToolsMaxRetries          int                  // retries of a Search/Fetch call after a 429 or 5xx
-	deepSeekToolsQuota               *deepseektools.Quota // per-account QPS pools for Search and Fetch
+	globalResponseHeaderTimeout  time.Duration
+	logger                       *slog.Logger
+	maxBodySizeMB                int
+	maxResponseBodySize          int64 // Pre-computed max response body size in bytes
+	requestTimeout               time.Duration
+	metrics                      *monitoring.Metrics
+	masterKey                    string
+	rateLimiter                  *ratelimit.RPMLimiter
+	tokenManager                 *auth.VertexTokenManager
+	routerID                     string                         // Identifier for this router used in /trace responses
+	modelManager                 *models.Manager                // Model manager for getting configured models
+	LiteLLMDB                    litellmdb.Manager              // LiteLLM database integration
+	kafkaLog                     kafkalog.Manager               // Kafka spend-log publishing (optional, analytics write-path)
+	rawBodyLog                   kafkalog.RawBodyManager        // Kafka raw-body publishing (optional, separate topic, failure-only)
+	routerResponseLog            kafkalog.RouterResponseManager // Kafka router-response publishing (optional, separate topic, every request)
+	routerResponsesEnabled       bool                           // Whether the router-response write-path is on (the manager says so too; this is the cheap check on the hot path)
+	routerResponsesRedact        bool                           // Mirrors KafkaRouterResponsesConfig.RedactSensitiveFields
+	rawBodyStoreRawBody          bool                           // Mirrors KafkaRawBodiesConfig.StoreRawBody
+	rawBodyStoreOnlyErrors       bool                           // Mirrors KafkaRawBodiesConfig.StoreOnlyErrors
+	rawBodyRedactSensitiveFields bool                           // Mirrors KafkaRawBodiesConfig.RedactSensitiveFields
+	healthChecker                HealthChecker                  // Cached DB health status (optional)
+	events                       *accountevents.Publisher       // Account outcome events publisher (kafka; nil when disabled)
+	banDecisionsExternal         bool                           // external ban source wired (see recordBanSignal)
+	priceRegistry                *models.ModelPriceRegistry     // Model pricing information (optional)
+	organizationPolicies         *models.OrganizationPolicyRegistry
+	maxProviderRetries           int                  // Max same-type credential retries on provider errors
+	retryPolicy                  *retryPolicy         // compiled Config.Retry
+	maxFallbackAttempts          int                  // Max fallback proxy hops per request chain
+	anthropicDefaultMaxTokens    int                  // max_tokens sent to a Claude model when the client sends none (0 = config.AnthropicDefaultMaxTokens)
+	deepSeekToolsEnabled         bool                 // the router runs DeepSeek's own Search/Fetch tools for models that cannot
+	deepSeekToolsTimeout         time.Duration        // timeout of one Search/Fetch call
+	deepSeekToolsMaxSteps        int                  // bound of the router-run tool loop
+	deepSeekToolsMaxRetries      int                  // retries of a Search/Fetch call after a 429 or 5xx
+	deepSeekToolsQuota           *deepseektools.Quota // per-account QPS pools for Search and Fetch
+
+	// The router-run Moonshot Search/Search Pro/Fetch adapter: the built-in
+	// $web_search was switched off, and its replacement is Moonshot's own
+	// REST APIs, which the model cannot reach by itself.
+	moonshotToolsEnabled             bool                 // the router runs Moonshot's own search/fetch tools for models that cannot
+	moonshotToolsTimeout             time.Duration        // timeout of one Search/Search Pro/Fetch call
+	moonshotToolsMaxSteps            int                  // bound of the router-run tool loop
+	moonshotToolsMaxRetries          int                  // retries of a call after a 429 or 5xx
+	moonshotToolsQuota               *moonshottools.Quota // per-account QPS pools for Search, Search Pro and Fetch
 	responseStore                    responsestore.Store  // Optional: Responses API store (bbolt or Redis)
 	sessionStore                     sessionBindingStore  // Optional: session-sticky credential routing
 	stickyAutoCacheCtrl              bool                 // Auto-inject Anthropic cache_control when session is active
@@ -841,6 +860,10 @@ func New(cfg *Config) *Proxy {
 		maxFallbackAttempts:              cfg.MaxFallbackAttempts,
 		anthropicDefaultMaxTokens:        cfg.AnthropicDefaultMaxTokens,
 		deepSeekToolsEnabled:             cfg.DeepSeekTools.Enabled,
+		moonshotToolsEnabled:             cfg.MoonshotTools.Enabled,
+		moonshotToolsTimeout:             cfg.MoonshotTools.RequestTimeout,
+		moonshotToolsMaxSteps:            cfg.MoonshotTools.MaxSteps,
+		moonshotToolsMaxRetries:          cfg.MoonshotTools.MaxRetries,
 		deepSeekToolsTimeout:             cfg.DeepSeekTools.RequestTimeout,
 		deepSeekToolsMaxSteps:            cfg.DeepSeekTools.MaxSteps,
 		deepSeekToolsMaxRetries:          cfg.DeepSeekTools.MaxRetries,
@@ -896,6 +919,32 @@ func New(cfg *Config) *Proxy {
 		cfg.DeepSeekToolsKeyPrefix,
 		cfg.DeepSeekTools.SearchQPS,
 		cfg.DeepSeekTools.FetchQPS,
+	)
+
+	// The Moonshot adapter's settings fall back to their defaults, so an
+	// absent section still gives a working adapter with the provider's own
+	// limits. It is on unless the configuration turns it off: it only ever
+	// engages for a credential that asked for it (the moonshot_tools
+	// opt-in) and a request that asked for one of the built-in tools.
+	p.moonshotToolsEnabled = true
+	if p.moonshotToolsTimeout <= 0 {
+		p.moonshotToolsTimeout = config.DefaultMoonshotToolsRequestTimeout
+	}
+	if p.moonshotToolsMaxSteps <= 0 {
+		p.moonshotToolsMaxSteps = config.DefaultMoonshotToolsMaxSteps
+	}
+	if p.moonshotToolsMaxRetries < 0 {
+		p.moonshotToolsMaxRetries = config.DefaultMoonshotToolsMaxRetries
+	}
+	// The QPS pools are per Moonshot account, so they have to be shared by
+	// the router's replicas: a Redis-backed pool does that, an in-process one
+	// does not (it is the fallback when Redis is unavailable).
+	p.moonshotToolsQuota = moonshottools.NewQuota(
+		cfg.MoonshotToolsRedisClient,
+		cfg.MoonshotToolsKeyPrefix,
+		cfg.MoonshotTools.SearchQPS,
+		cfg.MoonshotTools.SearchProQPS,
+		cfg.MoonshotTools.FetchQPS,
 	)
 	return p
 }
@@ -3294,28 +3343,66 @@ dispatch:
 		// usage is summed and carried into the final body -- otherwise the
 		// client would be billed for the last step only.
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			toolRun, toolErr := p.runDeepSeekToolLoop(r, w, logCtx, prepared, cred, modelID, realModelID,
-				body, []byte(decodedBody), start, attemptedCreds)
+			// The router-run tool loop: the model asked for one of the tools
+			// the router owns, so the router runs it and asks the model
+			// again. The loop's steps are separate upstream requests, so their
+			// usage is summed and carried into the final body -- otherwise
+			// the client would be billed for the last step only.
+			//
+			// The two adapters never overlap: each engages only for its own
+			// provider's credential (deepseek_tools / moonshot_tools), so
+			// exactly one of them can run for a request.
 			switch {
-			case toolErr != nil:
-				if errors.Is(toolErr, errDeepSeekToolCycleAborted) {
-					return
-				}
-				p.logger.WarnContext(r.Context(), "The router-run search/fetch loop failed",
-					"model", modelID, "credential", cred.Name, "error", toolErr,
-					"request_id", logCtx.RequestID)
-				// A tool that already ran and returned results is billed even
-				// though the model that followed it failed, so the loop's usage
-				// rides along here too.
-				if toolRun != nil {
+			case moonshotToolsEnabledFor(modelID, cred):
+				toolRun, toolErr := p.runMoonshotToolLoop(r, w, logCtx, prepared, cred, modelID, realModelID,
+					body, []byte(decodedBody), start, attemptedCreds)
+				switch {
+				case toolErr != nil:
+					if errors.Is(toolErr, errMoonshotToolCycleAborted) {
+						return
+					}
+					p.logger.WarnContext(r.Context(), "The router-run search/fetch loop failed",
+						"model", modelID, "credential", cred.Name, "error", toolErr,
+						"request_id", logCtx.RequestID)
+					// A tool that already ran and returned results is billed
+					// even though the model that followed it failed, so the
+					// loop's usage rides along here too.
+					if toolRun != nil {
+						deepSeekToolUsage = toolRun.usage
+					}
+				case toolRun != nil:
+					decodedBody = string(toolRun.body)
 					deepSeekToolUsage = toolRun.usage
+					p.logger.DebugContext(r.Context(), "The router ran the model's search/fetch tools",
+						"model", modelID, "credential", cred.Name,
+						"search_calls", toolRun.searchCalls,
+						"search_pro_calls", toolRun.searchProCalls,
+						"fetch_calls", toolRun.fetchCalls)
 				}
-			case toolRun != nil:
-				decodedBody = string(toolRun.body)
-				deepSeekToolUsage = toolRun.usage
-				p.logger.DebugContext(r.Context(), "The router ran the model's search/fetch tools",
-					"model", modelID, "credential", cred.Name,
-					"search_calls", toolRun.searchCalls, "fetch_calls", toolRun.fetchCalls)
+			default:
+				toolRun, toolErr := p.runDeepSeekToolLoop(r, w, logCtx, prepared, cred, modelID, realModelID,
+					body, []byte(decodedBody), start, attemptedCreds)
+				switch {
+				case toolErr != nil:
+					if errors.Is(toolErr, errDeepSeekToolCycleAborted) {
+						return
+					}
+					p.logger.WarnContext(r.Context(), "The router-run search/fetch loop failed",
+						"model", modelID, "credential", cred.Name, "error", toolErr,
+						"request_id", logCtx.RequestID)
+					// A tool that already ran and returned results is billed even
+					// though the model that followed it failed, so the loop's usage
+					// rides along here too.
+					if toolRun != nil {
+						deepSeekToolUsage = toolRun.usage
+					}
+				case toolRun != nil:
+					decodedBody = string(toolRun.body)
+					deepSeekToolUsage = toolRun.usage
+					p.logger.DebugContext(r.Context(), "The router ran the model's search/fetch tools",
+						"model", modelID, "credential", cred.Name,
+						"search_calls", toolRun.searchCalls, "fetch_calls", toolRun.fetchCalls)
+				}
 			}
 		}
 
@@ -3838,9 +3925,36 @@ dispatch:
 			// client cannot be shown a tool call for a tool it never declared.
 			// The stream is buffered, the tool run, and the model asked again.
 			if resp.StatusCode >= 200 && resp.StatusCode < 300 &&
-				p.deepSeekToolsEnabled && deepSeekToolsEnabledFor(modelID, cred) {
-				streamRun, streamErr := p.runDeepSeekStreamToolLoop(r, w, logCtx, prepared, cred,
-					modelID, realModelID, body, resp, start, attemptedCreds)
+				((p.deepSeekToolsEnabled && deepSeekToolsEnabledFor(modelID, cred)) ||
+					(p.moonshotToolsEnabled && moonshotToolsEnabledFor(modelID, cred))) {
+				// The two adapters never overlap: each engages only for its
+				// own provider's credential, so exactly one of them runs.
+				var streamErr error
+				var loopUsage *converter.TokenUsage
+				var loopTotalTokens int
+				var loopLastChunk []byte
+				streamLoopRan := false
+				if moonshotToolsEnabledFor(modelID, cred) {
+					moonshotRun, moonshotErr := p.runMoonshotStreamToolLoop(r, w, logCtx, prepared, cred,
+						modelID, realModelID, body, resp, start, attemptedCreds)
+					streamErr = moonshotErr
+					if moonshotRun != nil {
+						streamLoopRan = true
+						loopUsage = moonshotRun.usage
+						loopTotalTokens = moonshotRun.totalTokens
+						loopLastChunk = moonshotRun.lastChunk
+					}
+				} else {
+					deepSeekRun, deepSeekErr := p.runDeepSeekStreamToolLoop(r, w, logCtx, prepared, cred,
+						modelID, realModelID, body, resp, start, attemptedCreds)
+					streamErr = deepSeekErr
+					if deepSeekRun != nil {
+						streamLoopRan = true
+						loopUsage = deepSeekRun.usage
+						loopTotalTokens = deepSeekRun.totalTokens
+						loopLastChunk = deepSeekRun.lastChunk
+					}
+				}
 				switch {
 				case errors.Is(streamErr, errDeepSeekToolCycleAborted):
 					return
@@ -3856,7 +3970,7 @@ dispatch:
 						streamCompleted = true
 					}
 				default:
-					if streamRun != nil {
+					if streamLoopRan {
 						// The loop buffered the stream itself, so the usual
 						// streaming handler never ran: it neither counted the
 						// tokens nor wrote the spend row. The loop does both
@@ -3866,9 +3980,9 @@ dispatch:
 						if logCtx.TokenUsage == nil {
 							logCtx.TokenUsage = &converter.TokenUsage{}
 						}
-						applyDeepSeekToolUsageTo(logCtx.TokenUsage, streamRun.usage)
-						p.finalizeStreamingLog(logCtx, streamRun.totalTokens,
-							withDeepSeekToolUsage(streamRun.lastChunk, streamRun.usage),
+						applyDeepSeekToolUsageTo(logCtx.TokenUsage, loopUsage)
+						p.finalizeStreamingLog(logCtx, loopTotalTokens,
+							withDeepSeekToolUsage(loopLastChunk, loopUsage),
 							"openai", resp.StatusCode, false)
 					}
 					streamCompleted = true

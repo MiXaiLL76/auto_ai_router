@@ -33,8 +33,28 @@ server:
   #   fetch_qps: 25  # Per-account Fetch limit (default: 25, the provider's own limit)
   #   max_steps: 8  # Bound of the router-run tool loop (default: 8)
   #   max_retries: 2  # Retries of a Search or Fetch call after a 429 or 5xx (default: 2)
+  # The router-run Moonshot Search/Search Pro/Fetch adapter: for a model whose
+  # provider runs its own search and fetch tools (Moonshot's /v1/tools/search,
+  # /v1/tools/search_pro and /v1/tools/fetch -- the built-in $web_search was
+  # switched off on 2026-10-20), the router calls them with the credential's
+  # key and bills the calls apart from the model's tokens. A credential opts
+  # in with `moonshot_tools: true`.
+  # moonshot_tools:
+  #   request_timeout: 30s  # Timeout of one Search, Search Pro or Fetch call (default: 30s)
+  #   search_qps: 100  # Per-account Basic search limit (default: 100, the provider's own limit)
+  #   search_pro_qps: 100  # Per-account Pro search limit (default: 100, the provider's own limit)
+  #   fetch_qps: 25  # Per-account Fetch limit (default: 25, the provider's own limit)
+  #   max_steps: 8  # Bound of the router-run tool loop (default: 8)
+  #   max_retries: 2  # Retries of a Search, Search Pro or Fetch call after a 429 or 5xx (default: 2)
   model_prices_link: ""  # Optional: URL or file path to model prices JSON (supports os.environ/VAR_NAME)
   model_prices_sync_interval: 5m  # How often model prices are re-fetched from model_prices_link (default: 5m)
+  # The price of the tools the ROUTER runs on the model's behalf (the
+  # provider's own Search/Fetch APIs), as opposed to the model's token prices.
+  # A separate document from the model prices: it answers a different question
+  # and is billed from different counters. The cost_per_call values are the
+  # FINAL client prices -- the rate is already folded into them and is not
+  # applied again. Without this document the router's tool calls are free.
+  # tool_prices_path: ""  # Optional: path to the tool prices JSON (supports os.environ/VAR_NAME)
   response_headers:
     mode: passthrough  # Use allowlist to expose only standard response metadata
 

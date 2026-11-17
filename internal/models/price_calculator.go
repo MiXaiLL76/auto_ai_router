@@ -579,9 +579,24 @@ func CalculateTokenCostsWithResolver(usage *converter.TokenUsage, price *ModelPr
 	// fetch is never counted in usage.WebFetchRequests, so it costs nothing.
 	costs.WebFetchCost = float64(converterutil.NonNegativeTokenCount(usage.WebFetchRequests)) *
 		price.toolCostPerCall(ToolWebFetch)
+	// The router's own Moonshot calls, billed at the tool price document's
+	// per-call prices. Each is charged only for a call that actually
+	// succeeded and produced something: the counters carry only those.
+	//
+	// The prices are the FINAL client prices -- the rate is already folded
+	// into them and is not applied again.
+	costs.MoonshotSearchCost = float64(converterutil.NonNegativeTokenCount(usage.MoonshotSearchRequests)) *
+		price.MoonshotSearchCostPerCall
+	costs.MoonshotSearchProCost = float64(converterutil.NonNegativeTokenCount(usage.MoonshotSearchProRequests)) *
+		price.MoonshotSearchProCostPerCall
+	costs.MoonshotFetchCost = float64(converterutil.NonNegativeTokenCount(usage.MoonshotFetchRequests)) *
+		price.MoonshotFetchCostPerCall
 	costs.ImageGenerationToolCost = price.imageGenerationToolCost(usage, resolve)
 	costs.ToolUsageCost = costs.WebSearchCost +
 		costs.WebFetchCost +
+		costs.MoonshotSearchCost +
+		costs.MoonshotSearchProCost +
+		costs.MoonshotFetchCost +
 		costs.XSearchCost +
 		costs.CodeExecutionCost +
 		costs.AttachmentSearchCost +

@@ -809,6 +809,9 @@ func costBreakdownMap(costs *converter.TokenCosts) map[string]interface{} {
 		"tool_usage_cost":            costs.ToolUsageCost,
 		"web_search_cost":            costs.WebSearchCost,
 		"web_fetch_cost":             costs.WebFetchCost,
+		"moonshot_search_cost":       costs.MoonshotSearchCost,
+		"moonshot_search_pro_cost":   costs.MoonshotSearchProCost,
+		"moonshot_fetch_cost":        costs.MoonshotFetchCost,
 		"x_search_cost":              costs.XSearchCost,
 		"code_execution_cost":        costs.CodeExecutionCost,
 		"attachment_search_cost":     costs.AttachmentSearchCost,
@@ -892,6 +895,19 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 		}
 		if usage.WebFetchRequests > 0 {
 			serverToolUse["web_fetch_requests"] = usage.WebFetchRequests
+		}
+		// The router's own Moonshot calls are counted apart: they are priced
+		// by Moonshot's own tariff, not by the model's built-in search
+		// tariff, and the operation's type must be known from the call the
+		// router actually made.
+		if usage.MoonshotSearchRequests > 0 {
+			serverToolUse["moonshot_search_requests"] = usage.MoonshotSearchRequests
+		}
+		if usage.MoonshotSearchProRequests > 0 {
+			serverToolUse["moonshot_search_pro_requests"] = usage.MoonshotSearchProRequests
+		}
+		if usage.MoonshotFetchRequests > 0 {
+			serverToolUse["moonshot_fetch_requests"] = usage.MoonshotFetchRequests
 		}
 		if usage.HasServerToolUsage() {
 			serverToolUse["x_search_calls"] = usage.XSearchCalls

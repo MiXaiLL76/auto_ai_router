@@ -29,6 +29,12 @@ func applyDeepSeekToolUsageTo(usage *converter.TokenUsage, loop *converter.Token
 	usage.ReasoningTokens = loop.ReasoningTokens
 	usage.WebSearchRequests += loop.WebSearchRequests
 	usage.WebFetchRequests += loop.WebFetchRequests
+	// The router's own Moonshot calls ride along the same way: they are
+	// counters of what the router did, not of what the provider reported,
+	// so they are added rather than replaced.
+	usage.MoonshotSearchRequests += loop.MoonshotSearchRequests
+	usage.MoonshotSearchProRequests += loop.MoonshotSearchProRequests
+	usage.MoonshotFetchRequests += loop.MoonshotFetchRequests
 	if usage.WebSearchContextSize == "" {
 		usage.WebSearchContextSize = loop.WebSearchContextSize
 	}

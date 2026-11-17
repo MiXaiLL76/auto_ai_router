@@ -192,6 +192,29 @@ func main() {
 	// UpdateDBModels so that the sync loop can correctly add/remove DB-sourced entries.
 
 	priceRegistry := models.NewModelPriceRegistry()
+
+	// The tool price document: the price of the tools the ROUTER runs on
+	// the model's behalf (the provider's own Search/Fetch APIs), apart from
+	// the model's token prices. It is a separate document from the model
+	// prices, because it answers a different question and is billed from
+	// different counters.
+	if cfg.Server.ToolPricesPath != "" {
+		toolPrices, toolPricesErr := models.LoadToolPrices(cfg.Server.ToolPricesPath)
+		if toolPricesErr != nil {
+			log.Warn("Failed to load the tool prices document", "path", cfg.Server.ToolPricesPath, "error", toolPricesErr)
+		} else {
+			if moonshotPrices, ok := toolPrices.MoonshotToolPrices(); ok {
+				priceRegistry.SetMoonshotToolPrices(&moonshotPrices)
+				log.Info("Tool prices loaded",
+					"path", cfg.Server.ToolPricesPath,
+					"moonshot_search_cost_per_call", moonshotPrices.SearchCostPerCall,
+					"moonshot_search_pro_cost_per_call", moonshotPrices.SearchProCostPerCall,
+					"moonshot_fetch_cost_per_call", moonshotPrices.FetchCostPerCall)
+			} else {
+				log.Info("Tool prices loaded, without Moonshot's tools", "path", cfg.Server.ToolPricesPath)
+			}
+		}
+	}
 	f2b, rateLimiter, bal, hybridBackend := initializeBalancer(cfg, log, redisBackend, metrics)
 	if hybridBackend != nil {
 		defer hybridBackend.Close()

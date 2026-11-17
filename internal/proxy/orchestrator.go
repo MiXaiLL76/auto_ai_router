@@ -21,6 +21,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/auth"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
+	"github.com/mixaill76/auto_ai_router/internal/moonshottools"
 	"github.com/mixaill76/auto_ai_router/internal/responsestore"
 	"github.com/mixaill76/auto_ai_router/internal/scope"
 	"github.com/mixaill76/auto_ai_router/internal/security"
@@ -466,6 +467,22 @@ func (p *Proxy) sanitizeClientParams(r *http.Request, modelID string, cred *conf
 	// This runs after the conversion above, so the body is Chat-shaped for
 	// both client shapes (/v1/chat/completions and a /v1/responses request
 	// converted to Chat), which is the shape the model actually answers in.
+	// Moonshot's models cannot run the built-in search/fetch tools either:
+	// the built-in $web_search was switched off on 2026-10-20 and its
+	// replacement is Moonshot's own REST APIs, which the model cannot
+	// reach. The router takes the built-in tools over the same way.
+	if p.moonshotToolsEnabled && moonshotToolsEnabledFor(modelID, cred) {
+		rewritten, plan, rewriteErr := moonshottools.RewriteRequest(body)
+		switch {
+		case rewriteErr != nil:
+			p.logger.WarnContext(r.Context(), "Could not rewrite the built-in search tools for the router-run adapter",
+				"model", modelID, "credential", cred.Name, "error", rewriteErr)
+		case plan != nil:
+			body = rewritten
+			p.logger.DebugContext(r.Context(), "Router will run the built-in search/fetch tools itself",
+				"model", modelID, "credential", cred.Name, "plan", describeMoonshotToolPlan(plan))
+		}
+	}
 	return p.applyDeepSeekToolTools(r, modelID, cred, body)
 }
 
@@ -920,6 +937,22 @@ func (p *Proxy) buildCredentialRequestInner(
 		// asked for would be gone by the time the adapter could see it. The
 		// adapter's replacement is an ordinary function tool, which the
 		// conversion keeps.
+		// The router-run Moonshot Search/Search Pro/Fetch tools are taken
+		// over BEFORE the conversion too, for the same reason: the
+		// conversion drops every built-in tool, so a web_search the client
+		// asked for would be gone by the time the adapter could see it.
+		if p.moonshotToolsEnabled && moonshotToolsEnabledFor(modelID, cred) {
+			rewritten, plan, rewriteErr := moonshottools.RewriteResponsesRequest(body)
+			switch {
+			case rewriteErr != nil:
+				p.logger.WarnContext(r.Context(), "Could not rewrite the built-in search tools for the router-run adapter",
+					"model", modelID, "credential", cred.Name, "error", rewriteErr)
+			case plan != nil:
+				body = rewritten
+				p.logger.DebugContext(r.Context(), "Router will run the built-in search/fetch tools itself",
+					"model", modelID, "credential", cred.Name, "plan", describeMoonshotToolPlan(plan))
+			}
+		}
 		if p.deepSeekToolsEnabled && deepSeekToolsEnabledFor(modelID, cred) {
 			rewritten, plan, rewriteErr := deepseektools.RewriteResponsesRequest(body)
 			switch {
