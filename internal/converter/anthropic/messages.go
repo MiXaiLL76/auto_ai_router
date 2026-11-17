@@ -224,33 +224,38 @@ func OpenAIToAnthropic(openAIBody []byte, model string, isRealAnthropicBackend b
 	if req.ResponseFormat != nil {
 		if rfMap, ok := req.ResponseFormat.(map[string]interface{}); ok {
 			rfType, _ := rfMap["type"].(string)
-			applied := false
-			if rfType == "json_schema" {
-				if jsonSchema, ok := rfMap["json_schema"].(map[string]interface{}); ok {
-					if schema := jsonSchema["schema"]; schema != nil {
-						if anthropicReq.OutputConfig == nil {
-							anthropicReq.OutputConfig = &AnthropicOutputConfig{}
-						}
-						anthropicReq.OutputConfig.Format = &AnthropicJSONOutputFormat{
-							Type:   "json_schema",
-							Schema: normalizeSchemaForAnthropicOutput(schema),
-						}
-						applied = true
-					}
-				}
+			var schema interface{}
+			if jsonSchema, ok := rfMap["json_schema"].(map[string]interface{}); ok {
+				schema = jsonSchema["schema"]
 			}
-			if !applied && (rfType == "json_object" || rfType == "json_schema") {
-				jsonInstruction := buildJSONResponseInstruction()
-				if systemContent, ok := anthropicReq.System.(string); ok {
-					anthropicReq.System = systemContent + jsonInstruction
-				} else if anthropicReq.System == nil {
-					anthropicReq.System = strings.TrimPrefix(jsonInstruction, "\n\n")
-				}
-			}
+			ApplyJSONResponseFormat(&anthropicReq, rfType, schema)
 		}
 	}
 
 	return json.Marshal(anthropicReq)
+}
+
+// ApplyJSONResponseFormat maps an OpenAI-style JSON response format type and schema onto req.
+func ApplyJSONResponseFormat(req *AnthropicRequest, formatType string, schema interface{}) {
+	if formatType == "json_schema" && schema != nil {
+		if req.OutputConfig == nil {
+			req.OutputConfig = &AnthropicOutputConfig{}
+		}
+		req.OutputConfig.Format = &AnthropicJSONOutputFormat{
+			Type:   "json_schema",
+			Schema: normalizeSchemaForAnthropicOutput(schema),
+		}
+		return
+	}
+	if formatType != "json_object" && formatType != "json_schema" {
+		return
+	}
+	jsonInstruction := buildJSONResponseInstruction()
+	if systemContent, ok := req.System.(string); ok {
+		req.System = systemContent + jsonInstruction
+	} else if req.System == nil {
+		req.System = strings.TrimPrefix(jsonInstruction, "\n\n")
+	}
 }
 
 // normalizeSchemaForAnthropicOutput returns a deep copy of schema with three
