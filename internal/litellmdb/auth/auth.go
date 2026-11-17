@@ -132,7 +132,7 @@ func (a *Authenticator) fetchMasterKeyFromDB(ctx context.Context) string {
 // ValidateToken validates a token and returns its information
 //
 // Algorithm:
-// 1. Hash token (sha256) if it starts with "sk-"
+// 1. Reject tokens without the "sk-" prefix, then hash (sha256)
 // 2. Check cache
 // 3. If not in cache - query database
 // 4. Validate (blocked, expires, budget)
@@ -144,7 +144,10 @@ func (a *Authenticator) ValidateToken(ctx context.Context, rawToken string) (*mo
 		return nil, models.ErrTokenNotFound
 	}
 
-	// 1. Hash token
+	// 1. Require the sk- prefix, then hash token
+	if !strings.HasPrefix(rawToken, "sk-") {
+		return nil, models.ErrTokenNotFound
+	}
 	hashedToken := HashToken(rawToken)
 
 	// 2. Check cache. A token loaded in an earlier budget window carries that
