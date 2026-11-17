@@ -79,6 +79,9 @@ type orchestratedRequest struct {
 	// an organization-level opt-out of InjectCacheControl, independent of
 	// stickyCacheEligible and the global session_sticky_auto_cache_control switch.
 	autoCacheControlDisabled bool
+	// cacheControlOutcome mirrors credentialPreparedRequest.cacheControlOutcome
+	// for the credential actually used; see that field's doc comment.
+	cacheControlOutcome string
 }
 
 type credentialPreparedRequest struct {
@@ -98,6 +101,13 @@ type credentialPreparedRequest struct {
 	forcedChatNonStream        bool // see orchestratedRequest.forcedChatNonStream
 	completionsPath            bool // see orchestratedRequest.completionsPath
 	messagesMetadata           anthropicconv.MessagesAdapterMetadata
+	// cacheControlOutcome is anthropicconv.CacheControlOutcome ("none",
+	// "client_supplied", "router_injected"), or "" when this call site never
+	// ran InjectCacheControl at all (body wasn't Chat/Messages-shaped yet --
+	// a /v1/responses request before its Anthropic/Bedrock conversion;
+	// sendToCredential in proxy.go fills this in for that case instead, from
+	// the final requestBody). Logged as RequestLogContext.CacheControlOutcome.
+	cacheControlOutcome string
 }
 
 // orchestrateRequest performs auth and credential selection for an incoming request.
@@ -222,6 +232,15 @@ func (p *Proxy) orchestrateRequest(
 			} else {
 				prevEntry = entry
 				preferredCredentialName = entry.CredentialName
+				if logCtx.CacheEligibilitySource == "" {
+					// A resolved previous_response_id makes this request
+					// cache-eligible on its own (see stickyCacheEligible),
+					// independent of any session_id/header/client_id signal
+					// -- but only label it when nothing else already did,
+					// so a request that also carries a real session keeps
+					// that more specific label.
+					logCtx.CacheEligibilitySource = "previous_response_id"
+				}
 			}
 		}
 	}
@@ -374,6 +393,7 @@ func (p *Proxy) orchestrateRequest(
 		messagesMetadata:           credentialReq.messagesMetadata,
 		stickyCacheEligible:        stickyCacheEligible,
 		autoCacheControlDisabled:   autoCacheControlDisabled,
+		cacheControlOutcome:        credentialReq.cacheControlOutcome,
 	}, true
 }
 
@@ -722,11 +742,21 @@ func (p *Proxy) buildCredentialRequestInner(
 	}
 
 	effectiveType := cred.EffectiveProviderType()
+	var cacheControlOutcome anthropicconv.CacheControlOutcome
 	if p.stickyAutoCacheCtrl &&
 		stickyCacheEligible &&
 		!autoCacheControlDisabled &&
-		(effectiveType == config.ProviderTypeAnthropic || effectiveType == config.ProviderTypeCometAPI || effectiveType == config.ProviderTypeProMan || effectiveType == config.ProviderTypeBedrock) {
-		body = anthropicconv.InjectCacheControl(body)
+		(effectiveType == config.ProviderTypeAnthropic || effectiveType == config.ProviderTypeCometAPI || effectiveType == config.ProviderTypeProMan || effectiveType == config.ProviderTypeBedrock) &&
+		!isResponsesAPI {
+		// isResponsesAPI excluded deliberately: body is still Responses-API-shaped
+		// here (input/instructions, no messages/system) for every nativeResponses
+		// credential, so InjectCacheControlOutcome could only ever report
+		// CacheControlNone -- a misleading "nothing to do" that would make
+		// sendToCredential (proxy.go) skip its own, later re-check on the
+		// properly Anthropic/Bedrock-shaped requestBody. Leaving
+		// cacheControlOutcome at its zero value here means "not checked yet",
+		// which is exactly what tells that later check to run.
+		body, cacheControlOutcome = anthropicconv.InjectCacheControlOutcome(body)
 	}
 
 	req := credentialPreparedRequest{
@@ -739,6 +769,12 @@ func (p *Proxy) buildCredentialRequestInner(
 		// different SSE/JSON shape than Chat Completions' choices[].delta.content;
 		// the simulated non-stream reassembly branches on this.
 		completionsPath: basePath == "/v1/completions",
+		// cacheControlOutcome is "" (its zero value) here whenever the body
+		// at this point isn't Chat/Messages-shaped yet -- a /v1/responses
+		// request, still input/instructions-shaped. sendToCredential
+		// (proxy.go) re-checks after the Responses->Anthropic/Bedrock
+		// conversion and fills this in for that case; see its own comment.
+		cacheControlOutcome: string(cacheControlOutcome),
 	}
 	if basePath == "/v1/messages" {
 		if cred.IsProxyLike() {
@@ -1319,11 +1355,21 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 	modelID := sanitized.ModelID
 	streaming := sanitized.Streaming
 	sessionID := sanitized.SessionID
+	cacheEligibilitySource := ""
+	if sessionID != "" {
+		cacheEligibilitySource = "session_body"
+	}
 	if sessionID == "" {
 		sessionID = extractSessionIDFromHeaders(r.Header)
+		if sessionID != "" {
+			cacheEligibilitySource = "session_header"
+		}
 	}
 	if sessionID == "" {
 		sessionID = sanitized.ClientID
+		if sessionID != "" {
+			cacheEligibilitySource = "client_id"
+		}
 	}
 	if sanitized.Changed {
 		r.ContentLength = int64(len(body))
@@ -1335,6 +1381,7 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 	logCtx.CanonicalModelID = modelID
 	logCtx.ModelID = modelID
 	logCtx.SessionID = sessionID
+	logCtx.CacheEligibilitySource = cacheEligibilitySource
 
 	if modelID == "" {
 		p.logger.WarnContext(r.Context(), "Model not specified in request body",

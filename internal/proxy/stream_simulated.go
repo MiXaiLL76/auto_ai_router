@@ -449,6 +449,7 @@ func (p *Proxy) handleSimulatedNonStream(
 			prepared.forcedChatNonStream = nextReq.forcedChatNonStream
 			prepared.completionsPath = nextReq.completionsPath
 			prepared.messagesMetadata = nextReq.messagesMetadata
+			prepared.cacheControlOutcome = nextReq.cacheControlOutcome
 			logCtx.RealModelID = realModelID
 			retryReason := simulatedRetryReason(result.httpStatus, result.emptyStream)
 			httputil.AttemptsFrom(r.Context()).Next(httputil.AttemptRetry, string(retryReason))
@@ -1211,6 +1212,7 @@ func (p *Proxy) handleSimulatedNativeNonStream(
 			prepared.forcedChatNonStream = nextReq.forcedChatNonStream
 			prepared.completionsPath = nextReq.completionsPath
 			prepared.messagesMetadata = nextReq.messagesMetadata
+			prepared.cacheControlOutcome = nextReq.cacheControlOutcome
 			logCtx.RealModelID = realModelID
 			retryReason := simulatedRetryReason(result.httpStatus, false)
 			httputil.AttemptsFrom(r.Context()).Next(httputil.AttemptRetry, string(retryReason))
@@ -1761,6 +1763,7 @@ func (p *Proxy) handleSimulatedPassthroughNonStream(
 			prepared.forcedChatNonStream = nextReq.forcedChatNonStream
 			prepared.completionsPath = nextReq.completionsPath
 			prepared.messagesMetadata = nextReq.messagesMetadata
+			prepared.cacheControlOutcome = nextReq.cacheControlOutcome
 			logCtx.RealModelID = realModelID
 			retryReason := simulatedRetryReason(result.httpStatus, false)
 			httputil.AttemptsFrom(r.Context()).Next(httputil.AttemptRetry, string(retryReason))

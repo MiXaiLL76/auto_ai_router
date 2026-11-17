@@ -4,6 +4,22 @@ import "encoding/json"
 
 var cacheEphemeral = map[string]interface{}{"type": "ephemeral"}
 
+// CacheControlOutcome reports what InjectCacheControlOutcome found/did, so
+// callers can tell a client's own cache_control usage apart from the
+// router's automatic injection when logging cache-eligibility signals.
+type CacheControlOutcome string
+
+const (
+	// CacheControlNone means neither the client nor the router placed any
+	// cache_control marker (body had no messages/system, or malformed JSON).
+	CacheControlNone CacheControlOutcome = "none"
+	// CacheControlClientSupplied means the body already carried a
+	// cache_control marker before this call; it was left untouched.
+	CacheControlClientSupplied CacheControlOutcome = "client_supplied"
+	// CacheControlRouterInjected means this call added the marker(s) itself.
+	CacheControlRouterInjected CacheControlOutcome = "router_injected"
+)
+
 // InjectCacheControl adds Anthropic prompt-caching markers to a request body,
 // in either OpenAI-format (system prompt is a message with role "system"/"developer")
 // or native Anthropic Messages API format (system prompt is a top-level "system" field).
@@ -15,19 +31,32 @@ var cacheEphemeral = map[string]interface{}{"type": "ephemeral"}
 // If the body already contains any cache_control field, it is returned unchanged.
 // Non-JSON or structurally unexpected bodies are also returned unchanged.
 func InjectCacheControl(body []byte) []byte {
+	result, _ := injectCacheControl(body)
+	return result
+}
+
+// InjectCacheControlOutcome behaves exactly like InjectCacheControl, but
+// additionally reports the outcome -- distinguishing "the client already
+// sent its own cache_control" from "the router added it" from "neither" --
+// so a caller can log which signal, if any, drove this request's caching.
+func InjectCacheControlOutcome(body []byte) ([]byte, CacheControlOutcome) {
+	return injectCacheControl(body)
+}
+
+func injectCacheControl(body []byte) ([]byte, CacheControlOutcome) {
 	var req map[string]interface{}
 	if err := json.Unmarshal(body, &req); err != nil {
-		return body
+		return body, CacheControlNone
 	}
 
 	messages, _ := req["messages"].([]interface{})
 	hasSystemField := req["system"] != nil
 	if len(messages) == 0 && !hasSystemField {
-		return body
+		return body, CacheControlNone
 	}
 
 	if hasAnyCacheControl(messages) || contentHasCacheControl(req["system"]) {
-		return body
+		return body, CacheControlClientSupplied
 	}
 
 	modified := hasSystemField && markSystemField(req)
@@ -64,14 +93,14 @@ func InjectCacheControl(body []byte) []byte {
 	}
 
 	if !modified {
-		return body
+		return body, CacheControlNone
 	}
 
 	result, err := json.Marshal(req)
 	if err != nil {
-		return body
+		return body, CacheControlNone
 	}
-	return result
+	return result, CacheControlRouterInjected
 }
 
 // hasAnyCacheControl reports whether any content block in messages already carries

@@ -279,6 +279,7 @@ func (prepared *orchestratedRequest) useCredential(cred *config.CredentialConfig
 	prepared.forcedChatNonStream = nextReq.forcedChatNonStream
 	prepared.completionsPath = nextReq.completionsPath
 	prepared.messagesMetadata = nextReq.messagesMetadata
+	prepared.cacheControlOutcome = nextReq.cacheControlOutcome
 }
 
 // nextCrossTypeRetryCredential picks and prepares the next retry credential of any type
@@ -444,32 +445,47 @@ type RequestLogContext struct {
 	StreamOutcome             string                   // completed, client_aborted, or stream_error
 	Credential                *config.CredentialConfig // Credential used
 	SessionID                 string                   // Session ID
-	StickyHeldCredential      string                   // Credential the session stays bound to although it could not take this request (busy or excluded for it)
-	stickyExclude             map[string]bool          // Credentials excluded for this request (denylist, reasoning, tried); used to find the model's best tier
-	stickyRequestExcluded     map[string]bool          // Subset excluded only because of this request's shape (reasoning-only credentials)
-	clientServiceTiers        []string                 // service_tier values the client sent, stripped from the body at ingress; checked per credential (see withClientServiceTiers)
-	TargetURL                 string                   // Target URL (for APIBase extraction)
-	TokenInfo                 *litellmdb.TokenInfo     // User/team/org info
-	IsImageGeneration         bool                     // True if this is an image generation request
-	ImageCount                int                      // Number of images requested ('n' param, at least 1)
-	WebSearchRequested        bool                     // True when the request enabled the built-in web search tool
-	WebSearchContextSize      string                   // low|medium|high from web_search_options/tool config
-	HideWebSearchResults      bool                     // Z.AI web_search tool without search_result: results are still fetched to bill the search, then stripped from the client response
-	ReasoningRequested        bool
-	ReasoningSource           string
-	ThinkingMode              string
-	RequestEndpoint           string
-	Logged                    bool   // True if already logged (prevents duplicate logging)
-	IsResponsesAPI            bool   // True if this is a Responses API request (converted to Chat Completions)
-	IsSystemOne               bool   // True for a /v1/systemone request (native System One API, see systemone.go)
-	RequestCompleted          bool   // True only after the response was fully and successfully delivered
-	ActualCredentialName      string // Real credential name from upstream when Credential.Type == ProviderTypeProxy
-	IsProxyRequest            bool   // True when this request came from another auto_ai_router (HeaderAIRProxyClient)
-	Scope                     scope.Context
-	OrganizationPolicy        *models.OrganizationPolicy
-	BillingProfileID          string
-	BillingProfileSHA256      string
-	BillingOrganizationID     string
+	// CacheEligibilitySource records which client-supplied signal, if any,
+	// made this request eligible for automatic Anthropic cache_control
+	// injection (see anthropicconv.InjectCacheControl / stickyCacheEligible
+	// in orchestrator.go): "session_header", "session_body", "client_id"
+	// (safety_identifier/user fallback), "previous_response_id", or "" when
+	// the client gave no such signal at all. This is independent of whether
+	// stickyAutoCacheCtrl/org policy ultimately allowed the injection --
+	// it answers "did the client try", not "did caching happen".
+	CacheEligibilitySource string
+	// CacheControlOutcome is set from anthropicconv.CacheControlOutcome:
+	// "client_supplied" when the client's own request already carried
+	// cache_control, "router_injected" when this router added it, "none"
+	// when neither happened, "" when no Anthropic-wire credential was ever
+	// attempted for this request at all.
+	CacheControlOutcome   string
+	StickyHeldCredential  string               // Credential the session stays bound to although it could not take this request (busy or excluded for it)
+	stickyExclude         map[string]bool      // Credentials excluded for this request (denylist, reasoning, tried); used to find the model's best tier
+	stickyRequestExcluded map[string]bool      // Subset excluded only because of this request's shape (reasoning-only credentials)
+	clientServiceTiers    []string             // service_tier values the client sent, stripped from the body at ingress; checked per credential (see withClientServiceTiers)
+	TargetURL             string               // Target URL (for APIBase extraction)
+	TokenInfo             *litellmdb.TokenInfo // User/team/org info
+	IsImageGeneration     bool                 // True if this is an image generation request
+	ImageCount            int                  // Number of images requested ('n' param, at least 1)
+	WebSearchRequested    bool                 // True when the request enabled the built-in web search tool
+	WebSearchContextSize  string               // low|medium|high from web_search_options/tool config
+	HideWebSearchResults  bool                 // Z.AI web_search tool without search_result: results are still fetched to bill the search, then stripped from the client response
+	ReasoningRequested    bool
+	ReasoningSource       string
+	ThinkingMode          string
+	RequestEndpoint       string
+	Logged                bool   // True if already logged (prevents duplicate logging)
+	IsResponsesAPI        bool   // True if this is a Responses API request (converted to Chat Completions)
+	IsSystemOne           bool   // True for a /v1/systemone request (native System One API, see systemone.go)
+	RequestCompleted      bool   // True only after the response was fully and successfully delivered
+	ActualCredentialName  string // Real credential name from upstream when Credential.Type == ProviderTypeProxy
+	IsProxyRequest        bool   // True when this request came from another auto_ai_router (HeaderAIRProxyClient)
+	Scope                 scope.Context
+	OrganizationPolicy    *models.OrganizationPolicy
+	BillingProfileID      string
+	BillingProfileSHA256  string
+	BillingOrganizationID string
 
 	// visionInject holds image descriptions of this request to prepend to the answer
 	// (vision fallback, describe mode); nil when there is nothing to write.
@@ -1766,11 +1782,43 @@ func (p *Proxy) sendToCredential(
 	// bailed out above on seeing an existing cache_control marker), and is the
 	// only place that actually marks a /v1/responses request routed through
 	// the native Responses converter.
-	if p.stickyAutoCacheCtrl && prepared.stickyCacheEligible && !prepared.autoCacheControlDisabled {
-		switch cred.EffectiveProviderType() {
-		case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI, config.ProviderTypeProMan, config.ProviderTypeBedrock:
-			requestBody = anthropicconv.InjectCacheControl(requestBody)
+	//
+	// logCtx.CacheControlOutcome is set here too, for every Anthropic-wire
+	// attempt regardless of eligibility: when InjectCacheControl already ran
+	// above (or in orchestrator.go), its outcome is just carried over; when
+	// this request was never eligible (no session/previous_response_id
+	// signal, or an org opt-out), the body is inspected without being
+	// touched, purely so a client's own cache_control still shows up in the
+	// logs even though the router never acted on it. This is what lets
+	// cache-eligibility analysis (which signal clients actually send, if
+	// any) be done from logs alone, instead of re-deriving it after the
+	// fact from ambiguous columns like cached_input_tokens.
+	switch cred.EffectiveProviderType() {
+	case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI, config.ProviderTypeProMan, config.ProviderTypeBedrock:
+		switch {
+		case prepared.cacheControlOutcome != "":
+			logCtx.CacheControlOutcome = prepared.cacheControlOutcome
+		case p.stickyAutoCacheCtrl && prepared.stickyCacheEligible && !prepared.autoCacheControlDisabled:
+			var outcome anthropicconv.CacheControlOutcome
+			requestBody, outcome = anthropicconv.InjectCacheControlOutcome(requestBody)
+			logCtx.CacheControlOutcome = string(outcome)
+		default:
+			// Not eligible for auto-injection: the returned (possibly
+			// modified) body is discarded, requestBody is left exactly as
+			// it was. Only CacheControlClientSupplied is meaningful to log
+			// here -- it is a pure observation, never an action, so it's
+			// true regardless of eligibility. CacheControlRouterInjected
+			// would be a lie (we deliberately didn't send that body); report
+			// CacheControlNone for it and for CacheControlNone itself.
+			_, outcome := anthropicconv.InjectCacheControlOutcome(requestBody)
+			if outcome == anthropicconv.CacheControlClientSupplied {
+				logCtx.CacheControlOutcome = string(outcome)
+			} else {
+				logCtx.CacheControlOutcome = string(anthropicconv.CacheControlNone)
+			}
 		}
+	default:
+		logCtx.CacheControlOutcome = ""
 	}
 	logCtx.loopGateFormat, logCtx.loopGateSettings = p.loopGateAttemptFormat(r.Context(), cred, modelID,
 		loopGateUpstreamFormat(cred, r.URL.Path, prepared.passthroughResponses, prepared.passthroughMessages))
