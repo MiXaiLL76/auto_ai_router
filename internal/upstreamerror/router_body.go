@@ -3,6 +3,7 @@ package upstreamerror
 import (
 	"encoding/json"
 	"regexp"
+	"strings"
 )
 
 // This file recognizes a body that this package's own classifier has already
@@ -31,10 +32,10 @@ import (
 // produced. Where a message carries a provider-derived value (a token count,
 // a range) only DIGITS may vary -- nothing else.
 
-// routerClassifiedMessages maps each code this package emits to the exact message
+// fixedErrorMessages maps each code this package emits to the exact message
 // it emits for it, for the codes whose message carries no provider-derived
 // value.
-var routerClassifiedMessages = map[string]string{ //nolint:gosec // G101: these are the classifier's own client-facing messages, not credentials
+var fixedErrorMessages = map[string]string{ //nolint:gosec // G101: these are the classifier's own client-facing messages, not credentials
 	"invalid_request":            "Invalid request",
 	"invalid_model":              "Invalid model",
 	"invalid_tool_choice":        "Invalid tool_choice",
@@ -49,25 +50,9 @@ var routerClassifiedMessages = map[string]string{ //nolint:gosec // G101: these 
 	"invalid_multipart":          "Invalid multipart form data",
 	"invalid_value":              "Invalid parameter value",
 	"reasoning_required":         "Reasoning is required and cannot be disabled",
-	"account_blocked":            "Inference is blocked on this account",
-	"session_blocked":            "This session is blocked by content policy",
-	"upstream_fetch_failed":      "The upstream could not fetch the content it was asked to fetch",
-}
-
-// routerErrorTypes is the set of "type" values this package's classifier
-// emits (see errorTypeForStatus in the proxy package and the LiteLLM
-// compatibility layer). A body whose type is not one of these was not
-// produced by this package.
-var routerErrorTypes = map[string]struct{}{
-	"invalid_request_error": {},
-	"authentication_error":  {},
-	"insufficient_quota":    {},
-	"permission_denied":     {},
-	"not_found_error":       {},
-	"timeout_error":         {},
-	"rate_limit_error":      {},
-	"api_error":             {},
-	"server_error":          {},
+	accountBlockedCode:           accountBlockedMessage,
+	sessionBlockedCode:           sessionBlockedMessage,
+	upstreamFetchFailedCode:      upstreamFetchFailedMessage,
 }
 
 // routerContextLengthMessageRe matches the message contextLengthMessage
@@ -82,38 +67,11 @@ var routerContextLengthMessageRe = regexp.MustCompile(
 		`(?: However, you requested \d+ output tokens and your prompt contains at least \d+ input tokens\.` +
 		`| However, your prompt contains at least \d+ input tokens\.)?$`)
 
-// routerUnsupportedParameterMessageRe matches the "Unsupported parameter:
-// <param>" message, where the parameter name is fixed by the body's own param
-// field.
-func routerUnsupportedParameterMessageRe(param string) *regexp.Regexp {
-	return regexp.MustCompile(`^Unsupported parameter: ` + regexp.QuoteMeta(param) + `$`)
-}
-
-// routerInvalidFieldMessageRe matches the "Invalid <param>" message, where
-// the parameter name is fixed by the body's own param field.
-//
-// Two shapes: the bare one, and the one that carries the value the provider
-// pins the parameter to ("Invalid temperature: only 1 is allowed for this
-// model"). In the second, only the NUMBER may differ from what the router
-// wrote -- anything else appended to it means the body is not ours and must
-// be classified from scratch.
-func routerInvalidFieldMessageRe(param string) *regexp.Regexp {
-	return regexp.MustCompile(`^Invalid ` + regexp.QuoteMeta(param) +
-		`(?:: only \d+(?:\.\d+)? is allowed for this model)?$`)
-}
-
-// routerInvalidMaxTokensMessageRe matches the "Invalid <param>" message the
-// max-tokens branch renders, plus the variant that carries the provider's
-// range -- where only DIGITS may vary.
-//
-// The range variant is "Invalid <param>: requested N, but the supported
-// range is from L to U" (or "up to U" when the provider stated no lower
-// bound); both renderings are accepted, and in both only the numbers may
-// differ from what the router wrote.
-func routerInvalidMaxTokensMessageRe(param string) *regexp.Regexp {
-	return regexp.MustCompile(`^Invalid ` + regexp.QuoteMeta(param) +
-		`(?:: requested \d+, but the supported range is (?:from \d+ to |up to )\d+\.)?$`)
-}
+var (
+	routerPinnedParameterSuffix  = regexp.MustCompile("^" + pinnedValuePrefix + `\d+(?:\.\d+)?` + pinnedValueSuffix + "$")
+	routerOutputTokenRangeSuffix = regexp.MustCompile("^" + outputTokenRangePrefix + `\d+` + outputTokenRangeSeparator +
+		`(?:from \d+(?:` + regexp.QuoteMeta(exclusiveBoundSuffix) + `)? to |up to )\d+(?:` + regexp.QuoteMeta(exclusiveBoundSuffix) + `)?\.$`)
+)
 
 // ExtractRouterClassification returns the classification this package's own
 // classifier already applied to body, if body IS such a body.
@@ -122,6 +80,10 @@ func routerInvalidMaxTokensMessageRe(param string) *regexp.Regexp {
 // not JSON, and a provider body that merely resembles ours. The caller then
 // classifies it from scratch.
 func ExtractRouterClassification(body []byte) (BadRequest, bool) {
+	return extractRouterClassification(body, "")
+}
+
+func extractRouterClassification(body []byte, expectedType string) (BadRequest, bool) {
 	if len(body) == 0 {
 		return BadRequest{}, false
 	}
@@ -147,22 +109,32 @@ func ExtractRouterClassification(body []byte) (BadRequest, bool) {
 	if message == "" || code == "" {
 		return BadRequest{}, false
 	}
-	if _, ok := routerErrorTypes[typ]; !ok {
+	if expectedType != "" && typ != expectedType {
 		return BadRequest{}, false
 	}
-	if !isRouterMessage(code, message, e.Param) {
+	switch code {
+	case accountBlockedCode, sessionBlockedCode:
+		expectedType = "permission_denied"
+	case upstreamFetchFailedCode:
+		expectedType = "not_found_error"
+	default:
+		expectedType = "invalid_request_error"
+	}
+	if typ != expectedType {
 		return BadRequest{}, false
 	}
-	// The param goes through the same cleaning as one read off a provider
-	// body (cleanProviderErrorParam), so a body that reached this path
-	// cannot put an arbitrary string into the client's "param" field just
-	// by carrying one.
 	var param *string
 	if e.Param != nil {
-		if cleaned := cleanProviderErrorParam(*e.Param); cleaned != "" {
-			param = &cleaned
+		cleaned := cleanProviderErrorParam(*e.Param)
+		if cleaned == "" || cleaned != *e.Param {
+			return BadRequest{}, false
 		}
+		param = &cleaned
 	}
+	if !isRouterMessage(code, message, param) {
+		return BadRequest{}, false
+	}
+
 	return BadRequest{Message: message, Code: code, Param: param}, true
 }
 
@@ -175,29 +147,32 @@ func ExtractRouterClassification(body []byte) (BadRequest, bool) {
 // appends free text to the message is rejected and classified from scratch
 // like any other provider body.
 func isRouterMessage(code, message string, param *string) bool {
-	if fixed, ok := routerClassifiedMessages[code]; ok {
+	if fixed, ok := fixedErrorMessages[code]; ok {
 		return message == fixed
 	}
-	switch code {
-	case "unsupported_parameter":
-		// "Unsupported parameter: <param>" -- the parameter name is the
-		// body's own param field, so only that exact rendering is ours.
-		if param == nil || *param == "" {
-			return false
-		}
-		return routerUnsupportedParameterMessageRe(*param).MatchString(message)
-	case "context_length_exceeded":
-		return routerContextLengthMessageRe.MatchString(message)
-	case "invalid_field":
-		if param == nil || *param == "" {
-			return false
-		}
-		return routerInvalidFieldMessageRe(*param).MatchString(message)
-	case "invalid_max_tokens":
-		if param == nil || *param == "" {
-			return false
-		}
-		return routerInvalidMaxTokensMessageRe(*param).MatchString(message)
+	if code == "context_length_exceeded" {
+		return message == contextLengthGenericMessage || routerContextLengthMessageRe.MatchString(message)
 	}
-	return false
+	if param == nil {
+		return false
+	}
+	if code == "unsupported_parameter" {
+		_, known := requestParameterNames[*param]
+		return known && message == unsupportedParameterPrefix+*param
+	}
+
+	suffix, ok := strings.CutPrefix(message, invalidFieldPrefix+*param)
+	if !ok {
+		return false
+	}
+	switch code {
+	case "invalid_field":
+		_, pinnable := pinnableParameters[*param]
+		return suffix == "" || pinnable && routerPinnedParameterSuffix.MatchString(suffix)
+	case "invalid_max_tokens":
+		return isOutputTokenLimitParam(*param) &&
+			(suffix == "" || *param == "max_output_tokens" && routerOutputTokenRangeSuffix.MatchString(suffix))
+	default:
+		return false
+	}
 }

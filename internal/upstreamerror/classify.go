@@ -29,7 +29,7 @@ type BadRequest struct {
 // classified message/code/param. Returns the generic "Invalid request" /
 // "invalid_request" (Param nil) when nothing recognizable is found.
 func ClassifyBadRequest(rawBody []byte) BadRequest {
-	result := BadRequest{Message: "Invalid request", Code: "invalid_request"}
+	result := BadRequest{Message: fixedErrorMessages["invalid_request"], Code: "invalid_request"}
 	if len(rawBody) == 0 {
 		return result
 	}
@@ -42,7 +42,7 @@ func ClassifyBadRequest(rawBody []byte) BadRequest {
 	// leaked once, when a branch whose message did not round-trip degraded
 	// to the generic one on the second pass. Recognizing the shape makes
 	// the classifier idempotent by construction instead.
-	if classified, ok := ExtractRouterClassification(rawBody); ok {
+	if classified, ok := extractRouterClassification(rawBody, "invalid_request_error"); ok {
 		return classified
 	}
 
@@ -61,8 +61,8 @@ func ClassifyBadRequest(rawBody []byte) BadRequest {
 	// branches below when the message says nothing about a model.
 	if hasSignal(joined, "model group", "model not found", "model does not exist", "unsupported model", "invalid model", "model not supported") {
 		param := "model"
-		result.Message = "Invalid model"
 		result.Code = "invalid_model"
+		result.Message = fixedErrorMessages[result.Code]
 		result.Param = &param
 		return result
 	}
@@ -86,8 +86,8 @@ func ClassifyBadRequest(rawBody []byte) BadRequest {
 	switch {
 	case hasSignal(joined, "tool_choice", "tool choice", "toolchoice"):
 		param := "tool_choice"
-		result.Message = "Invalid tool_choice"
 		result.Code = "invalid_tool_choice"
+		result.Message = fixedErrorMessages[result.Code]
 		result.Param = &param
 	case hasSignal(joined, "maxoutputtokens value of", "maxoutputtokens of"):
 		// A provider that pins an output-token ceiling states the client's
@@ -106,14 +106,6 @@ func ClassifyBadRequest(rawBody []byte) BadRequest {
 		// Same shape as the context-length message above (contextLengthMessage),
 		// which already reports the provider's own numbers to the client for
 		// the same reason.
-		//
-		// "supported range is" is matched alongside the provider's own
-		// phrasing because this branch must also recognize the router's own
-		// output: litellm compatibility mode re-classifies the body the
-		// router already wrote (see normalizeError), so the message this
-		// branch produces has to land back in this branch, with the same
-		// numbers, on the second pass. Without it the re-classified message
-		// would lose the range and the two modes would disagree.
 		//
 		// The parameter name is the provider's camelCase "maxOutputTokens",
 		// normalized to the snake_case spelling the rest of the classifier
@@ -140,19 +132,19 @@ func ClassifyBadRequest(rawBody []byte) BadRequest {
 		//
 		// Checked BEFORE the max_tokens branch below, which matches the
 		// "max tokens" substring this name contains.
-		if providerParam == nil || *providerParam != "max_tokens" {
-			result.Message = "Max tokens exceeded"
+		if providerParam == nil || !isOutputTokenLimitParam(*providerParam) {
 			result.Code = "max_tokens_exceeded"
+			result.Message = fixedErrorMessages[result.Code]
 			break
 		}
 		fallthrough
 	case hasSignal(joined, "max_completion_tokens", "max_output_tokens", "max_tokens", "max tokens", "maximum tokens", "output tokens"):
 		param := inferBadRequestParam(joined, providerParam)
-		if param == nil || !strings.Contains(*param, "token") {
+		if param == nil || !isOutputTokenLimitParam(*param) {
 			v := inferMaxTokensParam(joined)
 			param = &v
 		}
-		result.Message = "Invalid " + *param
+		result.Message = invalidFieldPrefix + *param
 		result.Code = "invalid_max_tokens"
 		result.Param = param
 	case hasSignal(joined, "unrecognized request argument supplied",
@@ -183,11 +175,12 @@ func ClassifyBadRequest(rawBody []byte) BadRequest {
 		// The two need different client actions, so they get different
 		// codes.
 		if param := extractUnrecognizedArgumentName(signals); param != nil {
-			result.Message = "Unsupported parameter: " + *param
+			result.Message = unsupportedParameterPrefix + *param
 			result.Code = "unsupported_parameter"
 			result.Param = param
 		} else {
-			result.Message, result.Code = "Invalid request parameter", "invalid_parameter"
+			result.Code = "invalid_parameter"
+			result.Message = fixedErrorMessages[result.Code]
 		}
 	case hasSignal(joined, "is allowed for this model", "not allowed for this model"):
 		// A provider that pins a sampling parameter to one value ("invalid
@@ -216,7 +209,8 @@ func ClassifyBadRequest(rawBody []byte) BadRequest {
 			result.Code = "invalid_field"
 			result.Param = param
 		} else {
-			result.Message, result.Code = "Invalid request parameter", "invalid_parameter"
+			result.Code = "invalid_parameter"
+			result.Message = fixedErrorMessages[result.Code]
 		}
 	// "invalid_parameter" (underscore) is this branch's own Code value below —
 	// needed so re-classifying this package's own already-classified output
@@ -226,8 +220,8 @@ func ClassifyBadRequest(rawBody []byte) BadRequest {
 	// "request" sits in between) still lands back in this same bucket
 	// instead of falling through to the generic default.
 	case hasSignal(joined, "invalid argument", "invalid parameter", "invalidparameter", "invalid_parameter", "invalid value", "unsupported parameter", "unknown parameter", "unrecognized parameter", "argument not supported", "missing required", "required field", "must be", "should be", "does not support", "is not supported"):
-		result.Message = "Invalid request parameter"
 		result.Code = "invalid_parameter"
+		result.Message = fixedErrorMessages[result.Code]
 		// Precedence: an explicit "param" from the provider's own JSON is
 		// authoritative; next, a field path quoted directly in the message
 		// ("Invalid 'output[1].type': 'input_file'. Supported values are:
@@ -260,7 +254,7 @@ func ClassifyBadRequest(rawBody []byte) BadRequest {
 		// still one of a fixed, pre-vetted shape, never provider free text —
 		// and gives callers something actionable instead of a blank message.
 		if providerParam != nil {
-			result.Message = "Invalid " + *providerParam
+			result.Message = invalidFieldPrefix + *providerParam
 			// "invalid_field", not "invalid_value" — that string is
 			// classifyValidationError's own signal for a different, more
 			// specific bucket. A status code is itself fed back into the
@@ -281,6 +275,16 @@ func ClassifyBadRequest(rawBody []byte) BadRequest {
 
 // contextLengthGenericMessage is used when the provider text carries no limit.
 const contextLengthGenericMessage = "This model's maximum context length is exceeded by the request"
+
+const (
+	invalidFieldPrefix         = "Invalid "
+	unsupportedParameterPrefix = "Unsupported parameter: "
+	outputTokenRangePrefix     = ": requested "
+	outputTokenRangeSeparator  = ", but the supported range is "
+	exclusiveBoundSuffix       = " (exclusive)"
+	pinnedValuePrefix          = ": only "
+	pinnedValueSuffix          = " is allowed for this model"
+)
 
 var contextLengthSignals = []string{"context length", "context window", "context limit", "too many tokens", "input too long", "prompt too long", "prompt is too long", "token limit"}
 
@@ -303,13 +307,13 @@ var (
 	// "the supported range is from 1 to 65537" and "the maximum allowed is
 	// up to 65537".
 	maxOutputTokensRequestedRe = regexp.MustCompile(`maxoutputtokens (?:value )?of (\d+)`)
-	maxOutputTokensMinRe       = regexp.MustCompile(`supported range is from (\d+)`)
+	maxOutputTokensMinRe       = regexp.MustCompile(`supported range is from (\d+)(\s*\(exclusive\))?`)
 	// The upper bound sits after the lower one, with provider-specific
 	// filler in between: "from 1 (inclusive) to 65537 (exclusive)". The
 	// filler is why the pattern cannot simply look for "to N" -- it has to
 	// allow whatever the provider writes in between, and it must not stop
 	// at the lower bound's own digits.
-	maxOutputTokensMaxRe = regexp.MustCompile(`(?:supported range is from \d+[^0-9]*to|up to|maximum allowed is) (\d+)`)
+	maxOutputTokensMaxRe = regexp.MustCompile(`(?:supported range is from \d+[^0-9]*?to|up to|maximum allowed is) (\d+)(\s*\(exclusive\))?`)
 )
 
 // maxOutputTokensMessage rebuilds an out-of-range output-token message from
@@ -330,20 +334,27 @@ var (
 // though it does not learn the range.
 func maxOutputTokensMessage(joined string) string {
 	requested := firstNumber(maxOutputTokensRequestedRe, joined)
-	lower := firstNumber(maxOutputTokensMinRe, joined)
-	upper := firstNumber(maxOutputTokensMaxRe, joined)
+	lower := maxOutputTokensMinRe.FindStringSubmatch(joined)
+	upper := maxOutputTokensMaxRe.FindStringSubmatch(joined)
 
-	if requested == "" || upper == "" {
+	if requested == "" || upper == nil {
 		return "Invalid max_output_tokens"
 	}
-	msg := "Invalid max_output_tokens: requested " + requested + ", but the supported range is "
-	if lower != "" {
-		msg += "from " + lower + " to "
+	msg := invalidFieldPrefix + "max_output_tokens" + outputTokenRangePrefix + requested + outputTokenRangeSeparator
+	if lower != nil {
+		msg += "from " + lower[1]
+		if lower[2] != "" {
+			msg += exclusiveBoundSuffix
+		}
+		msg += " to "
 	} else {
 		msg += "up to "
 	}
-	msg += upper + "."
-	return msg
+	msg += upper[1]
+	if upper[2] != "" {
+		msg += exclusiveBoundSuffix
+	}
+	return msg + "."
 }
 
 // contextLengthMessage rebuilds a context-overflow message from the numbers
@@ -540,6 +551,15 @@ func hasSignal(value string, needles ...string) bool {
 		}
 	}
 	return false
+}
+
+func isOutputTokenLimitParam(param string) bool {
+	switch param {
+	case "max_tokens", "max_completion_tokens", "max_output_tokens":
+		return true
+	default:
+		return false
+	}
 }
 
 func inferBadRequestParam(joined string, providerParam *string) *string {
@@ -822,10 +842,10 @@ var pinnedParameterValueRe = regexp.MustCompile(`only ([0-9]+(?:\.[0-9]+)?) is a
 // Falls back to naming the parameter alone when the provider states no
 // parsable value, so the client still learns WHAT to fix.
 func pinnedParameterMessage(param string, signals []string) string {
-	base := "Invalid " + param
+	base := invalidFieldPrefix + param
 	for _, signal := range signals {
 		if value := firstNumber(pinnedParameterValueRe, strings.ToLower(signal)); value != "" {
-			return base + ": only " + value + " is allowed for this model"
+			return base + pinnedValuePrefix + value + pinnedValueSuffix
 		}
 	}
 	return base
@@ -1022,30 +1042,38 @@ func classifyValidationError(joined string, param *string, signals []string) (Ba
 		// would swallow billing/geo/IP blocks ("Your account has been blocked by
 		// the provider for suspected fraud"), replacing the real cause with a
 		// misleading content-policy message.
-		result.Message, result.Code = "The prompt was blocked by the provider's content policy", "content_policy_violation"
+		result.Code = "content_policy_violation"
+		result.Message = fixedErrorMessages[result.Code]
 		return result, true
 	case hasSignal(joined, "invalid_image_size", "invalid image size"):
-		result.Message, result.Code = "Invalid image size", "invalid_image_size"
+		result.Code = "invalid_image_size"
+		result.Message = fixedErrorMessages[result.Code]
 		if result.Param == nil {
 			field := "size"
 			result.Param = &field
 		}
 	case hasSignal(joined, "invalid_image", "invalid image", "could not decode image", "unable to decode image", "failed to decode image", "image is not valid", "image is invalid", "image_parse_error", "image file could not be processed", "unable to process input image", "unable to process the input image"):
-		result.Message, result.Code = "Invalid image data", "invalid_image"
+		result.Code = "invalid_image"
+		result.Message = fixedErrorMessages[result.Code]
 		if result.Param == nil {
 			field := "image"
 			result.Param = &field
 		}
 	case hasSignal(joined, "missing_required_parameter", "missing required parameter", "missing required argument"):
-		result.Message, result.Code = "Missing required parameter", "missing_required_parameter"
+		result.Code = "missing_required_parameter"
+		result.Message = fixedErrorMessages[result.Code]
 	case hasSignal(joined, "invalid_type", "invalid type", "invalid parameter type"):
-		result.Message, result.Code = "Invalid parameter type", "invalid_type"
+		result.Code = "invalid_type"
+		result.Message = fixedErrorMessages[result.Code]
 	case hasSignal(joined, "invalid_json", "invalid json"):
-		result.Message, result.Code = "Invalid JSON", "invalid_json"
+		result.Code = "invalid_json"
+		result.Message = fixedErrorMessages[result.Code]
 	case hasSignal(joined, "invalid_multipart", "invalid multipart"):
-		result.Message, result.Code = "Invalid multipart form data", "invalid_multipart"
+		result.Code = "invalid_multipart"
+		result.Message = fixedErrorMessages[result.Code]
 	case hasSignal(joined, "invalid_value", "invalid value", "invalid parameter value"):
-		result.Message, result.Code = "Invalid parameter value", "invalid_value"
+		result.Code = "invalid_value"
+		result.Message = fixedErrorMessages[result.Code]
 	case hasSignal(joined, "reasoning is mandatory", "thinking is mandatory"):
 		// A provider that serves only reasoning models refuses a request
 		// that turns reasoning off: "Reasoning is mandatory for this
@@ -1063,32 +1091,10 @@ func classifyValidationError(joined string, param *string, signals []string) (Ba
 		//
 		// The message says what to do rather than only what went wrong:
 		// the fix is to enable reasoning, not to "fix" a parameter.
-		result.Message = "Reasoning is required and cannot be disabled"
 		result.Code = "reasoning_required"
+		result.Message = fixedErrorMessages[result.Code]
 		param := "reasoning_effort"
 		result.Param = &param
-	case hasSignal(joined, "is allowed for this model", "not allowed for this model"):
-		// A provider that pins a sampling parameter to one value ("invalid
-		// temperature: only 1 is allowed for this model") names the
-		// parameter in the first word of its message and then states the
-		// constraint. The generic "invalid ..." branches never fire on
-		// this wording -- it contains no "invalid parameter", no "must be",
-		// nothing the switch above recognizes -- so the request fell
-		// through to the fully generic "Invalid request" and the client
-		// could not tell which parameter to change. The parameter name is
-		// read out of the message itself; only a known parameter name is
-		// accepted, so an unknown wording cannot smuggle free text into
-		// the client's "param" field.
-		//
-		// This branch lives in ClassifyBadRequest's own switch, NOT here,
-		// and that placement is load-bearing. It used to sit in this
-		// function, which runs BEFORE the outer switch -- so a message
-		// carrying both phrasings ("gpt-5 is not allowed for this model
-		// group") was intercepted here and reported as a generic parameter
-		// problem, losing the model-group diagnosis the outer switch
-		// would have produced. See the pinnedParameter case in
-		// ClassifyBadRequest.
-		return BadRequest{}, false
 	default:
 		return BadRequest{}, false
 	}

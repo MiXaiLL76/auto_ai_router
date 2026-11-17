@@ -332,6 +332,23 @@ func TestClassifiedErrorMessage_ConsistentWithMaskedUpstreamErrorBody(t *testing
 	}
 }
 
+func TestClassifiedErrorMessage_RecognizedStatus(t *testing.T) {
+	for _, tc := range []struct {
+		status  int
+		rawBody string
+		message string
+	}{
+		{http.StatusForbidden, `{"error":{"message":"Inference is blocked on this account"}}`, "Inference is blocked on this account"},
+		{http.StatusNotFound, `{"error":{"message":"Cannot fetch content from the provided URL"}}`, "The upstream could not fetch the content it was asked to fetch"},
+	} {
+		rawBody := []byte(tc.rawBody)
+		var decoded APIErrorResponse
+		require.NoError(t, json.Unmarshal(maskedUpstreamErrorBody(tc.status, "", rawBody), &decoded))
+		assert.Equal(t, tc.message, decoded.Error.Message)
+		assert.Equal(t, tc.message, classifiedErrorMessage(tc.status, rawBody))
+	}
+}
+
 func stringPtr(s string) *string {
 	return &s
 }

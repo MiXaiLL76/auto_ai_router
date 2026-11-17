@@ -105,46 +105,11 @@ func errorBodyRequestID(id string) string {
 }
 
 func maskedUpstreamErrorBody(statusCode int, requestID string, rawBodies ...[]byte) []byte {
-	message := "Request failed"
-	code := "api_error"
-	param := (*string)(nil)
-	switch statusCode {
-	case http.StatusBadRequest:
-		detail := classifiedBadRequestError(rawBodies...)
-		message = detail.Message
-		code = *detail.Code
-		param = detail.Param
-	case http.StatusForbidden, http.StatusNotFound:
-		// The other 4xx statuses used to report one generic message for
-		// every failure ("Request failed" / "api_error"), whatever the
-		// provider said. A provider that blocks the whole ACCOUNT
-		// ("Inference is blocked on this account") or that rejects a URL
-		// the client passed has named the cause, and the client's next
-		// action differs completely between them.
-		if detail, ok := classifiedStatusError(statusCode, rawBodies...); ok {
-			message = detail.Message
-			code = *detail.Code
-			param = detail.Param
-		}
-	case http.StatusTooManyRequests:
-		message = "Rate limit exceeded"
-		code = "rate_limit_error"
-	case http.StatusRequestTimeout, http.StatusGatewayTimeout:
-		message = "Request timed out"
-		code = "timeout_error"
-	case http.StatusRequestEntityTooLarge:
-		message = "Request entity too large"
-		code = "request_entity_too_large"
+	var raw []byte
+	if len(rawBodies) > 0 {
+		raw = rawBodies[0]
 	}
-
-	resp := APIErrorResponse{
-		Error: APIError{
-			Message: message,
-			Type:    errorTypeForStatus(statusCode),
-			Param:   param,
-			Code:    &code,
-		},
-	}
+	resp := APIErrorResponse{Error: maskedUpstreamError(statusCode, raw)}
 	resp.RequestID = errorBodyRequestID(requestID)
 	body, err := json.Marshal(resp)
 	if err != nil {
@@ -160,60 +125,29 @@ func maskedUpstreamErrorBody(statusCode int, requestID string, rawBodies ...[]by
 // client actually saw, instead of the historical hardcoded "Request failed"
 // placeholder (see internal/proxy/proxy.go's two logCtx.ErrorMsg call sites).
 func classifiedErrorMessage(statusCode int, rawBody []byte) string {
-	switch statusCode {
-	case http.StatusBadRequest:
-		return classifiedBadRequestError(rawBody).Message
-	case http.StatusTooManyRequests:
-		return "Rate limit exceeded"
-	case http.StatusRequestTimeout, http.StatusGatewayTimeout:
-		return "Request timed out"
-	case http.StatusRequestEntityTooLarge:
-		return "Request entity too large"
-	default:
-		return "Request failed"
-	}
+	return maskedUpstreamError(statusCode, rawBody).Message
 }
 
-// classifiedBadRequestError delegates to the shared upstreamerror classifier
-// (also used by litellm compatibility mode's normalizeError) so both modes
-// surface the same classification instead of one discarding it.
-func classifiedBadRequestError(rawBodies ...[]byte) APIError {
-	var raw []byte
-	if len(rawBodies) > 0 {
-		raw = rawBodies[0]
-	}
-	classified := upstreamerror.ClassifyBadRequest(raw)
-	code := classified.Code
-	return APIError{
-		Message: classified.Message,
-		Type:    errorTypeForStatus(http.StatusBadRequest),
-		Param:   classified.Param,
-		Code:    &code,
-	}
-}
-
-// classifiedStatusError classifies a non-400 4xx response body, so that a
-// provider that names the cause reaches the client named -- the same
-// treatment 400 gets (see classifiedBadRequestError).
-//
-// Returns ok=false when the body carries nothing recognized, and the caller
-// keeps its generic message for that status.
-func classifiedStatusError(statusCode int, rawBodies ...[]byte) (APIError, bool) {
-	var raw []byte
-	if len(rawBodies) > 0 {
-		raw = rawBodies[0]
-	}
-	classified, ok := upstreamerror.ClassifyStatus(statusCode, raw)
+func maskedUpstreamError(statusCode int, rawBody []byte) APIError {
+	classified, ok := upstreamerror.ClassifyStatus(statusCode, rawBody)
 	if !ok {
-		return APIError{}, false
+		switch statusCode {
+		case http.StatusTooManyRequests:
+			classified.Message, classified.Code = "Rate limit exceeded", "rate_limit_error"
+		case http.StatusRequestTimeout, http.StatusGatewayTimeout:
+			classified.Message, classified.Code = "Request timed out", "timeout_error"
+		case http.StatusRequestEntityTooLarge:
+			classified.Message, classified.Code = "Request entity too large", "request_entity_too_large"
+		default:
+			classified.Message, classified.Code = "Request failed", "api_error"
+		}
 	}
-	code := classified.Code
 	return APIError{
 		Message: classified.Message,
 		Type:    errorTypeForStatus(statusCode),
 		Param:   classified.Param,
-		Code:    &code,
-	}, true
+		Code:    &classified.Code,
+	}
 }
 
 // WriteErrorBadRequest writes a 400 Bad Request JSON error.

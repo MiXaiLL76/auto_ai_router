@@ -218,7 +218,7 @@ func TestClassifyBadRequest(t *testing.T) {
 			// branch is to tell the client what to ask for.
 			name:        "output token range in the shorter phrasing",
 			body:        `{"error":{"message":"...has a maxOutputTokens of 200000 but the maximum allowed is up to 65537 (exclusive)..."}}`,
-			wantMessage: "Invalid max_output_tokens: requested 200000, but the supported range is up to 65537.",
+			wantMessage: "Invalid max_output_tokens: requested 200000, but the supported range is up to 65537 (exclusive).",
 			wantCode:    "invalid_max_tokens",
 			wantParam:   stringPtr("max_output_tokens"),
 		},
@@ -297,10 +297,10 @@ func TestClassifyBadRequest(t *testing.T) {
 			// free text reaches the client.
 			name:        "output token value outside the supported range",
 			body:        `{"error":{"code":400,"message":"Unable to submit request because it has a maxOutputTokens value of 200000 but the supported range is from 1 (inclusive) to 65537 (exclusive). Update the value and try again.","status":"INVALID_ARGUMENT"}}`,
-			wantMessage: "Invalid max_output_tokens: requested 200000, but the supported range is from 1 to 65537.",
+			wantMessage: "Invalid max_output_tokens: requested 200000, but the supported range is from 1 to 65537 (exclusive).",
 			wantCode:    "invalid_max_tokens",
 			wantParam:   stringPtr("max_output_tokens"),
-			notContains: []string{"Unable to submit", "Update the value", "inclusive", "exclusive"},
+			notContains: []string{"Unable to submit", "Update the value", "inclusive"},
 		},
 		{
 			// The same wording with a different requested value -- the
@@ -308,7 +308,7 @@ func TestClassifyBadRequest(t *testing.T) {
 			// fixed one.
 			name:        "output token value outside the range, other value",
 			body:        `{"error":{"code":400,"message":"Unable to submit request because it has a maxOutputTokens value of 115000 but the supported range is from 1 (inclusive) to 65537 (exclusive). Update the value and try again.","status":"INVALID_ARGUMENT"}}`,
-			wantMessage: "Invalid max_output_tokens: requested 115000, but the supported range is from 1 to 65537.",
+			wantMessage: "Invalid max_output_tokens: requested 115000, but the supported range is from 1 to 65537 (exclusive).",
 			wantCode:    "invalid_max_tokens",
 			wantParam:   stringPtr("max_output_tokens"),
 		},
@@ -655,6 +655,10 @@ func TestExtractRouterClassificationRecognizesOurOwnBodies(t *testing.T) {
 // prevent.
 func TestExtractRouterClassificationRejectsProviderBodies(t *testing.T) {
 	bodies := []string{
+		// Invalid parameters must be rejected before comparing the message.
+		`{"error":{"message":"Invalid unknown field","type":"invalid_request_error","param":"unknown field","code":"invalid_field"}}`,
+		// Unsupported parameter messages may name only known request fields.
+		`{"error":{"message":"Unsupported parameter: unknown_field","type":"invalid_request_error","param":"unknown_field","code":"unsupported_parameter"}}`,
 		// A provider body that borrows our code but appends its own text.
 		`{"error":{"message":"Invalid sk-secret123 at api.internal","type":"invalid_request_error","param":"sk-secret123","code":"invalid_field"}}`,
 		// A context-length message with free text behind the number.
@@ -812,6 +816,18 @@ func TestClassifyStatus_NonBadRequest(t *testing.T) {
 			assert.Equal(t, tt.wantCode, got.Code)
 			assert.True(t, equalStringPtr(tt.wantParam, got.Param),
 				"param = %v, want %v", got.Param, tt.wantParam)
+		})
+	}
+}
+
+func TestClassifyBadRequest_RejectsExplicitOutputTokenLimit(t *testing.T) {
+	for _, param := range []string{"max_tokens", "max_completion_tokens", "max_output_tokens"} {
+		t.Run(param, func(t *testing.T) {
+			body := []byte(`{"error":{"code":"max_tokens_exceeded","param":"` + param + `","message":"Max tokens exceeded"}}`)
+			got := ClassifyBadRequest(body)
+			require.Equal(t, "invalid_max_tokens", got.Code)
+			require.NotNil(t, got.Param)
+			assert.Equal(t, param, *got.Param)
 		})
 	}
 }
