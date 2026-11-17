@@ -257,17 +257,17 @@ Note that `web_search_requests` is **0**: it is the model's own built-in search,
 
 ## The control spends
 
-| What happened | Tool calls billed | Tool cost |
-| ------------- | ----------------- | --------- |
-| One successful Basic search | 1 Basic | $0.013 |
-| One successful Pro search | 1 Pro | $0.013 |
-| One successful Fetch (page content) | 1 Fetch | $0.013 |
-| One Basic + one Pro + one Fetch | 3 | **$0.039** |
-| A search that returned nothing | 0 | $0 |
-| A search that failed (400/401/402/403/429/5xx) | 0 | $0 |
-| A search that timed out | 0 | $0 |
-| A Fetch whose page had no content | 0 | $0 |
-| A Fetch the provider refused (`markdown_not_found`) | 0 | $0 |
+| What happened                                       | Tool calls billed | Tool cost  |
+| --------------------------------------------------- | ----------------- | ---------- |
+| One successful Basic search                         | 1 Basic           | $0.013     |
+| One successful Pro search                           | 1 Pro             | $0.013     |
+| One successful Fetch (page content)                 | 1 Fetch           | $0.013     |
+| One Basic + one Pro + one Fetch                     | 3                 | **$0.039** |
+| A search that returned nothing                      | 0                 | $0         |
+| A search that failed (400/401/402/403/429/5xx)      | 0                 | $0         |
+| A search that timed out                             | 0                 | $0         |
+| A Fetch whose page had no content                   | 0                 | $0         |
+| A Fetch the provider refused (`markdown_not_found`) | 0                 | $0         |
 
 The tokens of every step of the loop are billed separately, on top of the tool calls.
 

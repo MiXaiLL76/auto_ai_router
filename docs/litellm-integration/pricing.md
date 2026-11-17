@@ -521,11 +521,11 @@ The client's own function tools are left alone: the upstream serves them, and th
 
 ### What is billed
 
-| Call      | Billed when                                          | Price                    |
-| --------- | ---------------------------------------------------- | ------------------------ |
-| Search    | HTTP 200 and a non-empty `search_results` array       | `search_cost_per_call`   |
-| Search Pro| HTTP 200 and a non-empty `search_results` array       | `search_pro_cost_per_call`|
-| Fetch     | HTTP 200 and a non-empty `markdown` (after trimming)  | `fetch_cost_per_call`    |
+| Call       | Billed when                                          | Price                      |
+| ---------- | ---------------------------------------------------- | -------------------------- |
+| Search     | HTTP 200 and a non-empty `search_results` array      | `search_cost_per_call`     |
+| Search Pro | HTTP 200 and a non-empty `search_results` array      | `search_pro_cost_per_call` |
+| Fetch      | HTTP 200 and a non-empty `markdown` (after trimming) | `fetch_cost_per_call`      |
 
 A failed call, a timeout, an empty result and the provider's own error code (`markdown_not_found`) cost nothing. `include_content: true` inside a search does **not** create a Fetch charge — a Fetch is billed only for its own successful REST call, so a Search followed by a Fetch costs both. The price is per call, independent of `limit` and of the number of pages found.
 
