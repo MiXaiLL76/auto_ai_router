@@ -6,7 +6,8 @@ import "time"
 // topic for every logged request. The struct is a superset of
 // litellmdb/models.SpendLogEntry: credential/server metadata is broken out
 // into typed fields instead of one JSON blob, so ClickHouse can ingest it
-// with JSONEachRow and query it with plain GROUP BY (no Nested/Tuple types).
+// with JSONEachRow and query it with plain GROUP BY. The one nested field is
+// Attempts.
 //
 // Request/response body capture is intentionally out of scope here (separate
 // ТЗ/PR) — the Body* fields are always zero-value placeholders.
@@ -49,8 +50,10 @@ type SpendEvent struct {
 	// connection was opened.
 	ExitRTTMs     *int64 `json:"exit_rtt_ms,omitempty"`
 	ExitConnectMs *int64 `json:"exit_connect_ms,omitempty"`
-	DurationMs    int64  `json:"duration_ms"`
-	TTFTMs        *int64 `json:"ttft_ms,omitempty"`
+	// Attempts is every upstream attempt of the request, in the order sent.
+	Attempts   []Attempt `json:"attempts,omitempty"`
+	DurationMs int64     `json:"duration_ms"`
+	TTFTMs     *int64    `json:"ttft_ms,omitempty"`
 
 	CallType     string `json:"call_type"`
 	APIBase      string `json:"api_base"`
@@ -163,6 +166,23 @@ type SpendEvent struct {
 	BodyCaptured      bool `json:"body_captured"`
 	BodyRequestBytes  int  `json:"body_request_bytes"`
 	BodyResponseBytes int  `json:"body_response_bytes"`
+}
+
+// Attempt is one upstream attempt of a request.
+type Attempt struct {
+	Credential        string    `json:"credential"`
+	Exit              string    `json:"exit,omitempty"`
+	Kind              string    `json:"kind"` // "first" | "retry" | "fallback"
+	RetryReason       string    `json:"retry_reason,omitempty"`
+	HTTPStatus        int       `json:"http_status"`
+	UpstreamRequestID string    `json:"upstream_request_id,omitempty"`
+	ErrorType         string    `json:"error_type,omitempty"`
+	ErrorMessage      string    `json:"error_message,omitempty"`
+	StartTime         time.Time `json:"start_time"`
+	DurationMs        int64     `json:"duration_ms"`
+	TTFBMs            *int64    `json:"ttfb_ms,omitempty"`
+	ConnReused        *bool     `json:"conn_reused,omitempty"`
+	IsFinal           bool      `json:"is_final"`
 }
 
 // Key returns the Kafka record key (request_id), guaranteeing all events for

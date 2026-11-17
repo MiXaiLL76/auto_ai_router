@@ -14,7 +14,8 @@
 -- AIR and are left to whoever operates the target ClickHouse/Kafka cluster.
 --
 -- Column list below matches internal/kafkalog.SpendEvent (internal/kafkalog/event.go)
--- field-for-field. Columns backed by a Go field with `,omitempty` are Nullable,
+-- field-for-field, but for `attempts`, which air.attempts_kafka reads (at the
+-- end of this file). Columns backed by a Go field with `,omitempty` are Nullable,
 -- since JSONEachRow will see the key entirely absent (not `null`) for a zero value.
 -- ClickHouse's `CREATE TABLE ... (LIKE other_table)` used as a parenthesized column
 -- list is not valid DDL (that's MySQL/Postgres syntax) and fails with
@@ -403,3 +404,123 @@ FROM air.spend_logs AS s
 LEFT JOIN air.raw_bodies AS b
     ON s.request_id = b.request_id AND s.server_router_id = b.server_router_id
 WHERE s.status = 'failure';
+
+-- A row for every upstream attempt of a request, from the event's `attempts`,
+-- beside the request's own columns (see
+-- clickhouse/migrations/011_attempts.sql for each column).
+CREATE TABLE air.attempts
+(
+    start_time DateTime64(3),
+    end_time DateTime64(3),
+    request_id String,
+    trace_id String,
+    service_name LowCardinality(String),
+    server_router_id LowCardinality(String),
+    call_type String,
+    organization_id String,
+    team_id String,
+    api_key_hash String,
+    model_group String,
+    request_status LowCardinality(String),
+    request_http_status UInt16,
+
+    attempt UInt8,
+    credential_name String,
+    exit LowCardinality(String),
+    kind LowCardinality(String),
+    retry_reason LowCardinality(String),
+    http_status UInt16,
+    upstream_request_id String,
+    error_type LowCardinality(String),
+    error_message String,
+    attempt_time DateTime64(3),
+    duration_ms UInt32,
+    ttfb_ms Nullable(UInt32),
+    conn_reused Nullable(UInt8),
+    is_final UInt8
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(start_time)
+ORDER BY (start_time, request_id, attempt)
+TTL toDateTime(start_time) + INTERVAL 90 DAY;
+
+-- A second reader of the topic, in a consumer group of its own: the list is
+-- read as text and parsed in the view, so nothing in it can fail a message.
+CREATE TABLE air.attempts_kafka
+(
+    request_id String,
+    trace_id String,
+    start_time DateTime64(3),
+    end_time DateTime64(3),
+    service_name LowCardinality(String),
+    server_router_id LowCardinality(String),
+    call_type String,
+    organization_id String,
+    team_id String,
+    api_key_hash String,
+    model_group String,
+    status LowCardinality(String),
+    http_status UInt16,
+    attempts String
+)
+ENGINE = Kafka
+SETTINGS
+    kafka_broker_list = 'kafka:29092',
+    kafka_topic_list = 'air.spend_logs',
+    kafka_group_name = 'clickhouse_air_attempts',
+    kafka_format = 'JSONEachRow',
+    date_time_input_format = 'best_effort',
+    input_format_json_read_arrays_as_strings = 1,
+    kafka_num_consumers = 2,
+    kafka_handle_error_mode = 'stream';
+
+CREATE MATERIALIZED VIEW air.attempts_mv TO air.attempts AS
+SELECT
+    start_time,
+    end_time,
+    request_id,
+    trace_id,
+    service_name,
+    server_router_id,
+    call_type,
+    organization_id,
+    team_id,
+    api_key_hash,
+    model_group,
+    request_status,
+    request_http_status,
+    toUInt8(number) AS attempt,
+    a.credential AS credential_name,
+    a.exit AS exit,
+    a.kind AS kind,
+    a.retry_reason AS retry_reason,
+    a.http_status AS http_status,
+    a.upstream_request_id AS upstream_request_id,
+    a.error_type AS error_type,
+    a.error_message AS error_message,
+    ifNull(parseDateTime64BestEffortOrNull(a.start_time, 3), start_time) AS attempt_time,
+    a.duration_ms AS duration_ms,
+    a.ttfb_ms AS ttfb_ms,
+    a.conn_reused AS conn_reused,
+    a.is_final AS is_final
+FROM
+(
+    SELECT
+        start_time,
+        end_time,
+        request_id,
+        trace_id,
+        service_name,
+        server_router_id,
+        call_type,
+        organization_id,
+        team_id,
+        api_key_hash,
+        model_group,
+        status AS request_status,
+        http_status AS request_http_status,
+        JSONExtract(attempts, 'Array(Tuple(credential String, exit String, kind String, retry_reason String, http_status UInt16, upstream_request_id String, error_type String, error_message String, start_time String, duration_ms UInt32, ttfb_ms Nullable(UInt32), conn_reused Nullable(UInt8), is_final UInt8))') AS list
+    FROM air.attempts_kafka
+    WHERE length(_error) = 0
+)
+ARRAY JOIN list AS a, arrayEnumerate(list) AS number;

@@ -13,7 +13,7 @@ import (
 
 const (
 	maxErrorBody    = 8 << 10 // how much of an error body is kept to read
-	maxErrorMessage = 512     // bounds the message on the span
+	maxErrorMessage = 512     // bounds a message
 	maxAnswerWord   = 128     // bounds a type, a code, an id
 )
 
@@ -28,13 +28,28 @@ func spanName(_ string, r *http.Request) string {
 	return "HTTP " + r.Method
 }
 
-// answered puts the provider's request id and error on the client span.
-func answered(span trace.Span, resp *http.Response) {
+// upstreamRequestID is the provider's id of the request, "" without one.
+func upstreamRequestID(resp *http.Response) string {
 	for _, name := range requestIDHeaders {
 		if id := resp.Header.Get(name); id != "" && len(id) <= maxAnswerWord {
-			span.SetAttributes(attribute.String("aar.upstream_request_id", id))
-			break
+			return id
 		}
+	}
+	return ""
+}
+
+// bounded is value cut to limit bytes of valid UTF-8.
+func bounded(value string, limit int) string {
+	if len(value) > limit {
+		value = value[:limit]
+	}
+	return strings.ToValidUTF8(value, "")
+}
+
+// answered puts the provider's request id and error on the client span.
+func answered(span trace.Span, resp *http.Response) {
+	if id := upstreamRequestID(resp); id != "" {
+		span.SetAttributes(attribute.String("aar.upstream_request_id", id))
 	}
 	// A body that the transport did not decode cannot be read here.
 	if resp.StatusCode >= http.StatusBadRequest && resp.Header.Get("Content-Encoding") == "" {
@@ -85,10 +100,7 @@ func providerError(body []byte, whole bool) []attribute.KeyValue {
 	}
 	attrs := make([]attribute.KeyValue, 0, 3)
 	add := func(key, value string, limit int) {
-		if len(value) > limit {
-			value = value[:limit]
-		}
-		if value = strings.ToValidUTF8(value, ""); value != "" {
+		if value = bounded(value, limit); value != "" {
 			attrs = append(attrs, attribute.String(key, value))
 		}
 	}

@@ -20,6 +20,32 @@ func milliseconds(d *time.Duration) *int64 {
 	return &ms
 }
 
+// spendAttempts is the request's attempts as the spend event carries them.
+func spendAttempts(list []httputil.Attempt) []kafkalog.Attempt {
+	if len(list) == 0 {
+		return nil
+	}
+	out := make([]kafkalog.Attempt, 0, len(list))
+	for _, at := range list {
+		out = append(out, kafkalog.Attempt{
+			Credential:        at.Credential,
+			Exit:              at.Exit,
+			Kind:              at.Kind,
+			RetryReason:       at.RetryReason,
+			HTTPStatus:        at.Status,
+			UpstreamRequestID: at.UpstreamRequestID,
+			ErrorType:         at.ErrorType,
+			ErrorMessage:      at.ErrorMessage,
+			StartTime:         at.Began.UTC(),
+			DurationMs:        at.Duration.Milliseconds(),
+			TTFBMs:            milliseconds(at.TTFB),
+			ConnReused:        at.Reused,
+			IsFinal:           at.IsFinal,
+		})
+	}
+	return out
+}
+
 // traceID is the id of the trace that ctx's span belongs to, "" without one.
 func traceID(ctx context.Context) string {
 	if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {
@@ -137,6 +163,7 @@ func (p *Proxy) buildKafkaSpendEvent(
 		Exit:                attempts.Exit(logCtx.Credential.Name),
 		ExitRTTMs:           exitRTTMs,
 		ExitConnectMs:       exitConnectMs,
+		Attempts:            spendAttempts(attempts.List(logCtx.Credential.Name, endTime)),
 		DurationMs:          endTime.Sub(logCtx.StartTime).Milliseconds(),
 		TTFTMs:              ttftMs,
 

@@ -402,6 +402,43 @@ func TestAttemptTransport_TheExitWithoutTracing(t *testing.T) {
 	assert.Nil(t, stages.ExitConnect)
 }
 
+// Without tracing the provider's status, or the error that left the attempt
+// without one, still reaches the request's Attempts.
+func TestAttemptTransport_TheResultWithoutTracing(t *testing.T) {
+	refusing := answering(t, http.StatusTooManyRequests, map[string]string{"X-Request-Id": "req-1"}, `{"error":"failed"}`)
+	gone := httptest.NewServer(http.NotFoundHandler())
+	gone.Close()
+	transport := newTransport(nil)
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: instrument(transport)}
+
+	ctx := WithAttempts(context.Background())
+	attempts := AttemptsFrom(ctx)
+	send := func(target string) error {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, strings.NewReader("{}"))
+		require.NoError(t, err)
+		resp, err := client.Do(req)
+		if err == nil {
+			_ = resp.Body.Close()
+		}
+		return err
+	}
+	attempts.Begin("cred-a")
+	require.NoError(t, send(refusing.URL))
+	attempts.Begin("cred-b")
+	require.Error(t, send(gone.URL))
+
+	list := attempts.List("cred-b", time.Now())
+	require.Len(t, list, 2)
+	assert.Equal(t, http.StatusTooManyRequests, list[0].Status)
+	assert.Equal(t, "req-1", list[0].UpstreamRequestID)
+	assert.Empty(t, list[0].ErrorType)
+	assert.Empty(t, list[0].ErrorMessage, "the provider's words stay on the span")
+	assert.Zero(t, list[1].Status, "no response")
+	assert.Equal(t, "*net.OpError", list[1].ErrorType, "as the span's error.type")
+	assert.Contains(t, list[1].ErrorMessage, "connection refused")
+}
+
 // A proxy that gives its time and no name, on a way so short that its whole
 // milliseconds exceed what the round trip took.
 func TestAttemptTransport_TheExitsTimeWithoutItsName(t *testing.T) {

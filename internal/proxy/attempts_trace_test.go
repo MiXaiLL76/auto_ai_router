@@ -148,6 +148,49 @@ func TestProxyRequest_SpendEventStages(t *testing.T) {
 	require.NotNil(t, event.UpstreamSendMs)
 	assert.LessOrEqual(t, *event.UpstreamSendMs+*event.RetryMs+*event.ConnWaitMs+*event.TTFBMs, event.DurationMs,
 		"the stages are parts of the request's duration")
+
+	require.Len(t, event.Attempts, 2, "and it carries both attempts")
+	refused, final := event.Attempts[0], event.Attempts[1]
+	assert.Equal(t, "primary", refused.Credential)
+	assert.Equal(t, httputil.AttemptFirst, refused.Kind)
+	assert.Equal(t, http.StatusTooManyRequests, refused.HTTPStatus, "what the provider answered")
+	assert.Equal(t, string(RetryReasonRateLimit), refused.RetryReason)
+	assert.False(t, refused.IsFinal)
+	assert.GreaterOrEqual(t, refused.DurationMs, refusalTakes.Milliseconds())
+	assert.Equal(t, "fallback", final.Credential)
+	assert.Equal(t, httputil.AttemptFallback, final.Kind)
+	assert.Equal(t, http.StatusOK, final.HTTPStatus)
+	assert.Empty(t, final.RetryReason)
+	assert.True(t, final.IsFinal)
+	assert.Equal(t, event.TTFBMs, final.TTFBMs, "the event's own stages are the final attempt's")
+	assert.Equal(t, event.ConnReused, final.ConnReused)
+}
+
+// A request no provider answered: its one attempt is the final one, with
+// no status and the error that left it without one.
+func TestProxyRequest_SpendEventAttemptWithoutAResponse(t *testing.T) {
+	gone := newIPv4Server(t, http.NotFoundHandler())
+	gone.Close()
+	prx := NewTestProxyBuilder().WithCredentials(
+		config.CredentialConfig{Name: "primary", Type: config.ProviderTypeOpenAI, BaseURL: gone.URL, APIKey: "key", RPM: 100, TPM: 10000},
+	).Build()
+	events := &stubKafkaManager{enabled: true}
+	prx.kafkaLog = events
+	setTestModelPrice(prx, "gpt-4", &pricingmodels.ModelPrice{})
+
+	w, _ := tracedChatRequest(t, prx)
+
+	require.GreaterOrEqual(t, w.Code, http.StatusInternalServerError, w.Body.String())
+	require.Len(t, events.events, 1)
+	event := events.events[0]
+	assert.Equal(t, "failure", event.Status)
+	require.Len(t, event.Attempts, 1)
+	attempt := event.Attempts[0]
+	assert.Equal(t, "primary", attempt.Credential)
+	assert.Zero(t, attempt.HTTPStatus, "no response")
+	assert.Equal(t, "*net.OpError", attempt.ErrorType)
+	assert.Contains(t, attempt.ErrorMessage, "connection refused")
+	assert.True(t, attempt.IsFinal, "its outcome is the request's")
 }
 
 // A failing credential, then the next one of the same pool: a retry, for
@@ -227,6 +270,12 @@ func TestHandleSimulatedNonStream_RetryIsTheNextAttempt(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 	assert.Equal(t, 2, attempts.Count(), "the first send is counted once, by the loop that sent it")
+	list := attempts.List("secondary", time.Now())
+	require.Len(t, list, 2)
+	assert.Equal(t, string(RetryReasonNetErr), list[0].RetryReason, "why the first attempt was left")
+	assert.False(t, list[0].IsFinal)
+	assert.Equal(t, http.StatusOK, list[1].Status)
+	assert.True(t, list[1].IsFinal)
 	assert.Equal(t, []map[string]any{{
 		"aar.credential": "secondary", "aar.attempt.number": int64(2), "aar.attempt.kind": httputil.AttemptRetry,
 		"aar.attempt.reason": string(RetryReasonNetErr), "aar.connection.reused": false,
