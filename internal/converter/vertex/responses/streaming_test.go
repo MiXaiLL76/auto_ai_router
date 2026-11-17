@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
+	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -374,4 +375,35 @@ func TestTransformVertexStreamToResponses_FunctionCallEmbedsThoughtSignature(t *
 		_, decoded := converterutil.SplitToolCallIDSignature(id)
 		assert.Equal(t, signature, decoded)
 	}
+}
+
+// The request's text.format is echoed in every response object of the stream
+// and in the one handed to onComplete (stored for GET /v1/responses/{id}).
+func TestTransformVertexStreamToResponses_EchoesRequestTextFormat(t *testing.T) {
+	stream := buildVertexSSEStream([]map[string]interface{}{{
+		"candidates": []map[string]interface{}{{
+			"content":      map[string]interface{}{"role": "model", "parts": []map[string]interface{}{{"text": "{}"}}},
+			"finishReason": "STOP",
+		}},
+		"usageMetadata": map[string]interface{}{"promptTokenCount": 5, "candidatesTokenCount": 3, "totalTokenCount": 8},
+	}})
+	text := map[string]interface{}{"format": map[string]interface{}{"type": "json_object"}}
+
+	var out bytes.Buffer
+	var completed *responses.Response
+	err := TransformVertexStreamToResponses(strings.NewReader(stream), &out, "gemini-test", "",
+		&responses.ResponsesMetadata{Text: text}, func(r *responses.Response) { completed = r })
+	require.NoError(t, err)
+
+	echoed := 0
+	for _, e := range parseVertexSSEEvents(out.String()) {
+		switch e["type"] {
+		case "response.created", "response.in_progress", "response.completed":
+			assert.Equal(t, text, e["response"].(map[string]interface{})["text"], e["type"])
+			echoed++
+		}
+	}
+	assert.Equal(t, 3, echoed)
+	require.NotNil(t, completed)
+	assert.Equal(t, text, completed.Text)
 }

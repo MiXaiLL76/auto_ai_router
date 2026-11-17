@@ -1083,3 +1083,37 @@ func TestTransformAnthropicStreamToResponses_InputTokensFromMessageDelta(t *test
 		assert.Equal(t, 128, completedResp.Usage.InputTokensDetails.CachedTokens)
 	})
 }
+
+// The request's text.format is echoed in every response object of the stream
+// and in the one handed to onComplete (stored for GET /v1/responses/{id}).
+func TestTransformAnthropicStreamToResponses_EchoesRequestTextFormat(t *testing.T) {
+	stream := buildAnthropicSSEStream([]map[string]interface{}{
+		{"type": "message_start", "message": map[string]interface{}{"usage": map[string]interface{}{"input_tokens": 10}}},
+		{"type": "content_block_start", "content_block": map[string]interface{}{"type": "text"}},
+		{"type": "content_block_delta", "delta": map[string]interface{}{"type": "text_delta", "text": `{"name":"Pushkin"}`}},
+		{"type": "content_block_stop"},
+		{"type": "message_delta", "delta": map[string]interface{}{"stop_reason": "end_turn"}, "usage": map[string]interface{}{"output_tokens": 5}},
+		{"type": "message_stop"},
+	})
+	text := map[string]interface{}{"format": map[string]interface{}{
+		"type": "json_schema", "name": "person", "strict": true, "schema": map[string]interface{}{"type": "object"},
+	}}
+
+	var out bytes.Buffer
+	var completed *responses.Response
+	err := TransformAnthropicStreamToResponses(strings.NewReader(stream), &out, "claude-haiku-5-5", "",
+		&responses.ResponsesMetadata{Text: text}, func(r *responses.Response) { completed = r })
+	require.NoError(t, err)
+
+	echoed := 0
+	for _, e := range parseSSEEvents(out.String()) {
+		switch e["type"] {
+		case "response.created", "response.in_progress", "response.completed":
+			assert.Equal(t, text, e["response"].(map[string]interface{})["text"], e["type"])
+			echoed++
+		}
+	}
+	assert.Equal(t, 3, echoed)
+	require.NotNil(t, completed)
+	assert.Equal(t, text, completed.Text)
+}

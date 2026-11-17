@@ -17,10 +17,12 @@ type ResponsesMetadata struct {
 	Metadata           map[string]string
 	TTL                int             // seconds; 0 = no expiry
 	AccumulatedInput   json.RawMessage // full input array after history prepending; used for multi-turn storage
+	Text               interface{}     // {"format": <request text.format>} echoed in responses the router builds; nil = no format
 }
 
 // ExtractResponsesMetadata extracts store / previous_response_id / metadata / ttl
-// from a Responses API request body without modifying it.
+// and the text.format to echo from a Responses API request body without
+// modifying it.
 func ExtractResponsesMetadata(body []byte) ResponsesMetadata {
 	var raw map[string]interface{}
 	if err := json.Unmarshal(body, &raw); err != nil {
@@ -44,7 +46,36 @@ func ExtractResponsesMetadata(body []byte) ResponsesMetadata {
 	if v, ok := raw["ttl"].(float64); ok {
 		meta.TTL = int(v)
 	}
+	// Only a well-formed format is echoed. text.verbosity is not applied on
+	// converted routes, so echoing it would claim a setting the model never
+	// got; a malformed format (which OpenAI rejects) would make the response's
+	// text invalid.
+	if text, ok := raw["text"].(map[string]interface{}); ok {
+		if format, ok := text["format"].(map[string]interface{}); ok && isWellFormedTextFormat(format) {
+			meta.Text = map[string]interface{}{"format": format}
+		}
+	}
 	return meta
+}
+
+// isWellFormedTextFormat reports whether format is a valid Responses
+// text.format: {type: "text"}, {type: "json_object"}, or {type: "json_schema"}
+// with a string name, an object schema and, if set, a bool strict and a string
+// description.
+func isWellFormedTextFormat(format map[string]interface{}) bool {
+	switch format["type"] {
+	case "text", "json_object":
+		return true
+	case "json_schema":
+		name, _ := format["name"].(string)
+		_, hasSchema := format["schema"].(map[string]interface{})
+		_, strictOK := format["strict"].(bool)
+		_, descriptionOK := format["description"].(string)
+		return name != "" && hasSchema &&
+			(strictOK || format["strict"] == nil) &&
+			(descriptionOK || format["description"] == nil)
+	}
+	return false
 }
 
 // PrependOutputToInput prepends the output items from a previous response to

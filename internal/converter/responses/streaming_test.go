@@ -389,6 +389,34 @@ func TestStreamTransform_BasicText(t *testing.T) {
 	assert.Contains(t, result, "response.completed")
 }
 
+// The request's text.format is echoed in every response object of the stream
+// and in the one handed to onComplete (stored for GET /v1/responses/{id}).
+func TestStreamTransform_EchoesRequestTextFormat(t *testing.T) {
+	stopReason := "stop"
+	input := buildSSEChunk(buildChatChunk("{}", nil)) +
+		buildSSEChunk(buildChatChunk("", &stopReason)) +
+		"data: [DONE]\n\n"
+	text := map[string]interface{}{"format": map[string]interface{}{"type": "json_object"}}
+
+	var completed *Response
+	var output bytes.Buffer
+	err := TransformChatStreamToResponsesWithMeta(strings.NewReader(input), &output, "gpt-4o",
+		&ResponsesMetadata{Text: text}, func(r *Response) { completed = r })
+	require.NoError(t, err)
+
+	echoed := 0
+	for _, e := range parseSSEEvents(t, output.String()) {
+		switch e["_event"] {
+		case "response.created", "response.in_progress", "response.completed":
+			assert.Equal(t, text, e["response"].(map[string]interface{})["text"], e["_event"])
+			echoed++
+		}
+	}
+	assert.Equal(t, 3, echoed)
+	require.NotNil(t, completed)
+	assert.Equal(t, text, completed.Text)
+}
+
 // A chat chunk can carry a generated image as one base64 blob in delta.images,
 // which pushes a single SSE line past 1 MiB. The scanner used to cap tokens at
 // 1 MiB and aborted the whole stream with "bufio.Scanner: token too long", so

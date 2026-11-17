@@ -2674,10 +2674,10 @@ dispatch:
 						"request_id", logCtx.RequestID)
 				} else {
 					// Enrich the response with request-echoed fields (store, previous_response_id,
-					// metadata) for both the client payload and the store record.
+					// metadata, text) for both the client payload and the store record.
 					var respObj responses.Response
 					if err := json.Unmarshal(responsesBody, &respObj); err == nil {
-						applyResponsesMetadata(&respObj, prepared.responsesMetadata)
+						applyConvertedResponsesMetadata(&respObj, prepared.responsesMetadata)
 						if enriched, marshalErr := json.Marshal(&respObj); marshalErr == nil {
 							responsesBody = enriched
 						}
@@ -3555,7 +3555,7 @@ dispatch:
 				p.logger.ErrorContext(r.Context(), "Failed to convert native Responses API response", args...)
 				// finalResponseBody already holds decodedBody — return as-is
 			} else {
-				applyResponsesMetadata(nativeResp, prepared.responsesMetadata)
+				applyConvertedResponsesMetadata(nativeResp, prepared.responsesMetadata)
 				if enriched, marshalErr := json.Marshal(nativeResp); marshalErr == nil {
 					finalResponseBody = enriched
 					// Use the converted Responses API body for token extraction:
@@ -3593,10 +3593,10 @@ dispatch:
 				// fallback: use Chat Completions body
 			} else {
 				// Enrich the response with request-echoed fields (store, previous_response_id,
-				// metadata) for both the client payload and the store record.
+				// metadata, text) for both the client payload and the store record.
 				var respObj responses.Response
 				if err := json.Unmarshal(responsesBody, &respObj); err == nil {
-					applyResponsesMetadata(&respObj, prepared.responsesMetadata)
+					applyConvertedResponsesMetadata(&respObj, prepared.responsesMetadata)
 					if enriched, marshalErr := json.Marshal(&respObj); marshalErr == nil {
 						responsesBody = enriched
 					}
@@ -4185,6 +4185,16 @@ func applyResponsesMetadata(resp *responses.Response, meta *responses.ResponsesM
 	}
 	if meta.Metadata != nil {
 		resp.Metadata = meta.Metadata
+	}
+}
+
+// applyConvertedResponsesMetadata is applyResponsesMetadata for a response the
+// router built from another API's reply. It also echoes the request's text
+// config, which a provider's own Responses reply (passthrough) already carries.
+func applyConvertedResponsesMetadata(resp *responses.Response, meta *responses.ResponsesMetadata) {
+	applyResponsesMetadata(resp, meta)
+	if meta != nil && resp != nil && meta.Text != nil {
+		resp.Text = meta.Text
 	}
 }
 

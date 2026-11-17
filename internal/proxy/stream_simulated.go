@@ -843,7 +843,7 @@ func (p *Proxy) finishSimulatedNonStream(
 		} else {
 			var respObj responses.Response
 			if err := json.Unmarshal(responsesBody, &respObj); err == nil {
-				applyResponsesMetadata(&respObj, prepared.responsesMetadata)
+				applyConvertedResponsesMetadata(&respObj, prepared.responsesMetadata)
 				if enriched, marshalErr := json.Marshal(&respObj); marshalErr == nil {
 					responsesBody = enriched
 				}
