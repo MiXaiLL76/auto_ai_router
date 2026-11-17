@@ -91,6 +91,14 @@ func buildAnthropicRequest(req *responses.Request, model string) (*anthropic.Ant
 		}
 	}
 
+	// Structured output: text.format → output_config.format
+	if req.Text != nil {
+		if format, ok := req.Text.Format.(map[string]interface{}); ok {
+			formatType, _ := format["type"].(string)
+			anthropic.ApplyJSONResponseFormat(ar, formatType, format["schema"])
+		}
+	}
+
 	// Tools
 	if len(req.Tools) > 0 {
 		tools, betas := responsesToolsToAnthropic(req.Tools)
