@@ -44,19 +44,19 @@ type attempt struct {
 
 // Attempt is what a spend row keeps of one attempt.
 type Attempt struct {
-	Credential string
-	Exit       string
-	Kind       string
-	RetryReason string
-	Status int
+	Credential        string
+	Exit              string
+	Kind              string
+	RetryReason       string
+	Status            int
 	UpstreamRequestID string
-	ErrorType    string
-	ErrorMessage string
-	Began        time.Time
-	Duration time.Duration
-	TTFB     *time.Duration
-	Reused   *bool
-	IsFinal bool
+	ErrorType         string
+	ErrorMessage      string
+	Began             time.Time
+	Duration          time.Duration
+	TTFB              *time.Duration
+	Reused            *bool
+	IsFinal           bool
 }
 
 // Stages is how a request's time divided around one of its attempts.
