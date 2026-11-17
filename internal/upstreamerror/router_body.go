@@ -49,6 +49,8 @@ var routerClassifiedMessages = map[string]string{ //nolint:gosec // G101: these 
 	"invalid_multipart":          "Invalid multipart form data",
 	"invalid_value":              "Invalid parameter value",
 	"reasoning_required":         "Reasoning is required and cannot be disabled",
+	"account_blocked":            "Inference is blocked on this account",
+	"session_blocked":            "This session is blocked by content policy",
 }
 
 // routerErrorTypes is the set of "type" values this package's classifier

@@ -155,6 +155,32 @@ func ClassifyBadRequest(rawBody []byte) BadRequest {
 		result.Message = "Invalid " + *param
 		result.Code = "invalid_max_tokens"
 		result.Param = param
+	case hasSignal(joined, "unrecognized request argument supplied",
+		"unrecognized request arguments supplied"):
+		// A provider that does not know a request field says which one:
+		// "Unrecognized request argument supplied: reasoning_effort" (2,018
+		// requests in production, 1,996 of them naming reasoning_effort --
+		// clients sending reasoning_effort to a model that has no such
+		// field).
+		//
+		// The wording was not recognized before: the switch's marker for a
+		// rejected parameter is "unrecognized parameter", and this provider
+		// writes "unrecognized request argument" -- the words in between
+		// ("request") mean the marker does not match, so every one of those
+		// requests fell through to the generic "Invalid request" and the
+		// client was not told WHICH field to drop. It was told, in the
+		// provider's own first line.
+		//
+		// The parameter name is read out of the message and accepted only
+		// from the closed list of request parameters, so an unknown name
+		// cannot smuggle provider free text into the client's "param" field.
+		if param := extractUnrecognizedArgumentName(signals); param != nil {
+			result.Message = "Invalid " + *param
+			result.Code = "invalid_field"
+			result.Param = param
+		} else {
+			result.Message, result.Code = "Invalid request parameter", "invalid_parameter"
+		}
 	case hasSignal(joined, "is allowed for this model", "not allowed for this model"):
 		// A provider that pins a sampling parameter to one value ("invalid
 		// temperature: only 1 is allowed for this model") names the
@@ -665,6 +691,84 @@ var pinnableParameters = map[string]struct{}{
 	"stop":                  {},
 	"reasoning_effort":      {},
 	"thinking":              {},
+}
+
+// requestParameterNames are the request fields a provider may report as
+// unrecognized. Only these are accepted as the offending parameter: the
+// name comes out of the provider's own free text, so without a closed list
+// a message like "Unrecognized request argument supplied: your-secret-key"
+// would put an arbitrary string into the client's "param" field.
+var requestParameterNames = map[string]struct{}{
+	"temperature":           {},
+	"top_p":                 {},
+	"top_k":                 {},
+	"frequency_penalty":     {},
+	"presence_penalty":      {},
+	"repetition_penalty":    {},
+	"max_tokens":            {},
+	"max_completion_tokens": {},
+	"max_output_tokens":     {},
+	"max_prompt_tokens":     {},
+	"n":                     {},
+	"seed":                  {},
+	"stop":                  {},
+	"reasoning_effort":      {},
+	"thinking":              {},
+	"reasoning":             {},
+	"enable_thinking":       {},
+	"skip_special_tokens":   {},
+	"response_format":       {},
+	"tools":                 {},
+	"tool_choice":           {},
+	"parallel_tool_calls":   {},
+	"stream_options":        {},
+	"logprobs":              {},
+	"top_logprobs":          {},
+	"service_tier":          {},
+	"user":                  {},
+	"metadata":              {},
+	"modalities":            {},
+	"prediction":            {},
+	"store":                 {},
+}
+
+// extractUnrecognizedArgumentName reads the parameter name out of a provider
+// message of the shape "Unrecognized request argument supplied: <name>" (and
+// its plural variant, which lists several names).
+//
+// Returns nil when the message names no KNOWN parameter, so an unrecognized
+// wording falls back to the generic "Invalid request parameter" instead of
+// guessing -- and a name that is not a request parameter is never passed
+// through to the client.
+func extractUnrecognizedArgumentName(signals []string) *string {
+	const marker = "unrecognized request argument supplied:"
+	const pluralMarker = "unrecognized request arguments supplied:"
+	for _, signal := range signals {
+		lower := strings.ToLower(signal)
+		for _, m := range []string{marker, pluralMarker} {
+			idx := strings.Index(lower, m)
+			if idx < 0 {
+				continue
+			}
+			rest := strings.TrimSpace(signal[idx+len(m):])
+			// The list may hold several names ("enable_thinking, reasoning,
+			// reasoning_effort, thinking"). The FIRST known one is reported:
+			// the client needs one field to drop, and the provider lists them
+			// in its own order.
+			for _, name := range strings.Split(rest, ",") {
+				name = strings.TrimSpace(name)
+				name = strings.Trim(name, ".'\"")
+				if name == "" {
+					continue
+				}
+				if _, known := requestParameterNames[name]; known {
+					field := name
+					return &field
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // extractPinnedParameterName reads the parameter name out of a provider

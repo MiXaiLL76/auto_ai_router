@@ -114,6 +114,18 @@ func maskedUpstreamErrorBody(statusCode int, requestID string, rawBodies ...[]by
 		message = detail.Message
 		code = *detail.Code
 		param = detail.Param
+	case http.StatusForbidden, http.StatusNotFound:
+		// The other 4xx statuses used to report one generic message for
+		// every failure ("Request failed" / "api_error"), whatever the
+		// provider said. A provider that blocks the whole ACCOUNT
+		// ("Inference is blocked on this account") or that rejects a URL
+		// the client passed has named the cause, and the client's next
+		// action differs completely between them.
+		if detail, ok := classifiedStatusError(statusCode, rawBodies...); ok {
+			message = detail.Message
+			code = *detail.Code
+			param = detail.Param
+		}
 	case http.StatusTooManyRequests:
 		message = "Rate limit exceeded"
 		code = "rate_limit_error"
@@ -178,6 +190,30 @@ func classifiedBadRequestError(rawBodies ...[]byte) APIError {
 		Param:   classified.Param,
 		Code:    &code,
 	}
+}
+
+// classifiedStatusError classifies a non-400 4xx response body, so that a
+// provider that names the cause reaches the client named -- the same
+// treatment 400 gets (see classifiedBadRequestError).
+//
+// Returns ok=false when the body carries nothing recognized, and the caller
+// keeps its generic message for that status.
+func classifiedStatusError(statusCode int, rawBodies ...[]byte) (APIError, bool) {
+	var raw []byte
+	if len(rawBodies) > 0 {
+		raw = rawBodies[0]
+	}
+	classified, ok := upstreamerror.ClassifyStatus(statusCode, raw)
+	if !ok {
+		return APIError{}, false
+	}
+	code := classified.Code
+	return APIError{
+		Message: classified.Message,
+		Type:    errorTypeForStatus(statusCode),
+		Param:   classified.Param,
+		Code:    &code,
+	}, true
 }
 
 // WriteErrorBadRequest writes a 400 Bad Request JSON error.

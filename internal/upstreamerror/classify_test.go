@@ -2,6 +2,7 @@ package upstreamerror
 
 import (
 	"encoding/json"
+	"net/http"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -666,6 +667,123 @@ func TestExtractRouterClassificationRejectsProviderBodies(t *testing.T) {
 		t.Run(body, func(t *testing.T) {
 			_, ok := ExtractRouterClassification([]byte(body))
 			assert.False(t, ok, "a provider body must not be taken for one of ours")
+		})
+	}
+}
+
+// TestClassifyBadRequest_UnrecognizedRequestArgument covers a wording the
+// switch did not recognize: a provider that does not know a request field
+// says which one -- "Unrecognized request argument supplied:
+// reasoning_effort" -- but the switch's marker for a rejected parameter is
+// "unrecognized parameter", and the words in between ("request") mean it
+// does not match. 2,018 requests in production, 1,996 of them naming
+// reasoning_effort, every one of them reaching the client as the generic
+// "Invalid request".
+func TestClassifyBadRequest_UnrecognizedRequestArgument(t *testing.T) {
+	tests := []struct {
+		name      string
+		body      string
+		wantParam *string
+		wantCode  string
+	}{
+		{
+			name:      "single argument",
+			body:      `{"error":{"message":"Unrecognized request argument supplied: reasoning_effort","type":"invalid_request_error"}}`,
+			wantParam: stringPtr("reasoning_effort"),
+			wantCode:  "invalid_field",
+		},
+		{
+			name:      "several arguments, first known one is reported",
+			body:      `{"error":{"message":"Unrecognized request arguments supplied: enable_thinking, reasoning, reasoning_effort, thinking","type":"invalid_request_error"}}`,
+			wantParam: stringPtr("enable_thinking"),
+			wantCode:  "invalid_field",
+		},
+		{
+			// The name comes out of the provider's free text, so an unknown
+			// one is not passed through -- it would put provider-controlled
+			// text into the client's "param" field.
+			name:      "unknown argument name is not echoed",
+			body:      `{"error":{"message":"Unrecognized request argument supplied: your-secret-key","type":"invalid_request_error"}}`,
+			wantParam: nil,
+			wantCode:  "invalid_parameter",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ClassifyBadRequest([]byte(tt.body))
+			assert.Equal(t, "Invalid "+func() string {
+				if tt.wantParam == nil {
+					return "request parameter"
+				}
+				return *tt.wantParam
+			}(), got.Message)
+			assert.Equal(t, tt.wantCode, got.Code)
+			assert.True(t, equalStringPtr(tt.wantParam, got.Param),
+				"param = %v, want %v", got.Param, tt.wantParam)
+		})
+	}
+}
+
+// TestClassifyStatus_NonBadRequest covers the 4xx statuses that used to
+// report one generic message for every failure ("Request failed" /
+// "api_error"), whatever the provider said.
+//
+// The account-block marker is exact in production: it appears in 17,903
+// responses and in NO other status, so it cannot shadow a different
+// failure.
+func TestClassifyStatus_NonBadRequest(t *testing.T) {
+	tests := []struct {
+		name      string
+		status    int
+		body      string
+		wantOK    bool
+		wantMsg   string
+		wantCode  string
+		wantParam *string
+	}{
+		{
+			name:     "account blocked",
+			status:   http.StatusForbidden,
+			body:     `{"error":{"message":"Inference is blocked on this account. Please contact support@openrouter.ai.","code":403,"metadata":{"provider_name":null}}}`,
+			wantOK:   true,
+			wantMsg:  "Inference is blocked on this account",
+			wantCode: "account_blocked",
+		},
+		{
+			name:     "session blocked by policy",
+			status:   http.StatusForbidden,
+			body:     `{"error":{"code":"session_blocked_by_cyber_policy","message":"This session is blocked by content policy","type":"permission_error"}}`,
+			wantOK:   true,
+			wantMsg:  "This session is blocked by content policy",
+			wantCode: "session_blocked",
+		},
+		{
+			name:      "url could not be fetched",
+			status:    http.StatusNotFound,
+			body:      `{"error":{"code":404,"message":"Cannot fetch content from the provided URL. The URL could not be reached."}}`,
+			wantOK:    true,
+			wantMsg:   "Invalid url",
+			wantCode:  "invalid_field",
+			wantParam: stringPtr("url"),
+		},
+		{
+			name:   "unrecognized body keeps the generic message",
+			status: http.StatusForbidden,
+			body:   `{"error":{"message":"Something else entirely"}}`,
+			wantOK: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := ClassifyStatus(tt.status, []byte(tt.body))
+			assert.Equal(t, tt.wantOK, ok)
+			if !tt.wantOK {
+				return
+			}
+			assert.Equal(t, tt.wantMsg, got.Message)
+			assert.Equal(t, tt.wantCode, got.Code)
+			assert.True(t, equalStringPtr(tt.wantParam, got.Param),
+				"param = %v, want %v", got.Param, tt.wantParam)
 		})
 	}
 }

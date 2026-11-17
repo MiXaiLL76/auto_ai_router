@@ -387,6 +387,16 @@ func normalizeError(status int, body []byte) []byte {
 		message = classified.Message
 		code = classified.Code
 		param = classified.Param
+	case http.StatusForbidden, http.StatusNotFound:
+		// The other 4xx statuses get the same treatment as 400: a provider
+		// that names the cause (an account-level block, a rejected URL)
+		// reaches the client named, exactly as in native mode -- the two
+		// must not disagree about the same failure.
+		if classified, ok := upstreamerror.ClassifyStatus(status, body); ok {
+			message = classified.Message
+			code = classified.Code
+			param = classified.Param
+		}
 	case http.StatusTooManyRequests:
 		message = "Rate limit exceeded"
 	case http.StatusRequestTimeout, http.StatusGatewayTimeout:
