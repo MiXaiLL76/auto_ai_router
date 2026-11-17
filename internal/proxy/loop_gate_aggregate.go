@@ -12,6 +12,7 @@ import (
 	json "github.com/goccy/go-json"
 
 	"github.com/mixaill76/auto_ai_router/internal/loopgate"
+	"github.com/mixaill76/auto_ai_router/internal/sse"
 )
 
 // chatStreamAggregator rebuilds the chat.completion a non-streamed request
@@ -136,7 +137,7 @@ func (a *chatStreamAggregator) consume(r io.Reader, limit int64) error {
 		if limit > 0 && read > limit {
 			return ErrResponseBodyTooLarge
 		}
-		if payload, ok := sseLinePayload(line); ok {
+		if payload, ok := sse.LinePayload(line); ok {
 			a.add(payload)
 			if a.errStatus != 0 {
 				return nil

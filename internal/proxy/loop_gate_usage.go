@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"github.com/mixaill76/auto_ai_router/internal/sse"
 	"io"
 	"slices"
 )
@@ -64,7 +65,7 @@ var loopGateNullUsage = []byte("null")
 // stripRunningUsage returns line with the usage of a chat chunk with choices
 // replaced by null; any other line is returned as is.
 func stripRunningUsage(line []byte) []byte {
-	payload, ok := sseLinePayload(line)
+	payload, ok := sse.LinePayload(line)
 	if !ok {
 		return line
 	}

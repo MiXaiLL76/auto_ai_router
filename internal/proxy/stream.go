@@ -21,6 +21,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
 	"github.com/mixaill76/auto_ai_router/internal/loopgate"
 	"github.com/mixaill76/auto_ai_router/internal/proxy/modelutils"
+	"github.com/mixaill76/auto_ai_router/internal/sse"
 )
 
 // streamChunkWriteTimeout is the per-chunk write deadline for streaming responses.
@@ -618,51 +619,7 @@ func chunkMayCarryTokenUsage(chunk []byte) bool {
 // one exception that must survive past the current chunk's lifetime, and it
 // copies explicitly (see its own doc comment).
 func splitSSEPayloads(chunk []byte, dst [][]byte) [][]byte {
-	dst = dst[:0]
-	trimmed := bytes.TrimSpace(chunk)
-	if len(trimmed) == 0 {
-		return dst
-	}
-
-	// Fast path: non-SSE plain JSON.
-	if !bytes.Contains(trimmed, sseDataPrefix) {
-		return append(dst, trimmed)
-	}
-
-	rest := trimmed
-	for {
-		var line []byte
-		if idx := bytes.IndexByte(rest, '\n'); idx >= 0 {
-			line = rest[:idx]
-			rest = rest[idx+1:]
-		} else {
-			line = rest
-			rest = nil
-		}
-		if payload, ok := sseLinePayload(line); ok {
-			dst = append(dst, payload)
-		}
-		if rest == nil {
-			break
-		}
-	}
-
-	return dst
-}
-
-// sseLinePayload returns the data payload of one SSE line: the text after
-// "data:" with surrounding whitespace trimmed, a sub-slice of line. ok is false
-// for any other line, an empty payload and the [DONE] sentinel.
-func sseLinePayload(line []byte) ([]byte, bool) {
-	payload, ok := bytes.CutPrefix(bytes.TrimSpace(line), sseDataPrefix)
-	if !ok {
-		return nil, false
-	}
-	payload = bytes.TrimSpace(payload)
-	if len(payload) == 0 || bytes.Equal(payload, sseDoneSentinel) {
-		return nil, false
-	}
-	return payload, true
+	return sse.SplitPayloads(chunk, dst)
 }
 
 // getStreamUsageExtractor returns the appropriate usage extractor for a provider.

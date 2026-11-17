@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
+	"github.com/mixaill76/auto_ai_router/internal/toolretry"
 )
 
 // Logger is the optional logger of a Client: it records every Search, Search
@@ -83,6 +84,11 @@ type ClientConfig struct {
 	MaxRetries int
 	// Logger, when set, records every call this client makes.
 	Logger Logger
+	// HTTPClient, when set, is the client the calls go out through. The
+	// router hands in a cached one, so the connections to Moonshot survive
+	// between the requests instead of being opened and dropped each time.
+	// Unset, the client builds its own.
+	HTTPClient *http.Client
 }
 
 // Client calls Moonshot's Search, Search Pro and Fetch endpoints.
@@ -97,11 +103,14 @@ type Client struct {
 // NewClient builds a Client over the shared HTTP transport (connection
 // pooling, HTTP/2 keepalive) so this feature does not hand-roll its own.
 func NewClient(cfg ClientConfig) *Client {
-	httpCfg := httputil.DefaultHTTPClientConfig()
-	httpCfg.Timeout = cfg.Timeout
-	client := httputil.NewHTTPClient(httpCfg)
-	if cfg.ProxyURL != "" {
-		client = httputil.WithClientProxy(client, cfg.ProxyURL)
+	client := cfg.HTTPClient
+	if client == nil {
+		httpCfg := httputil.DefaultHTTPClientConfig()
+		httpCfg.Timeout = cfg.Timeout
+		client = httputil.NewHTTPClient(httpCfg)
+		if cfg.ProxyURL != "" {
+			client = httputil.WithClientProxy(client, cfg.ProxyURL)
+		}
 	}
 	return &Client{
 		baseURL:    strings.TrimSuffix(cfg.BaseURL, "/"),
@@ -229,8 +238,14 @@ func (c *Client) do(ctx context.Context, path string, body any) (int, []byte, er
 //
 // A non-2xx status is returned as such with the body, not as an error: the
 // caller decides what a failed search means (it is never billable).
+//
+// A 429 or a 5xx is retried with a delay, as the provider's guide asks:
+// those are transient, and the router's own QPS limiter makes traffic near
+// the limit ordinary. Other 4xx answers are returned as they are --
+// retrying them without changing the request would only waste the
+// account's quota.
 func (c *Client) Search(ctx context.Context, req SearchRequest) (int, SearchResponse, []byte, error) {
-	status, raw, err := c.do(ctx, SearchPath, req)
+	status, raw, err := c.doWithRetry(ctx, SearchPath, req)
 	if err != nil {
 		return status, SearchResponse{}, raw, err
 	}
@@ -242,8 +257,11 @@ func (c *Client) Search(ctx context.Context, req SearchRequest) (int, SearchResp
 }
 
 // SearchPro runs a Pro search and returns the parsed response.
+//
+// As in Search, a transient failure is retried and a non-2xx answer is
+// returned to the caller as it is.
 func (c *Client) SearchPro(ctx context.Context, req SearchProRequest) (int, SearchResponse, []byte, error) {
-	status, raw, err := c.do(ctx, SearchProPath, req)
+	status, raw, err := c.doWithRetry(ctx, SearchProPath, req)
 	if err != nil {
 		return status, SearchResponse{}, raw, err
 	}
@@ -255,8 +273,11 @@ func (c *Client) SearchPro(ctx context.Context, req SearchProRequest) (int, Sear
 }
 
 // Fetch fetches a page and returns the parsed response.
+//
+// As in Search, a transient failure is retried and a non-2xx answer is
+// returned to the caller as it is.
 func (c *Client) Fetch(ctx context.Context, req FetchRequest) (int, FetchResponse, []byte, error) {
-	status, raw, err := c.do(ctx, FetchPath, req)
+	status, raw, err := c.doWithRetry(ctx, FetchPath, req)
 	if err != nil {
 		return status, FetchResponse{}, raw, err
 	}
@@ -265,6 +286,13 @@ func (c *Client) Fetch(ctx context.Context, req FetchRequest) (int, FetchRespons
 		return status, FetchResponse{}, raw, fmt.Errorf("moonshottools: parsing fetch response: %w", err)
 	}
 	return status, response, raw, nil
+}
+
+// doWithRetry posts body to path and retries a transient answer.
+func (c *Client) doWithRetry(ctx context.Context, path string, body any) (int, []byte, error) {
+	return toolretry.Do(ctx, c.MaxRetries, func() (int, []byte, error) {
+		return c.do(ctx, path, body)
+	})
 }
 
 // logCall records a finished call: the endpoint, the status, how long it

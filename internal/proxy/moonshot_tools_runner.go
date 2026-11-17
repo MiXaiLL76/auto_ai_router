@@ -9,11 +9,11 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/moonshottools"
+	"github.com/mixaill76/auto_ai_router/internal/toolloop"
 )
 
-// moonshotToolState is the adapter's state for one client request: the tools
-// the model was given, what the tools returned, and what the model has
-// already been told.
+// moonshotToolState is the adapter's state for one client request: what the
+// tools returned and what the model has already been told.
 //
 // The counters are the billing evidence: only a successful, non-empty
 // Search, Search Pro or Fetch is charged, and a tool's result is charged
@@ -44,6 +44,9 @@ func newMoonshotToolState() *moonshotToolState {
 
 // moonshotToolRunner executes the adapter's tool calls and feeds the results
 // back to the model.
+//
+// It is the router's toolloop.Runner for Moonshot: it owns the three tools
+// Moonshot runs, runs them, and counts the billable ones.
 type moonshotToolRunner struct {
 	// client talks to Moonshot's Search, Search Pro and Fetch endpoints.
 	client *moonshottools.Client
@@ -59,12 +62,46 @@ type moonshotToolRunner struct {
 	state *moonshotToolState
 }
 
-// runSearch executes one Basic search and returns the tool result to send
-// back to the model.
+// Owns reports whether the tool is one the router runs for Moonshot.
+func (runner *moonshotToolRunner) Owns(name string) bool {
+	switch name {
+	case moonshottools.SearchToolName, moonshottools.SearchProToolName, moonshottools.FetchToolName:
+		return true
+	default:
+		return false
+	}
+}
+
+// Billable counts the successful calls, per tool.
+func (runner *moonshotToolRunner) Billable() map[string]int {
+	return map[string]int{
+		moonshottools.SearchToolName:    runner.state.billableSearch,
+		moonshottools.SearchProToolName: runner.state.billableSearchPro,
+		moonshottools.FetchToolName:     runner.state.billableFetch,
+	}
+}
+
+// Run executes one tool call and returns the result to send back to the
+// model.
 //
-// A failed search is not a billable event: the provider's error is handed to
+// A failed call is not a billable event: the provider's error is handed to
 // the model as the tool result, so the model can retry or answer without the
 // router inventing a price.
+func (runner *moonshotToolRunner) Run(ctx context.Context, name, arguments string) string {
+	switch name {
+	case moonshottools.SearchToolName:
+		return runner.runSearch(ctx, arguments)
+	case moonshottools.SearchProToolName:
+		return runner.runSearchPro(ctx, arguments)
+	case moonshottools.FetchToolName:
+		return runner.runFetch(ctx, arguments)
+	default:
+		return string(moonshottools.EncodeToolError(fmt.Sprintf("unknown tool %q", name)))
+	}
+}
+
+// runSearch executes one Basic search and returns the tool result to send
+// back to the model.
 func (runner *moonshotToolRunner) runSearch(ctx context.Context, arguments string) string {
 	args, err := moonshottools.ParseSearchArguments(arguments)
 	if err != nil {
@@ -207,8 +244,8 @@ func (runner *moonshotToolRunner) quotaAllowFetch(ctx context.Context) (bool, ti
 	return runner.quota.AllowFetch(ctx, runner.account)
 }
 
-// admit waits for the account's QPS pool to have room and reports whether
-// the call may go ahead.
+// admit waits for the account's QPS pool to have room and reports whether the
+// call may go ahead.
 //
 // A call that could not be admitted is not billed: the provider counts only
 // the calls it served, and a call the router never made is not one of them.
@@ -239,15 +276,6 @@ func moonshotToolsEnabledFor(modelID string, cred *config.CredentialConfig) bool
 	return isMoonshotModel(modelID)
 }
 
-// describeMoonshotToolPlan renders the plan for a log line.
-func describeMoonshotToolPlan(plan *moonshottools.ToolPlan) string {
-	if plan == nil {
-		return "none"
-	}
-	return fmt.Sprintf("search=%v search_pro=%v fetch=%v",
-		plan.NeedsSearch, plan.NeedsSearchPro, plan.NeedsFetch)
-}
-
 // isMoonshotModel reports whether the model is one of Moonshot's own (a
 // kimi model), which is what the router's search adapter serves.
 func isMoonshotModel(modelID string) bool {
@@ -255,8 +283,8 @@ func isMoonshotModel(modelID string) bool {
 	return strings.Contains(lowered, "kimi") || strings.Contains(lowered, "moonshot")
 }
 
-// moonshotAccountKey names the Moonshot account the calls belong to, for
-// the per-account QPS pools.
+// moonshotAccountKey names the Moonshot account the calls belong to, for the
+// per-account QPS pools.
 //
 // The account is the credential's name: Moonshot counts its limits per
 // account, and one credential here is one account. The key is namespaced by
@@ -268,3 +296,15 @@ func moonshotAccountKey(cred *config.CredentialConfig) string {
 	}
 	return string(cred.Type) + ":" + cred.Name
 }
+
+// describeMoonshotToolPlan renders the plan for a log line.
+func describeMoonshotToolPlan(plan *moonshottools.ToolPlan) string {
+	if plan == nil {
+		return "none"
+	}
+	return fmt.Sprintf("search=%v search_pro=%v fetch=%v",
+		plan.NeedsSearch, plan.NeedsSearchPro, plan.NeedsFetch)
+}
+
+// compile-time check: the runner is the router's tool loop's runner.
+var _ toolloop.Runner = (*moonshotToolRunner)(nil)

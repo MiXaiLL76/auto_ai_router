@@ -1,29 +1,43 @@
 package proxy
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
-	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	"github.com/mixaill76/auto_ai_router/internal/moonshottools"
+	"github.com/mixaill76/auto_ai_router/internal/toolloop"
 )
 
 // moonshotToolRun is the outcome of the router-run tool loop.
 type moonshotToolRun struct {
-	// body is the model's final answer, in the upstream's own Chat shape.
-	body []byte
-	// usage is the summed usage of every step of the loop.
-	usage *converter.TokenUsage
-	// searchCalls, searchProCalls and fetchCalls are the billable tool
+	// bodyBytes is the model's final answer, in the upstream's own Chat shape.
+	bodyBytes []byte
+	// usageValue is the summed usage of every step of the loop.
+	usageValue *converter.TokenUsage
+	// searchCount, searchProCount and fetchCount are the billable tool
 	// counts.
-	searchCalls    int
-	searchProCalls int
-	fetchCalls     int
+	searchCount    int
+	searchProCount int
+	fetchCount     int
 }
+
+// body is the model's final answer.
+func (r *moonshotToolRun) body() []byte { return r.bodyBytes }
+
+// usage is the summed usage of every step of the loop.
+func (r *moonshotToolRun) usage() *converter.TokenUsage { return r.usageValue }
+
+// searchCalls is the billable Basic search count.
+func (r *moonshotToolRun) searchCalls() int { return r.searchCount }
+
+// searchProCalls is the billable Pro search count.
+func (r *moonshotToolRun) searchProCalls() int { return r.searchProCount }
+
+// fetchCalls is the billable fetch count.
+func (r *moonshotToolRun) fetchCalls() int { return r.fetchCount }
 
 // runMoonshotToolLoop drives the router-run search/fetch loop for a
 // non-streaming request.
@@ -50,17 +64,10 @@ func (p *Proxy) runMoonshotToolLoop(
 	if !moonshotToolsEnabledFor(modelID, cred) {
 		return nil, nil
 	}
-	calls := moonshotToolCallsFromResponse(firstResponse)
+	runner := p.newMoonshotToolRunner(cred)
+	calls := toolloop.CallsFromResponse(firstResponse, runner)
 	if len(calls) == 0 {
 		return nil, nil
-	}
-
-	runner := &moonshotToolRunner{
-		client:  p.moonshotToolsClient(cred),
-		logger:  p.logger,
-		quota:   p.moonshotToolsQuota,
-		account: moonshotAccountKey(cred),
-		state:   newMoonshotToolState(),
 	}
 	if runner.client == nil {
 		// No Moonshot client could be built for this credential (no key):
@@ -69,37 +76,48 @@ func (p *Proxy) runMoonshotToolLoop(
 		return nil, nil
 	}
 
-	cycle, err := newMoonshotToolCycle(firstBody, runner)
+	cycle, err := toolloop.NewCycle(firstBody, runner)
 	if err != nil {
 		return nil, err
 	}
-	total := usageFromMoonshotResponse(firstResponse)
+	total := toolloop.UsageFromResponse(firstResponse)
 	current := firstResponse
 
 	for step := 1; step < p.moonshotToolsMaxSteps; step++ {
-		next, err := cycle.nextBody(current)
+		next, err := cycle.NextBody(r.Context(), current)
 		if err != nil {
-			return cycle.runResult(current, total, runner), err
+			return moonshotRunResult(current, total, runner), err
 		}
 		responseBody, err := p.runMoonshotToolStep(r, w, logCtx, prepared, cred, modelID, realModelID, next, start, attemptedCreds)
 		if err != nil {
 			// A tool that already ran and returned results is billed even
 			// though the model that followed it failed, so the result is
 			// returned with the error rather than dropped.
-			return cycle.runResult(current, total, runner), err
+			return moonshotRunResult(current, total, runner), err
 		}
-		total.add(usageFromMoonshotResponse(responseBody))
+		total.Add(toolloop.UsageFromResponse(responseBody))
 		current = responseBody
-		if len(moonshotToolCallsFromResponse(responseBody)) == 0 {
+		if len(toolloop.CallsFromResponse(responseBody, runner)) == 0 {
 			break
 		}
 	}
 
-	return cycle.runResult(current, total, runner), nil
+	return moonshotRunResult(current, total, runner), nil
 }
 
-// runMoonshotToolStep sends one upstream request of the loop and returns
-// the response body.
+// newMoonshotToolRunner builds the runner for a credential.
+func (p *Proxy) newMoonshotToolRunner(cred *config.CredentialConfig) *moonshotToolRunner {
+	return &moonshotToolRunner{
+		client:  p.moonshotToolsClient(cred),
+		logger:  p.logger,
+		quota:   p.moonshotToolsQuota,
+		account: moonshotAccountKey(cred),
+		state:   newMoonshotToolState(),
+	}
+}
+
+// runMoonshotToolStep sends one upstream request of the loop and returns the
+// response body.
 //
 // It reuses the router's own send path, so the upstream request is built,
 // authenticated and proxied exactly as the first attempt of a normal request
@@ -152,48 +170,39 @@ func (p *Proxy) moonshotToolsClient(cred *config.CredentialConfig) *moonshottool
 		ProxyURL:   cred.ProxyURL,
 		MaxRetries: p.moonshotToolsMaxRetries,
 		Logger:     p.logger,
+		// The cached client: the connections to Moonshot survive between
+		// the requests instead of being opened and dropped each time.
+		HTTPClient: p.moonshotToolsClients.Client(cred.BaseURL, cred.ProxyURL, p.moonshotToolsTimeout),
 	})
 }
 
-// runResult is the loop's outcome: the body so far, the usage every step
-// accumulated, and the tool counters.
+// moonshotRunResult is the loop's outcome: the body so far, the usage every
+// step accumulated, and the tool counters.
 //
 // The counters are read from the runner, not from the accumulated usage, so
 // a step that fails leaves the loop early and the search that already ran
 // and returned results is still billed -- "a successful tool counts even when
 // the model that follows it fails".
-func (cycle *moonshotToolCycle) runResult(body []byte, usage *moonshotToolUsage, runner *moonshotToolRunner) *moonshotToolRun {
-	usage.webSearchRequests = runner.state.billableSearch
-	usage.webSearchProRequests = runner.state.billableSearchPro
-	usage.webFetchRequests = runner.state.billableFetch
+func moonshotRunResult(body []byte, total *toolloop.Usage, runner *moonshotToolRunner) *moonshotToolRun {
+	billable := runner.Billable()
+	usage := &converter.TokenUsage{
+		PromptTokens:      total.PromptTokens,
+		CompletionTokens:  total.CompletionTokens,
+		CachedInputTokens: total.CachedInputTokens,
+		ReasoningTokens:   total.ReasoningTokens,
+		// The tool counters go into the Moonshot fields alone: they are
+		// Moonshot's own calls, priced by the tool price document, and the
+		// built-in tools' counters are the model's own -- counting the
+		// router's calls in both would charge the client twice.
+		MoonshotSearchRequests:    billable[moonshottools.SearchToolName],
+		MoonshotSearchProRequests: billable[moonshottools.SearchProToolName],
+		MoonshotFetchRequests:     billable[moonshottools.FetchToolName],
+	}
 	return &moonshotToolRun{
-		body:           body,
-		usage:          usage.toTokenUsage(),
-		searchCalls:    runner.state.billableSearch,
-		searchProCalls: runner.state.billableSearchPro,
-		fetchCalls:     runner.state.billableFetch,
+		bodyBytes:      body,
+		usageValue:     usage,
+		searchCount:    usage.MoonshotSearchRequests,
+		searchProCount: usage.MoonshotSearchProRequests,
+		fetchCount:     usage.MoonshotFetchRequests,
 	}
-}
-
-// moonshotToolCallsFromResponse reads the tool calls out of a Chat
-// Completions response, keeping only the ones the adapter owns.
-//
-// A client's own function tools are left out: the upstream serves them, and
-// the router does not run a client's tools on its behalf.
-func moonshotToolCallsFromResponse(body []byte) []openai.OpenAIToolCall {
-	var response openai.OpenAIResponse
-	if err := json.Unmarshal(body, &response); err != nil {
-		return nil
-	}
-	if len(response.Choices) == 0 {
-		return nil
-	}
-	calls := make([]openai.OpenAIToolCall, 0, len(response.Choices[0].Message.ToolCalls))
-	for _, call := range response.Choices[0].Message.ToolCalls {
-		switch call.Function.Name {
-		case moonshottools.SearchToolName, moonshottools.SearchProToolName, moonshottools.FetchToolName:
-			calls = append(calls, call)
-		}
-	}
-	return calls
 }

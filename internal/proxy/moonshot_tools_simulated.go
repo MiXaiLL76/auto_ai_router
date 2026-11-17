@@ -6,6 +6,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
+	"github.com/mixaill76/auto_ai_router/internal/toolloop"
 )
 
 // moonshotSimulatedLoop runs the router-run tool loop over the simulated
@@ -35,17 +36,10 @@ func (p *Proxy) moonshotSimulatedLoop(
 	if !moonshotToolsEnabledFor(modelID, cred) {
 		return assembled, nil, 0, 0, 0, nil
 	}
-	calls := moonshotToolCallsFromResponse(assembled)
+	runner := p.newMoonshotToolRunner(cred)
+	calls := toolloop.CallsFromResponse(assembled, runner)
 	if len(calls) == 0 {
 		return assembled, nil, 0, 0, 0, nil
-	}
-
-	runner := &moonshotToolRunner{
-		client:  p.moonshotToolsClient(cred),
-		logger:  p.logger,
-		quota:   p.moonshotToolsQuota,
-		account: moonshotAccountKey(cred),
-		state:   newMoonshotToolState(),
 	}
 	if runner.client == nil {
 		// No key: the tool cannot be run, so the client's answer is the
@@ -53,29 +47,42 @@ func (p *Proxy) moonshotSimulatedLoop(
 		return assembled, nil, 0, 0, 0, nil
 	}
 
-	cycle, err := newMoonshotToolCycle(requestBody, runner)
+	cycle, err := toolloop.NewCycle(requestBody, runner)
 	if err != nil {
 		return assembled, nil, 0, 0, 0, err
 	}
-	total := usageFromMoonshotResponse(assembled)
+	total := toolloop.UsageFromResponse(assembled)
 	current := assembled
 
 	for step := 1; step < p.moonshotToolsMaxSteps; step++ {
-		next, err := cycle.nextBody(current)
+		next, err := cycle.NextBody(r.Context(), current)
 		if err != nil {
-			return cycle.result(current, total, runner, err)
+			return moonshotSimulatedResult(current, total, runner, err)
 		}
 		body, usage, err := p.moonshotSimulatedStep(r, w, logCtx, prepared, cred, modelID, realModelID, next, start, attemptedCreds)
 		if err != nil {
-			return cycle.result(current, total, runner, err)
+			return moonshotSimulatedResult(current, total, runner, err)
 		}
-		total.add(usage)
+		total.Add(usage)
 		current = body
-		if len(moonshotToolCallsFromResponse(body)) == 0 {
+		if len(toolloop.CallsFromResponse(body, runner)) == 0 {
 			break
 		}
 	}
-	return cycle.result(current, total, runner, nil)
+	return moonshotSimulatedResult(current, total, runner, nil)
+}
+
+// moonshotSimulatedResult is the loop's outcome: the reassembled body, the
+// summed usage, and the tool counters.
+//
+// The counters are read from the runner, not from the accumulated usage, so
+// a step that fails leaves the loop early and the search that already ran
+// and returned results is still billed -- "a successful tool counts even when
+// the model that follows it fails".
+func moonshotSimulatedResult(body []byte, total *toolloop.Usage, runner *moonshotToolRunner, err error) ([]byte, *converter.TokenUsage, int, int, int, error) {
+	usage := moonshotUsageOf(total, runner.Billable())
+	return body, usage,
+		usage.MoonshotSearchRequests, usage.MoonshotSearchProRequests, usage.MoonshotFetchRequests, err
 }
 
 // moonshotSimulatedStep sends one upstream request of the simulated loop and
@@ -94,7 +101,7 @@ func (p *Proxy) moonshotSimulatedStep(
 	body []byte,
 	start time.Time,
 	attemptedCreds map[string]bool,
-) ([]byte, *moonshotToolUsage, error) {
+) ([]byte, *toolloop.Usage, error) {
 	embedFanOutReplies := embedContentFanOutReplies{}
 	outcome, done, isClientGone, shouldRetry, _, transportErr := p.sendToCredential(
 		r, w, logCtx, cred, prepared, modelID, realModelID, body,
@@ -116,24 +123,13 @@ func (p *Proxy) moonshotSimulatedStep(
 		}
 		return nil, nil, &upstreamStatusError{status: outcome.resp.StatusCode, body: responseBody}
 	}
-	raw, _, usage, err := collectMoonshotStreamToolCalls(outcome.resp)
+	raw, err := readAndCloseResponseBody(outcome.resp)
 	if err != nil {
 		return nil, nil, err
 	}
-	return reassembleChatCompletion(raw), usageFromMoonshotStreamUsage(usage), nil
-}
-
-// result is the loop's outcome: the reassembled body, the summed usage, and
-// the tool counters.
-func (cycle *moonshotToolCycle) result(
-	body []byte,
-	total *moonshotToolUsage,
-	runner *moonshotToolRunner,
-	err error,
-) ([]byte, *converter.TokenUsage, int, int, int, error) {
-	total.webSearchRequests = runner.state.billableSearch
-	total.webSearchProRequests = runner.state.billableSearchPro
-	total.webFetchRequests = runner.state.billableFetch
-	return body, total.toTokenUsage(),
-		runner.state.billableSearch, runner.state.billableSearchPro, runner.state.billableFetch, err
+	assembled := reassembleChatCompletion(raw)
+	if len(assembled) == 0 {
+		return nil, nil, errMoonshotToolCycleAborted
+	}
+	return assembled, toolloop.UsageFromResponse(assembled), nil
 }
