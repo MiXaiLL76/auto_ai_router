@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -333,5 +334,60 @@ func TestTimeoutIsReportedAsAnError(t *testing.T) {
 	}
 	if time.Since(started) > time.Second {
 		t.Errorf("the call took %s, want it to give up at the timeout", time.Since(started))
+	}
+}
+
+// TestTransientAnswersAreRetried checks the retry rule: a 429 or a 5xx is
+// retried (the provider asks for it, and the router's own QPS limiter makes
+// traffic near the limit ordinary), while another 4xx is returned as it is
+// -- retrying it would only waste the account's quota.
+func TestTransientAnswersAreRetried(t *testing.T) {
+	cases := []struct {
+		name      string
+		status    int
+		wantCalls int
+	}{
+		{name: "429 is retried", status: http.StatusTooManyRequests, wantCalls: 3},
+		{name: "503 is retried", status: http.StatusServiceUnavailable, wantCalls: 3},
+		{name: "400 is not retried", status: http.StatusBadRequest, wantCalls: 1},
+		{name: "401 is not retried", status: http.StatusUnauthorized, wantCalls: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				calls++
+				mu.Unlock()
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(`{"error":{"message":"try again"}}`))
+			}))
+			defer server.Close()
+
+			client := NewClient(ClientConfig{
+				BaseURL:    server.URL,
+				APIKey:     "k",
+				Timeout:    5 * time.Second,
+				MaxRetries: 2,
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			status, _, _, err := client.Search(ctx, SearchRequest{TextQuery: "q"})
+			if err != nil {
+				t.Fatalf("Search: %v", err)
+			}
+			if status != tc.status {
+				t.Errorf("status = %d, want %d", status, tc.status)
+			}
+			mu.Lock()
+			got := calls
+			mu.Unlock()
+			if got != tc.wantCalls {
+				t.Errorf("the provider was called %d times, want %d", got, tc.wantCalls)
+			}
+		})
 	}
 }

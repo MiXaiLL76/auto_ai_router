@@ -650,7 +650,7 @@ func (p *Proxy) handleSimulatedNonStream(
 		var loopUsage *converter.TokenUsage
 		var searches, searchProCalls, fetches int
 		var loopErr error
-		if moonshotToolsEnabledFor(modelID, cred) {
+		if p.moonshotToolsEnabled && moonshotToolsEnabledFor(modelID, cred) {
 			assembled, loopUsage, searches, searchProCalls, fetches, loopErr = p.moonshotSimulatedLoop(
 				r, w, logCtx, prepared, cred, modelID, realModelID, requestBody,
 				result.finalChatBody, start, attemptedCreds)
@@ -660,7 +660,10 @@ func (p *Proxy) handleSimulatedNonStream(
 				result.finalChatBody, start, attemptedCreds)
 		}
 		switch {
-		case errors.Is(loopErr, errDeepSeekToolCycleAborted):
+		case errToolLoopAborted(loopErr):
+			// The client went away (or the provider's response was already
+			// handled): the loop stops here, and the router must not write
+			// anything else to the dead connection.
 			return
 		case loopErr != nil:
 			p.logger.WarnContext(r.Context(), "The router-run search/fetch loop failed",

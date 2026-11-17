@@ -496,7 +496,7 @@ credentials:
     deepseek_tools: true   # the provider runs its own Search and Fetch tools
 ```
 
-The adapter is off for every request that did not ask for one of the built-in tools, and for every credential without the opt-in.
+The adapter is off for every request that did not ask for one of the built-in tools, and for every credential without the opt-in. `server.deepseek_tools.enabled: false` is the kill-switch: the adapter stops entirely, for a provider outage or a runaway cost.
 
 ## The router-run Moonshot Search, Search Pro and Fetch tools
 
@@ -581,6 +581,6 @@ credentials:
     moonshot_tools: true   # the provider runs its own Search, Search Pro and Fetch tools
 ```
 
-The adapter is off for every request that did not ask for one of the built-in tools, and for every credential without the opt-in.
+The adapter is off for every request that did not ask for one of the built-in tools, and for every credential without the opt-in. `server.moonshot_tools.enabled: false` is the kill-switch: the adapter stops entirely, for a provider outage or a runaway cost.
 
 The whole exchange — the client's request, the router's call to Moonshot, the tool result going back to the model and the spend row — is shown with real bodies in [docs/moonshot-tools.md](../moonshot-tools.md).

@@ -47,6 +47,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/responsestore"
 	"github.com/mixaill76/auto_ai_router/internal/scope"
 	"github.com/mixaill76/auto_ai_router/internal/security"
+	"github.com/mixaill76/auto_ai_router/internal/toolhttp"
 	"github.com/mixaill76/auto_ai_router/internal/utils"
 	"github.com/valkey-io/valkey-go"
 	"go.opentelemetry.io/otel/attribute"
@@ -720,21 +721,29 @@ type Proxy struct {
 	deepSeekToolsMaxSteps        int                  // bound of the router-run tool loop
 	deepSeekToolsMaxRetries      int                  // retries of a Search/Fetch call after a 429 or 5xx
 	deepSeekToolsQuota           *deepseektools.Quota // per-account QPS pools for Search and Fetch
+	// deepSeekToolsClients holds one client per distinct destination, so the
+	// router's calls to DeepSeek reuse the connections between the requests
+	// instead of paying a fresh handshake each time.
+	deepSeekToolsClients *toolhttp.Cache
 
 	// The router-run Moonshot Search/Search Pro/Fetch adapter: the built-in
 	// $web_search was switched off, and its replacement is Moonshot's own
 	// REST APIs, which the model cannot reach by itself.
-	moonshotToolsEnabled             bool                 // the router runs Moonshot's own search/fetch tools for models that cannot
-	moonshotToolsTimeout             time.Duration        // timeout of one Search/Search Pro/Fetch call
-	moonshotToolsMaxSteps            int                  // bound of the router-run tool loop
-	moonshotToolsMaxRetries          int                  // retries of a call after a 429 or 5xx
-	moonshotToolsQuota               *moonshottools.Quota // per-account QPS pools for Search, Search Pro and Fetch
-	responseStore                    responsestore.Store  // Optional: Responses API store (bbolt or Redis)
-	sessionStore                     sessionBindingStore  // Optional: session-sticky credential routing
-	stickyAutoCacheCtrl              bool                 // Auto-inject Anthropic cache_control when session is active
-	drainUpstreamOnAbort             bool                 // Keep reading upstream after client disconnect to get real usage chunk
-	forceStreamForTTFT               bool                 // Force stream:true upstream for non-streaming chat requests and reassemble the response back to non-stream JSON (TTFT on every request)
-	tiktokenEnabled                  bool                 // Local tiktoken-based prompt/completion token fallback estimation
+	moonshotToolsEnabled    bool                 // the router runs Moonshot's own search/fetch tools for models that cannot
+	moonshotToolsTimeout    time.Duration        // timeout of one Search/Search Pro/Fetch call
+	moonshotToolsMaxSteps   int                  // bound of the router-run tool loop
+	moonshotToolsMaxRetries int                  // retries of a call after a 429 or 5xx
+	moonshotToolsQuota      *moonshottools.Quota // per-account QPS pools for Search, Search Pro and Fetch
+	// moonshotToolsClients holds one client per distinct destination, so the
+	// router's calls to Moonshot reuse the connections between the requests
+	// instead of paying a fresh handshake each time.
+	moonshotToolsClients             *toolhttp.Cache
+	responseStore                    responsestore.Store // Optional: Responses API store (bbolt or Redis)
+	sessionStore                     sessionBindingStore // Optional: session-sticky credential routing
+	stickyAutoCacheCtrl              bool                // Auto-inject Anthropic cache_control when session is active
+	drainUpstreamOnAbort             bool                // Keep reading upstream after client disconnect to get real usage chunk
+	forceStreamForTTFT               bool                // Force stream:true upstream for non-streaming chat requests and reassemble the response back to non-stream JSON (TTFT on every request)
+	tiktokenEnabled                  bool                // Local tiktoken-based prompt/completion token fallback estimation
 	strictAllTeamModelsACL           bool
 	responseHeaderMode               config.ResponseHeaderMode
 	credentialNameAsTeamID           bool
@@ -859,8 +868,6 @@ func New(cfg *Config) *Proxy {
 		maxProviderRetries:               cfg.MaxProviderRetries,
 		maxFallbackAttempts:              cfg.MaxFallbackAttempts,
 		anthropicDefaultMaxTokens:        cfg.AnthropicDefaultMaxTokens,
-		deepSeekToolsEnabled:             cfg.DeepSeekTools.Enabled,
-		moonshotToolsEnabled:             cfg.MoonshotTools.Enabled,
 		moonshotToolsTimeout:             cfg.MoonshotTools.RequestTimeout,
 		moonshotToolsMaxSteps:            cfg.MoonshotTools.MaxSteps,
 		moonshotToolsMaxRetries:          cfg.MoonshotTools.MaxRetries,
@@ -900,8 +907,9 @@ func New(cfg *Config) *Proxy {
 	// The adapter is on unless the configuration turns it off: it only ever
 	// engages for a credential that asked for it (the deepseek_tools opt-in)
 	// and a request that asked for one of the built-in tools, so leaving it
-	// on by default costs nothing on every other request.
-	p.deepSeekToolsEnabled = true
+	// on by default costs nothing on every other request. An explicit false
+	// is the kill-switch, for a provider outage or a runaway cost.
+	p.deepSeekToolsEnabled = cfg.DeepSeekTools.Enabled == nil || *cfg.DeepSeekTools.Enabled
 	if p.deepSeekToolsTimeout <= 0 {
 		p.deepSeekToolsTimeout = config.DefaultDeepSeekToolsRequestTimeout
 	}
@@ -920,13 +928,16 @@ func New(cfg *Config) *Proxy {
 		cfg.DeepSeekTools.SearchQPS,
 		cfg.DeepSeekTools.FetchQPS,
 	)
+	p.deepSeekToolsClients = toolhttp.NewCache()
 
 	// The Moonshot adapter's settings fall back to their defaults, so an
 	// absent section still gives a working adapter with the provider's own
 	// limits. It is on unless the configuration turns it off: it only ever
 	// engages for a credential that asked for it (the moonshot_tools
-	// opt-in) and a request that asked for one of the built-in tools.
-	p.moonshotToolsEnabled = true
+	// opt-in) and a request that asked for one of the built-in tools. An
+	// explicit false is the kill-switch, for a provider outage or a runaway
+	// cost.
+	p.moonshotToolsEnabled = cfg.MoonshotTools.Enabled == nil || *cfg.MoonshotTools.Enabled
 	if p.moonshotToolsTimeout <= 0 {
 		p.moonshotToolsTimeout = config.DefaultMoonshotToolsRequestTimeout
 	}
@@ -946,6 +957,7 @@ func New(cfg *Config) *Proxy {
 		cfg.MoonshotTools.SearchProQPS,
 		cfg.MoonshotTools.FetchQPS,
 	)
+	p.moonshotToolsClients = toolhttp.NewCache()
 	return p
 }
 
@@ -3352,57 +3364,49 @@ dispatch:
 			// The two adapters never overlap: each engages only for its own
 			// provider's credential (deepseek_tools / moonshot_tools), so
 			// exactly one of them can run for a request.
+			// The two adapters never overlap: each engages only for its own
+			// provider's credential (deepseek_tools / moonshot_tools), so
+			// exactly one of them can run for a request. Both answer with the
+			// same shape, so the dispatch is one block.
+			var toolRun toolLoopRun
+			var toolErr error
+			if p.moonshotToolsEnabled && moonshotToolsEnabledFor(modelID, cred) {
+				moonshotRun, moonshotErr := p.runMoonshotToolLoop(r, w, logCtx, prepared, cred, modelID, realModelID,
+					body, []byte(decodedBody), start, attemptedCreds)
+				toolErr = moonshotErr
+				if moonshotRun != nil {
+					toolRun = moonshotRun
+				}
+			} else {
+				deepSeekRun, deepSeekErr := p.runDeepSeekToolLoop(r, w, logCtx, prepared, cred, modelID, realModelID,
+					body, []byte(decodedBody), start, attemptedCreds)
+				toolErr = deepSeekErr
+				if deepSeekRun != nil {
+					toolRun = deepSeekRun
+				}
+			}
 			switch {
-			case moonshotToolsEnabledFor(modelID, cred):
-				toolRun, toolErr := p.runMoonshotToolLoop(r, w, logCtx, prepared, cred, modelID, realModelID,
-					body, []byte(decodedBody), start, attemptedCreds)
-				switch {
-				case toolErr != nil:
-					if errors.Is(toolErr, errMoonshotToolCycleAborted) {
-						return
-					}
-					p.logger.WarnContext(r.Context(), "The router-run search/fetch loop failed",
-						"model", modelID, "credential", cred.Name, "error", toolErr,
-						"request_id", logCtx.RequestID)
-					// A tool that already ran and returned results is billed
-					// even though the model that followed it failed, so the
-					// loop's usage rides along here too.
-					if toolRun != nil {
-						deepSeekToolUsage = toolRun.usage
-					}
-				case toolRun != nil:
-					decodedBody = string(toolRun.body)
-					deepSeekToolUsage = toolRun.usage
-					p.logger.DebugContext(r.Context(), "The router ran the model's search/fetch tools",
-						"model", modelID, "credential", cred.Name,
-						"search_calls", toolRun.searchCalls,
-						"search_pro_calls", toolRun.searchProCalls,
-						"fetch_calls", toolRun.fetchCalls)
+			case toolErr != nil:
+				if errToolLoopAborted(toolErr) {
+					return
 				}
-			default:
-				toolRun, toolErr := p.runDeepSeekToolLoop(r, w, logCtx, prepared, cred, modelID, realModelID,
-					body, []byte(decodedBody), start, attemptedCreds)
-				switch {
-				case toolErr != nil:
-					if errors.Is(toolErr, errDeepSeekToolCycleAborted) {
-						return
-					}
-					p.logger.WarnContext(r.Context(), "The router-run search/fetch loop failed",
-						"model", modelID, "credential", cred.Name, "error", toolErr,
-						"request_id", logCtx.RequestID)
-					// A tool that already ran and returned results is billed even
-					// though the model that followed it failed, so the loop's usage
-					// rides along here too.
-					if toolRun != nil {
-						deepSeekToolUsage = toolRun.usage
-					}
-				case toolRun != nil:
-					decodedBody = string(toolRun.body)
-					deepSeekToolUsage = toolRun.usage
-					p.logger.DebugContext(r.Context(), "The router ran the model's search/fetch tools",
-						"model", modelID, "credential", cred.Name,
-						"search_calls", toolRun.searchCalls, "fetch_calls", toolRun.fetchCalls)
+				p.logger.WarnContext(r.Context(), "The router-run search/fetch loop failed",
+					"model", modelID, "credential", cred.Name, "error", toolErr,
+					"request_id", logCtx.RequestID)
+				// A tool that already ran and returned results is billed even
+				// though the model that followed it failed, so the loop's
+				// usage rides along here too.
+				if toolRun != nil {
+					deepSeekToolUsage = toolRun.usage()
 				}
+			case toolRun != nil:
+				decodedBody = string(toolRun.body())
+				deepSeekToolUsage = toolRun.usage()
+				p.logger.DebugContext(r.Context(), "The router ran the model's search/fetch tools",
+					"model", modelID, "credential", cred.Name,
+					"search_calls", toolRun.searchCalls(),
+					"search_pro_calls", toolRun.searchProCalls(),
+					"fetch_calls", toolRun.fetchCalls())
 			}
 		}
 
@@ -3956,12 +3960,24 @@ dispatch:
 					}
 				}
 				switch {
-				case errors.Is(streamErr, errDeepSeekToolCycleAborted):
+				case errToolLoopAborted(streamErr):
+					// The client went away (or the provider's response was
+					// already handled): the loop stops here, and the router
+					// must not write anything else to the dead connection.
 					return
 				case streamErr != nil:
 					p.logger.WarnContext(r.Context(), "The router-run search/fetch loop failed",
 						"model", modelID, "credential", cred.Name, "error", streamErr,
 						"request_id", logCtx.RequestID)
+					// A tool that already ran and returned results is billed
+					// even though the model that followed it failed, so the
+					// loop's usage rides along here too.
+					if streamLoopRan && loopUsage != nil {
+						if logCtx.TokenUsage == nil {
+							logCtx.TokenUsage = &converter.TokenUsage{}
+						}
+						applyDeepSeekToolUsageTo(logCtx.TokenUsage, loopUsage)
+					}
 					err := p.handleProviderStreaming(w, resp, cred, realModelID, modelID, logCtx)
 					if err != nil {
 						p.logStreamHandlerError(r.Context(), "Failed to handle provider streaming response", err,

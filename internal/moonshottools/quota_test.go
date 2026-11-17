@@ -56,13 +56,32 @@ func TestQuotaIsPerAccount(t *testing.T) {
 // unconfigured quota uses the provider's own account-level limits.
 func TestQuotaDefaultsAreTheProviderLimits(t *testing.T) {
 	quota := NewQuota(nil, "test:", 0, 0, 0)
-	if quota.searchQPS != DefaultSearchQPS {
-		t.Errorf("the search limit = %d, want %d", quota.searchQPS, DefaultSearchQPS)
+	ctx := context.Background()
+
+	// The Basic search pool takes the provider's own limit: the 101st call
+	// inside one second is refused.
+	for i := 0; i < DefaultSearchQPS; i++ {
+		admitted, _, err := quota.AllowSearch(ctx, "account")
+		if err != nil {
+			t.Fatalf("AllowSearch: %v", err)
+		}
+		if !admitted {
+			t.Fatalf("call %d was not admitted, want the limit of %d", i, DefaultSearchQPS)
+		}
 	}
-	if quota.searchProQPS != DefaultSearchProQPS {
-		t.Errorf("the search_pro limit = %d, want %d", quota.searchProQPS, DefaultSearchProQPS)
+	admitted, _, err := quota.AllowSearch(ctx, "account")
+	if err != nil {
+		t.Fatalf("AllowSearch: %v", err)
 	}
-	if quota.fetchQPS != DefaultFetchQPS {
-		t.Errorf("the fetch limit = %d, want %d", quota.fetchQPS, DefaultFetchQPS)
+	if admitted {
+		t.Errorf("call %d was admitted, want the limit of %d", DefaultSearchQPS, DefaultSearchQPS)
+	}
+
+	// The other pools have their own budgets.
+	if admitted, _, _ := quota.AllowSearchPro(ctx, "account"); !admitted {
+		t.Error("the Pro search must have its own budget")
+	}
+	if admitted, _, _ := quota.AllowFetch(ctx, "account"); !admitted {
+		t.Error("the fetch must have its own budget")
 	}
 }

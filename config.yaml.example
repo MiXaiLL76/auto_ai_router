@@ -28,6 +28,7 @@ server:
   # the router calls them with the credential's key and bills the calls apart
   # from the model's tokens. A credential opts in with `deepseek_tools: true`.
   # deepseek_tools:
+  #   enabled: true  # The kill-switch: false turns the adapter off (default: on, i.e. absent or true)
   #   request_timeout: 30s  # Timeout of one Search or Fetch call (default: 30s)
   #   search_qps: 100  # Per-account Search limit (default: 100, the provider's own limit)
   #   fetch_qps: 25  # Per-account Fetch limit (default: 25, the provider's own limit)
@@ -40,6 +41,7 @@ server:
   # key and bills the calls apart from the model's tokens. A credential opts
   # in with `moonshot_tools: true`.
   # moonshot_tools:
+  #   enabled: true  # The kill-switch: false turns the adapter off (default: on, i.e. absent or true)
   #   request_timeout: 30s  # Timeout of one Search, Search Pro or Fetch call (default: 30s)
   #   search_qps: 100  # Per-account Basic search limit (default: 100, the provider's own limit)
   #   search_pro_qps: 100  # Per-account Pro search limit (default: 100, the provider's own limit)

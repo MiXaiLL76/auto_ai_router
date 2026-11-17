@@ -493,7 +493,7 @@ func (p *Proxy) sanitizeClientParams(r *http.Request, modelID string, cred *conf
 // run the tools itself, a request without them, or a credential that is not
 // DeepSeek's.
 func (p *Proxy) applyDeepSeekToolTools(r *http.Request, modelID string, cred *config.CredentialConfig, body []byte) []byte {
-	if !deepSeekToolsEnabledFor(modelID, cred) {
+	if !p.deepSeekToolsEnabled || !deepSeekToolsEnabledFor(modelID, cred) {
 		return body
 	}
 	plan := deepseektools.PlanTools(body)

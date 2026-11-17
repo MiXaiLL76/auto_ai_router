@@ -473,10 +473,11 @@ func resolveAliasesInNode(node *yaml.Node, anchors map[string]*yaml.Node) {
 // /v1/tools/search and /v1/tools/fetch endpoints with the credential's key
 // and bills the calls separately from the model's tokens.
 type DeepSeekToolsConfig struct {
-	// Enabled turns the adapter on (default: true when the section is
-	// present; the adapter only ever engages for a DeepSeek credential that
-	// was asked for one of the built-in tools).
-	Enabled bool `yaml:"enabled"`
+	// Enabled turns the adapter on. Unset means on: the adapter only ever
+	// engages for a DeepSeek credential that was asked for one of the
+	// built-in tools, so it costs nothing on every other request. False is
+	// the kill-switch -- for a provider outage or a runaway cost.
+	Enabled *bool `yaml:"enabled"`
 	// RequestTimeout bounds one Search or Fetch call (default: 30s).
 	RequestTimeout time.Duration `yaml:"request_timeout"`
 	// SearchQPS is the per-account Search limit (default: 100, the
@@ -495,6 +496,43 @@ type DeepSeekToolsConfig struct {
 	MaxRetries int `yaml:"max_retries"`
 }
 
+// UnmarshalYAML implements custom unmarshaling for DeepSeekToolsConfig with
+// env variable support.
+func (d *DeepSeekToolsConfig) UnmarshalYAML(value *yaml.Node) error {
+	type temp struct {
+		Enabled        string `yaml:"enabled"`
+		RequestTimeout string `yaml:"request_timeout"`
+		SearchQPS      string `yaml:"search_qps"`
+		FetchQPS       string `yaml:"fetch_qps"`
+		MaxSteps       string `yaml:"max_steps"`
+		MaxRetries     string `yaml:"max_retries"`
+	}
+	var t temp
+	if err := value.Decode(&t); err != nil {
+		return err
+	}
+	var err error
+	if d.Enabled, err = parseOptionalBool(t.Enabled, "deepseek_tools.enabled"); err != nil {
+		return err
+	}
+	if d.RequestTimeout, err = parseField(t.RequestTimeout, DefaultDeepSeekToolsRequestTimeout, time.ParseDuration, "deepseek_tools.request_timeout"); err != nil {
+		return err
+	}
+	if d.SearchQPS, err = parseField(t.SearchQPS, DefaultDeepSeekSearchQPS, strconv.Atoi, "deepseek_tools.search_qps"); err != nil {
+		return err
+	}
+	if d.FetchQPS, err = parseField(t.FetchQPS, DefaultDeepSeekFetchQPS, strconv.Atoi, "deepseek_tools.fetch_qps"); err != nil {
+		return err
+	}
+	if d.MaxSteps, err = parseField(t.MaxSteps, DefaultDeepSeekToolsMaxSteps, strconv.Atoi, "deepseek_tools.max_steps"); err != nil {
+		return err
+	}
+	if d.MaxRetries, err = parseField(t.MaxRetries, DefaultDeepSeekToolsMaxRetries, strconv.Atoi, "deepseek_tools.max_retries"); err != nil {
+		return err
+	}
+	return nil
+}
+
 // MoonshotToolsConfig holds the settings of the router-run Moonshot
 // Search/Search Pro/Fetch adapter.
 //
@@ -504,10 +542,11 @@ type DeepSeekToolsConfig struct {
 // /v1/tools/fetch with the credential's key and bills the calls separately
 // from the model's tokens.
 type MoonshotToolsConfig struct {
-	// Enabled turns the adapter on (default: true when the section is
-	// present; the adapter only ever engages for a Moonshot credential that
-	// was asked for one of the built-in tools).
-	Enabled bool `yaml:"enabled"`
+	// Enabled turns the adapter on. Unset means on: the adapter only ever
+	// engages for a Moonshot credential that was asked for one of the
+	// built-in tools, so it costs nothing on every other request. False is
+	// the kill-switch -- for a provider outage or a runaway cost.
+	Enabled *bool `yaml:"enabled"`
 	// RequestTimeout bounds one Search, Search Pro or Fetch call
 	// (default: 30s).
 	RequestTimeout time.Duration `yaml:"request_timeout"`
@@ -524,6 +563,47 @@ type MoonshotToolsConfig struct {
 	// MaxRetries is how many times a call is retried after a 429 or a 5xx
 	// (default: 2). Other 4xx answers are not retried.
 	MaxRetries int `yaml:"max_retries"`
+}
+
+// UnmarshalYAML implements custom unmarshaling for MoonshotToolsConfig with
+// env variable support.
+func (m *MoonshotToolsConfig) UnmarshalYAML(value *yaml.Node) error {
+	type temp struct {
+		Enabled        string `yaml:"enabled"`
+		RequestTimeout string `yaml:"request_timeout"`
+		SearchQPS      string `yaml:"search_qps"`
+		SearchProQPS   string `yaml:"search_pro_qps"`
+		FetchQPS       string `yaml:"fetch_qps"`
+		MaxSteps       string `yaml:"max_steps"`
+		MaxRetries     string `yaml:"max_retries"`
+	}
+	var t temp
+	if err := value.Decode(&t); err != nil {
+		return err
+	}
+	var err error
+	if m.Enabled, err = parseOptionalBool(t.Enabled, "moonshot_tools.enabled"); err != nil {
+		return err
+	}
+	if m.RequestTimeout, err = parseField(t.RequestTimeout, DefaultMoonshotToolsRequestTimeout, time.ParseDuration, "moonshot_tools.request_timeout"); err != nil {
+		return err
+	}
+	if m.SearchQPS, err = parseField(t.SearchQPS, DefaultMoonshotSearchQPS, strconv.Atoi, "moonshot_tools.search_qps"); err != nil {
+		return err
+	}
+	if m.SearchProQPS, err = parseField(t.SearchProQPS, DefaultMoonshotSearchProQPS, strconv.Atoi, "moonshot_tools.search_pro_qps"); err != nil {
+		return err
+	}
+	if m.FetchQPS, err = parseField(t.FetchQPS, DefaultMoonshotFetchQPS, strconv.Atoi, "moonshot_tools.fetch_qps"); err != nil {
+		return err
+	}
+	if m.MaxSteps, err = parseField(t.MaxSteps, DefaultMoonshotToolsMaxSteps, strconv.Atoi, "moonshot_tools.max_steps"); err != nil {
+		return err
+	}
+	if m.MaxRetries, err = parseField(t.MaxRetries, DefaultMoonshotToolsMaxRetries, strconv.Atoi, "moonshot_tools.max_retries"); err != nil {
+		return err
+	}
+	return nil
 }
 
 // DefaultDeepSeekToolsRequestTimeout is the default timeout of one
@@ -550,6 +630,17 @@ const DefaultMoonshotToolsMaxRetries = 2
 // DefaultDeepSeekToolsMaxRetries is the default number of retries of a
 // Search/Fetch call.
 const DefaultDeepSeekToolsMaxRetries = 2
+
+// The per-account QPS limits the providers themselves publish: DeepSeek's
+// 100 for Search and 25 for Fetch, Moonshot's 100 for Search, 100 for Search
+// Pro and 25 for Fetch.
+const (
+	DefaultDeepSeekSearchQPS    = 100
+	DefaultDeepSeekFetchQPS     = 25
+	DefaultMoonshotSearchQPS    = 100
+	DefaultMoonshotSearchProQPS = 100
+	DefaultMoonshotFetchQPS     = 25
+)
 
 // RedisConfig holds configuration for Redis/Valkey-backed distributed rate limiting.
 // When Enabled=false the rate limiter falls back to in-process counters.
@@ -927,11 +1018,27 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		ProxyHealthTimeout         string                `yaml:"proxy_health_timeout"`
 		ResponseHeaders            ResponseHeadersConfig `yaml:"response_headers"`
 		MirrorCacheWriteTokens     string                `yaml:"mirror_cache_write_tokens"`
+		DeepSeekTools              DeepSeekToolsConfig   `yaml:"deepseek_tools,omitempty"`
+		MoonshotTools              MoonshotToolsConfig   `yaml:"moonshot_tools,omitempty"`
 	}
 
 	var temp tempConfig
 	if err := value.Decode(&temp); err != nil {
 		return err
+	}
+
+	// The router-run tool adapters' own sections: each has its own
+	// unmarshaling (the kill-switch and the limits), so they are decoded
+	// from the node directly.
+	if node := mappingValue(value, "deepseek_tools"); node != nil {
+		if err := node.Decode(&s.DeepSeekTools); err != nil {
+			return err
+		}
+	}
+	if node := mappingValue(value, "moonshot_tools"); node != nil {
+		if err := node.Decode(&s.MoonshotTools); err != nil {
+			return err
+		}
 	}
 
 	// Resolve and parse each field
@@ -2466,6 +2573,26 @@ func hasMappingKey(node *yaml.Node, key string) bool {
 		}
 	}
 	return false
+}
+
+// mappingValue returns the value node of key in the top-level mapping, or
+// nil when the key is absent.
+func mappingValue(node *yaml.Node, key string) *yaml.Node {
+	if node == nil {
+		return nil
+	}
+	if node.Kind == yaml.DocumentNode && len(node.Content) > 0 {
+		node = node.Content[0]
+	}
+	if node.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == key {
+			return node.Content[i+1]
+		}
+	}
+	return nil
 }
 
 // mappingValueIsNull reports whether key is present in the top-level mapping with an

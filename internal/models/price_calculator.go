@@ -38,6 +38,16 @@ const (
 	// ToolWebFetch is the built-in web fetch tool: a page fetch the router
 	// executed, billed per successful call (one that returned page content).
 	ToolWebFetch = "web_fetch"
+	// ToolMoonshotSearch is the Moonshot Basic search the router ran on the
+	// model's behalf: the provider's own search API, billed per successful
+	// call (one that returned results), apart from the model's tokens.
+	ToolMoonshotSearch = "moonshot_search"
+	// ToolMoonshotSearchPro is the Moonshot Pro search, priced apart from
+	// the Basic one.
+	ToolMoonshotSearchPro = "moonshot_search_pro"
+	// ToolMoonshotFetch is the Moonshot page fetch, billed per successful
+	// call (one that returned page content).
+	ToolMoonshotFetch = "moonshot_fetch"
 )
 
 var toolCostAliases = map[string]string{
@@ -47,6 +57,11 @@ var toolCostAliases = map[string]string{
 	// "fetch" is the name DeepSeek's own price lists use for the web fetch
 	// tool; "web_fetch" is the tool's type name in a request.
 	"fetch": ToolWebFetch,
+	// The Moonshot tools' own spellings: the tool price document names them
+	// the way the request does.
+	"moonshot_search":     ToolMoonshotSearch,
+	"moonshot_search_pro": ToolMoonshotSearchPro,
+	"moonshot_fetch":      ToolMoonshotFetch,
 }
 
 // fullSessionTier describes one "Alibaba Cloud style" pricing bracket: once
@@ -586,11 +601,11 @@ func CalculateTokenCostsWithResolver(usage *converter.TokenUsage, price *ModelPr
 	// The prices are the FINAL client prices -- the rate is already folded
 	// into them and is not applied again.
 	costs.MoonshotSearchCost = float64(converterutil.NonNegativeTokenCount(usage.MoonshotSearchRequests)) *
-		price.MoonshotSearchCostPerCall
+		price.toolCostPerCall(ToolMoonshotSearch)
 	costs.MoonshotSearchProCost = float64(converterutil.NonNegativeTokenCount(usage.MoonshotSearchProRequests)) *
-		price.MoonshotSearchProCostPerCall
+		price.toolCostPerCall(ToolMoonshotSearchPro)
 	costs.MoonshotFetchCost = float64(converterutil.NonNegativeTokenCount(usage.MoonshotFetchRequests)) *
-		price.MoonshotFetchCostPerCall
+		price.toolCostPerCall(ToolMoonshotFetch)
 	costs.ImageGenerationToolCost = price.imageGenerationToolCost(usage, resolve)
 	costs.ToolUsageCost = costs.WebSearchCost +
 		costs.WebFetchCost +

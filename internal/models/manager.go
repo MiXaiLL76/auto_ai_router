@@ -183,19 +183,6 @@ type ModelPrice struct {
 	// grok-imagine-image-2.0. Without it such images are not billed.
 	ImageGenerationToolModel string `json:"image_generation_tool_model,omitempty"`
 
-	// MoonshotSearchCostPerCall is the price of one successful, non-empty
-	// Moonshot Basic search the router ran on the model's behalf. It comes
-	// from the tool price document (server.tool_prices_path), not from the
-	// model's own price row: it is the provider's search API that is
-	// billed, apart from the model's tokens.
-	MoonshotSearchCostPerCall float64 `json:"moonshot_search_cost_per_call,omitempty"`
-	// MoonshotSearchProCostPerCall is the price of one successful,
-	// non-empty Moonshot Pro search.
-	MoonshotSearchProCostPerCall float64 `json:"moonshot_search_pro_cost_per_call,omitempty"`
-	// MoonshotFetchCostPerCall is the price of one successful Moonshot
-	// fetch -- one that returned page content.
-	MoonshotFetchCostPerCall float64 `json:"moonshot_fetch_cost_per_call,omitempty"`
-
 	// Rate is a per-model markup/discount multiplier some price profiles carry
 	// (e.g. a provider markup applied upstream of these prices). It is parsed
 	// and preserved so strict tariff JSON decoding does not reject it, but it
@@ -340,9 +327,15 @@ func (r *ModelPriceRegistry) applyMoonshotToolPrices(modelName string, price *Mo
 		return
 	}
 	prices := r.moonshotToolPrices
-	price.MoonshotSearchCostPerCall = prices.SearchCostPerCall
-	price.MoonshotSearchProCostPerCall = prices.SearchProCostPerCall
-	price.MoonshotFetchCostPerCall = prices.FetchCostPerCall
+	// The prices go into the row's own tool price map, the same place the
+	// built-in tools' prices live: one map, one lookup, and the next
+	// provider's billable tool is a key rather than a new field.
+	if price.ToolCostPerCall == nil {
+		price.ToolCostPerCall = make(map[string]float64, 3)
+	}
+	price.ToolCostPerCall[ToolMoonshotSearch] = prices.SearchCostPerCall
+	price.ToolCostPerCall[ToolMoonshotSearchPro] = prices.SearchProCostPerCall
+	price.ToolCostPerCall[ToolMoonshotFetch] = prices.FetchCostPerCall
 }
 
 // isMoonshotModelName reports whether the model is one of Moonshot's own

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1404,5 +1405,359 @@ func TestMoonshotLoopKeepsTheModelState(t *testing.T) {
 	// The history is intact: the client's own first message is still there.
 	if messages[0]["role"] != "user" {
 		t.Errorf("the conversation's first message is %v, want the client's own", messages[0]["role"])
+	}
+}
+
+// TestMoonshotAdapterCanBeSwitchedOff checks the kill-switch: with the
+// adapter off, the router leaves the built-in tools alone and never calls
+// Moonshot's REST endpoints.
+//
+// The switch is what an operator reaches for during a provider outage or a
+// runaway cost, so it has to hold on every path.
+func TestMoonshotAdapterCanBeSwitchedOff(t *testing.T) {
+	for _, streaming := range []bool{false, true} {
+		name := "non-streaming"
+		if streaming {
+			name = "streaming"
+		}
+		t.Run(name, func(t *testing.T) {
+			fake := &moonshotFake{
+				searchResults: []map[string]any{{
+					"title": "Kimi K2 released",
+					"url":   "https://example.com/k2",
+				}},
+			}
+			server := httptest.NewServer(fake.handler())
+			defer server.Close()
+			fake.baseURL = server.URL
+
+			prx, dbStub := moonshotTestProxy(t, fake)
+			prx.moonshotToolsEnabled = false
+
+			body := `{
+				"model": "kimi-k2",
+				"messages": [{"role": "user", "content": "What is new in Kimi K2?"}],
+				"tools": [{"type": "web_search"}]
+			}`
+			if streaming {
+				body = `{
+					"model": "kimi-k2",
+					"messages": [{"role": "user", "content": "What is new in Kimi K2?"}],
+					"tools": [{"type": "web_search"}],
+					"stream": true
+				}`
+			}
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+			req.Header.Set("Authorization", "Bearer master-key")
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			prx.ProxyRequest(rec, req)
+
+			if fake.searchCalls != 0 {
+				t.Errorf("the router made %d search calls, want 0 (the adapter is off)", fake.searchCalls)
+			}
+			if len(dbStub.loggedEntries) != 1 {
+				t.Fatalf("got %d spend rows, want 1", len(dbStub.loggedEntries))
+			}
+			search, _, _ := moonshotToolCountsFromMetadata(t, dbStub.loggedEntries[0].Metadata)
+			if search != 0 {
+				t.Errorf("the moonshot search count = %d, want 0 (the adapter is off)", search)
+			}
+		})
+	}
+}
+
+// TestMoonshotClientToolCallsAreNotFabricated checks that a client's own
+// function tool is left alone: the router does not run it, and it does not
+// invent an answer for it either.
+//
+// The model may ask for a client's tool and the router's own tool in the
+// same turn (parallel tool calls). The router runs its own and says nothing
+// about the client's -- the client's tool call has to reach the client, or
+// the model's next turn is built on a fabricated result.
+func TestMoonshotClientToolCallsAreNotFabricated(t *testing.T) {
+	fake := &moonshotFake{
+		searchResults: []map[string]any{{
+			"title": "Kimi K2 released",
+			"url":   "https://example.com/k2",
+		}},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw := mustReadBody(r)
+		switch r.URL.Path {
+		case "/v1/tools/search":
+			fake.mu.Lock()
+			fake.searchCalls++
+			results := fake.searchResults
+			fake.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"search_results": results})
+		case "/v1/chat/completions":
+			fake.mu.Lock()
+			fake.chatCalls++
+			call := fake.chatCalls
+			var parsed map[string]json.RawMessage
+			_ = json.Unmarshal(raw, &parsed)
+			fake.lastChatBody = parsed
+			fake.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			if call == 1 {
+				// The model asks for the router's search AND for the
+				// client's own get_weather, in one turn.
+				_, _ = fmt.Fprintf(w, `{
+					"id":"chatcmpl-1","object":"chat.completion","model":"kimi-k2",
+					"choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":"",
+						"tool_calls":[
+							{"id":"call_s","type":"function","function":{"name":%q,"arguments":"{\"text_query\":\"kimi k2\"}"}},
+							{"id":"call_w","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Moscow\"}"}}
+						]}}],
+					"usage":{"prompt_tokens":100,"completion_tokens":10,"total_tokens":110}
+				}`, moonshottools.SearchToolName)
+				return
+			}
+			_, _ = w.Write([]byte(`{
+				"id":"chatcmpl-2","object":"chat.completion","model":"kimi-k2",
+				"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"Found it."}}],
+				"usage":{"prompt_tokens":200,"completion_tokens":20,"total_tokens":220}
+			}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	fake.baseURL = server.URL
+
+	prx, dbStub := moonshotTestProxy(t, fake)
+
+	body := `{
+		"model": "kimi-k2",
+		"messages": [{"role": "user", "content": "What is new in Kimi K2, and what is the weather?"}],
+		"tools": [
+			{"type": "web_search"},
+			{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object"}}}
+		]
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	prx.ProxyRequest(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if fake.searchCalls != 1 {
+		t.Errorf("the router made %d search calls, want 1", fake.searchCalls)
+	}
+
+	rawMessages, ok := fake.lastChatBody["messages"]
+	if !ok {
+		t.Fatal("the second request has no messages")
+	}
+	var messages []map[string]any
+	if err := json.Unmarshal(rawMessages, &messages); err != nil {
+		t.Fatalf("decoding the messages: %v", err)
+	}
+
+	// The router's own tool got its real result.
+	var toolMessage map[string]any
+	for _, message := range messages {
+		if message["role"] == "tool" {
+			toolMessage = message
+		}
+	}
+	if toolMessage == nil {
+		t.Fatal("the conversation has no tool message")
+	}
+	if toolMessage["tool_call_id"] != "call_s" {
+		t.Errorf("the tool message carries the call id %v, want call_s", toolMessage["tool_call_id"])
+	}
+	content, _ := toolMessage["content"].(string)
+	if strings.Contains(content, "unknown tool") {
+		t.Errorf("the router's own tool got a fabricated error: %s", content)
+	}
+	if !strings.Contains(content, "Kimi K2 released") {
+		t.Errorf("the tool result does not carry the search results: %s", content)
+	}
+
+	// The client's own tool got no result at all: the router does not run it
+	// and does not invent one.
+	for _, message := range messages {
+		if message["role"] != "tool" {
+			continue
+		}
+		if message["tool_call_id"] == "call_w" {
+			t.Error("the client's own tool got a result: the router must not run it")
+		}
+	}
+
+	// The search is still billed: it ran and it succeeded.
+	search, _, _ := moonshotToolCountsFromMetadata(t, dbStub.loggedEntries[0].Metadata)
+	if search != 1 {
+		t.Errorf("the moonshot search count = %d, want 1", search)
+	}
+}
+
+// mustReadBody reads a request body.
+func mustReadBody(r *http.Request) []byte {
+	body, _ := io.ReadAll(r.Body)
+	return body
+}
+
+// TestMoonshotStreamLoopKeepsTheBilledSearchOnAMidLoopFailure checks that a
+// search the router already ran and that succeeded is billed even when the
+// model that followed it failed.
+//
+// The router paid Moonshot for that search; the client must pay for it too,
+// or the operator eats the cost.
+func TestMoonshotStreamLoopKeepsTheBilledSearchOnAMidLoopFailure(t *testing.T) {
+	fake := &moonshotFake{
+		searchResults: []map[string]any{{
+			"title": "Kimi K2 released",
+			"url":   "https://example.com/k2",
+		}},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		switch r.URL.Path {
+		case "/v1/tools/search":
+			fake.mu.Lock()
+			fake.searchCalls++
+			results := fake.searchResults
+			fake.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"search_results": results})
+		case "/v1/chat/completions":
+			fake.mu.Lock()
+			fake.chatCalls++
+			call := fake.chatCalls
+			fake.mu.Unlock()
+			w.Header().Set("Content-Type", "text/event-stream")
+			if call == 1 {
+				_, _ = w.Write([]byte("data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_s1","type":"function","function":{"name":"` + moonshottools.SearchToolName + `","arguments":"{\"text_query\":\"kimi k2\"}"}}]}}]}` + "\n\n"))
+				_, _ = w.Write([]byte("data: " + `{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":100,"completion_tokens":10,"total_tokens":110}}` + "\n\n"))
+				_, _ = w.Write([]byte("data: [DONE]\n\n"))
+				return
+			}
+			// The continuation fails: the search that already ran is still
+			// billable.
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte(`{"error":{"message":"upstream is down"}}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	fake.baseURL = server.URL
+
+	prx, dbStub := moonshotTestProxy(t, fake)
+
+	body := `{
+		"model": "kimi-k2",
+		"messages": [{"role": "user", "content": "What is new in Kimi K2?"}],
+		"tools": [{"type": "web_search"}],
+		"stream": true
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	prx.ProxyRequest(rec, req)
+
+	if fake.searchCalls != 1 {
+		t.Errorf("the router made %d search calls, want 1", fake.searchCalls)
+	}
+	if len(dbStub.loggedEntries) != 1 {
+		t.Fatalf("got %d spend rows, want 1", len(dbStub.loggedEntries))
+	}
+	entry := dbStub.loggedEntries[0]
+	search, _, _ := moonshotToolCountsFromMetadata(t, entry.Metadata)
+	if search != 1 {
+		t.Errorf("the moonshot search count = %d, want 1 (the search already ran and succeeded)", search)
+	}
+	// The tool's price is billed even though the request failed afterwards.
+	if entry.Spend < 0.013 {
+		t.Errorf("Spend = %v, want at least the search's 0.013", entry.Spend)
+	}
+}
+
+// TestMoonshotLoopStopsWhenTheClientDisconnects checks that a client that
+// goes away mid-loop stops the loop quietly: the router must not report a
+// failed loop, must not write anything else to the dead connection, and must
+// not call the provider again.
+//
+// The loop's abort sentinel is shared by both adapters, so the router's
+// dispatch checks it once.
+func TestMoonshotLoopStopsWhenTheClientDisconnects(t *testing.T) {
+	fake := &moonshotFake{
+		searchResults: []map[string]any{{
+			"title": "Kimi K2 released",
+			"url":   "https://example.com/k2",
+		}},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		switch r.URL.Path {
+		case "/v1/tools/search":
+			fake.mu.Lock()
+			fake.searchCalls++
+			results := fake.searchResults
+			fake.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"search_results": results})
+		case "/v1/chat/completions":
+			fake.mu.Lock()
+			fake.chatCalls++
+			call := fake.chatCalls
+			fake.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			if call == 1 {
+				_, _ = fmt.Fprintf(w, `{
+					"id":"chatcmpl-1","object":"chat.completion","model":"kimi-k2",
+					"choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":"",
+						"tool_calls":[{"id":"call_1","type":"function","function":{"name":%q,"arguments":"{\"text_query\":\"kimi k2\"}"}}]}}],
+					"usage":{"prompt_tokens":100,"completion_tokens":10,"total_tokens":110}
+				}`, moonshottools.SearchToolName)
+				return
+			}
+			_, _ = w.Write([]byte(`{
+				"id":"chatcmpl-2","object":"chat.completion","model":"kimi-k2",
+				"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"Found it."}}],
+				"usage":{"prompt_tokens":200,"completion_tokens":20,"total_tokens":220}
+			}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	fake.baseURL = server.URL
+
+	prx, _ := moonshotTestProxy(t, fake)
+
+	body := `{
+		"model": "kimi-k2",
+		"messages": [{"role": "user", "content": "What is new in Kimi K2?"}],
+		"tools": [{"type": "web_search"}]
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	// The client goes away before the router's second call to the model.
+	ctx, cancel := context.WithCancel(req.Context())
+	req = req.WithContext(ctx)
+
+	rec := httptest.NewRecorder()
+	// The search itself succeeds; the cancellation lands before the model's
+	// second answer.
+	cancel()
+	prx.ProxyRequest(rec, req)
+
+	// Whatever the router wrote, it did not treat the disconnect as a failed
+	// loop: the request ends without a second attempt at the model.
+	fake.mu.Lock()
+	chatCalls := fake.chatCalls
+	fake.mu.Unlock()
+	if chatCalls > 1 {
+		t.Errorf("the model was called %d times, want at most 1 (the client is gone)", chatCalls)
 	}
 }

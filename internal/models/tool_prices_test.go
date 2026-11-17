@@ -114,18 +114,18 @@ func TestMoonshotToolPricesRideOnTheModelRow(t *testing.T) {
 	if kimi == nil {
 		t.Fatal("the registry has no kimi-k2")
 	}
-	if kimi.MoonshotSearchCostPerCall != 0.013 ||
-		kimi.MoonshotSearchProCostPerCall != 0.013 ||
-		kimi.MoonshotFetchCostPerCall != 0.013 {
-		t.Errorf("the Moonshot tool prices did not reach the model's row: %+v", kimi)
+	if kimi.ToolCostPerCall[ToolMoonshotSearch] != 0.013 ||
+		kimi.ToolCostPerCall[ToolMoonshotSearchPro] != 0.013 ||
+		kimi.ToolCostPerCall[ToolMoonshotFetch] != 0.013 {
+		t.Errorf("the Moonshot tool prices did not reach the model's row: %+v", kimi.ToolCostPerCall)
 	}
 
 	other := registry.GetPrice("gpt-4o")
 	if other == nil {
 		t.Fatal("the registry has no gpt-4o")
 	}
-	if other.MoonshotSearchCostPerCall != 0 {
-		t.Errorf("another provider's model got Moonshot's tool prices: %+v", other)
+	if other.ToolCostPerCall[ToolMoonshotSearch] != 0 {
+		t.Errorf("another provider's model got Moonshot's tool prices: %+v", other.ToolCostPerCall)
 	}
 }
 
@@ -146,8 +146,8 @@ func TestMoonshotToolPricesSurviveTheDBMerge(t *testing.T) {
 	if kimi == nil {
 		t.Fatal("the registry has no kimi-k2")
 	}
-	if kimi.MoonshotSearchCostPerCall != 0.013 {
-		t.Errorf("the Moonshot tool prices did not survive the DB merge: %+v", kimi)
+	if kimi.ToolCostPerCall[ToolMoonshotSearch] != 0.013 {
+		t.Errorf("the Moonshot tool prices did not survive the DB merge: %+v", kimi.ToolCostPerCall)
 	}
 }
 
