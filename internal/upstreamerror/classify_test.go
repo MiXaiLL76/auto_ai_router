@@ -195,7 +195,7 @@ func TestClassifyBadRequest(t *testing.T) {
 			// parameter.
 			name:        "capitalized parameter name",
 			body:        `{"error":{"message":"Invalid Temperature: only 1 is allowed for this model"}}`,
-			wantMessage: "Invalid temperature",
+			wantMessage: "Invalid temperature: only 1 is allowed for this model",
 			wantCode:    "invalid_field",
 			wantParam:   stringPtr("temperature"),
 		},
@@ -207,7 +207,7 @@ func TestClassifyBadRequest(t *testing.T) {
 			// wrong place in the original.
 			name:        "parameter name after a multi-byte character",
 			body:        `{"error":{"message":"İnvalid temperature: only 1 is allowed for this model"}}`,
-			wantMessage: "Invalid temperature",
+			wantMessage: "Invalid temperature: only 1 is allowed for this model",
 			wantCode:    "invalid_field",
 			wantParam:   stringPtr("temperature"),
 		},
@@ -265,19 +265,24 @@ func TestClassifyBadRequest(t *testing.T) {
 			// fell through to the generic "Invalid request" and the client
 			// could not tell which parameter to change -- the one thing the
 			// provider stated plainly in the first two words.
+			//
+			// The PINNED VALUE goes into the message too, because it is the
+			// client's next action: "Invalid temperature" leaves a client
+			// that sent temperature=0 still guessing what to send, while
+			// "only 1 is allowed" says it exactly. Same reasoning as the
+			// output-token range message below.
 			name:        "parameter pinned to a single value",
 			body:        `{"error":{"message":"invalid temperature: only 1 is allowed for this model","type":"invalid_request_error"}}`,
-			wantMessage: "Invalid temperature",
+			wantMessage: "Invalid temperature: only 1 is allowed for this model",
 			wantCode:    "invalid_field",
 			wantParam:   stringPtr("temperature"),
-			notContains: []string{"only 1 is allowed"},
 		},
 		{
 			// Same wording, a fractional pinned value -- the provider's
 			// limit is not always an integer.
 			name:        "parameter pinned to a fractional value",
 			body:        `{"error":{"message":"invalid temperature: only 0.6 is allowed for this model","type":"invalid_request_error"}}`,
-			wantMessage: "Invalid temperature",
+			wantMessage: "Invalid temperature: only 0.6 is allowed for this model",
 			wantCode:    "invalid_field",
 			wantParam:   stringPtr("temperature"),
 		},

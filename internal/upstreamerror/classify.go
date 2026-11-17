@@ -204,7 +204,7 @@ func ClassifyBadRequest(rawBody []byte) BadRequest {
 		// here, which is a different fix from "this parameter has a fixed
 		// value".
 		if param := extractPinnedParameterName(signals); param != nil {
-			result.Message = "Invalid " + *param
+			result.Message = pinnedParameterMessage(*param, signals)
 			result.Code = "invalid_field"
 			result.Param = param
 		} else {
@@ -776,6 +776,38 @@ func extractUnrecognizedArgumentName(signals []string) *string {
 // model" (and its "not allowed" variant). Returns nil when the message does
 // not name a known parameter, so an unrecognized wording falls back to the
 // generic "Invalid request parameter" instead of guessing.
+// pinnedParameterValueRe reads the value a provider says a parameter is
+// pinned to: "invalid temperature: only 1 is allowed for this model" names
+// the value 1.
+//
+// Only a NUMBER is taken from the provider's text, and it is re-validated as
+// digits, so what reaches the client is a value this package parsed -- never
+// a slice of the provider's own sentence. The wording around it is this
+// package's.
+var pinnedParameterValueRe = regexp.MustCompile(`only ([0-9]+(?:\.[0-9]+)?) is allowed`)
+
+// pinnedParameterMessage builds the client-facing message for a parameter
+// the provider pins to a single value.
+//
+// The value goes in, because it is the client's next action: a client that
+// sent temperature=0 and is told "Invalid temperature" still does not know
+// what to send instead, while "only 1 is allowed" says it exactly. This is
+// the same reasoning as the output-token range message (see
+// maxOutputTokensMessage), which reports the accepted range for the same
+// reason.
+//
+// Falls back to naming the parameter alone when the provider states no
+// parsable value, so the client still learns WHAT to fix.
+func pinnedParameterMessage(param string, signals []string) string {
+	base := "Invalid " + param
+	for _, signal := range signals {
+		if value := firstNumber(pinnedParameterValueRe, strings.ToLower(signal)); value != "" {
+			return base + ": only " + value + " is allowed for this model"
+		}
+	}
+	return base
+}
+
 func extractPinnedParameterName(signals []string) *string {
 	for _, signal := range signals {
 		// The marker is located in a LOWERCASED copy, but the parameter

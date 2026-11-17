@@ -83,8 +83,15 @@ var routerContextLengthMessageRe = regexp.MustCompile(
 
 // routerInvalidFieldMessageRe matches the "Invalid <param>" message, where
 // the parameter name is fixed by the body's own param field.
+//
+// Two shapes: the bare one, and the one that carries the value the provider
+// pins the parameter to ("Invalid temperature: only 1 is allowed for this
+// model"). In the second, only the NUMBER may differ from what the router
+// wrote -- anything else appended to it means the body is not ours and must
+// be classified from scratch.
 func routerInvalidFieldMessageRe(param string) *regexp.Regexp {
-	return regexp.MustCompile(`^Invalid ` + regexp.QuoteMeta(param) + `$`)
+	return regexp.MustCompile(`^Invalid ` + regexp.QuoteMeta(param) +
+		`(?:: only \d+(?:\.\d+)? is allowed for this model)?$`)
 }
 
 // routerInvalidMaxTokensMessageRe matches the "Invalid <param>" message the
