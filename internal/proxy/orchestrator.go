@@ -1368,7 +1368,12 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 	if sessionID == "" {
 		sessionID = sanitized.ClientID
 		if sessionID != "" {
-			cacheEligibilitySource = "client_id"
+			// sanitized.ClientIDSource is "safety_identifier" or "user_field"
+			// -- kept distinct rather than folded into one generic "client_id"
+			// label: safety_identifier is a deliberate client/session marker,
+			// while user is routinely just an application-level end-user id
+			// with no session intent at all (see clientIDWithSource).
+			cacheEligibilitySource = sanitized.ClientIDSource
 		}
 	}
 	if sanitized.Changed {

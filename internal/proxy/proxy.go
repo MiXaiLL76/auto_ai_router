@@ -448,9 +448,12 @@ type RequestLogContext struct {
 	// CacheEligibilitySource records which client-supplied signal, if any,
 	// made this request eligible for automatic Anthropic cache_control
 	// injection (see anthropicconv.InjectCacheControl / stickyCacheEligible
-	// in orchestrator.go): "session_header", "session_body", "client_id"
-	// (safety_identifier/user fallback), "previous_response_id", or "" when
-	// the client gave no such signal at all. This is independent of whether
+	// in orchestrator.go): "session_header", "session_body",
+	// "safety_identifier", "user_field" (the two fallbacks kept apart --
+	// safety_identifier is a deliberate client/session marker, user is
+	// routinely just an application-level end-user id with no session
+	// intent at all), "previous_response_id", or "" when the client gave no
+	// such signal at all. This is independent of whether
 	// stickyAutoCacheCtrl/org policy ultimately allowed the injection --
 	// it answers "did the client try", not "did caching happen".
 	CacheEligibilitySource string
@@ -1818,7 +1821,16 @@ func (p *Proxy) sendToCredential(
 			}
 		}
 	default:
-		logCtx.CacheControlOutcome = ""
+		// This attempt's credential doesn't speak Anthropic's wire protocol
+		// at all, so it has nothing to report either way. Deliberately not
+		// resetting to "" here: on a retry/fallback, an earlier attempt on
+		// an Anthropic-wire credential may already have set this to
+		// something meaningful (e.g. "router_injected"), and a later
+		// fallback to e.g. an OpenAI credential must not erase that --
+		// logCtx is reused across every attempt for the same request, and
+		// the spend event this feeds is built once, after the last one.
+		// Its zero value ("") already covers a request that never tried an
+		// Anthropic-wire credential at all.
 	}
 	logCtx.loopGateFormat, logCtx.loopGateSettings = p.loopGateAttemptFormat(r.Context(), cred, modelID,
 		loopGateUpstreamFormat(cred, r.URL.Path, prepared.passthroughResponses, prepared.passthroughMessages))

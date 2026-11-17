@@ -222,13 +222,26 @@ func extractSessionIDFromRawBody(reqBody map[string]goccyjson.RawMessage) string
 // and the session headers: binding to it pins every conversation of a client
 // to one credential instead of balancing each one.
 func extractClientIDFromRawBody(reqBody map[string]goccyjson.RawMessage) string {
+	id, _ := clientIDWithSource(reqBody)
+	return id
+}
+
+// clientIDWithSource is extractClientIDFromRawBody plus which field actually
+// matched. safety_identifier is a stable, router-caller-controlled client
+// marker; user is the OpenAI field it replaces, and in practice is far more
+// often an application-level end-user id a client already tracks for its
+// own purposes than something sent to mean "this is one session" -- callers
+// that log or reason about *why* a request became cache-eligible (not just
+// whether) should keep the two apart rather than reporting both as one
+// generic "client_id" source.
+func clientIDWithSource(reqBody map[string]goccyjson.RawMessage) (id, source string) {
 	if cid, ok := rawJSONString(reqBody["safety_identifier"]); ok && cid != "" {
-		return cid
+		return cid, "safety_identifier"
 	}
 	if cid, ok := rawJSONString(reqBody["user"]); ok && cid != "" {
-		return cid
+		return cid, "user_field"
 	}
-	return ""
+	return "", ""
 }
 
 // sessionIDHeaderPattern matches header names agents commonly use to carry a
@@ -390,7 +403,12 @@ type sanitizedRequestBody struct {
 	Streaming bool
 	SessionID string
 	ClientID  string
-	Changed   bool
+	// ClientIDSource is "safety_identifier" or "user_field", saying which of
+	// the two actually produced ClientID; "" when ClientID is empty. See
+	// clientIDWithSource's doc comment for why callers should keep these
+	// apart rather than reporting both as one generic "client id" signal.
+	ClientIDSource string
+	Changed        bool
 	// ServiceTiers are the client's service_tier values (top level, then
 	// extra_body), removed from Body.
 	ServiceTiers []string
@@ -470,7 +488,7 @@ func sanitizeJSONRequestBody(body []byte, isMessagesAPI bool) (sanitizedRequestB
 
 	// Extract session ID before removing LiteLLM-only request metadata.
 	result.SessionID = extractSessionIDFromRawBody(reqBody)
-	result.ClientID = extractClientIDFromRawBody(reqBody)
+	result.ClientID, result.ClientIDSource = clientIDWithSource(reqBody)
 	// litellm_session_id/session_id only ever drive AIR's own sticky-routing
 	// decision (already captured above into result.SessionID); no provider
 	// understands either as a wire-protocol field, and both are gone from
@@ -602,6 +620,7 @@ func sanitizeMultipartRequestBody(body []byte, params map[string]string) (saniti
 				result.SessionID = value
 			case "user":
 				result.ClientID = value
+				result.ClientIDSource = "user_field"
 			}
 		}
 
