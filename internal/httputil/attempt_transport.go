@@ -114,6 +114,7 @@ func (t *attemptTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	way, reused := rt.connection()
 	connWait, ttfb := rt.waits()
 	attempts.observed(number, way, reused, connWait, ttfb)
+	attempts.result(number, resp, err)
 	if recording {
 		span.SetAttributes(describe()...)
 		if resp != nil {

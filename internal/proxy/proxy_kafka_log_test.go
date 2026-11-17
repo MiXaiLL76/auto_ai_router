@@ -196,6 +196,7 @@ func TestBuildKafkaSpendEvent_UpstreamAttemptsAndExit(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(payload), `"upstream_attempts":0`)
 	assert.NotContains(t, string(payload), `"exit"`)
+	assert.NotContains(t, string(payload), `"attempts"`)
 	for _, stage := range []string{"retry_ms", "conn_wait_ms", "ttfb_ms"} {
 		assert.NotContains(t, string(payload), stage, "no attempt, no stages")
 	}
@@ -215,6 +216,18 @@ func TestBuildKafkaSpendEvent_UpstreamAttemptsAndExit(t *testing.T) {
 	assert.Nil(t, event.ConnReused)
 	assert.Nil(t, event.TTFBMs)
 	assert.Nil(t, event.ExitRTTMs)
+
+	require.Len(t, event.Attempts, 2)
+	first, final := event.Attempts[0], event.Attempts[1]
+	assert.GreaterOrEqual(t, first.DurationMs, int64(15), "until the next attempt was sent")
+	assert.Equal(t, final.StartTime.Sub(first.StartTime).Milliseconds(), *event.RetryMs)
+	first.StartTime, first.DurationMs, final.StartTime, final.DurationMs = time.Time{}, 0, time.Time{}, 0
+	assert.Equal(t, kafkalog.Attempt{Credential: "azure_first", Kind: httputil.AttemptFirst, RetryReason: string(RetryReasonRateLimit)}, first)
+	assert.Equal(t, kafkalog.Attempt{Credential: "openai_primary", Kind: httputil.AttemptRetry, IsFinal: true}, final)
+	payload, err = json.Marshal(event)
+	require.NoError(t, err)
+	assert.Contains(t, string(payload), `"attempts":[{"credential":"azure_first","kind":"first","retry_reason":"rate_limit","http_status":0,"start_time":"`)
+	assert.Contains(t, string(payload), `"is_final":false},{"credential":"openai_primary","kind":"retry","http_status":0,"start_time":"`)
 }
 
 func TestBuildKafkaSpendEvent_NilTokenUsage(t *testing.T) {

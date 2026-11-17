@@ -2,8 +2,11 @@ package httputil
 
 import (
 	"context"
+	"net/http"
 	"sync"
 	"time"
+
+	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 )
 
 // The kinds of upstream attempt (aar.attempt.kind).
@@ -24,14 +27,36 @@ type Attempts struct {
 }
 
 type attempt struct {
-	credential string
-	kind       string
-	reason     string
-	began      time.Time
-	tunnel     tunnel // the way of the connection it was sent on
-	reused     *bool  // that connection was a pooled one
-	connWait   *time.Duration
-	ttfb       *time.Duration
+	credential  string
+	kind        string
+	reason      string
+	began       time.Time
+	tunnel      tunnel // the way of the connection it was sent on
+	reused      *bool  // that connection was a pooled one
+	connWait    *time.Duration
+	ttfb        *time.Duration
+	status      int    // the provider's HTTP status, 0 without a response
+	requestID   string // the provider's id of the request
+	errType     string // the type of the error that left it without a response
+	errText     string // that error's text
+	retryReason string // why the next attempt followed it
+}
+
+// Attempt is what a spend row keeps of one attempt.
+type Attempt struct {
+	Credential        string
+	Exit              string
+	Kind              string
+	RetryReason       string
+	Status            int
+	UpstreamRequestID string
+	ErrorType         string
+	ErrorMessage      string
+	Began             time.Time
+	Duration          time.Duration
+	TTFB              *time.Duration
+	Reused            *bool
+	IsFinal           bool
 }
 
 // Stages is how a request's time divided around one of its attempts.
@@ -72,6 +97,9 @@ func (a *Attempts) Next(kind, reason string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.nextKind, a.nextReason = kind, reason
+	if n := len(a.attempts); n > 0 && a.attempts[n-1].retryReason == "" {
+		a.attempts[n-1].retryReason = reason
+	}
 }
 
 // Begin records that an attempt is being sent to credential. Without a Next
@@ -140,6 +168,45 @@ func (a *Attempts) Stages(credential string) (Stages, bool) {
 	return Stages{}, false
 }
 
+// List is every attempt in the order sent. The request ended at end, and
+// credential is the one that served it.
+func (a *Attempts) List(credential string, end time.Time) []Attempt {
+	if a == nil {
+		return nil
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	final := -1
+	for i, at := range a.attempts {
+		if at.credential == credential {
+			final = i
+		}
+	}
+	list := make([]Attempt, 0, len(a.attempts))
+	for i, at := range a.attempts {
+		until := end
+		if i+1 < len(a.attempts) {
+			until = a.attempts[i+1].began
+		}
+		list = append(list, Attempt{
+			Credential:        at.credential,
+			Exit:              at.tunnel.exit,
+			Kind:              at.kind,
+			RetryReason:       at.retryReason,
+			Status:            at.status,
+			UpstreamRequestID: at.requestID,
+			ErrorType:         at.errType,
+			ErrorMessage:      at.errText,
+			Began:             at.began,
+			Duration:          max(until.Sub(at.began), 0),
+			TTFB:              at.ttfb,
+			Reused:            at.reused,
+			IsFinal:           i == final,
+		})
+	}
+	return list
+}
+
 // current is the attempt in flight and its number from 1, 0 before the first Begin.
 func (a *Attempts) current() (int, attempt) {
 	if a == nil {
@@ -176,5 +243,29 @@ func (a *Attempts) observed(number int, way tunnel, reused *bool, connWait, ttfb
 	}
 	if at.ttfb == nil {
 		at.ttfb = ttfb
+	}
+}
+
+// result adds how a round trip of attempt number ended. Of several round
+// trips a failed one stays.
+func (a *Attempts) result(number int, resp *http.Response, err error) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if number < 1 || number > len(a.attempts) {
+		return
+	}
+	at := &a.attempts[number-1]
+	if at.errType != "" || at.status >= http.StatusBadRequest {
+		return
+	}
+	switch {
+	case err != nil:
+		at.status, at.requestID = 0, ""
+		at.errType, at.errText = semconv.ErrorType(err).Value.AsString(), bounded(err.Error(), maxErrorMessage)
+	case resp != nil:
+		at.status, at.requestID = resp.StatusCode, upstreamRequestID(resp)
 	}
 }
