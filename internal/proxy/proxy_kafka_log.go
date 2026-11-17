@@ -213,6 +213,9 @@ func (p *Proxy) buildKafkaSpendEvent(
 		RequesterIP: getClientIP(logCtx.Request),
 		SessionID:   logCtx.SessionID,
 		OverheadMs:  overheadMs,
+
+		CacheEligibilitySource: logCtx.CacheEligibilitySource,
+		CacheControlOutcome:    logCtx.CacheControlOutcome,
 	}
 
 	if tokenCosts != nil {

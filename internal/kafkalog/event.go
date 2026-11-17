@@ -166,6 +166,21 @@ type SpendEvent struct {
 	SessionID   string  `json:"session_id"`
 	OverheadMs  float64 `json:"overhead_ms"`
 
+	// CacheEligibilitySource is the client-supplied signal, if any, that made
+	// this request eligible for the router's automatic Anthropic
+	// cache_control injection: "session_header", "session_body",
+	// "safety_identifier", "user_field", "previous_response_id", or empty
+	// when the client sent none of those. safety_identifier and user_field
+	// are kept apart because the latter is routinely just an
+	// application-level end-user id with no session intent at all.
+	CacheEligibilitySource string `json:"cache_eligibility_source,omitempty"`
+	// CacheControlOutcome is "client_supplied" (the client's own request
+	// already carried cache_control), "router_injected" (this router added
+	// it), "none" (neither happened, though the request/model shape could
+	// have supported it), or empty when the credential's wire protocol
+	// doesn't use cache_control at all (non-Anthropic-family provider).
+	CacheControlOutcome string `json:"cache_control_outcome,omitempty"`
+
 	// Placeholder fields for the deferred request/response body capture PR.
 	// Always false/0 — no capture logic exists yet.
 	BodyCaptured      bool `json:"body_captured"`
