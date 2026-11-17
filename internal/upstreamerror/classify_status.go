@@ -43,7 +43,7 @@ func ClassifyStatus(statusCode int, rawBody []byte) (StatusError, bool) {
 		return StatusError(classified), true
 	}
 
-	signals, providerParam := providerErrorSignalsFromBody(rawBody)
+	signals, _ := providerErrorSignalsFromBody(rawBody)
 	if len(signals) == 0 {
 		return StatusError{}, false
 	}
@@ -59,7 +59,9 @@ func ClassifyStatus(statusCode int, rawBody []byte) (StatusError, bool) {
 		//
 		// The marker is exact: in production it appears in 17,903 responses
 		// and in NO other status, so it cannot shadow a different failure.
-		if hasSignal(joined, "inference is blocked on this account", "inference is blocked on this account.") {
+		// The trailing period is NOT part of the needle -- it is a
+		// substring of the needle itself.
+		if hasSignal(joined, "inference is blocked on this account") {
 			return StatusError{
 				Message: "Inference is blocked on this account",
 				Code:    "account_blocked",
@@ -98,6 +100,5 @@ func ClassifyStatus(statusCode int, rawBody []byte) (StatusError, bool) {
 			}, true
 		}
 	}
-	_ = providerParam
 	return StatusError{}, false
 }

@@ -752,13 +752,28 @@ func extractUnrecognizedArgumentName(signals []string) *string {
 	const marker = "unrecognized request argument supplied:"
 	const pluralMarker = "unrecognized request arguments supplied:"
 	for _, signal := range signals {
+		// The marker is located in a LOWERCASED copy, but the names are cut
+		// out of the ORIGINAL. The two are reconciled by RUNE count, not by
+		// byte offset: Unicode lowering can change a string's byte length
+		// (U+212A "K" lowercases to one byte, U+0130 "İ" to two), so a
+		// byte offset found in the lowered copy would point at the wrong
+		// place in the original and the slice would start mid-name.
+		//
+		// This is the same fix extractPinnedParameterName applies, for the
+		// same reason.
 		lower := strings.ToLower(signal)
+		original := []rune(signal)
 		for _, m := range []string{marker, pluralMarker} {
 			idx := strings.Index(lower, m)
 			if idx < 0 {
 				continue
 			}
-			rest := strings.TrimSpace(signal[idx+len(m):])
+			markerRunes := utf8.RuneCountInString(m)
+			startRunes := utf8.RuneCountInString(lower[:idx])
+			if startRunes+markerRunes > len(original) {
+				continue
+			}
+			rest := strings.TrimSpace(string(original[startRunes+markerRunes:]))
 			// The list may hold several names ("enable_thinking, reasoning,
 			// reasoning_effort, thinking"). The FIRST known one is reported:
 			// the client needs one field to drop, and the provider lists them

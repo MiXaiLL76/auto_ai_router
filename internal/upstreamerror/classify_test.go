@@ -712,6 +712,27 @@ func TestClassifyBadRequest_UnrecognizedRequestArgument(t *testing.T) {
 			wantParam: nil,
 			wantCode:  "invalid_parameter",
 		},
+		{
+			// The marker is located in a lowercased copy of the message but
+			// the names are cut out of the ORIGINAL, and the two are
+			// reconciled by RUNE count: Unicode lowering can change a
+			// string's byte length (U+212A "K" lowercases to one byte),
+			// so a byte offset would point at the wrong place in the
+			// original and the extraction would silently fall back to the
+			// generic "Invalid request parameter".
+			name:      "argument name after a multi-byte character",
+			body:      `{"error":{"message":"\u212AUnrecognized request argument supplied: reasoning_effort","type":"invalid_request_error"}}`,
+			wantParam: stringPtr("reasoning_effort"),
+			wantCode:  "unsupported_parameter",
+		},
+		{
+			// The same, with the other character whose lowering shrinks it
+			// (U+0130 "İ" lowercases to two bytes from three).
+			name:      "argument name after a shrinking multi-byte character",
+			body:      `{"error":{"message":"\u0130Unrecognized request argument supplied: reasoning_effort","type":"invalid_request_error"}}`,
+			wantParam: stringPtr("reasoning_effort"),
+			wantCode:  "unsupported_parameter",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
