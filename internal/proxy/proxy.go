@@ -1695,6 +1695,22 @@ func (p *Proxy) sendToCredential(
 		requestBody, generatedBetas = anthropicconv.ExtractBetaHeader(requestBody)
 		anthropicBetas = append(anthropicBetas, generatedBetas...)
 	}
+	// Mirrors orchestrator.go's InjectCacheControl call, which runs on the
+	// client's original body (Chat/Messages-shaped) before this point. For a
+	// nativeResponses credential that body is still Responses-API-shaped
+	// (input/instructions, no messages/system) at that earlier point --
+	// InjectCacheControl's shape check silently no-ops on it -- and only
+	// becomes Anthropic/Bedrock Messages-shaped here, via provResponses.RequestFrom
+	// above. Re-running it here is a no-op for every other path (it already
+	// bailed out above on seeing an existing cache_control marker), and is the
+	// only place that actually marks a /v1/responses request routed through
+	// the native Responses converter.
+	if p.stickyAutoCacheCtrl && prepared.stickyCacheEligible && !prepared.autoCacheControlDisabled {
+		switch cred.EffectiveProviderType() {
+		case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI, config.ProviderTypeProMan, config.ProviderTypeBedrock:
+			requestBody = anthropicconv.InjectCacheControl(requestBody)
+		}
+	}
 	logCtx.loopGateFormat, logCtx.loopGateSettings = p.loopGateAttemptFormat(r.Context(), cred, modelID,
 		loopGateUpstreamFormat(cred, r.URL.Path, prepared.passthroughResponses, prepared.passthroughMessages))
 	var loopGateForced *loopGateForcedStream

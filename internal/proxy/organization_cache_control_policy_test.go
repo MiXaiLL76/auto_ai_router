@@ -152,6 +152,48 @@ func TestOrganizationPolicy_AutoCacheControlInjectedWithoutOptOut(t *testing.T) 
 	assert.Equal(t, map[string]any{"type": "ephemeral"}, block["cache_control"])
 }
 
+// TestResponsesAPI_NativeAnthropicStillInjectsCacheControl guards against a
+// regression where a /v1/responses request routed through the native
+// Responses->Anthropic converter (ResponsesRequestToAnthropic, used for
+// Anthropic/CometAPI/ProMan/Bedrock credentials) never got a cache_control
+// marker: orchestrator.go's InjectCacheControl call runs on the client's
+// original Responses-shaped body (input/instructions, no messages/system),
+// which its shape check silently ignores, and that conversion only produces
+// an Anthropic Messages-shaped body (system/messages) later, in proxy.go at
+// dispatch time.
+func TestResponsesAPI_NativeAnthropicStillInjectsCacheControl(t *testing.T) {
+	upstream, captured := anthropicPassthroughUpstream(t)
+	db := &orgCacheControlTestDB{tokens: map[string]*dbmodels.TokenInfo{
+		"token": {Token: "token-hash", UserID: "user-1"},
+	}}
+	prx := newOrgCacheControlProxy(t, upstream.URL, db, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(
+		`{"model":"claude","instructions":"Be helpful.","input":[{"role":"user","content":"hi"}]}`,
+	))
+	req.Header.Set("Authorization", "Bearer token")
+	req.Header.Set("Session-Id", "session-1")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	var body map[string]any
+	select {
+	case body = <-captured:
+	default:
+		t.Fatal("the upstream received no request")
+	}
+
+	system, ok := body["system"].([]any)
+	require.True(t, ok, "system must be promoted to a content-block array carrying cache_control, got %#v", body["system"])
+	require.Len(t, system, 1)
+	block, ok := system[0].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, map[string]any{"type": "ephemeral"}, block["cache_control"])
+}
+
 func TestOrganizationPolicy_NoPolicyStillInjectsCacheControl(t *testing.T) {
 	// A token with no organization at all (effectiveOrganizationPolicy returns
 	// nil) must fall back to the global default: injection stays on.
