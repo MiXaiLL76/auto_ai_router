@@ -78,15 +78,23 @@ func ClassifyStatus(statusCode int, rawBody []byte) (StatusError, bool) {
 			}, true
 		}
 	case http.StatusNotFound:
-		// A provider that cannot fetch a URL the client passed (a web-search
-		// tool's target). The client's action is to pass a different URL --
-		// a parameter-level fix, and the provider names the field.
+		// A provider that could not fetch a URL it was asked to fetch.
+		//
+		// The URL is NOT reported as a rejected parameter, because it is
+		// not one: in production none of these requests carry a URL at
+		// all -- the body has only model, messages and (in 2 cases) tools.
+		// The URL comes from the provider's OWN grounding configuration, so
+		// the client has nothing to correct and no field to change.
+		// Saying "Invalid url" with param "url" would point the client at
+		// a field its own request never contained.
+		//
+		// What the client CAN do is try the request again on another
+		// credential or later, so the message says that rather than
+		// blaming the request.
 		if hasSignal(joined, "cannot fetch content from the provided url") {
-			param := "url"
 			return StatusError{
-				Message: "Invalid url",
-				Code:    "invalid_field",
-				Param:   &param,
+				Message: "The upstream could not fetch the content it was asked to fetch",
+				Code:    "upstream_fetch_failed",
 			}, true
 		}
 	}

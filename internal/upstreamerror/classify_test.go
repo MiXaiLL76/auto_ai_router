@@ -695,13 +695,13 @@ func TestClassifyBadRequest_UnrecognizedRequestArgument(t *testing.T) {
 			name:      "single argument",
 			body:      `{"error":{"message":"Unrecognized request argument supplied: reasoning_effort","type":"invalid_request_error"}}`,
 			wantParam: stringPtr("reasoning_effort"),
-			wantCode:  "invalid_field",
+			wantCode:  "unsupported_parameter",
 		},
 		{
 			name:      "several arguments, first known one is reported",
 			body:      `{"error":{"message":"Unrecognized request arguments supplied: enable_thinking, reasoning, reasoning_effort, thinking","type":"invalid_request_error"}}`,
 			wantParam: stringPtr("enable_thinking"),
-			wantCode:  "invalid_field",
+			wantCode:  "unsupported_parameter",
 		},
 		{
 			// The name comes out of the provider's free text, so an unknown
@@ -716,12 +716,11 @@ func TestClassifyBadRequest_UnrecognizedRequestArgument(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := ClassifyBadRequest([]byte(tt.body))
-			assert.Equal(t, "Invalid "+func() string {
-				if tt.wantParam == nil {
-					return "request parameter"
-				}
-				return *tt.wantParam
-			}(), got.Message)
+			wantMessage := "Invalid request parameter"
+			if tt.wantParam != nil {
+				wantMessage = "Unsupported parameter: " + *tt.wantParam
+			}
+			assert.Equal(t, wantMessage, got.Message)
 			assert.Equal(t, tt.wantCode, got.Code)
 			assert.True(t, equalStringPtr(tt.wantParam, got.Param),
 				"param = %v, want %v", got.Param, tt.wantParam)
@@ -763,13 +762,16 @@ func TestClassifyStatus_NonBadRequest(t *testing.T) {
 			wantCode: "session_blocked",
 		},
 		{
-			name:      "url could not be fetched",
-			status:    http.StatusNotFound,
-			body:      `{"error":{"code":404,"message":"Cannot fetch content from the provided URL. The URL could not be reached."}}`,
-			wantOK:    true,
-			wantMsg:   "Invalid url",
-			wantCode:  "invalid_field",
-			wantParam: stringPtr("url"),
+			// The URL is NOT reported as a rejected parameter: in production
+			// none of these requests carry a URL at all -- it comes from the
+			// provider's own grounding configuration. Blaming the client for
+			// a field its request never contained would be wrong.
+			name:     "url could not be fetched",
+			status:   http.StatusNotFound,
+			body:     `{"error":{"code":404,"message":"Cannot fetch content from the provided URL. The URL could not be reached."}}`,
+			wantOK:   true,
+			wantMsg:  "The upstream could not fetch the content it was asked to fetch",
+			wantCode: "upstream_fetch_failed",
 		},
 		{
 			name:   "unrecognized body keeps the generic message",

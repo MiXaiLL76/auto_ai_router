@@ -174,9 +174,17 @@ func ClassifyBadRequest(rawBody []byte) BadRequest {
 		// The parameter name is read out of the message and accepted only
 		// from the closed list of request parameters, so an unknown name
 		// cannot smuggle provider free text into the client's "param" field.
+		//
+		// The code is unsupported_parameter, NOT invalid_field. "Invalid
+		// <param>" reads as "the value you sent is not acceptable, change
+		// it" -- but here the provider does not know the FIELD at all (a
+		// client sending reasoning_effort to a model that has no such
+		// field), and there is no value to change: the field has to go.
+		// The two need different client actions, so they get different
+		// codes.
 		if param := extractUnrecognizedArgumentName(signals); param != nil {
-			result.Message = "Invalid " + *param
-			result.Code = "invalid_field"
+			result.Message = "Unsupported parameter: " + *param
+			result.Code = "unsupported_parameter"
 			result.Param = param
 		} else {
 			result.Message, result.Code = "Invalid request parameter", "invalid_parameter"

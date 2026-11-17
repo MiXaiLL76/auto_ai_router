@@ -51,6 +51,7 @@ var routerClassifiedMessages = map[string]string{ //nolint:gosec // G101: these 
 	"reasoning_required":         "Reasoning is required and cannot be disabled",
 	"account_blocked":            "Inference is blocked on this account",
 	"session_blocked":            "This session is blocked by content policy",
+	"upstream_fetch_failed":      "The upstream could not fetch the content it was asked to fetch",
 }
 
 // routerErrorTypes is the set of "type" values this package's classifier
@@ -80,6 +81,13 @@ var routerContextLengthMessageRe = regexp.MustCompile(
 	`^This model's maximum context length is \d+ tokens\.` +
 		`(?: However, you requested \d+ output tokens and your prompt contains at least \d+ input tokens\.` +
 		`| However, your prompt contains at least \d+ input tokens\.)?$`)
+
+// routerUnsupportedParameterMessageRe matches the "Unsupported parameter:
+// <param>" message, where the parameter name is fixed by the body's own param
+// field.
+func routerUnsupportedParameterMessageRe(param string) *regexp.Regexp {
+	return regexp.MustCompile(`^Unsupported parameter: ` + regexp.QuoteMeta(param) + `$`)
+}
 
 // routerInvalidFieldMessageRe matches the "Invalid <param>" message, where
 // the parameter name is fixed by the body's own param field.
@@ -171,6 +179,13 @@ func isRouterMessage(code, message string, param *string) bool {
 		return message == fixed
 	}
 	switch code {
+	case "unsupported_parameter":
+		// "Unsupported parameter: <param>" -- the parameter name is the
+		// body's own param field, so only that exact rendering is ours.
+		if param == nil || *param == "" {
+			return false
+		}
+		return routerUnsupportedParameterMessageRe(*param).MatchString(message)
 	case "context_length_exceeded":
 		return routerContextLengthMessageRe.MatchString(message)
 	case "invalid_field":
