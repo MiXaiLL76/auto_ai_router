@@ -1841,11 +1841,6 @@ func (p *Proxy) sendToCredential(
 				logCtx.CacheControlOutcome = string(anthropicconv.CacheControlNone)
 			}
 		}
-		// CacheMarkersOut: count on requestBody exactly as it stands now --
-		// after ExtractBetaHeader and whatever the switch above just did
-		// (carried over, injected, or left untouched) -- so it reflects what
-		// this attempt is actually about to send, not an intermediate state.
-		logCtx.CacheMarkersOut = anthropicconv.CountCacheMarkers(requestBody)
 	default:
 		// This attempt's credential doesn't speak Anthropic's wire protocol
 		// at all, so it has nothing to report either way. Deliberately not
@@ -1862,6 +1857,18 @@ func (p *Proxy) sendToCredential(
 		loopGateUpstreamFormat(cred, r.URL.Path, prepared.passthroughResponses, prepared.passthroughMessages))
 	var loopGateForced *loopGateForcedStream
 	requestBody, loopGateForced = p.loopGateUpstreamBody(r.Context(), logCtx, cred, modelID, streaming, requestBody)
+	switch cred.EffectiveProviderType() {
+	case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI, config.ProviderTypeProMan, config.ProviderTypeBedrock:
+		// Counted here, after loopGateUpstreamBody, not right after the
+		// outcome switch above: loop-gate currently never touches
+		// cache_control (it only rewrites stream/stream_options for
+		// FormatChat), but counting post-loop-gate means this stays correct
+		// even if that changes later, instead of silently drifting from what
+		// actually gets sent. Same retry-survival rule as CacheControlOutcome:
+		// a later non-Anthropic-wire attempt simply isn't in this switch, so
+		// it can't reset what an earlier attempt already counted.
+		logCtx.CacheMarkersOut = anthropicconv.CountCacheMarkers(requestBody)
+	}
 
 	// For Vertex AI, obtain OAuth2 token
 	var vertexToken string

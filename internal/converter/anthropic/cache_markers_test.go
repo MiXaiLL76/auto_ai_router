@@ -89,3 +89,38 @@ func TestCountCacheMarkers_DoesNotRecurseIntoCacheControlValueItself(t *testing.
 	assert.Equal(t, 1, counts.System)
 	assert.Equal(t, 1, counts.TTL1h)
 }
+
+// TestCountCacheMarkers_SchemaPropertyNamedCacheControlIsNotAMarker guards
+// against the exact false positive a code review caught: a tool's JSON
+// Schema is free to declare a parameter literally called "cache_control",
+// e.g. {"properties":{"cache_control":{"type":"string"}}} -- that is not an
+// Anthropic cache_control marker (no "type":"ephemeral"), and must not be
+// counted as one.
+func TestCountCacheMarkers_SchemaPropertyNamedCacheControlIsNotAMarker(t *testing.T) {
+	body := []byte(`{
+		"model": "claude",
+		"messages": [{"role": "user", "content": "hi"}],
+		"tools": [
+			{"type": "function", "function": {"name": "f", "parameters": {
+				"type": "object",
+				"properties": {"cache_control": {"type": "string"}}
+			}}}
+		]
+	}`)
+	assert.Equal(t, CacheMarkerCounts{}, CountCacheMarkers(body))
+}
+
+// TestCountCacheMarkers_NullCacheControlIsNotAMarker guards against the
+// other false positive the same review caught: a present-but-null
+// "cache_control" key (map lookup's ok is still true for a JSON null) must
+// not be counted.
+func TestCountCacheMarkers_NullCacheControlIsNotAMarker(t *testing.T) {
+	body := []byte(`{
+		"model": "claude",
+		"messages": [{"role": "user", "content": "hi"}],
+		"tools": [
+			{"type": "function", "function": {"name": "f"}, "cache_control": null}
+		]
+	}`)
+	assert.Equal(t, CacheMarkerCounts{}, CountCacheMarkers(body))
+}
