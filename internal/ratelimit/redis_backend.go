@@ -93,9 +93,14 @@ return 1
 // Lua script: record token consumption into the current second's bucket.
 // ARGV[3] = token count. Expired buckets are pruned once the hash holds more
 // than two windows of seconds, which keeps it bounded without a read.
+// KEYS[2] (optional) = per-call marker kept for ARGV[5] seconds, so a retry of
+// a call that already ran is not counted twice.
 //
 //nolint:gosec // G101: false positive — Lua script text, not a credential
 const luaConsumeTokens = `
+if KEYS[2] and not redis.call('SET', KEYS[2], 1, 'NX', 'EX', tonumber(ARGV[5])) then
+  return 0
+end
 local key    = KEYS[1]
 local sec    = math.floor(tonumber(ARGV[1]) / 1000)
 local span   = math.floor(tonumber(ARGV[2]) / 1000)
@@ -438,16 +443,27 @@ func (b *RedisBackend) canAllowTPM(ctx context.Context, key string, limit int) b
 
 func (b *RedisBackend) consumeTokens(ctx context.Context, key string, tokenCount int) {
 	now := nowMS()
+	bucketKey := b.tpmKey(key)
+	opKey := bucketKey + ":op:" + uuid.New().String()
 	_, _ = b.doWithRetry(ctx, func(ctx context.Context) (int64, error) {
 		return 0, scriptConsumeTokens.Exec(ctx, b.client,
-			[]string{b.tpmKey(key)},
+			[]string{bucketKey, opKey},
 			[]string{
 				fmt.Sprintf("%d", now),
 				fmt.Sprintf("%d", tpmWindow.Milliseconds()),
 				fmt.Sprintf("%d", tokenCount),
 				fmt.Sprintf("%d", b.keyTTL),
+				fmt.Sprintf("%d", b.consumeDedupTTL()),
 			}).Error()
 	})
+}
+
+// consumeDedupTTL returns how long, in seconds, a consumeTokens marker must live to cover every retry.
+func (b *RedisBackend) consumeDedupTTL() int {
+	if b.commandTimeout <= 0 {
+		return int(defaultContextTimeout / time.Second)
+	}
+	return int(time.Duration(maxRetries+1)*b.commandTimeout/time.Second) + 1
 }
 
 func (b *RedisBackend) currentRPM(ctx context.Context, key string) int {

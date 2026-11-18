@@ -432,6 +432,27 @@ func TestRedisBackend_Integration_TPMBucketsDropExpiredSeconds(t *testing.T) {
 	assert.False(t, b.canAllowTPM(ctx, key, 27))
 }
 
+func TestRedisBackend_Integration_ConsumeTokensRetryCountedOnce(t *testing.T) {
+	b := redisBackendForTest(t, "test:tpmb3:")
+	ctx := context.Background()
+	key := fmt.Sprintf("cred-%d", time.Now().UnixNano())
+	opKey := b.tpmKey(key) + ":op:retry"
+	args := []string{
+		strconv.FormatInt(nowMS(), 10),
+		strconv.FormatInt(tpmWindow.Milliseconds(), 10),
+		"40",
+		strconv.Itoa(b.keyTTL),
+		strconv.Itoa(b.consumeDedupTTL()),
+	}
+
+	for i := 0; i < 2; i++ {
+		require.NoError(t, scriptConsumeTokens.Exec(ctx, b.client, []string{b.tpmKey(key), opKey}, args).Error())
+	}
+	b.consumeTokens(ctx, key, 2)
+
+	assert.Equal(t, 42, b.currentTPM(ctx, key))
+}
+
 func TestRedisBackend_Integration_TPMBucketsStayBounded(t *testing.T) {
 	b := redisBackendForTest(t, "test:tpmb2:")
 	ctx := context.Background()
