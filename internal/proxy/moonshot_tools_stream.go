@@ -95,7 +95,18 @@ func (p *Proxy) runMoonshotStreamToolLoop(
 	current := raw
 
 	for step := 1; step < p.moonshotToolsMaxSteps; step++ {
-		next, err := cycle.NextBodyFromToolCalls(r.Context(), owned)
+		// The last step of the budget asks the model to answer with what it
+		// has found, with the tools taken away: a tool call for the
+		// router's own function must never reach the client, which never
+		// declared it.
+		last := step == p.moonshotToolsMaxSteps-1
+		var next []byte
+		var err error
+		if last {
+			next, err = cycle.FinalBodyFromToolCalls(r.Context(), owned)
+		} else {
+			next, err = cycle.NextBodyFromToolCalls(r.Context(), owned)
+		}
 		if err != nil {
 			return moonshotStreamResult(current, total, runner), err
 		}

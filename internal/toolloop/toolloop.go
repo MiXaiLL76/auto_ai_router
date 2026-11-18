@@ -186,6 +186,50 @@ func (cycle *Cycle) NextBody(ctx context.Context, responseBody []byte) ([]byte, 
 	return cycle.bodyWithMessages()
 }
 
+// FinalBody builds the body for the loop's last request: the conversation
+// with the assistant's tool-call message and the tool results appended, and
+// the tools removed.
+//
+// It is what the loop sends when its step budget is spent: the model is
+// asked to answer with what it has found, so the client's answer is an
+// answer and not a tool call for a tool the client never declared.
+//
+// The tools the model asked for are still run: their results are the very
+// thing the model needs to answer with.
+func (cycle *Cycle) FinalBody(ctx context.Context, responseBody []byte) ([]byte, error) {
+	next, err := cycle.NextBody(ctx, responseBody)
+	if err != nil {
+		return nil, err
+	}
+	return cycle.withoutTools(next)
+}
+
+// FinalBodyFromToolCalls is the streaming counterpart of FinalBody.
+func (cycle *Cycle) FinalBodyFromToolCalls(ctx context.Context, calls []ToolCall) ([]byte, error) {
+	next, err := cycle.NextBodyFromToolCalls(ctx, calls)
+	if err != nil {
+		return nil, err
+	}
+	return cycle.withoutTools(next)
+}
+
+// withoutTools removes the tools from a request body: the model must answer
+// now, not call a tool again.
+func (cycle *Cycle) withoutTools(body []byte) ([]byte, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil {
+		return nil, fmt.Errorf("toolloop: parsing request body: %w", err)
+	}
+	delete(fields, "tools")
+	delete(fields, "tool_choice")
+	final, err := json.Marshal(fields)
+	if err != nil {
+		return nil, fmt.Errorf("toolloop: encoding request body: %w", err)
+	}
+	cycle.body = final
+	return final, nil
+}
+
 // NextBodyFromToolCalls builds the next request body from a streamed tool
 // call, the streaming counterpart of NextBody.
 func (cycle *Cycle) NextBodyFromToolCalls(ctx context.Context, calls []ToolCall) ([]byte, error) {
