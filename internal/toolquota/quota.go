@@ -61,6 +61,9 @@ redis.call('EXPIRE', key, ttl)
 return {1, 0}
 `
 
+// scriptQuota runs luaQuota via EVALSHA, falling back to EVAL on NOSCRIPT.
+var scriptQuota = valkey.NewLuaScript(luaQuota)
+
 // Quota admits tool calls against per-account QPS limits.
 //
 // The pools are named, and each pool is keyed by the ACCOUNT (not the key):
@@ -116,16 +119,15 @@ func (q *Quota) Allow(ctx context.Context, pool, account string) (bool, time.Dur
 		return q.allowLocal(key, limit), 0, nil
 	}
 	now := time.Now()
-	reply := q.client.Do(ctx, q.client.B().Eval().
-		Script(luaQuota).
-		Numkeys(1).
-		Key(key).
-		Arg(strconv.FormatInt(now.UnixMilli(), 10)).
-		Arg(strconv.FormatInt(quotaWindow.Milliseconds(), 10)).
-		Arg(strconv.Itoa(limit)).
-		Arg(uuid.NewString()).
-		Arg(strconv.Itoa(quotaKeyTTLSeconds)).
-		Build())
+	reply := scriptQuota.Exec(ctx, q.client,
+		[]string{key},
+		[]string{
+			strconv.FormatInt(now.UnixMilli(), 10),
+			strconv.FormatInt(quotaWindow.Milliseconds(), 10),
+			strconv.Itoa(limit),
+			uuid.NewString(),
+			strconv.Itoa(quotaKeyTTLSeconds),
+		})
 	parts, err := reply.ToArray()
 	if err != nil || len(parts) < 2 {
 		// Redis is unavailable: degrade to the local counter rather than

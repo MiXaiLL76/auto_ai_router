@@ -154,17 +154,17 @@ The budget `HybridBackend` differs from the rate limiter's in how it writes to R
 
 All keys are namespaced under `key_prefix` (default `rl:`):
 
-| Key pattern                            | Used for                                    |
-| -------------------------------------- | ------------------------------------------- |
-| `rl:rpm:{c:credname}`                  | Credential request count ZSET (sliding 60s) |
-| `rl:tpm:{c:credname}`                  | Credential token count ZSET (sliding 60s)   |
-| `rl:rpm:{c:credname}:m:credname:model` | Model request count ZSET (sliding 60s)      |
-| `rl:tpm:{c:credname}:m:credname:model` | Model token count ZSET (sliding 60s)        |
-| `rl:response:{id}`                     | Stored Responses API entry                  |
+| Key pattern                             | Used for                                      |
+| --------------------------------------- | --------------------------------------------- |
+| `rl:rpm:{c:credname}`                   | Credential request count ZSET (sliding 60s)   |
+| `rl:tpmb:{c:credname}`                  | Credential token count HASH (1s buckets, 60s) |
+| `rl:rpm:{c:credname}:m:credname:model`  | Model request count ZSET (sliding 60s)        |
+| `rl:tpmb:{c:credname}:m:credname:model` | Model token count HASH (1s buckets, 60s)      |
+| `rl:response:{id}`                      | Stored Responses API entry                    |
 
 The `{c:credname}` portion is a Redis **hash tag** — it ensures all four keys for a given credential (`cred rpm`, `cred tpm`, `model rpm`, `model tpm`) land in the same hash slot. This is required by valkey-go's multi-key `EVAL` slot validation, which is enforced even on single-node deployments.
 
-The four `rpm:`/`tpm:` keys above use `balancer_key_prefix`, which defaults to `key_prefix` (so nothing changes unless it is set). Response, budget and auth keys always stay under `key_prefix`.
+The four `rpm:`/`tpmb:` keys above use `balancer_key_prefix`, which defaults to `key_prefix` (so nothing changes unless it is set). Response, budget and auth keys always stay under `key_prefix`.
 
 Rate-limit keys expire after `key_ttl` seconds of inactivity (default **120 seconds**) via Redis `EXPIRE`. Response keys use the TTL from the `ttl` field of the request, or persist indefinitely when `ttl: 0`.
 

@@ -64,38 +64,52 @@ end
 return 1
 `
 
-// Lua script: check TPM (sum of token counts in window) without recording.
-// Token entries are stored as "uuid:count" members with score = timestamp_ms.
-const luaCanAllowTPM = `
-local key    = KEYS[1]
-local now    = tonumber(ARGV[1])
-local window = tonumber(ARGV[2])
-local limit  = tonumber(ARGV[3])
-if limit == -1 then return 1 end
-redis.call('ZREMRANGEBYSCORE', key, 0, now - window)
-local members = redis.call('ZRANGE', key, 0, -1)
-local total = 0
-for _, m in ipairs(members) do
-  local sep = string.find(m, ':', 1, true)
-  if sep then
-    total = total + tonumber(string.sub(m, sep + 1)) or 0
+// luaTPMWindowSum sums a TPM hash whose fields are unix seconds and values are
+// token counts, counting only the seconds inside the window. The read costs
+// O(window seconds) regardless of request rate.
+const luaTPMWindowSum = `
+local function tpm_window_sum(key, now_ms, window_ms)
+  local sec = math.floor(now_ms / 1000)
+  local oldest = sec - math.floor(window_ms / 1000)
+  local h = redis.call('HGETALL', key)
+  local total = 0
+  for i = 1, #h, 2 do
+    if tonumber(h[i]) > oldest then
+      total = total + tonumber(h[i + 1])
+    end
   end
+  return total
 end
-if total >= limit then return 0 end
+`
+
+// Lua script: check TPM (sum of token counts in window) without recording.
+const luaCanAllowTPM = luaTPMWindowSum + `
+local limit = tonumber(ARGV[3])
+if limit == -1 then return 1 end
+if tpm_window_sum(KEYS[1], tonumber(ARGV[1]), tonumber(ARGV[2])) >= limit then return 0 end
 return 1
 `
 
-// Lua script: record token consumption.
-// ARGV[4] = "uuid:count" member
+// Lua script: record token consumption into the current second's bucket.
+// ARGV[3] = token count. Expired buckets are pruned once the hash holds more
+// than two windows of seconds, which keeps it bounded without a read.
+// KEYS[2] (optional) = per-call marker kept for ARGV[5] seconds, so a retry of
+// a call that already ran is not counted twice.
 //
 //nolint:gosec // G101: false positive — Lua script text, not a credential
 const luaConsumeTokens = `
+if KEYS[2] and not redis.call('SET', KEYS[2], 1, 'NX', 'EX', tonumber(ARGV[5])) then
+  return 0
+end
 local key    = KEYS[1]
-local now    = tonumber(ARGV[1])
-local window = tonumber(ARGV[2])
-local member = ARGV[3]
-redis.call('ZREMRANGEBYSCORE', key, 0, now - window)
-redis.call('ZADD', key, now, member)
+local sec    = math.floor(tonumber(ARGV[1]) / 1000)
+local span   = math.floor(tonumber(ARGV[2]) / 1000)
+redis.call('HINCRBY', key, sec, ARGV[3])
+if redis.call('HLEN', key) > 2 * span then
+  for _, f in ipairs(redis.call('HKEYS', key)) do
+    if tonumber(f) <= sec - span then redis.call('HDEL', key, f) end
+  end
+end
 redis.call('EXPIRE', key, tonumber(ARGV[4]))
 return 1
 `
@@ -110,20 +124,8 @@ return redis.call('ZCARD', key)
 `
 
 // Lua script: get current TPM sum.
-const luaCurrentTPM = `
-local key    = KEYS[1]
-local now    = tonumber(ARGV[1])
-local window = tonumber(ARGV[2])
-redis.call('ZREMRANGEBYSCORE', key, 0, now - window)
-local members = redis.call('ZRANGE', key, 0, -1)
-local total = 0
-for _, m in ipairs(members) do
-  local sep = string.find(m, ':', 1, true)
-  if sep then
-    total = total + tonumber(string.sub(m, sep + 1)) or 0
-  end
-end
-return total
+const luaCurrentTPM = luaTPMWindowSum + `
+return tpm_window_sum(KEYS[1], tonumber(ARGV[1]), tonumber(ARGV[2]))
 `
 
 // Lua script: atomic TryAllowAll — check cred RPM+TPM + optional model RPM+TPM,
@@ -143,7 +145,7 @@ return total
 // ARGV[8] = model rpm member (uuid)
 // ARGV[9] = ttl (seconds)
 // Returns 1 allowed, 0 rejected.
-const luaTryAllowAll = `
+const luaTryAllowAll = luaTPMWindowSum + `
 local now    = tonumber(ARGV[1])
 local window = tonumber(ARGV[2])
 local ttl    = tonumber(ARGV[9])
@@ -157,17 +159,7 @@ end
 
 local function check_tpm(key, limit)
   if limit == -1 then return true end
-  redis.call('ZREMRANGEBYSCORE', key, 0, now - window)
-  local members = redis.call('ZRANGE', key, 0, -1)
-  local total = 0
-  for _, m in ipairs(members) do
-    local sep = string.find(m, ':', 1, true)
-    if sep then
-      total = total + (tonumber(string.sub(m, sep + 1)) or 0)
-    end
-  end
-  if total >= limit then return false end
-  return true
+  return tpm_window_sum(key, now, window) < limit
 end
 
 local function record_rpm(key, member)
@@ -190,6 +182,17 @@ if #KEYS >= 3 then
 end
 return 1
 `
+
+// Hot-path scripts go through EVALSHA and fall back to EVAL on NOSCRIPT.
+var (
+	scriptTryAllowRPM   = valkey.NewLuaScript(luaTryAllowRPM)
+	scriptCanAllowRPM   = valkey.NewLuaScript(luaCanAllowRPM)
+	scriptCanAllowTPM   = valkey.NewLuaScript(luaCanAllowTPM)
+	scriptConsumeTokens = valkey.NewLuaScript(luaConsumeTokens)
+	scriptCurrentRPM    = valkey.NewLuaScript(luaCurrentRPM)
+	scriptCurrentTPM    = valkey.NewLuaScript(luaCurrentTPM)
+	scriptTryAllowAll   = valkey.NewLuaScript(luaTryAllowAll)
+)
 
 // RedisBackend implements counterBackend using Valkey/Redis.
 // It is exported so that the underlying valkey.Client can be reused by other
@@ -290,7 +293,7 @@ func (b *RedisBackend) Ping(ctx context.Context) error {
 }
 
 func (b *RedisBackend) rpmKey(key string) string { return b.keyPrefix + "rpm:" + b.hashTag(key) }
-func (b *RedisBackend) tpmKey(key string) string { return b.keyPrefix + "tpm:" + b.hashTag(key) }
+func (b *RedisBackend) tpmKey(key string) string { return b.keyPrefix + "tpmb:" + b.hashTag(key) }
 
 // hashTag wraps key in a Redis hash tag so that all keys for the same credential
 // land in the same hash slot. This is required by valkey-go's multi-key EVAL slot
@@ -385,16 +388,15 @@ func (b *RedisBackend) tryAllowRPM(ctx context.Context, key string, limit int) b
 	now := nowMS()
 	member := uuid.New().String()
 	res, err := b.doWithRetry(ctx, func(ctx context.Context) (int64, error) {
-		return b.client.Do(ctx, b.client.B().Eval().
-			Script(luaTryAllowRPM).
-			Numkeys(1).
-			Key(b.rpmKey(key)).
-			Arg(fmt.Sprintf("%d", now)).
-			Arg(fmt.Sprintf("%d", rpmWindow.Milliseconds())).
-			Arg(fmt.Sprintf("%d", limit)).
-			Arg(member).
-			Arg(fmt.Sprintf("%d", b.keyTTL)).
-			Build()).AsInt64()
+		return scriptTryAllowRPM.Exec(ctx, b.client,
+			[]string{b.rpmKey(key)},
+			[]string{
+				fmt.Sprintf("%d", now),
+				fmt.Sprintf("%d", rpmWindow.Milliseconds()),
+				fmt.Sprintf("%d", limit),
+				member,
+				fmt.Sprintf("%d", b.keyTTL),
+			}).AsInt64()
 	})
 	if err != nil {
 		return false
@@ -405,14 +407,13 @@ func (b *RedisBackend) tryAllowRPM(ctx context.Context, key string, limit int) b
 func (b *RedisBackend) canAllowRPM(ctx context.Context, key string, limit int) bool {
 	now := nowMS()
 	res, err := b.doWithRetry(ctx, func(ctx context.Context) (int64, error) {
-		return b.client.Do(ctx, b.client.B().Eval().
-			Script(luaCanAllowRPM).
-			Numkeys(1).
-			Key(b.rpmKey(key)).
-			Arg(fmt.Sprintf("%d", now)).
-			Arg(fmt.Sprintf("%d", rpmWindow.Milliseconds())).
-			Arg(fmt.Sprintf("%d", limit)).
-			Build()).AsInt64()
+		return scriptCanAllowRPM.Exec(ctx, b.client,
+			[]string{b.rpmKey(key)},
+			[]string{
+				fmt.Sprintf("%d", now),
+				fmt.Sprintf("%d", rpmWindow.Milliseconds()),
+				fmt.Sprintf("%d", limit),
+			}).AsInt64()
 	})
 	if err != nil {
 		return false
@@ -426,14 +427,13 @@ func (b *RedisBackend) canAllowTPM(ctx context.Context, key string, limit int) b
 	}
 	now := nowMS()
 	res, err := b.doWithRetry(ctx, func(ctx context.Context) (int64, error) {
-		return b.client.Do(ctx, b.client.B().Eval().
-			Script(luaCanAllowTPM).
-			Numkeys(1).
-			Key(b.tpmKey(key)).
-			Arg(fmt.Sprintf("%d", now)).
-			Arg(fmt.Sprintf("%d", tpmWindow.Milliseconds())).
-			Arg(fmt.Sprintf("%d", limit)).
-			Build()).AsInt64()
+		return scriptCanAllowTPM.Exec(ctx, b.client,
+			[]string{b.tpmKey(key)},
+			[]string{
+				fmt.Sprintf("%d", now),
+				fmt.Sprintf("%d", tpmWindow.Milliseconds()),
+				fmt.Sprintf("%d", limit),
+			}).AsInt64()
 	})
 	if err != nil {
 		return false
@@ -443,30 +443,36 @@ func (b *RedisBackend) canAllowTPM(ctx context.Context, key string, limit int) b
 
 func (b *RedisBackend) consumeTokens(ctx context.Context, key string, tokenCount int) {
 	now := nowMS()
-	member := fmt.Sprintf("%s:%d", uuid.New().String(), tokenCount)
+	bucketKey := b.tpmKey(key)
+	opKey := bucketKey + ":op:" + uuid.New().String()
 	_, _ = b.doWithRetry(ctx, func(ctx context.Context) (int64, error) {
-		return 0, b.client.Do(ctx, b.client.B().Eval().
-			Script(luaConsumeTokens).
-			Numkeys(1).
-			Key(b.tpmKey(key)).
-			Arg(fmt.Sprintf("%d", now)).
-			Arg(fmt.Sprintf("%d", tpmWindow.Milliseconds())).
-			Arg(member).
-			Arg(fmt.Sprintf("%d", b.keyTTL)).
-			Build()).Error()
+		return 0, scriptConsumeTokens.Exec(ctx, b.client,
+			[]string{bucketKey, opKey},
+			[]string{
+				fmt.Sprintf("%d", now),
+				fmt.Sprintf("%d", tpmWindow.Milliseconds()),
+				fmt.Sprintf("%d", tokenCount),
+				fmt.Sprintf("%d", b.keyTTL),
+				fmt.Sprintf("%d", b.consumeDedupTTL()),
+			}).Error()
 	})
+}
+
+// consumeDedupTTL returns how long, in seconds, a consumeTokens marker must live to cover every retry.
+func (b *RedisBackend) consumeDedupTTL() int {
+	if b.commandTimeout <= 0 {
+		return int(defaultContextTimeout / time.Second)
+	}
+	return int(time.Duration(maxRetries+1)*b.commandTimeout/time.Second) + 1
 }
 
 func (b *RedisBackend) currentRPM(ctx context.Context, key string) int {
 	now := nowMS()
 	res, err := b.doWithRetry(ctx, func(ctx context.Context) (int64, error) {
-		return b.client.Do(ctx, b.client.B().Eval().
-			Script(luaCurrentRPM).
-			Numkeys(1).
-			Key(b.rpmKey(key)).
-			Arg(fmt.Sprintf("%d", now)).
-			Arg(fmt.Sprintf("%d", rpmWindow.Milliseconds())).
-			Build()).AsInt64()
+		return scriptCurrentRPM.Exec(ctx, b.client,
+			[]string{b.rpmKey(key)},
+			[]string{fmt.Sprintf("%d", now), fmt.Sprintf("%d", rpmWindow.Milliseconds())},
+		).AsInt64()
 	})
 	if err != nil {
 		return 0
@@ -477,13 +483,10 @@ func (b *RedisBackend) currentRPM(ctx context.Context, key string) int {
 func (b *RedisBackend) currentTPM(ctx context.Context, key string) int {
 	now := nowMS()
 	res, err := b.doWithRetry(ctx, func(ctx context.Context) (int64, error) {
-		return b.client.Do(ctx, b.client.B().Eval().
-			Script(luaCurrentTPM).
-			Numkeys(1).
-			Key(b.tpmKey(key)).
-			Arg(fmt.Sprintf("%d", now)).
-			Arg(fmt.Sprintf("%d", tpmWindow.Milliseconds())).
-			Build()).AsInt64()
+		return scriptCurrentTPM.Exec(ctx, b.client,
+			[]string{b.tpmKey(key)},
+			[]string{fmt.Sprintf("%d", now), fmt.Sprintf("%d", tpmWindow.Milliseconds())},
+		).AsInt64()
 	})
 	if err != nil {
 		return 0
@@ -503,44 +506,24 @@ func (b *RedisBackend) tryAllowAll(
 	credRPMKey := b.rpmKey(credKey)
 	credTPMKey := b.tpmKey(credKey)
 
-	res, err := b.doWithRetry(ctx, func(ctx context.Context) (int64, error) {
-		evalCmd := b.client.B().Eval().
-			Script(luaTryAllowAll)
+	keys := []string{credRPMKey, credTPMKey}
+	if modelKey != "" {
+		keys = append(keys, b.rpmKey(modelKey), b.tpmKey(modelKey))
+	}
+	args := []string{
+		fmt.Sprintf("%d", now),
+		fmt.Sprintf("%d", rpmWindow.Milliseconds()),
+		fmt.Sprintf("%d", credRPM),
+		fmt.Sprintf("%d", credTPM),
+		fmt.Sprintf("%d", modelRPM),
+		fmt.Sprintf("%d", modelTPM),
+		credMember,
+		modelMember,
+		fmt.Sprintf("%d", b.keyTTL),
+	}
 
-		if modelKey != "" {
-			modRPMKey := b.rpmKey(modelKey)
-			modTPMKey := b.tpmKey(modelKey)
-			return b.client.Do(ctx, evalCmd.
-				Numkeys(4).
-				Key(credRPMKey).
-				Key(credTPMKey).
-				Key(modRPMKey).
-				Key(modTPMKey).
-				Arg(fmt.Sprintf("%d", now)).
-				Arg(fmt.Sprintf("%d", rpmWindow.Milliseconds())).
-				Arg(fmt.Sprintf("%d", credRPM)).
-				Arg(fmt.Sprintf("%d", credTPM)).
-				Arg(fmt.Sprintf("%d", modelRPM)).
-				Arg(fmt.Sprintf("%d", modelTPM)).
-				Arg(credMember).
-				Arg(modelMember).
-				Arg(fmt.Sprintf("%d", b.keyTTL)).
-				Build()).AsInt64()
-		}
-		return b.client.Do(ctx, evalCmd.
-			Numkeys(2).
-			Key(credRPMKey).
-			Key(credTPMKey).
-			Arg(fmt.Sprintf("%d", now)).
-			Arg(fmt.Sprintf("%d", rpmWindow.Milliseconds())).
-			Arg(fmt.Sprintf("%d", credRPM)).
-			Arg(fmt.Sprintf("%d", credTPM)).
-			Arg(fmt.Sprintf("%d", modelRPM)).
-			Arg(fmt.Sprintf("%d", modelTPM)).
-			Arg(credMember).
-			Arg(modelMember).
-			Arg(fmt.Sprintf("%d", b.keyTTL)).
-			Build()).AsInt64()
+	res, err := b.doWithRetry(ctx, func(ctx context.Context) (int64, error) {
+		return scriptTryAllowAll.Exec(ctx, b.client, keys, args).AsInt64()
 	})
 	if err != nil {
 		return false

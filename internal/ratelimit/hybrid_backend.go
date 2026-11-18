@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"sync"
 	"time"
 
@@ -29,7 +30,8 @@ const (
 type asyncOp struct {
 	kind   asyncOpKind
 	key    string
-	member string // uuid for RPM; "uuid:count" for TPM
+	member string // uuid for RPM
+	tokens int    // token count for TPM
 	now    int64  // unix ms
 }
 
@@ -172,7 +174,7 @@ func (h *HybridBackend) writeWorker() {
 					Script(luaConsumeTokens).Numkeys(1).
 					Key(h.remote.tpmKey(op.key)).
 					Arg(nowStr).Arg(windowStr).
-					Arg(op.member).
+					Arg(strconv.Itoa(op.tokens)).
 					Arg(ttlStr).
 					Build())
 			}
@@ -416,8 +418,7 @@ func (h *HybridBackend) canAllowTPM(ctx context.Context, key string, limit int) 
 func (h *HybridBackend) consumeTokens(ctx context.Context, key string, tokenCount int) {
 	h.track(key)
 	h.local.consumeTokens(ctx, key, tokenCount)
-	member := fmt.Sprintf("%s:%d", uuid.New().String(), tokenCount)
-	h.enqueue(asyncOp{kind: opTPM, key: key, member: member, now: nowMS()})
+	h.enqueue(asyncOp{kind: opTPM, key: key, tokens: tokenCount, now: nowMS()})
 }
 
 func (h *HybridBackend) currentRPM(ctx context.Context, key string) int {
