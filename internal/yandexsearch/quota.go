@@ -70,6 +70,9 @@ redis.call('EXPIRE', hourKey, hourTTL)
 return {1, '', 0}
 `
 
+// scriptFolderQuota runs luaFolderQuota via EVALSHA, falling back to EVAL on NOSCRIPT.
+var scriptFolderQuota = valkey.NewLuaScript(luaFolderQuota)
+
 // ErrFolderQuotaUnavailable wraps a Redis error from a FolderQuota check.
 var ErrFolderQuotaUnavailable = errors.New("yandexsearch: shared folder quota unavailable")
 
@@ -116,20 +119,18 @@ func (q *FolderQuota) Allow(ctx context.Context) (allowed bool, retryAfter time.
 	now := time.Now().UnixMilli()
 	member := uuid.New().String()
 
-	reply := q.client.Do(ctx, q.client.B().Eval().
-		Script(luaFolderQuota).
-		Numkeys(2).
-		Key(q.rpsKey).
-		Key(q.hourKey).
-		Arg(fmt.Sprintf("%d", now)).
-		Arg(fmt.Sprintf("%d", quotaRPSWindow.Milliseconds())).
-		Arg(fmt.Sprintf("%d", q.rps)).
-		Arg(fmt.Sprintf("%d", quotaHourWindow.Milliseconds())).
-		Arg(fmt.Sprintf("%d", q.hourlyLimit)).
-		Arg(member).
-		Arg(fmt.Sprintf("%d", quotaRPSKeyTTLSeconds)).
-		Arg(fmt.Sprintf("%d", quotaHourKeyTTLSeconds)).
-		Build())
+	reply := scriptFolderQuota.Exec(ctx, q.client,
+		[]string{q.rpsKey, q.hourKey},
+		[]string{
+			fmt.Sprintf("%d", now),
+			fmt.Sprintf("%d", quotaRPSWindow.Milliseconds()),
+			fmt.Sprintf("%d", q.rps),
+			fmt.Sprintf("%d", quotaHourWindow.Milliseconds()),
+			fmt.Sprintf("%d", q.hourlyLimit),
+			member,
+			fmt.Sprintf("%d", quotaRPSKeyTTLSeconds),
+			fmt.Sprintf("%d", quotaHourKeyTTLSeconds),
+		})
 
 	parts, err := reply.ToArray()
 	if err != nil {

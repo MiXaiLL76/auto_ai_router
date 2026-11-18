@@ -35,6 +35,9 @@ end
 return 1
 `
 
+// scriptTryReserve runs luaTryReserve via EVALSHA, falling back to EVAL on NOSCRIPT.
+var scriptTryReserve = valkey.NewLuaScript(luaTryReserve)
+
 // redisReserveBackend implements reserveBackend directly against Redis/Valkey:
 // every TryReserve/Reconcile is one synchronous round trip (Lua-atomic).
 type redisReserveBackend struct {
@@ -60,15 +63,14 @@ func (b *redisReserveBackend) tryReserve(ctx context.Context, entity string, dbS
 	cmdCtx, cancel := b.cmdCtx(ctx)
 	defer cancel()
 
-	res, err := b.client.Do(cmdCtx, b.client.B().Eval().
-		Script(luaTryReserve).
-		Numkeys(1).
-		Key(b.key(entity)).
-		Arg(strconv.FormatFloat(dbSpend, 'f', -1, 64)).
-		Arg(strconv.FormatFloat(estimatedCost, 'f', -1, 64)).
-		Arg(strconv.FormatFloat(maxBudget, 'f', -1, 64)).
-		Arg(strconv.FormatInt(int64(b.ttl.Seconds()), 10)).
-		Build()).AsInt64()
+	res, err := scriptTryReserve.Exec(cmdCtx, b.client,
+		[]string{b.key(entity)},
+		[]string{
+			strconv.FormatFloat(dbSpend, 'f', -1, 64),
+			strconv.FormatFloat(estimatedCost, 'f', -1, 64),
+			strconv.FormatFloat(maxBudget, 'f', -1, 64),
+			strconv.FormatInt(int64(b.ttl.Seconds()), 10),
+		}).AsInt64()
 	if err != nil {
 		return false, err
 	}

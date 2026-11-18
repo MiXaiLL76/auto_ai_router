@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -400,6 +402,51 @@ func TestRedisBackend_Integration_CurrentTPM_Empty(t *testing.T) {
 	b := redisBackendForTest(t, "test:curr2:")
 	ctx := context.Background()
 	assert.Equal(t, 0, b.currentTPM(ctx, "nonexistent"))
+}
+
+func TestRedisBackend_Integration_ScriptsSurviveScriptFlush(t *testing.T) {
+	b := redisBackendForTest(t, "test:evalsha1:")
+	ctx := context.Background()
+	key := fmt.Sprintf("cred-%d", time.Now().UnixNano())
+
+	require.NoError(t, b.client.Do(ctx, b.client.B().ScriptFlush().Build()).Error())
+
+	assert.True(t, b.tryAllowRPM(ctx, key, 2))
+	assert.True(t, b.tryAllowRPM(ctx, key, 2))
+	assert.False(t, b.tryAllowRPM(ctx, key, 2))
+	b.consumeTokens(ctx, key, 7)
+	assert.Equal(t, 2, b.currentRPM(ctx, key))
+	assert.Equal(t, 7, b.currentTPM(ctx, key))
+	assert.True(t, b.tryAllowAll(ctx, key+":c", -1, -1, key+":m", -1, -1))
+}
+
+func TestRedisBackend_Integration_HotPathUsesEvalsha(t *testing.T) {
+	b := redisBackendForTest(t, "test:evalsha2:")
+	ctx := context.Background()
+	key := fmt.Sprintf("cred-%d", time.Now().UnixNano())
+
+	require.True(t, b.tryAllowRPM(ctx, key, -1))
+	before := evalshaCalls(t, b)
+	for i := 0; i < 3; i++ {
+		require.True(t, b.tryAllowRPM(ctx, key, -1))
+	}
+	assert.GreaterOrEqual(t, evalshaCalls(t, b)-before, int64(3))
+}
+
+func evalshaCalls(t *testing.T, b *RedisBackend) int64 {
+	t.Helper()
+	info, err := b.client.Do(context.Background(), b.client.B().Info().Section("commandstats").Build()).ToString()
+	require.NoError(t, err)
+	for _, line := range strings.Split(info, "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "cmdstat_evalsha:calls=")
+		if !ok {
+			continue
+		}
+		n, err := strconv.ParseInt(rest[:strings.IndexByte(rest, ',')], 10, 64)
+		require.NoError(t, err)
+		return n
+	}
+	return 0
 }
 
 // TestNewRedisBackend_Integration tests constructor with a real connection.

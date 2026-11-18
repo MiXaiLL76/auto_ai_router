@@ -191,6 +191,17 @@ end
 return 1
 `
 
+// Hot-path scripts go through EVALSHA and fall back to EVAL on NOSCRIPT.
+var (
+	scriptTryAllowRPM   = valkey.NewLuaScript(luaTryAllowRPM)
+	scriptCanAllowRPM   = valkey.NewLuaScript(luaCanAllowRPM)
+	scriptCanAllowTPM   = valkey.NewLuaScript(luaCanAllowTPM)
+	scriptConsumeTokens = valkey.NewLuaScript(luaConsumeTokens)
+	scriptCurrentRPM    = valkey.NewLuaScript(luaCurrentRPM)
+	scriptCurrentTPM    = valkey.NewLuaScript(luaCurrentTPM)
+	scriptTryAllowAll   = valkey.NewLuaScript(luaTryAllowAll)
+)
+
 // RedisBackend implements counterBackend using Valkey/Redis.
 // It is exported so that the underlying valkey.Client can be reused by other
 // packages (e.g. responsestore) via Client().
@@ -385,16 +396,15 @@ func (b *RedisBackend) tryAllowRPM(ctx context.Context, key string, limit int) b
 	now := nowMS()
 	member := uuid.New().String()
 	res, err := b.doWithRetry(ctx, func(ctx context.Context) (int64, error) {
-		return b.client.Do(ctx, b.client.B().Eval().
-			Script(luaTryAllowRPM).
-			Numkeys(1).
-			Key(b.rpmKey(key)).
-			Arg(fmt.Sprintf("%d", now)).
-			Arg(fmt.Sprintf("%d", rpmWindow.Milliseconds())).
-			Arg(fmt.Sprintf("%d", limit)).
-			Arg(member).
-			Arg(fmt.Sprintf("%d", b.keyTTL)).
-			Build()).AsInt64()
+		return scriptTryAllowRPM.Exec(ctx, b.client,
+			[]string{b.rpmKey(key)},
+			[]string{
+				fmt.Sprintf("%d", now),
+				fmt.Sprintf("%d", rpmWindow.Milliseconds()),
+				fmt.Sprintf("%d", limit),
+				member,
+				fmt.Sprintf("%d", b.keyTTL),
+			}).AsInt64()
 	})
 	if err != nil {
 		return false
@@ -405,14 +415,13 @@ func (b *RedisBackend) tryAllowRPM(ctx context.Context, key string, limit int) b
 func (b *RedisBackend) canAllowRPM(ctx context.Context, key string, limit int) bool {
 	now := nowMS()
 	res, err := b.doWithRetry(ctx, func(ctx context.Context) (int64, error) {
-		return b.client.Do(ctx, b.client.B().Eval().
-			Script(luaCanAllowRPM).
-			Numkeys(1).
-			Key(b.rpmKey(key)).
-			Arg(fmt.Sprintf("%d", now)).
-			Arg(fmt.Sprintf("%d", rpmWindow.Milliseconds())).
-			Arg(fmt.Sprintf("%d", limit)).
-			Build()).AsInt64()
+		return scriptCanAllowRPM.Exec(ctx, b.client,
+			[]string{b.rpmKey(key)},
+			[]string{
+				fmt.Sprintf("%d", now),
+				fmt.Sprintf("%d", rpmWindow.Milliseconds()),
+				fmt.Sprintf("%d", limit),
+			}).AsInt64()
 	})
 	if err != nil {
 		return false
@@ -426,14 +435,13 @@ func (b *RedisBackend) canAllowTPM(ctx context.Context, key string, limit int) b
 	}
 	now := nowMS()
 	res, err := b.doWithRetry(ctx, func(ctx context.Context) (int64, error) {
-		return b.client.Do(ctx, b.client.B().Eval().
-			Script(luaCanAllowTPM).
-			Numkeys(1).
-			Key(b.tpmKey(key)).
-			Arg(fmt.Sprintf("%d", now)).
-			Arg(fmt.Sprintf("%d", tpmWindow.Milliseconds())).
-			Arg(fmt.Sprintf("%d", limit)).
-			Build()).AsInt64()
+		return scriptCanAllowTPM.Exec(ctx, b.client,
+			[]string{b.tpmKey(key)},
+			[]string{
+				fmt.Sprintf("%d", now),
+				fmt.Sprintf("%d", tpmWindow.Milliseconds()),
+				fmt.Sprintf("%d", limit),
+			}).AsInt64()
 	})
 	if err != nil {
 		return false
@@ -445,28 +453,24 @@ func (b *RedisBackend) consumeTokens(ctx context.Context, key string, tokenCount
 	now := nowMS()
 	member := fmt.Sprintf("%s:%d", uuid.New().String(), tokenCount)
 	_, _ = b.doWithRetry(ctx, func(ctx context.Context) (int64, error) {
-		return 0, b.client.Do(ctx, b.client.B().Eval().
-			Script(luaConsumeTokens).
-			Numkeys(1).
-			Key(b.tpmKey(key)).
-			Arg(fmt.Sprintf("%d", now)).
-			Arg(fmt.Sprintf("%d", tpmWindow.Milliseconds())).
-			Arg(member).
-			Arg(fmt.Sprintf("%d", b.keyTTL)).
-			Build()).Error()
+		return 0, scriptConsumeTokens.Exec(ctx, b.client,
+			[]string{b.tpmKey(key)},
+			[]string{
+				fmt.Sprintf("%d", now),
+				fmt.Sprintf("%d", tpmWindow.Milliseconds()),
+				member,
+				fmt.Sprintf("%d", b.keyTTL),
+			}).Error()
 	})
 }
 
 func (b *RedisBackend) currentRPM(ctx context.Context, key string) int {
 	now := nowMS()
 	res, err := b.doWithRetry(ctx, func(ctx context.Context) (int64, error) {
-		return b.client.Do(ctx, b.client.B().Eval().
-			Script(luaCurrentRPM).
-			Numkeys(1).
-			Key(b.rpmKey(key)).
-			Arg(fmt.Sprintf("%d", now)).
-			Arg(fmt.Sprintf("%d", rpmWindow.Milliseconds())).
-			Build()).AsInt64()
+		return scriptCurrentRPM.Exec(ctx, b.client,
+			[]string{b.rpmKey(key)},
+			[]string{fmt.Sprintf("%d", now), fmt.Sprintf("%d", rpmWindow.Milliseconds())},
+		).AsInt64()
 	})
 	if err != nil {
 		return 0
@@ -477,13 +481,10 @@ func (b *RedisBackend) currentRPM(ctx context.Context, key string) int {
 func (b *RedisBackend) currentTPM(ctx context.Context, key string) int {
 	now := nowMS()
 	res, err := b.doWithRetry(ctx, func(ctx context.Context) (int64, error) {
-		return b.client.Do(ctx, b.client.B().Eval().
-			Script(luaCurrentTPM).
-			Numkeys(1).
-			Key(b.tpmKey(key)).
-			Arg(fmt.Sprintf("%d", now)).
-			Arg(fmt.Sprintf("%d", tpmWindow.Milliseconds())).
-			Build()).AsInt64()
+		return scriptCurrentTPM.Exec(ctx, b.client,
+			[]string{b.tpmKey(key)},
+			[]string{fmt.Sprintf("%d", now), fmt.Sprintf("%d", tpmWindow.Milliseconds())},
+		).AsInt64()
 	})
 	if err != nil {
 		return 0
@@ -503,44 +504,24 @@ func (b *RedisBackend) tryAllowAll(
 	credRPMKey := b.rpmKey(credKey)
 	credTPMKey := b.tpmKey(credKey)
 
-	res, err := b.doWithRetry(ctx, func(ctx context.Context) (int64, error) {
-		evalCmd := b.client.B().Eval().
-			Script(luaTryAllowAll)
+	keys := []string{credRPMKey, credTPMKey}
+	if modelKey != "" {
+		keys = append(keys, b.rpmKey(modelKey), b.tpmKey(modelKey))
+	}
+	args := []string{
+		fmt.Sprintf("%d", now),
+		fmt.Sprintf("%d", rpmWindow.Milliseconds()),
+		fmt.Sprintf("%d", credRPM),
+		fmt.Sprintf("%d", credTPM),
+		fmt.Sprintf("%d", modelRPM),
+		fmt.Sprintf("%d", modelTPM),
+		credMember,
+		modelMember,
+		fmt.Sprintf("%d", b.keyTTL),
+	}
 
-		if modelKey != "" {
-			modRPMKey := b.rpmKey(modelKey)
-			modTPMKey := b.tpmKey(modelKey)
-			return b.client.Do(ctx, evalCmd.
-				Numkeys(4).
-				Key(credRPMKey).
-				Key(credTPMKey).
-				Key(modRPMKey).
-				Key(modTPMKey).
-				Arg(fmt.Sprintf("%d", now)).
-				Arg(fmt.Sprintf("%d", rpmWindow.Milliseconds())).
-				Arg(fmt.Sprintf("%d", credRPM)).
-				Arg(fmt.Sprintf("%d", credTPM)).
-				Arg(fmt.Sprintf("%d", modelRPM)).
-				Arg(fmt.Sprintf("%d", modelTPM)).
-				Arg(credMember).
-				Arg(modelMember).
-				Arg(fmt.Sprintf("%d", b.keyTTL)).
-				Build()).AsInt64()
-		}
-		return b.client.Do(ctx, evalCmd.
-			Numkeys(2).
-			Key(credRPMKey).
-			Key(credTPMKey).
-			Arg(fmt.Sprintf("%d", now)).
-			Arg(fmt.Sprintf("%d", rpmWindow.Milliseconds())).
-			Arg(fmt.Sprintf("%d", credRPM)).
-			Arg(fmt.Sprintf("%d", credTPM)).
-			Arg(fmt.Sprintf("%d", modelRPM)).
-			Arg(fmt.Sprintf("%d", modelTPM)).
-			Arg(credMember).
-			Arg(modelMember).
-			Arg(fmt.Sprintf("%d", b.keyTTL)).
-			Build()).AsInt64()
+	res, err := b.doWithRetry(ctx, func(ctx context.Context) (int64, error) {
+		return scriptTryAllowAll.Exec(ctx, b.client, keys, args).AsInt64()
 	})
 	if err != nil {
 		return false
