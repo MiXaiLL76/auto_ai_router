@@ -89,7 +89,18 @@ func (p *Proxy) runDeepSeekStreamToolLoop(
 	current := raw
 
 	for step := 1; step < p.deepSeekToolsMaxSteps; step++ {
-		next, err := cycle.NextBodyFromToolCalls(r.Context(), calls)
+		// The last step of the budget asks the model to answer with what it
+		// has found, with the tools taken away: a tool call for the
+		// router's own function must never reach the client, which never
+		// declared it.
+		last := step == p.deepSeekToolsMaxSteps-1
+		var next []byte
+		var err error
+		if last {
+			next, err = cycle.FinalBodyFromToolCalls(r.Context(), calls)
+		} else {
+			next, err = cycle.NextBodyFromToolCalls(r.Context(), calls)
+		}
 		if err != nil {
 			return deepSeekStreamResult(current, total, runner), err
 		}

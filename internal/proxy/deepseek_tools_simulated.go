@@ -55,7 +55,18 @@ func (p *Proxy) deepSeekSimulatedLoop(
 	current := assembled
 
 	for step := 1; step < p.deepSeekToolsMaxSteps; step++ {
-		next, err := cycle.NextBody(r.Context(), current)
+		// The last step of the budget asks the model to answer with what it
+		// has found, with the tools taken away: a tool call for the
+		// router's own function must never reach the client, which never
+		// declared it.
+		last := step == p.deepSeekToolsMaxSteps-1
+		var next []byte
+		var err error
+		if last {
+			next, err = cycle.FinalBody(r.Context(), current)
+		} else {
+			next, err = cycle.NextBody(r.Context(), current)
+		}
 		if err != nil {
 			return deepSeekSimulatedResult(current, total, runner, err)
 		}

@@ -1761,3 +1761,114 @@ func TestMoonshotLoopStopsWhenTheClientDisconnects(t *testing.T) {
 		t.Errorf("the model was called %d times, want at most 1 (the client is gone)", chatCalls)
 	}
 }
+
+// TestMoonshotLoopEndsWithAnAnswerWhenTheStepsRunOut checks that the client
+// gets an answer, not a tool call, when the loop's step budget is spent.
+//
+// The model may keep asking for the search; when the budget runs out the
+// router asks it to answer with what it found, with the tools taken away. A
+// tool call for the router's own function must never reach the client: it
+// declared a built-in search, not a function named moonshot_web_search.
+func TestMoonshotLoopEndsWithAnAnswerWhenTheStepsRunOut(t *testing.T) {
+	var searchCalls int
+	var lastRequestHadTools bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		switch r.URL.Path {
+		case "/v1/tools/search":
+			searchCalls++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"search_results":[{"title":"T","url":"https://e.com"}]}`))
+		case "/v1/chat/completions":
+			w.Header().Set("Content-Type", "application/json")
+			lastRequestHadTools = strings.Contains(string(raw), `"tools"`)
+			if !lastRequestHadTools {
+				// The final step: the model must answer.
+				_, _ = w.Write([]byte(`{
+					"id":"c-final","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"I found it."}}],
+					"usage":{"prompt_tokens":100,"completion_tokens":10}
+				}`))
+				return
+			}
+			// The model always asks for the tool: the loop never ends on its own.
+			_, _ = fmt.Fprintf(w, `{
+				"id":"c","choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":"",
+					"tool_calls":[{"id":"call_%d","type":"function","function":{"name":%q,"arguments":"{\"text_query\":\"q\"}"}}]}}],
+				"usage":{"prompt_tokens":100,"completion_tokens":10}
+			}`, searchCalls+1, moonshottools.SearchToolName)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer upstream.Close()
+
+	credential := config.CredentialConfig{
+		Name: "moonshot", Type: config.ProviderTypeOpenAI, BaseURL: upstream.URL,
+		APIKey: "ms-key", RPM: 100, TPM: 100000, MoonshotTools: true,
+	}
+	prx := NewTestProxyBuilder().WithCredentials(credential).WithMasterKey("master-key").Build()
+	dbStub := &stubLiteLLMManager{}
+	prx.LiteLLMDB = dbStub
+	noPassthrough := false
+	prx.modelManager = models.New(prx.logger, 50, []config.ModelRPMConfig{{
+		Name: "kimi-k2", Model: "kimi-k2", Credential: "moonshot", PassthroughResponses: &noPassthrough,
+	}})
+	prx.modelManager.LoadModelsFromConfig([]config.CredentialConfig{{
+		Name: "moonshot", Type: config.ProviderTypeOpenAI, APIKey: "ms-key",
+	}})
+	prx.priceRegistry = models.NewModelPriceRegistry()
+	prx.priceRegistry.SetMoonshotToolPrices(&models.ToolPricesProvider{
+		SearchCostPerCall: 0.013, SearchProCostPerCall: 0.013, FetchCostPerCall: 0.013,
+	})
+	prx.priceRegistry.Update(map[string]*models.ModelPrice{"kimi-k2": {
+		InputCostPerToken: 1e-6, OutputCostPerToken: 2e-6,
+	}})
+
+	body := `{"model":"kimi-k2","messages":[{"role":"user","content":"search"}],"tools":[{"type":"web_search"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	prx.ProxyRequest(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if lastRequestHadTools {
+		t.Error("the last request to the model still carried the tools")
+	}
+	var response struct {
+		Choices []struct {
+			FinishReason string `json:"finish_reason"`
+			Message      struct {
+				Content   string `json:"content"`
+				ToolCalls []struct {
+					Function struct {
+						Name string `json:"name"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decoding: %v", err)
+	}
+	if len(response.Choices) == 0 {
+		t.Fatal("no choices")
+	}
+	if len(response.Choices[0].Message.ToolCalls) > 0 {
+		t.Errorf("the client got a tool call for a tool it never declared: %+v",
+			response.Choices[0].Message.ToolCalls[0].Function.Name)
+	}
+	if response.Choices[0].Message.Content == "" {
+		t.Error("the client got an empty answer")
+	}
+	// The searches that ran are still billed.
+	if len(dbStub.loggedEntries) != 1 {
+		t.Fatalf("got %d spend rows, want 1", len(dbStub.loggedEntries))
+	}
+	search, _, _ := moonshotToolCountsFromMetadata(t, dbStub.loggedEntries[0].Metadata)
+	if search != prx.moonshotToolsMaxSteps-1 {
+		t.Errorf("the search count = %d, want %d (one per step)", search, prx.moonshotToolsMaxSteps-1)
+	}
+}

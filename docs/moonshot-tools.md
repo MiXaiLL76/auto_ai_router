@@ -255,6 +255,12 @@ The breakdown in the spend row's metadata:
 
 Note that `web_search_requests` is **0**: it is the model's own built-in search, which the provider never ran here. The router's call is counted only as `moonshot_search_requests`, because it is priced by Moonshot's own tariff — counting it in both would charge the client twice.
 
+## When the step budget runs out
+
+The model may keep asking for the search — and each round is another upstream request (and another bill). The loop is bounded by `server.moonshot_tools.max_steps` (default 8).
+
+When the budget is spent, the router asks the model to answer with what it has found, **with the tools taken away**. A tool call for the router's own function must never reach the client: the client declared a built-in `web_search`, not a function named `moonshot_web_search`, so a tool call for it would be a call for a tool nobody declared.
+
 ## The control spends
 
 | What happened                                       | Tool calls billed | Tool cost  |
