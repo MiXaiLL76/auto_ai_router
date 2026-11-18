@@ -152,12 +152,17 @@ func budgetWindowLevels(info *dbmodels.TokenInfo) []budgetLevel {
 }
 
 func (p *Proxy) estimateCompletionTokens(body []byte) int {
+	raw, _ := decodeRequestBody(body)
+	return p.estimateCompletionTokensFromRaw(raw)
+}
+
+// estimateCompletionTokensFromRaw is estimateCompletionTokens for an already decoded body; nil means undecodable.
+func (p *Proxy) estimateCompletionTokensFromRaw(raw map[string]interface{}) int {
 	fallback := p.defaultEstimatedCompletionTokens
 	if fallback <= 0 {
 		fallback = 1000
 	}
-	raw, ok := decodeRequestBody(body)
-	if !ok {
+	if raw == nil {
 		return fallback
 	}
 	for _, field := range []string{"max_completion_tokens", "max_tokens", "max_output_tokens"} {
@@ -189,14 +194,17 @@ func (p *Proxy) estimateRequestCost(logCtx *RequestLogContext, publicModelID, mo
 	// tokenization; it must not also disable reservation entirely (costKnown
 	// stays true — see estimateCompletionTokens below, which never touches
 	// the tokenizer and so needs no such gate).
+	raw, decoded := decodeRequestBody(body)
 	var promptTokens int
+	if p.tiktokenEnabled && decoded {
+		promptTokens = estimatePromptTokensFromRaw(raw, realModelID)
+	}
 	if p.tiktokenEnabled {
-		promptTokens = estimatePromptTokensForModel(body, realModelID)
 		promptTokens = addNativeWSHistoryTokens(logCtx.Context(), promptTokens)
 	}
 	usage := &converter.TokenUsage{
 		PromptTokens:     promptTokens,
-		CompletionTokens: p.estimateCompletionTokens(body),
+		CompletionTokens: p.estimateCompletionTokensFromRaw(raw),
 	}
 	costs := modelPrice.CalculateCosts(usage)
 	if costs == nil {

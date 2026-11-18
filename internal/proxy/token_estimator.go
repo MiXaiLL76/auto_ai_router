@@ -45,6 +45,11 @@ func estimatePromptTokensForModel(body []byte, model string) int {
 	if !ok {
 		return 0
 	}
+	return estimatePromptTokensFromRaw(raw, model)
+}
+
+// estimatePromptTokensFromRaw is estimatePromptTokensForModel for an already decoded body.
+func estimatePromptTokensFromRaw(raw map[string]interface{}, model string) int {
 	if model == "" {
 		model, _ = raw["model"].(string)
 	}
