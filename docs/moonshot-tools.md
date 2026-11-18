@@ -208,6 +208,8 @@ The client gets the final answer — never the tool call, because it declared a 
 
 On a streaming request the client gets the last step's stream; the steps that asked for the tool are not relayed.
 
+This holds for the Responses API too: `/v1/responses` with `stream: true` gets the last step's stream converted to the Responses shape (`response.output_text.delta`, `response.completed`), not the model's tool call. How Codex talks.
+
 ## 7. The spend row
 
 The client's answer is billed for the tokens of **both** steps (the loop's steps are separate upstream requests) and for the router's own search call:

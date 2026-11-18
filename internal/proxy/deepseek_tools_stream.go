@@ -53,6 +53,34 @@ func (p *Proxy) runDeepSeekStreamToolLoop(
 	if !deepSeekToolsEnabledFor(modelID, cred) {
 		return nil, nil
 	}
+	result, err := p.runDeepSeekStreamToolLoopBuffered(r, w, logCtx, prepared, cred, modelID, realModelID, body, resp, start, attemptedCreds)
+	if err != nil {
+		return result, err
+	}
+	// The final step's stream is what the client gets.
+	replayToolStream(w, resp, result.body)
+	return result, nil
+}
+
+// runDeepSeekStreamToolLoopBuffered runs the loop and returns the final
+// step's stream, without writing it to the client.
+//
+// The split matters for the Responses API: its client expects Responses-shaped
+// SSE, and the provider answered in Chat Completions SSE. So the loop's
+// result is converted on the way out, and the conversion needs the buffered
+// stream rather than one already written.
+func (p *Proxy) runDeepSeekStreamToolLoopBuffered(
+	r *http.Request,
+	w http.ResponseWriter,
+	logCtx *RequestLogContext,
+	prepared *orchestratedRequest,
+	cred *config.CredentialConfig,
+	modelID, realModelID string,
+	body []byte,
+	resp *http.Response,
+	start time.Time,
+	attemptedCreds map[string]bool,
+) (*deepSeekStreamCycleResult, error) {
 	runner := p.newDeepSeekToolRunner(cred)
 	raw, calls, usage, err := toolloop.CollectStreamToolCalls(resp)
 	if err != nil {
@@ -60,7 +88,6 @@ func (p *Proxy) runDeepSeekStreamToolLoop(
 	}
 	if len(calls) == 0 {
 		// No tool call: the client gets the provider's stream as it is.
-		replayToolStream(w, resp, raw)
 		streamUsage := toolloop.UsageFromStreamUsage(usage)
 		return &deepSeekStreamCycleResult{
 			body:        raw,
@@ -71,7 +98,6 @@ func (p *Proxy) runDeepSeekStreamToolLoop(
 	}
 	if runner.client == nil {
 		// No key: the tool cannot be run, so the stream is relayed as it is.
-		replayToolStream(w, resp, raw)
 		streamUsage := toolloop.UsageFromStreamUsage(usage)
 		return &deepSeekStreamCycleResult{
 			body:        raw,
@@ -120,8 +146,6 @@ func (p *Proxy) runDeepSeekStreamToolLoop(
 		calls = nextCalls
 	}
 
-	// The final step's stream is what the client gets.
-	replayToolStream(w, resp, current)
 	return deepSeekStreamResult(current, total, runner), nil
 }
 

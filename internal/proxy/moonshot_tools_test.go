@@ -2023,3 +2023,117 @@ func TestMoonshotResponsesWithoutASearchKeepsThePassthrough(t *testing.T) {
 		t.Errorf("the router made %d search calls, want 0", fake.searchCalls)
 	}
 }
+
+// TestMoonshotResponsesStreamingWithASearchIsTakenOver checks the Responses
+// API's streaming path with a built-in search.
+//
+// The Responses branch converts the provider's Chat Completions SSE into
+// Responses SSE and hands it to the client. Without the tool loop the
+// client received the model's own tool call -- for the router's own
+// function, which it cannot run -- and no answer at all.
+//
+// This is how Codex talks: /v1/responses with stream:true and a web_search.
+func TestMoonshotResponsesStreamingWithASearchIsTakenOver(t *testing.T) {
+	fake := &moonshotFake{
+		searchResults: []map[string]any{{
+			"title": "Kimi K2 released",
+			"url":   "https://example.com/k2",
+		}},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		switch r.URL.Path {
+		case "/v1/tools/search":
+			fake.mu.Lock()
+			fake.searchCalls++
+			results := fake.searchResults
+			fake.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"search_results": results})
+		case "/v1/chat/completions":
+			fake.mu.Lock()
+			fake.chatCalls++
+			call := fake.chatCalls
+			fake.mu.Unlock()
+			w.Header().Set("Content-Type", "text/event-stream")
+			if call == 1 {
+				// The first stream asks for the router's search.
+				_, _ = w.Write([]byte("data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"` + moonshottools.SearchToolName + `","arguments":"{\"text_query\":\"kimi k2\"}"}}]}}]}` + "\n\n"))
+				_, _ = w.Write([]byte("data: " + `{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":100,"completion_tokens":10,"total_tokens":110}}` + "\n\n"))
+				_, _ = w.Write([]byte("data: [DONE]\n\n"))
+				return
+			}
+			// The second stream is the answer.
+			_, _ = w.Write([]byte("data: " + `{"choices":[{"index":0,"delta":{"content":"Kimi K2 was released."}}]}` + "\n\n"))
+			_, _ = w.Write([]byte("data: " + `{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":200,"completion_tokens":20,"total_tokens":220}}` + "\n\n"))
+			_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+		_ = raw
+	}))
+	defer server.Close()
+	fake.baseURL = server.URL
+
+	credential := config.CredentialConfig{
+		Name:          "moonshot",
+		Type:          config.ProviderTypeOpenAI,
+		BaseURL:       fake.serverURL(),
+		APIKey:        "ms-key",
+		RPM:           100,
+		TPM:           100000,
+		MoonshotTools: true,
+	}
+	prx := NewTestProxyBuilder().WithCredentials(credential).WithMasterKey("master-key").Build()
+	dbStub := &stubLiteLLMManager{}
+	prx.LiteLLMDB = dbStub
+	prx.modelManager = models.New(prx.logger, 50, []config.ModelRPMConfig{{
+		Name:       "kimi-k3.1-pro",
+		Model:      "kimi-k3.1-pro",
+		Credential: "moonshot",
+	}})
+	prx.modelManager.LoadModelsFromConfig([]config.CredentialConfig{{
+		Name: "moonshot", Type: config.ProviderTypeOpenAI, APIKey: "ms-key",
+	}})
+	prx.priceRegistry = models.NewModelPriceRegistry()
+	prx.priceRegistry.SetMoonshotToolPrices(&models.ToolPricesProvider{
+		SearchCostPerCall: 0.013, SearchProCostPerCall: 0.013, FetchCostPerCall: 0.013,
+	})
+	prx.priceRegistry.Update(map[string]*models.ModelPrice{"kimi-k3.1-pro": {
+		InputCostPerToken: 1e-6, OutputCostPerToken: 2e-6,
+	}})
+
+	body := `{
+		"model": "kimi-k3.1-pro",
+		"input": [{"role": "user", "content": [{"type": "input_text", "text": "When was Kimi K2 released?"}]}],
+		"tools": [{"type": "web_search"}],
+		"stream": true
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	prx.ProxyRequest(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if fake.searchCalls != 1 {
+		t.Errorf("the router made %d search calls, want 1 (the built-in tool must be taken over)", fake.searchCalls)
+	}
+	out := rec.Body.String()
+	// The client must get an answer, not the router's own tool call.
+	if !strings.Contains(out, "Kimi K2 was released.") {
+		t.Errorf("the client got no answer: %s", out)
+	}
+	if strings.Contains(out, moonshottools.SearchToolName) {
+		t.Errorf("the client saw the router's own tool call: %s", out)
+	}
+	if len(dbStub.loggedEntries) != 1 {
+		t.Fatalf("got %d spend rows, want 1", len(dbStub.loggedEntries))
+	}
+	search, _, _ := moonshotToolCountsFromMetadata(t, dbStub.loggedEntries[0].Metadata)
+	if search != 1 {
+		t.Errorf("the moonshot search count = %d, want 1", search)
+	}
+}
