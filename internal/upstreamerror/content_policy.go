@@ -69,6 +69,34 @@ var ContentPolicyMarkers = []string{
 	"unable to complete inference",
 	"responsibleaipolicyviolation",
 	"responsible ai policy violation",
+	// OpenAI and Azure both refuse a request by naming "the safety system"
+	// -- "Your request was rejected by the safety system. If you believe this
+	// is an error, contact us at help.openai.com and include the request ID
+	// ...". Until the provider adds a safety_violations=[...] list to that
+	// message, nothing in it matched the markers above ("safety violation"
+	// needs the word "violation"), so the refusal was classified as a
+	// generic 400 and reported to the client as "Invalid request" -- the
+	// client was told to fix a request that was actually refused on policy
+	// grounds, with nothing to fix.
+	//
+	// Both spellings are needed, for the reason every other entry here
+	// needed both: the marker is matched against a normalized signal, but
+	// the retry policy (config.DefaultNonRetryableMarkers, the same slice)
+	// matches the response body against it as a plain lowercase substring.
+	// The prose form ("rejected by the safety system") is what the
+	// providers actually write.
+	//
+	// "content safety system" is deliberately NOT here. The retry policy
+	// matches these markers against the response body for ANY status, not
+	// just 400s, so a generic phrase would also catch an infrastructure
+	// failure that merely mentions the subsystem -- "An internal error
+	// occurred while the content safety system was processing your
+	// request" -- and mark a retryable 5xx non-retryable across the whole
+	// credential pool. The refusal itself is named tightly enough without
+	// it: in production "rejected by the safety system" covers 3,380
+	// requests, and the bare subsystem name added only 46 more, nearly all
+	// of them overlapping with it.
+	"rejected by the safety system",
 }
 
 // IsContentPolicySignal reports whether a provider signal describes a

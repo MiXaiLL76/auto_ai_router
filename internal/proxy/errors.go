@@ -105,34 +105,11 @@ func errorBodyRequestID(id string) string {
 }
 
 func maskedUpstreamErrorBody(statusCode int, requestID string, rawBodies ...[]byte) []byte {
-	message := "Request failed"
-	code := "api_error"
-	param := (*string)(nil)
-	switch statusCode {
-	case http.StatusBadRequest:
-		detail := classifiedBadRequestError(rawBodies...)
-		message = detail.Message
-		code = *detail.Code
-		param = detail.Param
-	case http.StatusTooManyRequests:
-		message = "Rate limit exceeded"
-		code = "rate_limit_error"
-	case http.StatusRequestTimeout, http.StatusGatewayTimeout:
-		message = "Request timed out"
-		code = "timeout_error"
-	case http.StatusRequestEntityTooLarge:
-		message = "Request entity too large"
-		code = "request_entity_too_large"
+	var raw []byte
+	if len(rawBodies) > 0 {
+		raw = rawBodies[0]
 	}
-
-	resp := APIErrorResponse{
-		Error: APIError{
-			Message: message,
-			Type:    errorTypeForStatus(statusCode),
-			Param:   param,
-			Code:    &code,
-		},
-	}
+	resp := APIErrorResponse{Error: maskedUpstreamError(statusCode, raw)}
 	resp.RequestID = errorBodyRequestID(requestID)
 	body, err := json.Marshal(resp)
 	if err != nil {
@@ -148,35 +125,28 @@ func maskedUpstreamErrorBody(statusCode int, requestID string, rawBodies ...[]by
 // client actually saw, instead of the historical hardcoded "Request failed"
 // placeholder (see internal/proxy/proxy.go's two logCtx.ErrorMsg call sites).
 func classifiedErrorMessage(statusCode int, rawBody []byte) string {
-	switch statusCode {
-	case http.StatusBadRequest:
-		return classifiedBadRequestError(rawBody).Message
-	case http.StatusTooManyRequests:
-		return "Rate limit exceeded"
-	case http.StatusRequestTimeout, http.StatusGatewayTimeout:
-		return "Request timed out"
-	case http.StatusRequestEntityTooLarge:
-		return "Request entity too large"
-	default:
-		return "Request failed"
-	}
+	return maskedUpstreamError(statusCode, rawBody).Message
 }
 
-// classifiedBadRequestError delegates to the shared upstreamerror classifier
-// (also used by litellm compatibility mode's normalizeError) so both modes
-// surface the same classification instead of one discarding it.
-func classifiedBadRequestError(rawBodies ...[]byte) APIError {
-	var raw []byte
-	if len(rawBodies) > 0 {
-		raw = rawBodies[0]
+func maskedUpstreamError(statusCode int, rawBody []byte) APIError {
+	classified, ok := upstreamerror.ClassifyStatus(statusCode, rawBody)
+	if !ok {
+		switch statusCode {
+		case http.StatusTooManyRequests:
+			classified.Message, classified.Code = "Rate limit exceeded", "rate_limit_error"
+		case http.StatusRequestTimeout, http.StatusGatewayTimeout:
+			classified.Message, classified.Code = "Request timed out", "timeout_error"
+		case http.StatusRequestEntityTooLarge:
+			classified.Message, classified.Code = "Request entity too large", "request_entity_too_large"
+		default:
+			classified.Message, classified.Code = "Request failed", "api_error"
+		}
 	}
-	classified := upstreamerror.ClassifyBadRequest(raw)
-	code := classified.Code
 	return APIError{
 		Message: classified.Message,
-		Type:    errorTypeForStatus(http.StatusBadRequest),
+		Type:    errorTypeForStatus(statusCode),
 		Param:   classified.Param,
-		Code:    &code,
+		Code:    &classified.Code,
 	}
 }
 

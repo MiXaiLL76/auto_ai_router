@@ -367,26 +367,19 @@ func errorStatus(value any) int {
 	return upstreamerror.ClassifyProviderErrorSignals(signals)
 }
 
-// normalizeError builds the litellm-compatible error body for a non-2xx
-// response. Status 400 is run through the same signal-based classifier as
-// native mode's maskedUpstreamErrorBody (see upstreamerror.ClassifyBadRequest)
-// to surface which parameter was rejected — this only ever extracts a short,
-// pre-vetted message from a small fixed set plus a narrow field/param name,
-// never the raw provider message text, so it's safe to run on a body that
-// hasn't been trusted yet (see TestTransformError: raw provider bodies with
-// embedded credential names or internal URLs must never reach the client
-// verbatim, for 429 or otherwise). Other statuses keep their fixed generic
-// message, matching native mode exactly.
+// normalizeError builds the LiteLLM-compatible error body for a non-2xx
+// response. Upstream diagnostics use the same classifier as native mode.
 func normalizeError(status int, body []byte) []byte {
 	message := "Request failed"
 	code := fmt.Sprintf("%d", status)
 	var param *string
 	switch status {
-	case http.StatusBadRequest:
-		classified := upstreamerror.ClassifyBadRequest(body)
-		message = classified.Message
-		code = classified.Code
-		param = classified.Param
+	case http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound:
+		if classified, ok := upstreamerror.ClassifyStatus(status, body); ok {
+			message = classified.Message
+			code = classified.Code
+			param = classified.Param
+		}
 	case http.StatusTooManyRequests:
 		message = "Rate limit exceeded"
 	case http.StatusRequestTimeout, http.StatusGatewayTimeout:
