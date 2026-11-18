@@ -184,6 +184,30 @@ type SpendEvent struct {
 	// doesn't use cache_control at all (non-Anthropic-family provider).
 	CacheControlOutcome string `json:"cache_control_outcome,omitempty"`
 
+	// CacheMarkersIn* count cache_control markers on the client's own
+	// request body, by where they sit -- CacheControlOutcome only looks at
+	// messages/system, so these are what catches a marker the client placed
+	// on a tool definition instead (Anthropic allows that, and the router's
+	// own tool converter forwards it verbatim -- it reaches the provider and
+	// can cause real cache reads/writes that CacheControlOutcome's "none"
+	// can't explain). Counted once per request, independent of which
+	// credential serves it. CacheMarkersInTTL1h is how many of the three
+	// counts specify the 1h extended TTL rather than the 5m default.
+	CacheMarkersInSystem   int `json:"cache_markers_in_system"`
+	CacheMarkersInMessages int `json:"cache_markers_in_messages"`
+	CacheMarkersInTools    int `json:"cache_markers_in_tools"`
+	CacheMarkersInTTL1h    int `json:"cache_markers_in_ttl_1h"`
+	// CacheMarkersOut* are the same four counts, but on the final body this
+	// attempt actually sent to its Anthropic-wire credential -- zero across
+	// all four when no Anthropic-wire credential was ever attempted.
+	// Comparing In and Out answers what the diagnosis in #381 alone could
+	// not: whether a marker the client sent actually survived the router's
+	// conversion pipeline to reach the provider.
+	CacheMarkersOutSystem   int `json:"cache_markers_out_system"`
+	CacheMarkersOutMessages int `json:"cache_markers_out_messages"`
+	CacheMarkersOutTools    int `json:"cache_markers_out_tools"`
+	CacheMarkersOutTTL1h    int `json:"cache_markers_out_ttl_1h"`
+
 	// Placeholder fields for the deferred request/response body capture PR.
 	// Always false/0 — no capture logic exists yet.
 	BodyCaptured      bool `json:"body_captured"`

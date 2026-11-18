@@ -1387,6 +1387,12 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 	logCtx.ModelID = modelID
 	logCtx.SessionID = sessionID
 	logCtx.CacheEligibilitySource = cacheEligibilitySource
+	// Counted once here, on the client's own body, before any per-credential
+	// conversion -- independent of which credential (if any Anthropic-wire
+	// one at all) ends up serving the request. See CacheMarkersIn's doc
+	// comment on RequestLogContext for why this exists alongside
+	// CacheControlOutcome.
+	logCtx.CacheMarkersIn = anthropicconv.CountCacheMarkers(body)
 
 	if modelID == "" {
 		p.logger.WarnContext(r.Context(), "Model not specified in request body",
