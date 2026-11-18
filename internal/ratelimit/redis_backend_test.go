@@ -174,10 +174,10 @@ func TestRedisBackend_KeyFunctions(t *testing.T) {
 	b := &RedisBackend{keyPrefix: "rl:"}
 	// Credential key: wrapped in hash tag for slot consistency.
 	assert.Equal(t, "rl:rpm:{c:mycred}", b.rpmKey("c:mycred"))
-	assert.Equal(t, "rl:tpm:{c:mycred}", b.tpmKey("c:mycred"))
+	assert.Equal(t, "rl:tpmb:{c:mycred}", b.tpmKey("c:mycred"))
 	// Model key: inherits credential's hash tag.
 	assert.Equal(t, "rl:rpm:{c:mycred}:m:mycred:mymodel", b.rpmKey("m:mycred:mymodel"))
-	assert.Equal(t, "rl:tpm:{c:mycred}:m:mycred:mymodel", b.tpmKey("m:mycred:mymodel"))
+	assert.Equal(t, "rl:tpmb:{c:mycred}:m:mycred:mymodel", b.tpmKey("m:mycred:mymodel"))
 	// Generic key: wrapped as-is.
 	assert.Equal(t, "rl:rpm:{other}", b.rpmKey("other"))
 }
@@ -185,7 +185,7 @@ func TestRedisBackend_KeyFunctions(t *testing.T) {
 func TestRedisBackend_KeyFunctions_EmptyPrefix(t *testing.T) {
 	b := &RedisBackend{keyPrefix: ""}
 	assert.Equal(t, "rpm:{c:mycred}", b.rpmKey("c:mycred"))
-	assert.Equal(t, "tpm:{c:mycred}", b.tpmKey("c:mycred"))
+	assert.Equal(t, "tpmb:{c:mycred}", b.tpmKey("c:mycred"))
 }
 
 // ── constructors ────────────────────────────────────────────────────────────
@@ -402,6 +402,56 @@ func TestRedisBackend_Integration_CurrentTPM_Empty(t *testing.T) {
 	b := redisBackendForTest(t, "test:curr2:")
 	ctx := context.Background()
 	assert.Equal(t, 0, b.currentTPM(ctx, "nonexistent"))
+}
+
+func consumeTokensAt(t *testing.T, b *RedisBackend, key string, nowMs int64, tokens int) {
+	t.Helper()
+	err := scriptConsumeTokens.Exec(context.Background(), b.client,
+		[]string{b.tpmKey(key)},
+		[]string{
+			strconv.FormatInt(nowMs, 10),
+			strconv.FormatInt(tpmWindow.Milliseconds(), 10),
+			strconv.Itoa(tokens),
+			strconv.Itoa(b.keyTTL),
+		}).Error()
+	require.NoError(t, err)
+}
+
+func TestRedisBackend_Integration_TPMBucketsDropExpiredSeconds(t *testing.T) {
+	b := redisBackendForTest(t, "test:tpmb1:")
+	ctx := context.Background()
+	key := fmt.Sprintf("cred-%d", time.Now().UnixNano())
+	now := nowMS()
+
+	consumeTokensAt(t, b, key, now-61_000, 500)
+	consumeTokensAt(t, b, key, now-30_000, 20)
+	consumeTokensAt(t, b, key, now, 7)
+
+	assert.Equal(t, 27, b.currentTPM(ctx, key))
+	assert.True(t, b.canAllowTPM(ctx, key, 28))
+	assert.False(t, b.canAllowTPM(ctx, key, 27))
+}
+
+func TestRedisBackend_Integration_TPMBucketsStayBounded(t *testing.T) {
+	b := redisBackendForTest(t, "test:tpmb2:")
+	ctx := context.Background()
+	key := fmt.Sprintf("cred-%d", time.Now().UnixNano())
+	now := nowMS()
+
+	for s := int64(300); s >= 0; s-- {
+		consumeTokensAt(t, b, key, now-s*1000, 1)
+	}
+
+	n, err := b.client.Do(ctx, b.client.B().Hlen().Key(b.tpmKey(key)).Build()).AsInt64()
+	require.NoError(t, err)
+	assert.LessOrEqual(t, n, int64(2*tpmWindow/time.Second)+1)
+
+	total, err := scriptCurrentTPM.Exec(ctx, b.client,
+		[]string{b.tpmKey(key)},
+		[]string{strconv.FormatInt(now, 10), strconv.FormatInt(tpmWindow.Milliseconds(), 10)},
+	).AsInt64()
+	require.NoError(t, err)
+	assert.Equal(t, int64(60), total)
 }
 
 func TestRedisBackend_Integration_ScriptsSurviveScriptFlush(t *testing.T) {

@@ -64,38 +64,47 @@ end
 return 1
 `
 
-// Lua script: check TPM (sum of token counts in window) without recording.
-// Token entries are stored as "uuid:count" members with score = timestamp_ms.
-const luaCanAllowTPM = `
-local key    = KEYS[1]
-local now    = tonumber(ARGV[1])
-local window = tonumber(ARGV[2])
-local limit  = tonumber(ARGV[3])
-if limit == -1 then return 1 end
-redis.call('ZREMRANGEBYSCORE', key, 0, now - window)
-local members = redis.call('ZRANGE', key, 0, -1)
-local total = 0
-for _, m in ipairs(members) do
-  local sep = string.find(m, ':', 1, true)
-  if sep then
-    total = total + tonumber(string.sub(m, sep + 1)) or 0
+// luaTPMWindowSum sums a TPM hash whose fields are unix seconds and values are
+// token counts, counting only the seconds inside the window. The read costs
+// O(window seconds) regardless of request rate.
+const luaTPMWindowSum = `
+local function tpm_window_sum(key, now_ms, window_ms)
+  local sec = math.floor(now_ms / 1000)
+  local oldest = sec - math.floor(window_ms / 1000)
+  local h = redis.call('HGETALL', key)
+  local total = 0
+  for i = 1, #h, 2 do
+    if tonumber(h[i]) > oldest then
+      total = total + tonumber(h[i + 1])
+    end
   end
+  return total
 end
-if total >= limit then return 0 end
+`
+
+// Lua script: check TPM (sum of token counts in window) without recording.
+const luaCanAllowTPM = luaTPMWindowSum + `
+local limit = tonumber(ARGV[3])
+if limit == -1 then return 1 end
+if tpm_window_sum(KEYS[1], tonumber(ARGV[1]), tonumber(ARGV[2])) >= limit then return 0 end
 return 1
 `
 
-// Lua script: record token consumption.
-// ARGV[4] = "uuid:count" member
+// Lua script: record token consumption into the current second's bucket.
+// ARGV[3] = token count. Expired buckets are pruned once the hash holds more
+// than two windows of seconds, which keeps it bounded without a read.
 //
 //nolint:gosec // G101: false positive — Lua script text, not a credential
 const luaConsumeTokens = `
 local key    = KEYS[1]
-local now    = tonumber(ARGV[1])
-local window = tonumber(ARGV[2])
-local member = ARGV[3]
-redis.call('ZREMRANGEBYSCORE', key, 0, now - window)
-redis.call('ZADD', key, now, member)
+local sec    = math.floor(tonumber(ARGV[1]) / 1000)
+local span   = math.floor(tonumber(ARGV[2]) / 1000)
+redis.call('HINCRBY', key, sec, ARGV[3])
+if redis.call('HLEN', key) > 2 * span then
+  for _, f in ipairs(redis.call('HKEYS', key)) do
+    if tonumber(f) <= sec - span then redis.call('HDEL', key, f) end
+  end
+end
 redis.call('EXPIRE', key, tonumber(ARGV[4]))
 return 1
 `
@@ -110,20 +119,8 @@ return redis.call('ZCARD', key)
 `
 
 // Lua script: get current TPM sum.
-const luaCurrentTPM = `
-local key    = KEYS[1]
-local now    = tonumber(ARGV[1])
-local window = tonumber(ARGV[2])
-redis.call('ZREMRANGEBYSCORE', key, 0, now - window)
-local members = redis.call('ZRANGE', key, 0, -1)
-local total = 0
-for _, m in ipairs(members) do
-  local sep = string.find(m, ':', 1, true)
-  if sep then
-    total = total + tonumber(string.sub(m, sep + 1)) or 0
-  end
-end
-return total
+const luaCurrentTPM = luaTPMWindowSum + `
+return tpm_window_sum(KEYS[1], tonumber(ARGV[1]), tonumber(ARGV[2]))
 `
 
 // Lua script: atomic TryAllowAll — check cred RPM+TPM + optional model RPM+TPM,
@@ -143,7 +140,7 @@ return total
 // ARGV[8] = model rpm member (uuid)
 // ARGV[9] = ttl (seconds)
 // Returns 1 allowed, 0 rejected.
-const luaTryAllowAll = `
+const luaTryAllowAll = luaTPMWindowSum + `
 local now    = tonumber(ARGV[1])
 local window = tonumber(ARGV[2])
 local ttl    = tonumber(ARGV[9])
@@ -157,17 +154,7 @@ end
 
 local function check_tpm(key, limit)
   if limit == -1 then return true end
-  redis.call('ZREMRANGEBYSCORE', key, 0, now - window)
-  local members = redis.call('ZRANGE', key, 0, -1)
-  local total = 0
-  for _, m in ipairs(members) do
-    local sep = string.find(m, ':', 1, true)
-    if sep then
-      total = total + (tonumber(string.sub(m, sep + 1)) or 0)
-    end
-  end
-  if total >= limit then return false end
-  return true
+  return tpm_window_sum(key, now, window) < limit
 end
 
 local function record_rpm(key, member)
@@ -301,7 +288,7 @@ func (b *RedisBackend) Ping(ctx context.Context) error {
 }
 
 func (b *RedisBackend) rpmKey(key string) string { return b.keyPrefix + "rpm:" + b.hashTag(key) }
-func (b *RedisBackend) tpmKey(key string) string { return b.keyPrefix + "tpm:" + b.hashTag(key) }
+func (b *RedisBackend) tpmKey(key string) string { return b.keyPrefix + "tpmb:" + b.hashTag(key) }
 
 // hashTag wraps key in a Redis hash tag so that all keys for the same credential
 // land in the same hash slot. This is required by valkey-go's multi-key EVAL slot
@@ -451,14 +438,13 @@ func (b *RedisBackend) canAllowTPM(ctx context.Context, key string, limit int) b
 
 func (b *RedisBackend) consumeTokens(ctx context.Context, key string, tokenCount int) {
 	now := nowMS()
-	member := fmt.Sprintf("%s:%d", uuid.New().String(), tokenCount)
 	_, _ = b.doWithRetry(ctx, func(ctx context.Context) (int64, error) {
 		return 0, scriptConsumeTokens.Exec(ctx, b.client,
 			[]string{b.tpmKey(key)},
 			[]string{
 				fmt.Sprintf("%d", now),
 				fmt.Sprintf("%d", tpmWindow.Milliseconds()),
-				member,
+				fmt.Sprintf("%d", tokenCount),
 				fmt.Sprintf("%d", b.keyTTL),
 			}).Error()
 	})
