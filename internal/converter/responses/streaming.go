@@ -83,6 +83,7 @@ type streamAccumulator struct {
 	storeFlag          bool
 	previousResponseID string
 	requestMetadata    map[string]string
+	requestText        interface{}
 }
 
 // allocOutputIndex reserves the output_index for an output item being opened.
@@ -302,6 +303,7 @@ func transformChatStreamToResponsesInner(
 		acc.storeFlag = meta.Store
 		acc.previousResponseID = meta.PreviousResponseID
 		acc.requestMetadata = meta.Metadata
+		acc.requestText = meta.Text
 	}
 
 	callOnComplete := func() {
@@ -727,6 +729,7 @@ func buildTypedCompletedResponse(acc *streamAccumulator) *Response {
 		PreviousResponseID: prevRespID,
 		Store:              acc.storeFlag,
 		ToolChoice:         "auto",
+		Text:               acc.requestText,
 	})
 }
 
@@ -973,6 +976,7 @@ func buildInProgressResponse(acc *streamAccumulator) map[string]interface{} {
 		PreviousResponseID: prevRespID,
 		Store:              acc.storeFlag,
 		ToolChoice:         "auto",
+		Text:               acc.requestText,
 	}))
 }
 
@@ -1041,6 +1045,7 @@ func buildCompletedResponse(acc *streamAccumulator) map[string]interface{} {
 		PreviousResponseID: prevRespID,
 		Store:              acc.storeFlag,
 		ToolChoice:         "auto",
+		Text:               acc.requestText,
 	}))
 }
 

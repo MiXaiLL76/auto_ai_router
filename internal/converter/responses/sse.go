@@ -51,6 +51,9 @@ type CompletedResponseParams struct {
 	// Store and ToolChoice are only populated by the Chat Completions path.
 	Store      bool
 	ToolChoice interface{}
+
+	// Text is the request's text config to echo (ResponsesMetadata.Text).
+	Text interface{}
 }
 
 // BuildCompletedResponse constructs the typed *Response for a stream-completed
@@ -71,6 +74,7 @@ func BuildCompletedResponse(p CompletedResponseParams) *Response {
 		PreviousResponseID: p.PreviousResponseID,
 		Store:              p.Store,
 		ToolChoice:         p.ToolChoice,
+		Text:               p.Text,
 	})
 }
 

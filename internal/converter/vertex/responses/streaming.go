@@ -537,6 +537,9 @@ func buildVertexInProgressResponse(acc *vertexStreamAccumulator) map[string]inte
 		if acc.meta.PreviousResponseID != "" {
 			resp["previous_response_id"] = acc.meta.PreviousResponseID
 		}
+		if acc.meta.Text != nil {
+			resp["text"] = acc.meta.Text
+		}
 	}
 	return resp
 }
@@ -643,7 +646,7 @@ func buildVertexCompletedResponse(acc *vertexStreamAccumulator) *responses.Respo
 
 	completedAt := acc.createdAt
 	metadata := map[string]string{}
-	var prevRespID interface{}
+	var prevRespID, text interface{}
 	if acc.meta != nil {
 		for k, v := range acc.meta.Metadata {
 			metadata[k] = v
@@ -651,6 +654,7 @@ func buildVertexCompletedResponse(acc *vertexStreamAccumulator) *responses.Respo
 		if acc.meta.PreviousResponseID != "" {
 			prevRespID = acc.meta.PreviousResponseID
 		}
+		text = acc.meta.Text
 	}
 
 	return responses.BuildCompletedResponse(responses.CompletedResponseParams{
@@ -664,6 +668,7 @@ func buildVertexCompletedResponse(acc *vertexStreamAccumulator) *responses.Respo
 		Usage:              usage,
 		Metadata:           metadata,
 		PreviousResponseID: prevRespID,
+		Text:               text,
 	})
 }
 

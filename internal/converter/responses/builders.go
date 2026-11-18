@@ -16,6 +16,7 @@ type ResponseParams struct {
 	PreviousResponseID interface{}
 	Store              bool
 	ToolChoice         interface{}
+	Text               interface{} // echoed text config (ResponsesMetadata.Text); nil = {format: {type: "text"}}
 }
 
 // NewResponse builds a fully-populated Responses API object with schema-required defaults.
@@ -33,6 +34,14 @@ func NewResponse(p ResponseParams) *Response {
 	toolChoice := p.ToolChoice
 	if toolChoice == nil {
 		toolChoice = "auto"
+	}
+	text := p.Text
+	if text == nil {
+		text = map[string]interface{}{
+			"format": map[string]interface{}{
+				"type": "text",
+			},
+		}
 	}
 
 	return &Response{
@@ -65,12 +74,8 @@ func NewResponse(p ResponseParams) *Response {
 		Truncation:         "disabled",
 		ServiceTier:        "default",
 		ToolChoice:         toolChoice,
-		Text: map[string]interface{}{
-			"format": map[string]interface{}{
-				"type": "text",
-			},
-		},
-		MaxToolCalls: nil,
+		Text:               text,
+		MaxToolCalls:       nil,
 	}
 }
 

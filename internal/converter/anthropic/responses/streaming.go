@@ -639,6 +639,9 @@ func buildAnthropicInProgressResponse(acc *anthropicStreamAccumulator) map[strin
 	if acc.meta != nil && acc.meta.PreviousResponseID != "" {
 		resp["previous_response_id"] = acc.meta.PreviousResponseID
 	}
+	if acc.meta != nil && acc.meta.Text != nil {
+		resp["text"] = acc.meta.Text
+	}
 	return resp
 }
 
@@ -698,7 +701,7 @@ func buildAnthropicCompletedResponse(acc *anthropicStreamAccumulator) *responses
 
 	completedAt := acc.createdAt
 	metadata := map[string]string{}
-	var prevRespID interface{}
+	var prevRespID, text interface{}
 	if acc.meta != nil {
 		for k, v := range acc.meta.Metadata {
 			metadata[k] = v
@@ -706,6 +709,7 @@ func buildAnthropicCompletedResponse(acc *anthropicStreamAccumulator) *responses
 		if acc.meta.PreviousResponseID != "" {
 			prevRespID = acc.meta.PreviousResponseID
 		}
+		text = acc.meta.Text
 	}
 
 	return responses.BuildCompletedResponse(responses.CompletedResponseParams{
@@ -719,6 +723,7 @@ func buildAnthropicCompletedResponse(acc *anthropicStreamAccumulator) *responses
 		Usage:              usage,
 		Metadata:           metadata,
 		PreviousResponseID: prevRespID,
+		Text:               text,
 	})
 }
 
