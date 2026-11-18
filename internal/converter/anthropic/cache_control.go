@@ -125,11 +125,38 @@ func contentHasCacheControl(content interface{}) bool {
 	}
 	for _, block := range blocks {
 		b, ok := block.(map[string]interface{})
-		if ok && b["cache_control"] != nil {
-			return true
+		if ok {
+			if _, isMarker := asEphemeralCacheControl(b["cache_control"]); isMarker {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// asEphemeralCacheControl reports whether v is a well-formed Anthropic
+// cache_control marker -- a map with "type":"ephemeral" -- and returns it as
+// a map if so. A field literally named "cache_control" is not on its own
+// proof of a marker: a tool's JSON Schema can freely declare a parameter
+// called "cache_control" (e.g. {"properties":{"cache_control":{"type":
+// "string"}}}), and some clients round-trip an empty "{}" placeholder, or an
+// explicit "cache_control": null, on every block regardless of whether
+// caching was actually requested. Treating either as "the client already
+// supplied a marker" would make InjectCacheControl silently skip injecting
+// its own marker for a request that never asked for one. Anthropic's
+// cache_control object always has "type":"ephemeral" (its only documented
+// value, the same one InjectCacheControl itself always writes); requiring
+// that match rules out both false-positive shapes. Shared with
+// cache_markers.go's countCacheControlMarkers so the two can't drift apart
+// on what counts as a marker, which is exactly how this was found: that
+// diagnostic's stricter check kept disagreeing with this one's "none" in
+// production.
+func asEphemeralCacheControl(v interface{}) (map[string]interface{}, bool) {
+	cc, ok := v.(map[string]interface{})
+	if !ok || cc["type"] != "ephemeral" {
+		return nil, false
+	}
+	return cc, true
 }
 
 // markLastContentBlock adds cache_control to the last block of a message's content.

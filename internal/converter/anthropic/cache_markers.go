@@ -77,18 +77,11 @@ func CountCacheMarkers(body []byte) CacheMarkerCounts {
 func countCacheControlMarkers(v interface{}) (count, ttl1h int) {
 	switch t := v.(type) {
 	case map[string]interface{}:
-		// A field literally named "cache_control" is not on its own proof of
-		// a marker: a tool's JSON Schema can freely declare a parameter
-		// called "cache_control" (e.g. {"properties":{"cache_control":
-		// {"type":"string"}}}), and `"cache_control": null` is a present-but-
-		// empty key, not a marker either -- both would otherwise inflate
-		// Tools for a request that never sent one. Anthropic's cache_control
-		// object always has "type":"ephemeral" (its only documented value,
-		// the same one InjectCacheControl itself always writes); requiring
-		// that match rules out both false-positive shapes, since a schema
-		// property named "cache_control" would need to coincidentally be
-		// typed exactly {"type":"ephemeral", ...} to still slip through.
-		if cc, ok := t["cache_control"].(map[string]interface{}); ok && cc["type"] == "ephemeral" {
+		// See asEphemeralCacheControl (cache_control.go) for why a field
+		// literally named "cache_control" isn't on its own proof of a
+		// marker, and why this same check is shared with InjectCacheControl's
+		// own client-supplied detection.
+		if cc, ok := asEphemeralCacheControl(t["cache_control"]); ok {
 			count++
 			if ttl, _ := cc["ttl"].(string); ttl == "1h" {
 				ttl1h++
