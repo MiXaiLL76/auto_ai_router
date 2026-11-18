@@ -1,7 +1,6 @@
 package toolloop
 
 import (
-	"context"
 	"testing"
 )
 
@@ -47,14 +46,3 @@ func TestStreamToolCallsAreFilteredByTheRunner(t *testing.T) {
 		t.Errorf("the call = %q, want the router's own tool", calls[0].Name)
 	}
 }
-
-// fakeRunner owns one tool and counts nothing.
-type fakeRunner struct {
-	owned map[string]bool
-}
-
-func (r *fakeRunner) Owns(name string) bool { return r.owned[name] }
-
-func (r *fakeRunner) Run(_ context.Context, _, _ string) string { return "{}" }
-
-func (r *fakeRunner) Billable() map[string]int { return nil }
