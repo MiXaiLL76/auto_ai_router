@@ -470,6 +470,13 @@ func TestOpenAIToAnthropic_ReasoningEffortPrecedence(t *testing.T) {
 	assert.Equal(t, "high", request["output_config"].(map[string]interface{})["effort"])
 }
 
+// TestOpenAIToAnthropic_ReasoningObjectCanDisableTopLevelEffort checks that
+// a nested reasoning.effort of "none" wins over a top-level reasoning_effort
+// and turns thinking off.
+//
+// Opus 5 thinks by default and takes an explicit "disabled" to say otherwise,
+// so the request must carry that field: without it the model reasons anyway
+// and the client gets exactly the behaviour it asked to avoid.
 func TestOpenAIToAnthropic_ReasoningObjectCanDisableTopLevelEffort(t *testing.T) {
 	result, err := OpenAIToAnthropic([]byte(`{
 		"model":"claude-opus-5",
@@ -481,7 +488,8 @@ func TestOpenAIToAnthropic_ReasoningObjectCanDisableTopLevelEffort(t *testing.T)
 
 	var request map[string]interface{}
 	require.NoError(t, json.Unmarshal(result, &request))
-	assert.NotContains(t, request, "thinking")
+	require.Contains(t, request, "thinking")
+	assert.Equal(t, "disabled", request["thinking"].(map[string]interface{})["type"])
 	assert.NotContains(t, request, "output_config")
 }
 

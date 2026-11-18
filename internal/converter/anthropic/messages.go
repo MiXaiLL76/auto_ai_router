@@ -136,6 +136,9 @@ func OpenAIToAnthropic(openAIBody []byte, model string, isRealAnthropicBackend b
 	if err := validateBetweenTools(tc, effort); err != nil {
 		return nil, err
 	}
+	if err := validateThinkingOffEffort(tc, effort, anthropicReq.Model); err != nil {
+		return nil, err
+	}
 	if tc != nil {
 		anthropicReq.Thinking = tc
 		anthropicReq.OutputConfig = oc

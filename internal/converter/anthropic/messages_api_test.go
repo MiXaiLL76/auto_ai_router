@@ -814,9 +814,19 @@ func TestMessagesToChat_InvalidThinkingOffRejected(t *testing.T) {
 		testhelpers.RequireValidationError(t, err, tt.param, "")
 	}
 
-	// Other models have no between_tools rules.
+	// Opus 5 has no between_tools rules, but it does have the effort limit:
+	// it takes "disabled" to turn thinking off only up to effort "high", so
+	// "disabled" at "max" is a request the model cannot serve -- the router
+	// answers it itself rather than letting the provider's 400 through
+	// (see validateThinkingOffEffort).
 	body := `{"model":"claude-opus-5","max_tokens":100,"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"disabled"},"output_config":{"effort":"max"}}`
 	_, _, err := MessagesToChat([]byte(body))
+	testhelpers.RequireValidationError(t, err, "output_config.effort", "")
+
+	// A model that thinks only when asked has no such limit: for it, no
+	// thinking field at all IS thinking off.
+	body2 := `{"model":"claude-opus-4-7","max_tokens":100,"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"disabled"},"output_config":{"effort":"max"}}`
+	_, _, err = MessagesToChat([]byte(body2))
 	require.NoError(t, err)
 }
 
