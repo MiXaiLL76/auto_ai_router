@@ -116,6 +116,9 @@ func MessagesToChat(body []byte) ([]byte, MessagesAdapterMetadata, error) {
 	if err := validateBetweenTools(tc, configuredEffort); err != nil {
 		return nil, MessagesAdapterMetadata{}, err
 	}
+	if err := validateThinkingOffEffort(tc, configuredEffort, model); err != nil {
+		return nil, MessagesAdapterMetadata{}, err
+	}
 	thinking, hasThinking := request["thinking"].(map[string]interface{})
 	if IsNativeAdaptiveModel(model) {
 		// Thinking is always adaptive here (ValidateThinkingControls rejects the rest), so
@@ -201,6 +204,9 @@ func NormalizeMessagesForPassthrough(body []byte, model string, isRealAnthropicB
 	outputConfig, _ := request["output_config"].(map[string]interface{})
 	effort, _ := outputConfig["effort"].(string)
 	if err := validateBetweenTools(tc, effort); err != nil {
+		return nil, err
+	}
+	if err := validateThinkingOffEffort(tc, effort, model); err != nil {
 		return nil, err
 	}
 	if tc != nil {

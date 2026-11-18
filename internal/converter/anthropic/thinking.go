@@ -235,7 +235,14 @@ func reasoningEffortOff(effort string) bool {
 // Claude Sonnet 5.5 asked for no thinking: returns (*AnthropicThinking{Type:"between_tools"}, nil).
 func mapThinkingConfig(thinking interface{}, reasoningEffort string, modelName string) (*AnthropicThinking, *AnthropicOutputConfig) {
 	adaptive := isAdaptiveThinkingModel(modelName)
-	betweenTools := thinkingOffModeFor(modelName) == thinkingOffBetweenTools
+	mode := thinkingOffModeFor(modelName)
+	betweenTools := mode == thinkingOffBetweenTools
+	// disabledUpToHigh models (Claude Haiku 5.5, Claude Opus 5) take an
+	// explicit "disabled" to turn thinking off, but only up to effort high.
+	// They are also adaptive, so omitting the thinking field makes them
+	// THINK BY DEFAULT -- which is why "disabled" has to reach them as an
+	// explicit field rather than as no field at all.
+	disabledUpToHigh := mode == thinkingOffDisabledUpToHigh
 
 	if thinking != nil {
 		if thinkingMap, ok := thinking.(map[string]interface{}); ok {
@@ -277,8 +284,38 @@ func mapThinkingConfig(thinking interface{}, reasoningEffort string, modelName s
 				if budget > 0 {
 					return &AnthropicThinking{Type: "enabled", BudgetTokens: budget, BlockBinding: blockBinding}, nil
 				}
-			case "disabled", "between_tools":
+			case "disabled":
+				if betweenTools {
+					// Sonnet 5.5 rejects "disabled" and takes "between_tools"
+					// in its place.
+					tc := &AnthropicThinking{Type: "between_tools", Display: display, BudgetTokens: int(budgetTokens), BlockBinding: blockBinding}
+					if effort := mapReasoningEffortToEffort(reasoningEffort); effort != "" {
+						return tc, &AnthropicOutputConfig{Effort: effort}
+					}
+					return tc, nil
+				}
+				if disabledUpToHigh {
+					// The client asked for no thinking and this model takes
+					// "disabled" to say so -- but only up to effort high;
+					// above that it cannot run without thinking, and the
+					// request is rejected (see validateThinkingOffEffort).
+					//
+					// The explicit field matters: these models think by
+					// default, so NO thinking field would leave them
+					// reasoning, which is the opposite of what the client
+					// asked for.
+					if effort := mapReasoningEffortToEffort(reasoningEffort); effort != "" {
+						return &AnthropicThinking{Type: "disabled"}, &AnthropicOutputConfig{Effort: effort}
+					}
+					return &AnthropicThinking{Type: "disabled"}, nil
+				}
+				// Every other model: "disabled" means no extended thinking,
+				// which for them is simply the absence of the field.
+				return nil, nil
+			case "between_tools":
 				if !betweenTools {
+					// Only Sonnet 5.5 takes "between_tools"; elsewhere it
+					// means nothing, and the model keeps its own default.
 					return nil, nil
 				}
 				// The other fields are kept so validateBetweenTools reports them.
@@ -292,8 +329,34 @@ func mapThinkingConfig(thinking interface{}, reasoningEffort string, modelName s
 	}
 
 	if reasoningEffort != "" {
-		if betweenTools && reasoningEffortOff(reasoningEffort) {
-			return thinkingOff(modelName, ""), nil
+		if reasoningEffortOff(reasoningEffort) {
+			// The client asked for no reasoning. Only Sonnet 5.5 was handled
+			// here; for every other model this fell through to the effort
+			// mapping below, where "none" maps to no budget and so to NO
+			// thinking config at all -- which on the adaptive models means
+			// they keep thinking. The client asked for no reasoning and got
+			// reasoning.
+			//
+			// The fix is model-specific, because the ways to say "no
+			// thinking" differ:
+			//   - Sonnet 5.5 takes "between_tools" (thinking only between
+			//     tool calls) -- already handled, and it is NOT the same
+			//     thing as thinking being off.
+			//   - Haiku 5.5 takes an explicit "disabled", and needs it:
+			//     it thinks by default, so no thinking field means it
+			//     reasons. This is the case that was broken.
+			//   - A model that always thinks (Opus 5.5, Fable, Mythos)
+			//     gets nothing -- the request cannot be satisfied.
+			//   - A model that thinks only when asked (Claude 4.x and
+			//     older) gets nothing -- that IS thinking off, and it is
+			//     what it always did.
+			if betweenTools {
+				return thinkingOff(modelName, ""), nil
+			}
+			if disabledUpToHigh {
+				return &AnthropicThinking{Type: "disabled"}, nil
+			}
+			return nil, nil
 		}
 		if adaptive {
 			effort := mapReasoningEffortToEffort(reasoningEffort)
@@ -368,6 +431,32 @@ func validateBetweenTools(tc *AnthropicThinking, effort string) error {
 	if effort == "xhigh" || effort == "max" {
 		return converterutil.NewRequestValidationError("output_config.effort",
 			`thinking off on claude-sonnet-5.5 (thinking.type "disabled" or "between_tools") supports effort "low", "medium" or "high"; use thinking.type "adaptive" for "xhigh" or "max"`)
+	}
+	return nil
+}
+
+// validateThinkingOffEffort rejects a request that turns thinking off at an
+// effort the model cannot do it at.
+//
+// Claude Haiku 5.5 and Claude Opus 5 take thinking.type "disabled" to turn
+// thinking off, but only up to effort "high": above that the model cannot run
+// without thinking, and Anthropic answers "output_config.effort 'xhigh' is
+// not supported when thinking is disabled on this model".
+//
+// The router answers this itself rather than letting the provider's 400
+// through, for the same reason it validates the Sonnet 5.5 case: the client
+// gets an error that names the field and the fix, instead of one it cannot
+// act on.
+func validateThinkingOffEffort(tc *AnthropicThinking, effort, model string) error {
+	if tc == nil || tc.Type != "disabled" {
+		return nil
+	}
+	if thinkingOffModeFor(model) != thinkingOffDisabledUpToHigh {
+		return nil
+	}
+	if effort == "xhigh" || effort == "max" {
+		return converterutil.NewRequestValidationError("output_config.effort",
+			`thinking off on this model (thinking.type "disabled") supports effort "low", "medium" or "high"; use thinking.type "adaptive" for "xhigh" or "max"`)
 	}
 	return nil
 }
