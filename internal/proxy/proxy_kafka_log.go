@@ -243,6 +243,16 @@ func (p *Proxy) buildKafkaSpendEvent(
 
 		CacheEligibilitySource: logCtx.CacheEligibilitySource,
 		CacheControlOutcome:    logCtx.CacheControlOutcome,
+
+		CacheMarkersInSystem:   logCtx.CacheMarkersIn.System,
+		CacheMarkersInMessages: logCtx.CacheMarkersIn.Messages,
+		CacheMarkersInTools:    logCtx.CacheMarkersIn.Tools,
+		CacheMarkersInTTL1h:    logCtx.CacheMarkersIn.TTL1h,
+
+		CacheMarkersOutSystem:   logCtx.CacheMarkersOut.System,
+		CacheMarkersOutMessages: logCtx.CacheMarkersOut.Messages,
+		CacheMarkersOutTools:    logCtx.CacheMarkersOut.Tools,
+		CacheMarkersOutTTL1h:    logCtx.CacheMarkersOut.TTL1h,
 	}
 
 	if tokenCosts != nil {

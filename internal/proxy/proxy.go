@@ -462,6 +462,27 @@ type RequestLogContext struct {
 	// cache_control, "router_injected" when this router added it, "none"
 	// when neither happened, "" when no Anthropic-wire credential was ever
 	// attempted for this request at all.
+	//
+	// CacheControlOutcome only looks at messages/system, so it can say
+	// "none" for a request that actually carries a cache_control marker on
+	// a tool definition (Anthropic allows that, and the router's own
+	// OpenAI->Anthropic tool converter already forwards one verbatim --
+	// see tools.go) -- the marker still reaches the provider and can produce
+	// real cache reads/writes that CacheControlOutcome's "none" makes look
+	// unexplained. CacheMarkersIn/CacheMarkersOut (anthropicconv.CacheMarkerCounts)
+	// close that gap: counts only, by location (system/messages/tools) and
+	// TTL, no request content.
+	//
+	// CacheMarkersIn is counted once, on the client's original request body
+	// at ingress, independent of which credential ends up serving it --
+	// it answers "what did the client actually send", universally.
+	CacheMarkersIn anthropicconv.CacheMarkerCounts
+	// CacheMarkersOut is counted per credential attempt, on the final body
+	// actually handed to that attempt's Anthropic-wire credential (same
+	// point, and same retry-survival rule, as CacheControlOutcome below) --
+	// it answers "what did this attempt actually send upstream". Zero value
+	// for a request that never tried an Anthropic-wire credential.
+	CacheMarkersOut       anthropicconv.CacheMarkerCounts
 	CacheControlOutcome   string
 	StickyHeldCredential  string               // Credential the session stays bound to although it could not take this request (busy or excluded for it)
 	stickyExclude         map[string]bool      // Credentials excluded for this request (denylist, reasoning, tried); used to find the model's best tier
@@ -1820,6 +1841,11 @@ func (p *Proxy) sendToCredential(
 				logCtx.CacheControlOutcome = string(anthropicconv.CacheControlNone)
 			}
 		}
+		// CacheMarkersOut: count on requestBody exactly as it stands now --
+		// after ExtractBetaHeader and whatever the switch above just did
+		// (carried over, injected, or left untouched) -- so it reflects what
+		// this attempt is actually about to send, not an intermediate state.
+		logCtx.CacheMarkersOut = anthropicconv.CountCacheMarkers(requestBody)
 	default:
 		// This attempt's credential doesn't speak Anthropic's wire protocol
 		// at all, so it has nothing to report either way. Deliberately not
