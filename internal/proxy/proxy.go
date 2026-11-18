@@ -3954,6 +3954,77 @@ dispatch:
 			// For Responses API: only transform successful responses (2xx status).
 			// For error responses (4xx/5xx), pass through the provider error as-is.
 			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				// The router-run tool loop, streaming variant: the model may
+				// ask for one of the router's tools mid-stream, and the
+				// client cannot be shown a tool call for a tool it never
+				// declared. The stream is buffered, the tool run, and the
+				// model asked again; the final step's stream is what the
+				// client gets, converted to the Responses shape on the way
+				// out.
+				//
+				// Without this the client received the model's own tool
+				// call -- for the router's own function, which it cannot
+				// run -- and no answer at all.
+				responsesLoopRan := false
+				if p.deepSeekToolsEnabled && deepSeekToolsEnabledFor(modelID, cred) ||
+					p.moonshotToolsEnabled && moonshotToolsEnabledFor(modelID, cred) {
+					var buffered []byte
+					var loopUsage *converter.TokenUsage
+					var loopErr error
+					if moonshotToolsEnabledFor(modelID, cred) {
+						moonshotRun, moonshotErr := p.runMoonshotStreamToolLoopBuffered(r, w, logCtx, prepared, cred,
+							modelID, realModelID, body, resp, start, attemptedCreds)
+						loopErr = moonshotErr
+						if moonshotRun != nil {
+							responsesLoopRan = true
+							buffered = moonshotRun.body
+							loopUsage = moonshotRun.usage
+						}
+					} else {
+						deepSeekRun, deepSeekErr := p.runDeepSeekStreamToolLoopBuffered(r, w, logCtx, prepared, cred,
+							modelID, realModelID, body, resp, start, attemptedCreds)
+						loopErr = deepSeekErr
+						if deepSeekRun != nil {
+							responsesLoopRan = true
+							buffered = deepSeekRun.body
+							loopUsage = deepSeekRun.usage
+						}
+					}
+					switch {
+					case errToolLoopAborted(loopErr):
+						// The client went away (or the provider's response was
+						// already handled): the loop stops here, and the router
+						// must not write anything else to the dead connection.
+						return
+					case loopErr != nil:
+						p.logger.WarnContext(r.Context(), "The router-run search/fetch loop failed",
+							"model", modelID, "credential", cred.Name, "error", loopErr,
+							"request_id", logCtx.RequestID)
+						// A tool that already ran and returned results is
+						// billed even though the model that followed it
+						// failed, so the loop's usage rides along here too.
+						if responsesLoopRan && loopUsage != nil {
+							logCtx.DeepSeekToolUsage = loopUsage
+						}
+					case responsesLoopRan:
+						// The loop buffered the stream itself, so the usual
+						// streaming handler never ran: it neither counted the
+						// tokens nor wrote the spend row. The loop's usage is
+						// applied to the request's own usage after the
+						// streaming log wrote its figures (the log read the
+						// last chunk's usage, which carries only the last
+						// step's).
+						logCtx.DeepSeekToolUsage = loopUsage
+					}
+					if responsesLoopRan && buffered != nil {
+						// The final step's stream, in the provider's own Chat
+						// Completions shape: the conversion to Responses SSE
+						// happens below, as it does for a stream without a
+						// tool call.
+						resp.Body = io.NopCloser(bytes.NewReader(buffered))
+						resp.ContentLength = int64(len(buffered))
+					}
+				}
 				// Transform to Responses API SSE format
 				err := p.handleResponsesAPIStreaming(w, resp, cred, modelID, logCtx, saveResponseFn, prepared.responsesMetadata)
 				if err != nil {
