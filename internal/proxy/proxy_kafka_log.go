@@ -270,6 +270,9 @@ func (p *Proxy) buildKafkaSpendEvent(
 		event.VideoInputCost = tokenCosts.VideoInputCost
 		event.WebSearchCost = tokenCosts.WebSearchCost
 		event.WebFetchCost = tokenCosts.WebFetchCost
+		event.MoonshotSearchCost = tokenCosts.MoonshotSearchCost
+		event.MoonshotSearchProCost = tokenCosts.MoonshotSearchProCost
+		event.MoonshotFetchCost = tokenCosts.MoonshotFetchCost
 		event.XSearchCost = tokenCosts.XSearchCost
 		event.CodeExecutionCost = tokenCosts.CodeExecutionCost
 		event.AttachmentSearchCost = tokenCosts.AttachmentSearchCost

@@ -364,6 +364,34 @@ func RewriteRequest(body []byte) ([]byte, *ToolPlan, error) {
 	return result, plan, nil
 }
 
+// HasBuiltInTool reports whether a Responses API request body asks for one of
+// the built-in tools the adapter takes over.
+//
+// It is what the router's passthrough branch asks: a request that carries a
+// built-in search must not be forwarded as it is (the provider refuses it),
+// while every other /v1/responses request keeps the passthrough path.
+func HasBuiltInTool(body []byte) bool {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil {
+		return false
+	}
+	rawTools, ok := fields["tools"]
+	if !ok {
+		return false
+	}
+	var tools []responsesTool
+	if err := json.Unmarshal(rawTools, &tools); err != nil {
+		return false
+	}
+	for _, tool := range tools {
+		switch tool.Type {
+		case BuiltinWebSearch, BuiltinWebSearchPreview, BuiltinMoonshotSearchPro, BuiltinWebFetch:
+			return true
+		}
+	}
+	return false
+}
+
 // RewriteResponsesRequest replaces the built-in search tools in a Responses
 // API request body with the adapter's function tools.
 //

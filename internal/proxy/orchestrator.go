@@ -506,6 +506,25 @@ func (p *Proxy) sanitizeClientParams(r *http.Request, modelID string, cred *conf
 	return p.applyDeepSeekToolTools(r, modelID, cred, body)
 }
 
+// routerRunsBuiltInTools reports whether the router would run one of the
+// built-in tools for this request -- the Moonshot adapter's or DeepSeek's.
+//
+// It is the passthrough branch's question: a request that carries a built-in
+// tool the router runs must be diverted to the conversion path (where the
+// adapter takes the tool over), because the provider would refuse the
+// built-in tool as it is.
+func (p *Proxy) routerRunsBuiltInTools(modelID string, cred *config.CredentialConfig, body []byte) bool {
+	if p.moonshotToolsEnabled && moonshotToolsEnabledFor(modelID, cred) &&
+		moonshottools.HasBuiltInTool(body) {
+		return true
+	}
+	if p.deepSeekToolsEnabled && deepSeekToolsEnabledFor(modelID, cred) &&
+		deepseektools.HasBuiltInTool(body) {
+		return true
+	}
+	return false
+}
+
 // applyDeepSeekToolTools replaces the built-in search/fetch tools with the
 // adapter's function tools, when the request and the credential call for it.
 //
@@ -910,7 +929,15 @@ func (p *Proxy) buildCredentialRequestInner(
 	}
 
 	switch {
-	case p.modelManager != nil && p.modelManager.IsPassthroughResponsesForProvider(modelID, cred.Type):
+	case p.modelManager != nil && p.modelManager.IsPassthroughResponsesForProvider(modelID, cred.Type) &&
+		!p.routerRunsBuiltInTools(modelID, cred, body):
+		// A request that asks for one of the router's own tools must not be
+		// forwarded as it is: the provider refuses a built-in search it does
+		// not have, and the adapter has to run the tool instead. Such a
+		// request falls through to the default branch below, where the
+		// adapter takes the tool over and the request is converted.
+		//
+		// Every other /v1/responses request keeps the passthrough path.
 		req.body = responses.PrepareCodexPassthrough(body, prevEntryHandled)
 		req.proxyBody = responses.PrepareCodexPassthrough(proxyBody, prevEntryHandled)
 		req.passthroughResponses = true

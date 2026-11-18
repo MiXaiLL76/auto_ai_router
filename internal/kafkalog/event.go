@@ -115,6 +115,15 @@ type SpendEvent struct {
 	MoonshotSearchRequests    int `json:"moonshot_search_requests"`
 	MoonshotSearchProRequests int `json:"moonshot_search_pro_requests"`
 	MoonshotFetchRequests     int `json:"moonshot_fetch_requests"`
+	// MoonshotSearchCost, MoonshotSearchProCost and MoonshotFetchCost are
+	// what those calls cost, at the tool price document's per-call prices.
+	// They are apart from the model's own token costs, and they are what
+	// the built-in tools' costs (web_search_cost, web_fetch_cost) are for
+	// the model's own tools: the difference is that these are the ROUTER's
+	// calls, on a provider's search API, not the model's.
+	MoonshotSearchCost    float64 `json:"moonshot_search_cost"`
+	MoonshotSearchProCost float64 `json:"moonshot_search_pro_cost"`
+	MoonshotFetchCost     float64 `json:"moonshot_fetch_cost"`
 	// Built-in server-side tool usage beyond web search (xAI).
 	XSearchCalls           int `json:"x_search_calls"`
 	XSearchPosts           int `json:"x_search_posts"`
