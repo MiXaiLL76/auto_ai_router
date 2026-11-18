@@ -88,6 +88,22 @@ func (f *moonshotFake) handler() http.Handler {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"title": "Example", "markdown": markdown, "error": fetchError,
 			})
+		case "/v1/responses":
+			// The native Responses path: the client's own Responses-shaped
+			// body arrives as it is (no "messages"), and the provider answers
+			// in the Responses shape.
+			f.mu.Lock()
+			f.chatCalls++
+			var parsed map[string]json.RawMessage
+			_ = json.Unmarshal(body, &parsed)
+			f.lastChatBody = parsed
+			f.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"id":"resp-plain","object":"response","model":"kimi-k2",
+				"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Hi!"}]}],
+				"usage":{"input_tokens":20,"output_tokens":3,"total_tokens":23}
+			}`))
 		case "/v1/chat/completions":
 			f.mu.Lock()
 			f.chatCalls++
@@ -1870,5 +1886,140 @@ func TestMoonshotLoopEndsWithAnAnswerWhenTheStepsRunOut(t *testing.T) {
 	search, _, _ := moonshotToolCountsFromMetadata(t, dbStub.loggedEntries[0].Metadata)
 	if search != prx.moonshotToolsMaxSteps-1 {
 		t.Errorf("the search count = %d, want %d (one per step)", search, prx.moonshotToolsMaxSteps-1)
+	}
+}
+
+// TestMoonshotResponsesWithASearchIsTakenOver checks the Responses path with
+// the production configuration: the model has no `passthrough_responses`
+// override, so the router's default for an OpenAI-type credential is to
+// forward a /v1/responses request as it is.
+//
+// A request that asks for a built-in search must not be forwarded as it is
+// then: Moonshot refuses a built-in tool it does not have ("unknown tool
+// type: web_search"), and the adapter has to run the tool instead. So such
+// a request is diverted to the conversion path, where the adapter takes
+// the tool over.
+func TestMoonshotResponsesWithASearchIsTakenOver(t *testing.T) {
+	fake := &moonshotFake{
+		searchResults: []map[string]any{{
+			"title": "Kimi K3 released",
+			"url":   "https://example.com/k3",
+		}},
+	}
+	server := httptest.NewServer(fake.handler())
+	defer server.Close()
+	fake.baseURL = server.URL
+
+	credential := config.CredentialConfig{
+		Name:          "moonshot",
+		Type:          config.ProviderTypeOpenAI,
+		BaseURL:       fake.serverURL(),
+		APIKey:        "ms-key",
+		RPM:           100,
+		TPM:           100000,
+		MoonshotTools: true,
+	}
+	prx := NewTestProxyBuilder().WithCredentials(credential).WithMasterKey("master-key").Build()
+	dbStub := &stubLiteLLMManager{}
+	prx.LiteLLMDB = dbStub
+	// The production configuration: no `passthrough_responses` override, so
+	// the router's default for an OpenAI-type credential applies.
+	prx.modelManager = models.New(prx.logger, 50, []config.ModelRPMConfig{{
+		Name:       "kimi-k3.1-pro",
+		Model:      "kimi-k3.1-pro",
+		Credential: "moonshot",
+	}})
+	prx.modelManager.LoadModelsFromConfig([]config.CredentialConfig{{
+		Name: "moonshot", Type: config.ProviderTypeOpenAI, APIKey: "ms-key",
+	}})
+	prx.priceRegistry = models.NewModelPriceRegistry()
+	prx.priceRegistry.SetMoonshotToolPrices(&models.ToolPricesProvider{
+		SearchCostPerCall: 0.013, SearchProCostPerCall: 0.013, FetchCostPerCall: 0.013,
+	})
+	prx.priceRegistry.Update(map[string]*models.ModelPrice{"kimi-k3.1-pro": {
+		InputCostPerToken: 1e-6, OutputCostPerToken: 2e-6,
+	}})
+
+	body := `{
+		"model": "kimi-k3.1-pro",
+		"input": [{"role": "user", "content": [{"type": "input_text", "text": "What is new in Kimi K3?"}]}],
+		"tools": [{"type": "web_search"}]
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	prx.ProxyRequest(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if fake.searchCalls != 1 {
+		t.Errorf("the router made %d search calls, want 1 (the built-in tool must be taken over)", fake.searchCalls)
+	}
+	if len(dbStub.loggedEntries) != 1 {
+		t.Fatalf("got %d spend rows, want 1", len(dbStub.loggedEntries))
+	}
+	search, _, _ := moonshotToolCountsFromMetadata(t, dbStub.loggedEntries[0].Metadata)
+	if search != 1 {
+		t.Errorf("the moonshot search count = %d, want 1", search)
+	}
+}
+
+// TestMoonshotResponsesWithoutASearchKeepsThePassthrough checks the other
+// half: a /v1/responses request that asks for no built-in tool keeps the
+// passthrough path, so the ordinary Responses traffic is not diverted.
+func TestMoonshotResponsesWithoutASearchKeepsThePassthrough(t *testing.T) {
+	fake := &moonshotFake{}
+	server := httptest.NewServer(fake.handler())
+	defer server.Close()
+	fake.baseURL = server.URL
+
+	credential := config.CredentialConfig{
+		Name:          "moonshot",
+		Type:          config.ProviderTypeOpenAI,
+		BaseURL:       fake.serverURL(),
+		APIKey:        "ms-key",
+		RPM:           100,
+		TPM:           100000,
+		MoonshotTools: true,
+	}
+	prx := NewTestProxyBuilder().WithCredentials(credential).WithMasterKey("master-key").Build()
+	dbStub := &stubLiteLLMManager{}
+	prx.LiteLLMDB = dbStub
+	prx.modelManager = models.New(prx.logger, 50, []config.ModelRPMConfig{{
+		Name:       "kimi-k3.1-pro",
+		Model:      "kimi-k3.1-pro",
+		Credential: "moonshot",
+	}})
+	prx.modelManager.LoadModelsFromConfig([]config.CredentialConfig{{
+		Name: "moonshot", Type: config.ProviderTypeOpenAI, APIKey: "ms-key",
+	}})
+	prx.priceRegistry = models.NewModelPriceRegistry()
+	prx.priceRegistry.Update(map[string]*models.ModelPrice{"kimi-k3.1-pro": {
+		InputCostPerToken: 1e-6, OutputCostPerToken: 2e-6,
+	}})
+
+	body := `{
+		"model": "kimi-k3.1-pro",
+		"input": [{"role": "user", "content": [{"type": "input_text", "text": "Say hi."}]}]
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	prx.ProxyRequest(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if fake.chatCalls != 1 {
+		t.Errorf("the model was called %d times, want 1", fake.chatCalls)
+	}
+	// The passthrough path sends the client's own Responses-shaped body: the
+	// fake would answer a Chat-shaped one with a plain 404, so a 200 here
+	// means the body arrived as the client wrote it.
+	if fake.searchCalls != 0 {
+		t.Errorf("the router made %d search calls, want 0", fake.searchCalls)
 	}
 }
