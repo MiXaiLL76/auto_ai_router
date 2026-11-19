@@ -11,11 +11,11 @@ var errKeyRoutingPolicy = errors.New("credential is outside the permitted routin
 
 type keyRoutingRestrictedContextKey struct{}
 
-func (p *Proxy) applyKeyRoutingPolicy(logCtx *RequestLogContext, modelID, realModelID string) {
+func (p *Proxy) applyKeyRoutingPolicy(logCtx *RequestLogContext, modelID string) {
 	if p.keyRoutingPolicies == nil || logCtx.TokenInfo == nil || logCtx.TokenInfo.IsMasterKey {
 		return
 	}
-	visibility, policyID := p.keyRoutingPolicies.Restrict(logCtx.Scope, logCtx.TokenInfo.Token, logCtx.PublicModelID, modelID, realModelID)
+	visibility, policyID := p.keyRoutingPolicies.Restrict(logCtx.Scope, logCtx.TokenInfo.Token, logCtx.PublicModelID, modelID)
 	logCtx.Scope = visibility
 	if policyID != "" {
 		p.logger.InfoContext(logCtx.Context(), "Key routing policy applied", "routing_policy_id", policyID, "model", logCtx.PublicModelID)

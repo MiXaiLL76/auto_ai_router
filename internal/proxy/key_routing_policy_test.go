@@ -178,6 +178,7 @@ func TestKeyRoutingPolicyBansAndOrganizationDenylistStillApply(t *testing.T) {
 func TestKeyRoutingPolicyResponsesAndStreaming(t *testing.T) {
 	for _, request := range []struct{ endpoint, body string }{
 		{"/v1/responses", `{"model":"model-a","input":"hello"}`},
+		{"/v1/messages", `{"model":"model-a","max_tokens":16,"messages":[{"role":"user","content":"hello"}]}`},
 		{"/v1/chat/completions", `{"model":"model-a","messages":[],"stream":true}`},
 	} {
 		f := newKeyRoutingFixture(t)

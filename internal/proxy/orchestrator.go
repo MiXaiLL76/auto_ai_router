@@ -150,7 +150,7 @@ func (p *Proxy) orchestrateRequest(
 	if !ok {
 		return nil, false
 	}
-	p.applyKeyRoutingPolicy(logCtx, modelID, realModelID)
+	p.applyKeyRoutingPolicy(logCtx, modelID)
 	r = withClientServiceTiers(r, logCtx.clientServiceTiers)
 
 	logCtx.RequestEndpoint = r.URL.Path

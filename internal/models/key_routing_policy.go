@@ -51,7 +51,10 @@ func LoadKeyRoutingPolicies(policies []config.KeyRoutingPolicyConfig, credential
 				if !slices.ContainsFunc(cfg.CredentialAllowlist, func(credential string) bool { return slices.Contains(supported, credential) }) {
 					return nil, fmt.Errorf("key_routing_policies[%d].rules[%d]: model has no permitted direct route", i, j)
 				}
-				rule.identities[name], rule.identities[resolved] = true, true
+				rule.identities[name] = true
+				for identity := range manager.keyRoutingModelIdentities(resolved) {
+					rule.identities[identity] = true
+				}
 			}
 			policy.rules = append(policy.rules, rule)
 		}
@@ -72,7 +75,7 @@ func (r *KeyRoutingPolicyRegistry) resolve(name string) (string, error) {
 // Restrict intersects all matching rules. Public names and the admitted route
 // identity are both considered so neither an accepted alias nor an organization
 // model mapping can widen a caller's permitted credential pool.
-func (r *KeyRoutingPolicyRegistry) Restrict(visibility scope.Context, keyHash, publicModel, routeModel, realModel string) (scope.Context, string) {
+func (r *KeyRoutingPolicyRegistry) Restrict(visibility scope.Context, keyHash, publicModel, routeModel string) (scope.Context, string) {
 	if r == nil {
 		return visibility, ""
 	}
@@ -80,13 +83,15 @@ func (r *KeyRoutingPolicyRegistry) Restrict(visibility scope.Context, keyHash, p
 	if !exists {
 		return visibility, ""
 	}
-	identities := map[string]bool{publicModel: true, routeModel: true}
+	identities := r.manager.keyRoutingModelIdentities(routeModel)
 	if resolved, err := r.resolve(publicModel); err == nil {
-		identities[resolved] = true
+		if !identities[resolved] {
+			for identity := range r.manager.keyRoutingModelIdentities(resolved) {
+				identities[identity] = true
+			}
+		}
 	}
-	for _, alias := range r.manager.GetAliasesForModel(routeModel, realModel) {
-		identities[alias] = true
-	}
+	identities[publicModel] = true
 	matched := false
 	for _, rule := range policy.rules {
 		matches := false
@@ -109,4 +114,38 @@ func (r *KeyRoutingPolicyRegistry) Restrict(visibility scope.Context, keyHash, p
 		return visibility, policy.id
 	}
 	return visibility, ""
+}
+
+// Match deployment aliases using the real model name of EACH credential, not
+// the pre-selection global name. One logical route can use different wire names
+// on different providers. Resolve the connected aliases under one catalog lock
+// so a refresh cannot leave a partially expanded identity set.
+func (m *Manager) keyRoutingModelIdentities(model string) map[string]bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	realName := func(alias, credential string) string {
+		if name, ok := m.modelRealNamesPerCred[credential][alias]; ok {
+			return name
+		}
+		if name, ok := m.modelRealNames[alias]; ok {
+			return name
+		}
+		return alias
+	}
+	identities := map[string]bool{model: true}
+	queue := []string{model}
+	for i := 0; i < len(queue); i++ {
+		current := queue[i]
+		for _, credential := range m.modelToCredentials[current] {
+			wireName := realName(current, credential)
+			for _, alias := range m.credentialModels[credential] {
+				if identities[alias] || realName(alias, credential) != wireName {
+					continue
+				}
+				identities[alias] = true
+				queue = append(queue, alias)
+			}
+		}
+	}
+	return identities
 }

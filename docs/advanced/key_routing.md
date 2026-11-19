@@ -41,7 +41,9 @@ Configuration is loaded at startup. An infrastructure repository can supply this
 
 Unmatched keys and models retain their existing routing. A newly added credential does not enter an existing allowlist automatically. An allowed credential still needs to serve the requested model; the policy does not substitute a different model or override pricing, budgets, access checks, bans or limits. Requests share the existing RPM/TPM counters, rather than receiving fresh quota per policy.
 
-Exact model names and their resolved aliases are supported; wildcards are rejected. Rules that match the same request intersect. Disjoint allowlists deliberately leave no eligible route. Catalog refreshes also match a rule's current alias target, while retaining its startup identity until restart to avoid broadening access on a transient alias change.
+Exact model names and their resolved aliases are supported; wildcards are rejected. This includes alternate route names mapping to the same upstream model on the same credential, including per-credential deployment names. Equivalence follows connected aliases; an identical deployment name on two different credentials alone does not establish equivalence. Both the requested public identity and an organization's mapped route participate in matching.
+
+Rules that match the same request intersect. Disjoint allowlists deliberately leave no eligible route. Catalog refreshes also match a rule's current alias target, while retaining its startup identities and equivalent deployment aliases until restart to avoid broadening access when a catalog entry disappears. Consequently, renaming or temporarily removing a configured alias does not disable its restriction; changing the policy itself is an explicit operator action.
 
 ## Unavailable routes and conversations
 
