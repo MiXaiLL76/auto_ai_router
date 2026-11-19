@@ -2554,6 +2554,43 @@ dispatch:
 				"credential", cred.Name, "status", proxyResp.StatusCode)
 			streamCompleted := false
 
+			// A non-2xx response from a proxy-like credential is not a stream to
+			// relay -- every format-specific branch below (convertedMessages,
+			// passthroughResponses, convertedResp, and the generic writer they
+			// fall through to) is written for a 2xx body, and none of them masks
+			// an error: a production incident showed exactly this (a credential's
+			// raw 400 body -- its own nonstandard error shape -- reaching the
+			// client byte-for-byte because nothing here ever classified it, the
+			// same gap handlePassthroughResponsesStreaming had for the
+			// Codex-passthrough branch specifically, fixed separately). Read the
+			// body and classify it the same way the non-streaming path
+			// (statusCodeFromProviderBodyError + writeProxyResponse, above) does,
+			// instead of falling into any of the branches below.
+			if proxyResp.StatusCode >= http.StatusBadRequest {
+				body, readErr := p.readLimitedResponseBody(proxyResp.StreamBody)
+				_ = proxyResp.StreamBody.Close()
+				if readErr != nil {
+					body = nil
+				}
+				masked := maskedUpstreamErrorBody(proxyResp.StatusCode, logCtx.RequestID, body)
+				p.logUpstreamError(r.Context(), "Proxy request completed with error status (streaming)", proxyResp.StatusCode, cred, modelID, body,
+					"url", security.RedactURLForLog(cred.BaseURL),
+					"request_id", logCtx.RequestID)
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Content-Length", fmt.Sprintf("%d", len(masked)))
+				dropRepresentationIntegrityHeaders(w.Header())
+				w.WriteHeader(proxyResp.StatusCode)
+				_, _ = w.Write(masked)
+				logCtx.Status = "failure"
+				logCtx.HTTPStatus = proxyResp.StatusCode
+				logCtx.ErrorMsg = classifiedErrorMessage(proxyResp.StatusCode, body)
+				logCtx.ErrorBodyRaw = extractErrorBodyRaw(body)
+				logCtx.ClientResponseBody = extractErrorBodyRaw(masked)
+				logCtx.TargetURL = cred.BaseURL
+				p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, proxyResp.StatusCode, time.Since(start))
+				return
+			}
+
 			if prepared.convertedMessages && proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
 				defer func() {
 					if closeErr := proxyResp.StreamBody.Close(); closeErr != nil {

@@ -244,8 +244,14 @@ func TestTransformVertexStreamToOpenAI_ToolCallsFinishInLaterChunk(t *testing.T)
 // the whole stream carried no choices and callers saw a generic 502 after
 // exhausting every credential. The refusal must instead surface as a terminal
 // error event carrying the "content policy" marker.
+//
+// blockReason/blockReasonMessage must NOT appear in the emitted event: a later
+// production incident showed the provider's own text (Google support codes,
+// policy URLs, "Unable to show the generated image...") reaching the client
+// verbatim because the assumption that something downstream re-masks this
+// event did not hold. The event carries only the fixed, pre-vetted message.
 func TestTransformVertexStreamToOpenAI_PromptBlockEmitsContentPolicyEvent(t *testing.T) {
-	stream := "data: " + `{"promptFeedback":{"blockReason":"PROHIBITED_CONTENT"},"usageMetadata":{"promptTokenCount":12,"totalTokenCount":12}}` + "\n\n"
+	stream := "data: " + `{"promptFeedback":{"blockReason":"PROHIBITED_CONTENT","blockReasonMessage":"Unable to show the generated image. Support code: 39181034."},"usageMetadata":{"promptTokenCount":12,"totalTokenCount":12}}` + "\n\n"
 
 	var out strings.Builder
 	require.NoError(t, TransformVertexStreamToOpenAI(strings.NewReader(stream), "gemini-2.5-pro", &out))
@@ -253,8 +259,9 @@ func TestTransformVertexStreamToOpenAI_PromptBlockEmitsContentPolicyEvent(t *tes
 	got := out.String()
 	assert.Contains(t, got, "content_policy_violation")
 	assert.Contains(t, got, "content policy")
-	assert.Contains(t, got, "PROHIBITED_CONTENT")
 	assert.Contains(t, got, "[DONE]")
+	assert.NotContains(t, got, "PROHIBITED_CONTENT", "the provider's own block reason must never reach the client")
+	assert.NotContains(t, got, "Support code", "the provider's own free text must never reach the client")
 }
 
 // TestTransformVertexStreamToOpenAI_PromptBlockUnspecifiedReason covers a block

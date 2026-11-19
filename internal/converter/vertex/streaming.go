@@ -100,7 +100,9 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 		// real candidates (which the contract says does not happen) keeps the
 		// content and is handled normally instead.
 		if pf := vertexChunk.PromptFeedback; pf != nil && isFirstChunk && len(vertexChunk.Candidates) == 0 {
-			return writePromptBlockedEvent(output, string(pf.BlockReason), pf.BlockReasonMessage)
+			slog.Debug("[vertex/streaming] prompt blocked by content policy",
+				"block_reason", string(pf.BlockReason), "block_reason_message", pf.BlockReasonMessage)
+			return writePromptBlockedEvent(output)
 		}
 		toolUse.Add(vertexChunk.Candidates, vertexChunk.ModelVersion)
 		answeringModel := toolUse.AnsweringModel(model)
@@ -280,23 +282,22 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 // proxy already recognizes (extractStreamErrorEvent / statusCodeFromProviderStreamError),
 // with a message that carries the "content policy" marker the retry policy
 // treats as non-retryable — every credential would refuse the same prompt, so
-// replaying it only multiplies the delay. blockReasonMessage is the provider's
-// own readable explanation when present (Vertex sends one); it is only used as
-// the event's message suffix, never forwarded verbatim to the client (the
-// proxy masks the body).
-func writePromptBlockedEvent(output io.Writer, blockReason, blockReasonMessage string) error {
-	message := "The prompt was blocked by the provider's content policy"
-	if blockReason != "" {
-		message += " (reason: " + blockReason + ")"
-	}
-	if blockReasonMessage != "" {
-		message += ": " + blockReasonMessage
-	}
+// replaying it only multiplies the delay.
+//
+// The message and code are the fixed, pre-vetted pair upstreamerror's own
+// content-policy branch emits — never built from blockReason/blockReasonMessage.
+// An earlier version appended the provider's own blockReasonMessage ("Unable to
+// show the generated image... Support code: 39181034.") as a message suffix on
+// the assumption that something downstream would re-mask it before it reached
+// the client; in production it did not, and that text — plus Google's own
+// support codes and policy URLs — reached clients verbatim. The caller logs
+// blockReason/blockReasonMessage server-side for diagnostics instead.
+func writePromptBlockedEvent(output io.Writer) error {
 	event := map[string]any{
 		"error": map[string]any{
 			"type":    "invalid_request_error",
 			"code":    "content_policy_violation",
-			"message": message,
+			"message": "The prompt was blocked by the provider's content policy",
 		},
 	}
 	eventJSON, err := json.Marshal(event)

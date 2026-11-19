@@ -2047,6 +2047,42 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 ) error {
 	p.logger.DebugContext(respCtx(resp), "Starting passthrough Responses API streaming",
 		"credential", credName, "model", modelID)
+
+	// A non-2xx response is not a stream to relay -- it's an upstream error
+	// the Codex passthrough path, by design, otherwise forwards byte-for-byte
+	// to the client ("the provider SSE stream is forwarded to the client
+	// as-is", see the doc comment above). That design is correct for a 2xx
+	// stream -- Codex-native SSE is not worth reparsing -- but silently
+	// extended to error bodies too: a production incident showed a
+	// passthrough-responses credential's raw 400 body (its own
+	// "permission_error" type and provider-specific code, e.g.
+	// "session_blocked_by_cyber_policy") reaching the client verbatim, with
+	// no masking at all, because nothing upstream of streamToClient ever
+	// special-cased the status here. Read and classify it instead, the same
+	// way the non-streaming and native-streaming paths already do.
+	if resp.StatusCode >= http.StatusBadRequest {
+		body, readErr := p.readLimitedResponseBody(resp.Body)
+		if readErr != nil {
+			body = nil
+		}
+		masked := maskedUpstreamErrorBody(resp.StatusCode, logContextRequestID(logCtx), body)
+		p.logger.WarnContext(respCtx(resp), "Passthrough Responses API request completed with error status",
+			"credential", credName, "model", modelID, "status_code", resp.StatusCode)
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(masked)))
+		dropRepresentationIntegrityHeaders(w.Header())
+		w.WriteHeader(resp.StatusCode)
+		_, writeErr := w.Write(masked)
+		if logCtx != nil {
+			logCtx.Status = "failure"
+			logCtx.HTTPStatus = resp.StatusCode
+			logCtx.ErrorMsg = classifiedErrorMessage(resp.StatusCode, body)
+			logCtx.ErrorBodyRaw = extractErrorBodyRaw(body)
+			logCtx.ClientResponseBody = extractErrorBodyRaw(masked)
+		}
+		return writeErr
+	}
+
 	tokenUsageOptions := converter.TokenUsageExtractionOptions{AudioInputIncludesCachedAudio: true}
 	if len(usageOptions) > 0 {
 		tokenUsageOptions = usageOptions[0]
