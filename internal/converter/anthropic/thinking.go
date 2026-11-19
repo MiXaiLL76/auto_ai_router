@@ -220,15 +220,12 @@ func thinksByDefault(model string) bool {
 // provider that speaks the OpenAI wire protocol but fronts a Claude model
 // needs to be told to turn thinking off in Anthropic's own words, because
 // "reasoning_effort": "none" does not mean that to such a provider.
+//
+// The companion "is this effort an off-request" check lives in the openai
+// package, which this one imports -- so it cannot be shared back the other
+// way without an import cycle.
 func ThinksByDefault(model string) bool {
 	return thinksByDefault(model)
-}
-
-// ReasoningEffortOff reports whether an OpenAI reasoning effort asks for no reasoning.
-//
-// Exported for the same reason as ThinksByDefault.
-func ReasoningEffortOff(effort string) bool {
-	return reasoningEffortOff(effort)
 }
 
 // reasoningEffortOff reports whether an OpenAI reasoning effort asks for no reasoning.

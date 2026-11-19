@@ -47,6 +47,35 @@ func TestSetThinkingDisabled(t *testing.T) {
 			wantNoEffort: false,
 		},
 		{
+			// The two forms disagree: the nested one asks for no reasoning,
+			// the flat one asks for a lot of it. The nested one decides --
+			// the same precedence the Anthropic converter applies -- and the
+			// flat one goes with it: a provider reads the surviving effort
+			// as the stronger signal and turns reasoning back on (measured
+			// against Requesty), which is the exact failure this rewrite
+			// exists to prevent.
+			name:         "a nested off wins over a flat effort, and the flat one goes too",
+			body:         `{"model":"m","reasoning_effort":"high","reasoning":{"effort":"none"},"messages":[]}`,
+			wantThinking: map[string]any{"type": "disabled"},
+			wantNoEffort: true,
+		},
+		{
+			// The mirror case: the flat one asks for no reasoning and the
+			// nested one asks for a lot of it. The nested one decides here
+			// too -- so the request keeps reasoning, and nothing is taken
+			// away from it.
+			name:         "a nested effort wins over a flat off",
+			body:         `{"model":"m","reasoning_effort":"none","reasoning":{"effort":"high"},"messages":[]}`,
+			wantThinking: nil,
+			wantNoEffort: false,
+		},
+		{
+			name:         "both forms asking for no reasoning",
+			body:         `{"model":"m","reasoning_effort":"none","reasoning":{"effort":"none"},"messages":[]}`,
+			wantThinking: map[string]any{"type": "disabled"},
+			wantNoEffort: true,
+		},
+		{
 			name:         "the responses api carries the effort nested",
 			body:         `{"model":"m","reasoning":{"effort":"none"},"input":"hi"}`,
 			wantThinking: map[string]any{"type": "disabled"},
