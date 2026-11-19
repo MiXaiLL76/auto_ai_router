@@ -197,7 +197,7 @@ func (p *Proxy) estimateRequestCost(logCtx *RequestLogContext, publicModelID, mo
 	raw, decoded := decodeRequestBody(body)
 	var promptTokens int
 	if p.tiktokenEnabled && decoded {
-		promptTokens = estimatePromptTokensFromRaw(raw, realModelID)
+		promptTokens = estimatePromptTokensBySample(raw, realModelID)
 	}
 	if p.tiktokenEnabled {
 		promptTokens = addNativeWSHistoryTokens(logCtx.Context(), promptTokens)

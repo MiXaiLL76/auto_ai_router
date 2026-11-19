@@ -3,6 +3,8 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"math"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -21,6 +23,11 @@ const (
 	openAIChatTokensPerMessage = 3
 	openAIChatTokensPerName    = 1
 	openAIChatReplyPrimer      = 3
+)
+
+const (
+	promptSampleWindows     = 32
+	promptSampleWindowBytes = 512
 )
 
 const (
@@ -54,7 +61,25 @@ func estimatePromptTokensFromRaw(raw map[string]interface{}, model string) int {
 		model, _ = raw["model"].(string)
 	}
 
-	enc := tokenizerForModel(model)
+	return estimatePromptTokensWithCodec(raw, tokenizerForModel(model))
+}
+
+// estimatePromptTokensBySample is the prompt-token estimate that tokenizes the prompt
+// text in full only when it is short; otherwise it tokenizes evenly spaced windows of it
+// and scales their tokens per byte to the whole text.
+func estimatePromptTokensBySample(raw map[string]interface{}, model string) int {
+	if model == "" {
+		model, _ = raw["model"].(string)
+	}
+	sample := &promptSampleCodec{}
+	total := estimatePromptTokensWithCodec(raw, sample)
+	if sample.bytes == 0 {
+		return total
+	}
+	return total - sample.sizeTokens + sample.tokens(tokenizerForModel(model))
+}
+
+func estimatePromptTokensWithCodec(raw map[string]interface{}, enc tokenizer.Codec) int {
 	if tokens := countOpenAIChatPromptTokensFromRaw(enc, raw); tokens > 0 {
 		return tokens
 	}
@@ -237,6 +262,10 @@ func countTextTokens(enc tokenizer.Codec, text string) int {
 	if enc == nil || text == "" {
 		return 0
 	}
+	if sample, ok := enc.(*promptSampleCodec); ok {
+		count, _ := sample.Count(text)
+		return count
+	}
 	if hasLongWord(text) {
 		return countTextTokensWithEstimatedLongWords(enc, text)
 	}
@@ -317,6 +346,72 @@ func textSample(text string, start int) string {
 	start = previousRuneBoundary(text, start)
 	end := nextRuneBoundary(text, start+tokenizerLongWordSampleBytes)
 	return text[start:end]
+}
+
+// promptSampleCodec collects the prompt texts instead of tokenizing them; Count returns
+// a size estimate so the prompt walkers see the same non-zero counts as with a tokenizer.
+type promptSampleCodec struct {
+	texts      []string
+	bytes      int
+	sizeTokens int
+}
+
+func (c *promptSampleCodec) GetName() string { return "prompt-sample" }
+
+func (c *promptSampleCodec) Count(text string) (int, error) {
+	count := estimateLongWordTokensByBytes(len(text))
+	c.texts = append(c.texts, text)
+	c.bytes += len(text)
+	c.sizeTokens += count
+	return count, nil
+}
+
+func (c *promptSampleCodec) Encode(string) ([]uint, []string, error) {
+	return nil, nil, errors.New("prompt sample does not encode")
+}
+
+func (c *promptSampleCodec) Decode([]uint) (string, error) {
+	return "", errors.New("prompt sample does not decode")
+}
+
+func (c *promptSampleCodec) tokens(enc tokenizer.Codec) int {
+	if c.bytes <= promptSampleWindows*promptSampleWindowBytes {
+		total := 0
+		for _, text := range c.texts {
+			total += countTextTokens(enc, text)
+		}
+		return total
+	}
+	// A window may span several texts; each is tokenized on its own, and a text no
+	// longer than a window is taken whole to keep its token boundaries.
+	stride := c.bytes / promptSampleWindows
+	sampleBytes, sampleTokens := 0, 0
+	index, start := 0, 0
+	for window := range promptSampleWindows {
+		offset := window*stride + stride/2
+		end := min(offset+promptSampleWindowBytes, c.bytes)
+		for offset >= start+len(c.texts[index]) {
+			start += len(c.texts[index])
+			index++
+		}
+		for i, textStart := index, start; i < len(c.texts) && textStart < end; i++ {
+			text := c.texts[i]
+			from, to := 0, len(text)
+			if len(text) > promptSampleWindowBytes {
+				from = previousRuneBoundary(text, max(offset-textStart, 0))
+				to = nextRuneBoundary(text, min(end-textStart, len(text)))
+			}
+			if to > from {
+				sampleBytes += to - from
+				sampleTokens += countTextTokensDirect(enc, text[from:to])
+			}
+			textStart += len(text)
+		}
+	}
+	if sampleBytes == 0 || sampleTokens == 0 {
+		return c.sizeTokens
+	}
+	return max(1, int(math.Ceil(float64(c.bytes)*float64(sampleTokens)/float64(sampleBytes))))
 }
 
 func estimateLongWordTokensByBytes(bytes int) int {
