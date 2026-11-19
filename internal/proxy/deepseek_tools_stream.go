@@ -82,12 +82,18 @@ func (p *Proxy) runDeepSeekStreamToolLoopBuffered(
 	attemptedCreds map[string]bool,
 ) (*deepSeekStreamCycleResult, error) {
 	runner := p.newDeepSeekToolRunner(cred)
-	raw, calls, usage, err := toolloop.CollectStreamToolCalls(resp)
+	raw, allCalls, usage, err := toolloop.CollectStreamToolCalls(resp)
 	if err != nil {
 		return nil, err
 	}
+	// Only the router's OWN tools count: a call of the client's own (a coding
+	// agent's read_file, say) is the client's business, and the router relays
+	// it as it is. Counting it made the router send the very same request to
+	// the provider a second time -- the client never noticed (it got the
+	// second answer's stream), but the request was billed twice.
+	calls := toolloop.OwnedCalls(allCalls, runner)
 	if len(calls) == 0 {
-		// No tool call: the client gets the provider's stream as it is.
+		// No tool call of ours: the client gets the provider's stream as it is.
 		streamUsage := toolloop.UsageFromStreamUsage(usage)
 		return &deepSeekStreamCycleResult{
 			body:        raw,

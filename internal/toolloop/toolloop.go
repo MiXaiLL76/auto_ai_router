@@ -17,6 +17,14 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 )
 
+// ErrNothingToRun is returned when a step's tool calls are none of the
+// router's own.
+//
+// The step cannot go on: there is no tool to run and nothing to add to the
+// conversation, so the request would be sent again unchanged -- and the
+// client would pay for it twice.
+var ErrNothingToRun = errors.New("toolloop: no tool of the router's to run")
+
 // ErrAborted ends the cycle when the client went away.
 //
 // It is one sentinel for every provider, so the dispatch in the router
@@ -256,7 +264,11 @@ func (cycle *Cycle) NextBodyFromToolCalls(ctx context.Context, calls []ToolCall)
 		results = append(results, toolResultMessage(call.ID, call.Name, content))
 	}
 	if len(toolCalls) == 0 {
-		return cycle.body, nil
+		// None of the calls is the router's own: there is nothing to run and
+		// nothing to add to the conversation. Sending the request again would
+		// be sending the very same request -- the provider would answer the
+		// same way, and the client would be billed for the request twice.
+		return nil, ErrNothingToRun
 	}
 	assistant["tool_calls"] = toolCalls
 	cycle.messages = appendToolResults(cycle.messages, assistant, results)
@@ -290,6 +302,21 @@ type ToolCall struct {
 	Name string
 	// Arguments is the function's arguments, as a JSON string.
 	Arguments string
+}
+
+// OwnedCalls keeps the tool calls the router owns.
+//
+// The router runs only its own tools: a client's own function tool is the
+// upstream's to serve, and the router neither runs it nor counts it as a
+// reason to loop.
+func OwnedCalls(calls []ToolCall, runner Runner) []ToolCall {
+	owned := make([]ToolCall, 0, len(calls))
+	for _, call := range calls {
+		if runner.Owns(call.Name) {
+			owned = append(owned, call)
+		}
+	}
+	return owned
 }
 
 // CallsFromResponse reads the tool calls the router owns out of a Chat

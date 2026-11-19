@@ -4157,10 +4157,14 @@ dispatch:
 						// here -- and the streaming log reads its figures from
 						// the last chunk, so the chunk carries the loop's
 						// summed usage rather than the last step's.
-						if logCtx.TokenUsage == nil {
-							logCtx.TokenUsage = &converter.TokenUsage{}
-						}
-						applyDeepSeekToolUsageTo(logCtx.TokenUsage, loopUsage)
+						//
+						// The loop's usage is handed to the log rather than
+						// applied here: the log reads the chunk's own usage
+						// afterwards, and only then does the loop's figure --
+						// the sum of every step's -- replace it. Applied
+						// before, the log's own reading would overwrite the
+						// cached and reasoning tokens with the last step's.
+						logCtx.DeepSeekToolUsage = loopUsage
 						p.finalizeStreamingLog(logCtx, loopTotalTokens,
 							withDeepSeekToolUsage(loopLastChunk, loopUsage),
 							"openai", resp.StatusCode, false)
