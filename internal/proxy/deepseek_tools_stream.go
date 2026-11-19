@@ -82,12 +82,18 @@ func (p *Proxy) runDeepSeekStreamToolLoopBuffered(
 	attemptedCreds map[string]bool,
 ) (*deepSeekStreamCycleResult, error) {
 	runner := p.newDeepSeekToolRunner(cred)
-	raw, calls, usage, err := toolloop.CollectStreamToolCalls(resp)
+	// The collector returns the router's OWN calls only: a call of the
+	// client's own (a coding agent's read_file, say) is the client's
+	// business, and the router relays it as it is. Counting it made the
+	// router send the very same request to the provider a second time --
+	// the client never noticed (it got the second answer's stream), but the
+	// request was billed twice.
+	raw, calls, usage, err := toolloop.CollectStreamToolCalls(resp, runner)
 	if err != nil {
 		return nil, err
 	}
 	if len(calls) == 0 {
-		// No tool call: the client gets the provider's stream as it is.
+		// No tool call of ours: the client gets the provider's stream as it is.
 		streamUsage := toolloop.UsageFromStreamUsage(usage)
 		return &deepSeekStreamCycleResult{
 			body:        raw,
@@ -126,6 +132,16 @@ func (p *Proxy) runDeepSeekStreamToolLoopBuffered(
 			next, err = cycle.FinalBodyFromToolCalls(r.Context(), calls)
 		} else {
 			next, err = cycle.NextBodyFromToolCalls(r.Context(), calls)
+		}
+		if errors.Is(err, toolloop.ErrNothingToRun) {
+			// The step's calls are none of the router's own, so there is
+			// nothing to run and nothing to add to the conversation: the
+			// loop ends here and the client gets the answer as it is.
+			//
+			// Sending the request again would be sending the very same
+			// request -- the provider would answer the same way, and the
+			// client would be billed for both sends.
+			break
 		}
 		if err != nil {
 			return deepSeekStreamResult(current, total, runner), err
@@ -183,7 +199,7 @@ func (p *Proxy) runDeepSeekStreamToolStep(
 		}
 		return nil, nil, &upstreamStatusError{status: outcome.resp.StatusCode, body: responseBody}
 	}
-	raw, _, usage, err := toolloop.CollectStreamToolCalls(outcome.resp)
+	raw, usage, err := toolloop.ReadStream(outcome.resp)
 	if err != nil {
 		return nil, nil, err
 	}

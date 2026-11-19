@@ -21,10 +21,14 @@ import (
 // is replayed to the client byte for byte, so the client sees exactly what
 // the provider sent.
 //
-// It returns the stream's bytes, the tool calls and the usage the stream
-// carried. The calls are not filtered: the caller decides which of them it
-// owns (see CallsFromStream).
-func CollectStreamToolCalls(resp *http.Response) ([]byte, []ToolCall, *openai.OpenAIUsage, error) {
+// It returns the stream's bytes, the tool calls of the ROUTER'S OWN and the
+// usage the stream carried.
+//
+// The calls are filtered here, and only here: a caller that got the raw
+// list could mistake a client's own tool call for the router's and loop on a
+// request it has no tool to run -- sending the very same request upstream a
+// second time and billing the client for both sends.
+func CollectStreamToolCalls(resp *http.Response, runner Runner) ([]byte, []ToolCall, *openai.OpenAIUsage, error) {
 	if resp == nil || resp.Body == nil {
 		return nil, nil, nil, errors.New("toolloop: no stream to read")
 	}
@@ -37,19 +41,33 @@ func CollectStreamToolCalls(resp *http.Response) ([]byte, []ToolCall, *openai.Op
 	raw := buffered.Bytes()
 
 	calls, usage := callsFromStream(raw)
-	return raw, calls, usage, nil
+	return raw, OwnedCalls(calls, runner), usage, nil
 }
 
-// CallsFromStream reads the tool calls out of a buffered stream.
+// CallsFromStream reads the router's own tool calls out of a buffered stream.
 func CallsFromStream(raw []byte, runner Runner) []ToolCall {
 	calls, _ := callsFromStream(raw)
-	owned := make([]ToolCall, 0, len(calls))
-	for _, call := range calls {
-		if runner.Owns(call.Name) {
-			owned = append(owned, call)
-		}
+	return OwnedCalls(calls, runner)
+}
+
+// ReadStream reads a response's stream whole and returns its bytes and the
+// usage it carried.
+//
+// It is for the step that reads the model's NEXT answer: the calls in it are
+// not needed there, only the stream itself and its figures.
+func ReadStream(resp *http.Response) ([]byte, *openai.OpenAIUsage, error) {
+	if resp == nil || resp.Body == nil {
+		return nil, nil, errors.New("toolloop: no stream to read")
 	}
-	return owned
+	defer func() { _ = resp.Body.Close() }()
+
+	var buffered bytes.Buffer
+	if _, err := io.Copy(&buffered, resp.Body); err != nil {
+		return nil, nil, err
+	}
+	raw := buffered.Bytes()
+	_, usage := callsFromStream(raw)
+	return raw, usage, nil
 }
 
 // callsFromStream folds a stream's tool call pieces back into one call per
