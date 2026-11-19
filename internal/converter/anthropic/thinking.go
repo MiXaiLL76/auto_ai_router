@@ -213,6 +213,24 @@ func thinksByDefault(model string) bool {
 	return thinkingOffModeFor(model) != thinkingOffWhenOmitted
 }
 
+// ThinksByDefault reports whether model runs adaptive thinking when a request
+// omits thinking.
+//
+// Exported for the OpenAI-wire request path (see converter.RequestFrom): a
+// provider that speaks the OpenAI wire protocol but fronts a Claude model
+// needs to be told to turn thinking off in Anthropic's own words, because
+// "reasoning_effort": "none" does not mean that to such a provider.
+func ThinksByDefault(model string) bool {
+	return thinksByDefault(model)
+}
+
+// ReasoningEffortOff reports whether an OpenAI reasoning effort asks for no reasoning.
+//
+// Exported for the same reason as ThinksByDefault.
+func ReasoningEffortOff(effort string) bool {
+	return reasoningEffortOff(effort)
+}
+
 // reasoningEffortOff reports whether an OpenAI reasoning effort asks for no reasoning.
 func reasoningEffortOff(effort string) bool {
 	switch effort {

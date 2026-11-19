@@ -383,6 +383,20 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 			body = openaiconv.StripVLLMOnlySamplingParams(body)
 		}
 
+		// A provider that speaks the OpenAI wire protocol but fronts a
+		// Claude model does not read "reasoning_effort": "none" as "no
+		// reasoning" -- measured against Requesty with
+		// anthropic/claude-haiku-5-5, a model that thinks by default, the
+		// reasoning RAN. Anthropic's own words are needed, and the effort
+		// that contradicted them has to go with it.
+		//
+		// Only for the models that think by default (Claude 5.x): for a
+		// model that reasons only when asked, "none" already means off and
+		// there is nothing to fix.
+		if anthropic.ThinksByDefault(c.mode.ModelID) {
+			body = openaiconv.SetThinkingDisabled(body)
+		}
+
 		if c.mode.IsImageGeneration || c.mode.IsImageEdit {
 			body = openaiconv.RewriteImageMiniJSON(body, c.mode.ModelID, c.mode.IsImageEdit)
 		}
