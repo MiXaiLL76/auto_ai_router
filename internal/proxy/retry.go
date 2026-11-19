@@ -11,6 +11,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/scope"
+	"github.com/mixaill76/auto_ai_router/internal/upstreamerror"
 )
 
 // RetryReason describes why a request is being retried
@@ -46,6 +47,16 @@ type retryPolicy struct {
 	credentialOverrides map[string]map[int]struct{}
 	nonRetryableMarkers [][]byte
 	badRequestMarkers   [][]byte
+	// credentialScopedMarkers are checked BEFORE nonRetryableMarkers: a
+	// provider signal here reads as a content-policy refusal in plain
+	// English (so it would otherwise match a content-policy marker) but is
+	// actually about the credential/session that served the request, not
+	// the request itself -- a different credential answers the same request
+	// fine. Not configurable: unlike the content-policy/bad-request marker
+	// lists, which an operator may reasonably want to extend, this list only
+	// exists to keep a wording collision from silently flipping a
+	// credential-scoped failure into a non-retryable one.
+	credentialScopedMarkers [][]byte
 }
 
 // defaultRetryPolicy is the built-in policy, used when a Proxy has none configured.
@@ -54,11 +65,12 @@ var defaultRetryPolicy = newRetryPolicy(config.DefaultRetryConfig())
 func newRetryPolicy(cfg config.RetryConfig) *retryPolicy {
 	cfg = cfg.WithDefaults()
 	rp := &retryPolicy{
-		statusCodes:         statusCodeSet(cfg.StatusCodes),
-		providerOverrides:   make(map[config.ProviderType]map[int]struct{}, len(cfg.ProviderOverrides)),
-		credentialOverrides: make(map[string]map[int]struct{}, len(cfg.CredentialOverrides)),
-		nonRetryableMarkers: markerBytes(cfg.NonRetryableMarkers),
-		badRequestMarkers:   markerBytes(cfg.BadRequestMarkers),
+		statusCodes:             statusCodeSet(cfg.StatusCodes),
+		providerOverrides:       make(map[config.ProviderType]map[int]struct{}, len(cfg.ProviderOverrides)),
+		credentialOverrides:     make(map[string]map[int]struct{}, len(cfg.CredentialOverrides)),
+		nonRetryableMarkers:     markerBytes(cfg.NonRetryableMarkers),
+		badRequestMarkers:       markerBytes(cfg.BadRequestMarkers),
+		credentialScopedMarkers: markerBytes(upstreamerror.CredentialScopedMarkers),
 	}
 	for providerType, override := range cfg.ProviderOverrides {
 		rp.providerOverrides[providerType] = statusCodeSet(override.StatusCodes)
@@ -111,6 +123,16 @@ func (rp *retryPolicy) shouldRetry(cred *config.CredentialConfig, statusCode int
 	}
 	bodyLower := bytes.ToLower(respBody)
 
+	// Checked BEFORE the content-policy markers: this credential's own
+	// session got blocked, not the request -- production carries e.g.
+	// "This session is blocked by content policy" for exactly this signal,
+	// which would otherwise match the "content policy" marker below and
+	// wrongly treat a credential-scoped block (every OTHER credential still
+	// answers fine) as if it were a content-scoped refusal (every credential
+	// would refuse identically).
+	if containsAnyMarker(bodyLower, rp.credentialScopedMarkers) {
+		return true, retryReasonForStatus(statusCode)
+	}
 	// The provider refused the content itself; every other credential would too.
 	if containsAnyMarker(bodyLower, rp.nonRetryableMarkers) {
 		return false, ""

@@ -67,6 +67,25 @@ func ClassifyBadRequest(rawBody []byte) BadRequest {
 		return result
 	}
 
+	// A credential/session-level block is checked next, before
+	// classifyValidationError's generic content-policy branch: production
+	// carries this exact provider signal at BOTH 400 and 403 (classify_status.go
+	// has the 403 case), and its message happens to say "...content policy" in
+	// plain English. Without this check that wording falls into the generic
+	// content_policy_violation bucket -- which means "every credential would
+	// refuse the same prompt", and the retry policy (config.DefaultNonRetryableMarkers)
+	// treats it as non-retryable for exactly that reason. This is the opposite:
+	// the SESSION behind this one credential got blocked, not the request, so a
+	// different credential answers it fine and the retry must go through.
+	// Reporting the identical code/message regardless of which status the
+	// upstream happened to use keeps the two statuses from disagreeing about
+	// the same failure.
+	if hasSignal(joined, sessionBlockedSignal) {
+		result.Message = sessionBlockedMessage
+		result.Code = sessionBlockedCode
+		return result
+	}
+
 	if classified, ok := classifyValidationError(joined, providerParam, signals); ok {
 		return classified
 	}
