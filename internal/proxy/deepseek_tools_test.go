@@ -1113,3 +1113,95 @@ func TestDeepSeekLoopSumsTheCachedAndReasoningTokens(t *testing.T) {
 			envelope.UsageObject.CompletionTokensDetails.ReasoningTokens)
 	}
 }
+
+// TestDeepSeekStreamingMidLoopFailureDoesNotRelayAClosedBody checks what
+// the client gets when a step of the loop fails after a successful first
+// step.
+//
+// The loop read the provider's stream whole (and closed it) before it ran
+// the tool, so the fallback that relayed the original response would have
+// read from a closed body: the client would get a 200 with an empty stream
+// and the log would say "invalid Read on closed Body" instead of the real
+// failure.
+//
+// The client must get the error, not an empty stream.
+func TestDeepSeekStreamingMidLoopFailureDoesNotRelayAClosedBody(t *testing.T) {
+	fake := &deepSeekFake{
+		searchResults: []map[string]any{{
+			"title": "DeepSeek V4 released",
+			"url":   "https://example.com/v4",
+		}},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		switch r.URL.Path {
+		case "/v1/tools/search":
+			fake.mu.Lock()
+			fake.searchCalls++
+			results := fake.searchResults
+			fake.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"results": results})
+		case "/v1/chat/completions":
+			fake.mu.Lock()
+			fake.chatCalls++
+			call := fake.chatCalls
+			fake.mu.Unlock()
+			w.Header().Set("Content-Type", "text/event-stream")
+			if call == 1 {
+				// The first stream asks for the router's search.
+				_, _ = w.Write([]byte("data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"deepseek_web_search","arguments":"{\"query\":\"deepseek v4\"}"}}]}}]}` + "\n\n"))
+				_, _ = w.Write([]byte("data: " + `{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":100,"completion_tokens":10,"total_tokens":110}}` + "\n\n"))
+				_, _ = w.Write([]byte("data: [DONE]\n\n"))
+				return
+			}
+			// The continuation fails: the upstream is gone.
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte(`{"error":{"message":"upstream is down"}}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	fake.baseURL = server.URL
+
+	prx, dbStub := deepSeekTestProxy(t, fake)
+
+	body := `{
+		"model": "deepseek-flash",
+		"messages": [{"role": "user", "content": "What is new in DeepSeek V4?"}],
+		"tools": [{"type": "web_search"}],
+		"stream": true
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	prx.ProxyRequest(rec, req)
+
+	out := rec.Body.String()
+	// The client must not get an empty stream that ends without an answer:
+	// it would look like a successful request with no content.
+	if strings.Contains(out, "invalid Read on closed Body") {
+		t.Errorf("the client was served a closed body: %s", out)
+	}
+	if rec.Code == http.StatusOK && !strings.Contains(out, "finish_reason") &&
+		!strings.Contains(out, "error") {
+		t.Errorf("the client got a 200 with no answer and no error: %s", out)
+	}
+	// It gets the failure, and it is the real one.
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502 (the upstream failed after the tool ran): %s", rec.Code, out)
+	}
+	if !strings.Contains(out, "error") {
+		t.Errorf("the client got no error: %s", out)
+	}
+	// The search that already ran is still billed.
+	if len(dbStub.loggedEntries) != 1 {
+		t.Fatalf("got %d spend rows, want 1", len(dbStub.loggedEntries))
+	}
+	searches, _ := toolCountsFromMetadata(t, dbStub.loggedEntries[0].Metadata)
+	if searches != 1 {
+		t.Errorf("the web search count = %d, want 1 (the search already ran)", searches)
+	}
+}

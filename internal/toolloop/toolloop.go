@@ -178,20 +178,36 @@ func (cycle *Cycle) NextBody(ctx context.Context, responseBody []byte) ([]byte, 
 	assistant := assistantToolCallMessage(response)
 	results := make([]map[string]any, 0, len(response.Choices))
 	if len(response.Choices) > 0 {
-		for _, call := range response.Choices[0].Message.ToolCalls {
-			if !cycle.runner.Owns(call.Function.Name) {
-				continue
-			}
+		for _, call := range OwnedCalls(callsFromResponse(response), cycle.runner) {
 			content, ok := cycle.results[call.ID]
 			if !ok {
-				content = cycle.runner.Run(ctx, call.Function.Name, call.Function.Arguments)
+				content = cycle.runner.Run(ctx, call.Name, call.Arguments)
 				cycle.results[call.ID] = content
 			}
-			results = append(results, toolResultMessage(call.ID, call.Function.Name, content))
+			results = append(results, toolResultMessage(call.ID, call.Name, content))
 		}
+	}
+	if len(results) == 0 {
+		// None of the calls is the router's own: there is nothing to run and
+		// nothing to add to the conversation. Sending the request again would
+		// be sending the very same request -- the provider would answer the
+		// same way, and the client would be billed for the request twice.
+		return nil, ErrNothingToRun
 	}
 	cycle.messages = appendToolResults(cycle.messages, assistant, results)
 	return cycle.bodyWithMessages()
+}
+
+// callsFromResponse reads every tool call out of a Chat Completions response.
+func callsFromResponse(response openai.OpenAIResponse) []ToolCall {
+	if len(response.Choices) == 0 {
+		return nil
+	}
+	calls := make([]ToolCall, 0, len(response.Choices[0].Message.ToolCalls))
+	for _, call := range response.Choices[0].Message.ToolCalls {
+		calls = append(calls, ToolCall{ID: call.ID, Name: call.Function.Name, Arguments: call.Function.Arguments})
+	}
+	return calls
 }
 
 // FinalBody builds the body for the loop's last request: the conversation
@@ -332,14 +348,11 @@ func CallsFromResponse(body []byte, runner Runner) []ToolCall {
 	if len(response.Choices) == 0 {
 		return nil
 	}
-	calls := make([]ToolCall, 0, len(response.Choices[0].Message.ToolCalls))
+	all := make([]ToolCall, 0, len(response.Choices[0].Message.ToolCalls))
 	for _, call := range response.Choices[0].Message.ToolCalls {
-		if !runner.Owns(call.Function.Name) {
-			continue
-		}
-		calls = append(calls, ToolCall{ID: call.ID, Name: call.Function.Name, Arguments: call.Function.Arguments})
+		all = append(all, ToolCall{ID: call.ID, Name: call.Function.Name, Arguments: call.Function.Arguments})
 	}
-	return calls
+	return OwnedCalls(all, runner)
 }
 
 // assistantToolCallMessage builds the assistant message that carries the

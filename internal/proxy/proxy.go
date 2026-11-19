@@ -4141,14 +4141,21 @@ dispatch:
 							logCtx.TokenUsage = &converter.TokenUsage{}
 						}
 						applyDeepSeekToolUsageTo(logCtx.TokenUsage, loopUsage)
+						logCtx.DeepSeekToolUsage = loopUsage
 					}
-					err := p.handleProviderStreaming(w, resp, cred, realModelID, modelID, logCtx)
-					if err != nil {
-						p.logStreamHandlerError(r.Context(), "Failed to handle provider streaming response", err,
-							"credential", cred.Name, "provider", cred.Type, "model", modelID, "request_id", logCtx.RequestID)
-					} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-						streamCompleted = true
-					}
+					// The loop read the provider's stream whole (and closed it)
+					// before it ran the tool, so the original response cannot
+					// be relayed: reading it would give the client a 200 with
+					// an empty stream and the log an "invalid Read on closed
+					// Body" instead of the real failure.
+					//
+					// The client gets the failure instead.
+					logCtx.Status = "failure"
+					logCtx.HTTPStatus = http.StatusBadGateway
+					logCtx.ErrorMsg = "the router-run tool loop failed"
+					logCtx.StreamOutcome = "stream_error"
+					WriteErrorBadGateway(w, "the upstream failed to answer after the router ran a tool")
+					streamCompleted = true
 				default:
 					if streamLoopRan {
 						// The loop buffered the stream itself, so the usual
