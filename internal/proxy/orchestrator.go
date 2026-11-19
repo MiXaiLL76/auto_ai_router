@@ -150,6 +150,7 @@ func (p *Proxy) orchestrateRequest(
 	if !ok {
 		return nil, false
 	}
+	p.applyKeyRoutingPolicy(logCtx, modelID, realModelID)
 	r = withClientServiceTiers(r, logCtx.clientServiceTiers)
 
 	logCtx.RequestEndpoint = r.URL.Path
@@ -274,6 +275,19 @@ func (p *Proxy) orchestrateRequest(
 		// This must happen after any history prepending but before RequestToChat removes
 		// "input", and before the vision fallback: the stored history keeps the images.
 		responsesMetadata.AccumulatedInput = responses.ExtractInputArray(baseBody)
+	}
+
+	// Without reconstructed history an opaque provider response ID is only valid
+	// on its original account. Keep that constraint on retries as well as the
+	// first pick; never widen the key's allowlist to resume a conversation.
+	if logCtx.Scope.HasCredentialRestriction() && responsesMetadata != nil && responsesMetadata.PreviousResponseID != "" && !prevEntryHandled && nativeWSRoutingFromContext(r.Context()) == nil {
+		if prevEntry == nil || prevEntry.CredentialName == "" || !logCtx.Scope.AllowsCredential(prevEntry.CredentialName) {
+			logCtx.Status, logCtx.HTTPStatus = "failure", http.StatusBadRequest
+			logCtx.ErrorMsg = "Previous response cannot be continued on the permitted route; resend the conversation without previous_response_id"
+			WriteErrorBadRequest(w, logCtx.ErrorMsg)
+			return nil, false
+		}
+		logCtx.Scope = logCtx.Scope.RestrictCredentials([]string{prevEntry.CredentialName})
 	}
 
 	// Images sent to a model configured with supports_vision: false are handled once
@@ -1628,6 +1642,10 @@ func (p *Proxy) selectCredentialForModel(
 		errorMsg = "Rate limit exceeded"
 	} else {
 		errorMsg = fmt.Sprintf("No credentials available for model %s", modelID)
+		if logCtx.Scope.HasCredentialRestriction() {
+			errCode = http.StatusServiceUnavailable
+			errorMsg = "No permitted route available"
+		}
 	}
 
 	p.logger.ErrorContext(logCtx.Context(), "No credentials available (regular and fallback)",
@@ -1654,6 +1672,10 @@ func (p *Proxy) selectCredentialForModel(
 	}
 	logCtx.Logged = true
 	p.setRetryAfterFromBan(w, modelID, exclude, logCtx.Scope)
-	WriteErrorRateLimit(w, errorMsg)
+	if errCode == http.StatusServiceUnavailable {
+		WriteErrorServiceUnavailable(w, errorMsg)
+	} else {
+		WriteErrorRateLimit(w, errorMsg)
+	}
 	return nil, false
 }

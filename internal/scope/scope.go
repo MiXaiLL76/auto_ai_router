@@ -9,9 +9,10 @@ import (
 const legacyNoMatchScope = "\x00air:no-matching-scope"
 
 type Context struct {
-	Allowed map[string]struct{}
-	Denied  map[string]struct{}
-	Admin   bool
+	Allowed     map[string]struct{}
+	Denied      map[string]struct{}
+	Admin       bool
+	credentials map[string]struct{}
 }
 
 func AdminContext() Context {
@@ -83,10 +84,15 @@ func hasLegacyNoMatchScope(values []string) bool {
 }
 
 func (c Context) HasScopes() bool {
-	return c.Admin || len(c.Allowed) > 0 || len(c.Denied) > 0
+	return c.Admin || len(c.Allowed) > 0 || len(c.Denied) > 0 || c.HasCredentialRestriction()
 }
 
 func (c Context) Key() string {
+	if c.HasCredentialRestriction() {
+		names := setToList(c.credentials)
+		c.credentials = nil
+		return c.Key() + "|c:" + encodeKeyValues(names)
+	}
 	if c.Admin {
 		return "admin"
 	}
