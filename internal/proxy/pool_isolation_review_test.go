@@ -13,8 +13,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// These are proposed strict-isolation expectations for review, not a claim that
-// PR398 already promises them. Two cases intentionally fail on its current head.
+// Strict isolation requires an explicit model selector in key metadata.
+// Deployment tags alone cannot preserve that intent after all tags are removed.
 // No upstream requests are sent; selection and the real retry path are exercised.
 func TestPoolIsolationReview(t *testing.T) {
 	newFixture := func(t *testing.T) (*Proxy, *models.Manager, []config.ModelRPMConfig, []config.CredentialConfig) {
@@ -47,7 +47,7 @@ func TestPoolIsolationReview(t *testing.T) {
 		t.Helper()
 		info := &dbmodels.TokenInfo{}
 		if bound {
-			info.Metadata = map[string]interface{}{routingProfilesKey: []interface{}{"pool-01"}}
+			info.Metadata = map[string]interface{}{routingProfilesKey: []interface{}{"pool-01"}, models.RoutingModelsField: []interface{}{"model-a"}}
 		}
 		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"`+model+`","messages":[]}`))
 		req = withTrustedClientAuth(req, "fixture-client-key", info)
