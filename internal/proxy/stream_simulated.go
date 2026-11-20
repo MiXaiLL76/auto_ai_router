@@ -751,11 +751,19 @@ func (p *Proxy) finishSimulatedNonStream(
 		logCtx.ErrorMsg = classifiedErrorMessage(result.httpStatus, result.httpBody)
 		logCtx.ErrorBodyRaw = extractErrorBodyRaw(result.httpBody)
 		// finalizeStreamingLog writes the spend row synchronously from logCtx
-		// (TargetURL -> api_base), so set it before that write, not after.
+		// (TargetURL -> api_base), so set it (and ClientResponseBody, below)
+		// before that write, not after. ClientResponseBody must be recomputed
+		// here even though a terminal stream error already stamped it
+		// (markProxyProviderStreamError) with the provider's raw payload: that
+		// assumption only holds for a client that is genuinely streaming, where
+		// those bytes were already relayed live. Here the response is still
+		// being buffered for reassembly -- nothing has reached the client yet
+		// -- so the logged/published body must be the masked one, not the raw
+		// one the stream-error capture assumed was already seen.
 		logCtx.TargetURL = targetURL
-		p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerLabel, result.httpStatus, !tokenUsageOptions.AudioInputIncludesCachedAudio)
 		clientBody, _, _ := clientResponseBodyForCredential(result.httpStatus, result.httpBody, cred, modelID, logCtx.RequestID)
 		logCtx.ClientResponseBody = string(clientBody)
+		p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerLabel, result.httpStatus, !tokenUsageOptions.AudioInputIncludesCachedAudio)
 		// A surfaced 429 must carry a Retry-After header, exactly as the main
 		// loop's final-error path does (ensureRetryAfterOn429): a client told to
 		// back off with no hint will otherwise hammer the pool immediately.
@@ -1387,9 +1395,15 @@ func (p *Proxy) finishSimulatedNativeNonStream(
 		logCtx.ErrorMsg = classifiedErrorMessage(result.httpStatus, result.httpBody)
 		logCtx.ErrorBodyRaw = extractErrorBodyRaw(result.httpBody)
 		logCtx.TargetURL = targetURL
-		p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerLabel, result.httpStatus, true)
+		// ClientResponseBody must be recomputed (masked) before
+		// finalizeStreamingLog publishes the spend/raw-body row -- see the
+		// comment on the equivalent line in finishSimulatedNonStream. A
+		// terminal stream error may have already stamped it with the
+		// provider's raw payload under the live-streaming assumption, which
+		// does not hold here: nothing has reached the client yet.
 		clientBody, _, _ := clientResponseBodyForCredential(result.httpStatus, result.httpBody, cred, modelID, logCtx.RequestID)
 		logCtx.ClientResponseBody = string(clientBody)
+		p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerLabel, result.httpStatus, true)
 		p.ensureRetryAfterOn429(w, result.httpStatus, nil, modelID, logCtx.Scope)
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(clientBody)))
@@ -1935,9 +1949,15 @@ func (p *Proxy) finishSimulatedPassthroughNonStream(
 		logCtx.ErrorMsg = classifiedErrorMessage(result.httpStatus, result.httpBody)
 		logCtx.ErrorBodyRaw = extractErrorBodyRaw(result.httpBody)
 		logCtx.TargetURL = targetURL
-		p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerLabel, result.httpStatus, true)
+		// ClientResponseBody must be recomputed (masked) before
+		// finalizeStreamingLog publishes the spend/raw-body row -- see the
+		// comment on the equivalent line in finishSimulatedNonStream. A
+		// terminal stream error may have already stamped it with the
+		// provider's raw payload under the live-streaming assumption, which
+		// does not hold here: nothing has reached the client yet.
 		clientBody, _, _ := clientResponseBodyForCredential(result.httpStatus, result.httpBody, cred, modelID, logCtx.RequestID)
 		logCtx.ClientResponseBody = string(clientBody)
+		p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerLabel, result.httpStatus, true)
 		p.ensureRetryAfterOn429(w, result.httpStatus, nil, modelID, logCtx.Scope)
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(clientBody)))
