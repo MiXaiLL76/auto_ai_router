@@ -12,6 +12,8 @@ import (
 
 // detectImageMIME inspects the first bytes of data and returns the image MIME type.
 // Returns ("", false) if the data does not match a known image magic sequence.
+//
+//nolint:gocyclo // flat lookup table, one branch per case
 func detectImageMIME(data []byte) (string, bool) {
 	if len(data) >= 4 && data[0] == 0x89 && data[1] == 'P' && data[2] == 'N' && data[3] == 'G' {
 		return "image/png", true

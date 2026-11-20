@@ -43,6 +43,7 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 	return &Service{store: cfg.Store, objects: cfg.Objects, billing: cfg.Billing, uploadTTL: cfg.UploadTTL, now: cfg.Now}, nil
 }
 
+//nolint:gocyclo // linear guard clauses with early returns, no nested logic
 func (s *Service) Create(ctx context.Context, p Principal, idem string, request CreateRequest) (*Job, bool, error) {
 	req, err := request.normalized()
 	if err != nil {

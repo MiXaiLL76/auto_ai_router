@@ -42,6 +42,8 @@ func clientResponseBodyForCredential(statusCode int, body []byte, _ *config.Cred
 // A map decode has no such failure mode: a non-string value is simply not a
 // string, and every other key is read normally. Only a body that is not JSON
 // at all yields nothing.
+//
+//nolint:gocyclo // linear guard clauses with early returns, no nested logic
 func statusCodeFromProviderBodyError(statusCode int, body []byte) (int, bool) {
 	if len(body) == 0 {
 		return 0, false

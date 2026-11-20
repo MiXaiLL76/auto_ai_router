@@ -116,6 +116,7 @@ type S3Store struct {
 	http     *http.Client
 }
 
+//nolint:gocyclo // flat sequence of independent validation checks
 func NewS3Store(cfg S3Config) (*S3Store, error) {
 	u, err := url.Parse(strings.TrimRight(cfg.Endpoint, "/"))
 	if err != nil || !secureEndpoint(u) || cfg.Bucket == "" || cfg.AccessKey == "" || cfg.SecretKey == "" {
@@ -173,6 +174,7 @@ func (s *S3Store) DeleteUpload(ctx context.Context, u *Upload) error {
 	return s.delete(ctx, u.ObjectKey)
 }
 
+//nolint:gocyclo // flat sequence of independent validation checks
 func (s *S3Store) FetchResult(ctx context.Context, j *Job, rawURL string) (Object, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {

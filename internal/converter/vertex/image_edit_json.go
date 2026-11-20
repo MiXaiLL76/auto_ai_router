@@ -9,6 +9,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 )
 
+//nolint:gocyclo // flat sequence of independent validation checks
 func imageEditJSONToOpenAIChatRequest(body []byte, model string) ([]byte, error) {
 	chatBody, err := imageRequestToOpenAIChatRequest(body, model)
 	if err != nil {
@@ -63,6 +64,7 @@ func imageEditJSONToOpenAIChatRequest(body []byte, model string) ([]byte, error)
 	return json.Marshal(chat)
 }
 
+//nolint:gocyclo // flat sequence of independent validation checks
 func imageEditJSONURL(raw json.RawMessage, param string) (*openai.ImageURL, error) {
 	var value string
 	if json.Unmarshal(raw, &value) != nil {

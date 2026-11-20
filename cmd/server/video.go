@@ -23,6 +23,7 @@ type videoRuntime struct {
 	logger  *slog.Logger
 }
 
+//nolint:gocyclo // linear startup wiring with error checks
 func initializeVideoOrExit(cfg *config.Config, prx *proxy.Proxy, db litellmdb.Manager, logger *slog.Logger) *videoRuntime {
 	if cfg == nil || !cfg.Video.Enabled {
 		return nil
