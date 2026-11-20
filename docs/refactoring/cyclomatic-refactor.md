@@ -367,8 +367,17 @@ and can be reviewed statement by statement; the `goto` driver (PR 5) is the
 only phase where the retry state machine itself changes, so it goes last, when
 the surrounding code is already small and covered.
 
-Each PR must keep `go test -race ./...` green and must not raise the number of
-`gocyclo` findings (the target is strictly decreasing).
+Each PR must keep `go test -race ./...` green. Complexity is tracked by three
+numbers, not by the count of findings: splitting one 394 into 133 + 187 + 73
+adds two findings while making the code materially better, so the count may
+rise in an intermediate PR.
+
+- the **maximum** complexity in the touched package must go down;
+- the **sum of excess** (`complexity - 15` over all functions) must go down;
+- no function may end up higher than it started.
+
+The count is expected to fall as the phases land, and is the number the CI
+gate will eventually report.
 
 ## 7. Baseline gate (separate decision)
 
