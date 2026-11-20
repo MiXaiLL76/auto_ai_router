@@ -1480,42 +1480,98 @@ func TestProxyRequest_UnsupportedProManRequestWithoutFallbackReturnsLocalError(t
 }
 
 func TestOrchestrateRequestRoutingPools(t *testing.T) {
-	logger := testhelpers.NewTestLogger()
-	credentials := []config.CredentialConfig{
-		{Name: "general", Type: config.ProviderTypeOpenAI, RPM: 50, BaseURL: "http://general.local"},
-		{Name: "pooled", Type: config.ProviderTypeOpenAI, RPM: 50, BaseURL: "http://pooled.local"},
+	metadata := func(profiles ...string) map[string]interface{} {
+		values := make([]interface{}, len(profiles))
+		for i, profile := range profiles {
+			values[i] = profile
+		}
+		return map[string]interface{}{routingProfilesKey: values}
 	}
-	builder := NewTestProxyBuilder().WithCredentials(credentials...)
-	manager := models.New(logger, 50, []config.ModelRPMConfig{
-		{Name: "gpt-oss", Credential: "general"},
-		{Name: "gpt-oss", Credential: "pooled", Pools: []string{"pool-01"}},
-		{Name: "gpt4.1", Credential: "general"},
-	})
-	manager.LoadModelsFromConfig(credentials)
-	builder.config.ModelManager = manager
-	proxy := builder.Build()
-
-	metadata := map[string]interface{}{"air_routing_profiles": []interface{}{"pool-01"}}
+	pool01 := metadata("pool-01")
 	for _, tt := range []struct {
-		name, model, credential string
-		info                    dbmodels.TokenInfo
+		name        string
+		model       string
+		info        dbmodels.TokenInfo
+		want        []string
+		unavailable string
 	}{
-		{name: "key", model: "gpt-oss", credential: "pooled", info: dbmodels.TokenInfo{Metadata: metadata}},
-		{name: "team", model: "gpt-oss", credential: "pooled", info: dbmodels.TokenInfo{TeamMetadata: metadata}},
-		{name: "organization", model: "gpt-oss", credential: "pooled", info: dbmodels.TokenInfo{OrganizationMetadata: metadata}},
-		{name: "unpooled model", model: "gpt4.1", credential: "general", info: dbmodels.TokenInfo{Metadata: metadata}},
+		{name: "absent profiles", want: []string{"a", "b", "c", "d"}},
+		{name: "empty profiles", info: dbmodels.TokenInfo{Metadata: metadata()}, want: []string{"a", "b", "c", "d"}},
+		{name: "unknown profile", info: dbmodels.TokenInfo{Metadata: metadata("unknown")}, want: []string{"a", "b", "c", "d"}},
+		{name: "unpooled model", model: "gpt4.1", info: dbmodels.TokenInfo{Metadata: pool01}, want: []string{"a", "b", "c", "d"}},
+		{name: "one match", info: dbmodels.TokenInfo{Metadata: metadata("pool-02")}, want: []string{"b"}},
+		{name: "two matches from key", info: dbmodels.TokenInfo{Metadata: pool01}, want: []string{"a", "b"}},
+		{name: "two matches from team", info: dbmodels.TokenInfo{TeamMetadata: pool01}, want: []string{"a", "b"}},
+		{name: "two matches from organization", info: dbmodels.TokenInfo{OrganizationMetadata: pool01}, want: []string{"a", "b"}},
+		{name: "three matches from multiple key profiles", info: dbmodels.TokenInfo{Metadata: metadata("pool-01", "pool-03")}, want: []string{"a", "b", "c"}},
+		{
+			name: "three matches from combined profiles",
+			info: dbmodels.TokenInfo{Metadata: pool01, TeamMetadata: metadata("pool-02"), OrganizationMetadata: metadata("pool-01", "pool-03")},
+			want: []string{"a", "b", "c"},
+		},
+		{name: "all deployments match", model: "all-pooled", info: dbmodels.TokenInfo{Metadata: pool01}, want: []string{"a", "b", "c", "d"}},
+		{name: "model-wide assignment", model: "global-pool", info: dbmodels.TokenInfo{Metadata: pool01}, want: []string{"a", "b", "c", "d"}},
+		{name: "one matching deployment unavailable", info: dbmodels.TokenInfo{Metadata: pool01}, unavailable: "a", want: []string{"b"}},
+		{name: "only matching deployment unavailable", info: dbmodels.TokenInfo{Metadata: metadata("pool-02")}, unavailable: "b"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"`+tt.model+`","messages":[]}`))
+			modelID := tt.model
+			if modelID == "" {
+				modelID = "gpt-oss"
+			}
+			entries := []config.ModelRPMConfig{
+				{Name: "gpt-oss", Credential: "a", Pools: []string{"pool-01"}},
+				{Name: "gpt-oss", Credential: "b", Pools: []string{"pool-01", "pool-02"}},
+				{Name: "gpt-oss", Credential: "c", Pools: []string{"pool-03"}},
+				{Name: "gpt-oss", Credential: "d"},
+				{Name: "gpt4.1"},
+				{Name: "global-pool", Pools: []string{"pool-01"}},
+			}
+			var credentials []config.CredentialConfig
+			for _, name := range []string{"a", "b", "c", "d"} {
+				credentials = append(credentials, config.CredentialConfig{
+					Name: name, Type: config.ProviderTypeOpenAI, RPM: 50, BaseURL: "http://" + name + ".local",
+					ReasoningOnly: name == tt.unavailable,
+				})
+				entries = append(entries, config.ModelRPMConfig{
+					Name: "all-pooled", Credential: name, Pools: []string{"pool-01"},
+				})
+			}
+			builder := NewTestProxyBuilder().WithCredentials(credentials...)
+			manager := models.New(testhelpers.NewTestLogger(), 50, entries)
+			manager.LoadModelsFromConfig(credentials)
+			builder.config.ModelManager = manager
+			proxy := builder.Build()
+
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"`+modelID+`","messages":[]}`))
 			req = withTrustedClientAuth(req, "client-key", &tt.info)
 			w := httptest.NewRecorder()
-			prepared, ok := proxy.orchestrateRequest(w, req, &RequestLogContext{})
-			require.True(t, ok, w.Body.String())
-			require.Equal(t, tt.credential, prepared.cred.Name)
-			require.Equal(t, tt.model, prepared.modelID)
-			if tt.credential == "pooled" {
-				require.True(t, GetTried(prepared.request.Context())["general"], "retries must also exclude the deployment outside the pool")
+			logCtx := &RequestLogContext{}
+			prepared, ok := proxy.orchestrateRequest(w, req, logCtx)
+			if len(tt.want) == 0 {
+				require.False(t, ok)
+				require.Equal(t, http.StatusTooManyRequests, w.Code)
+				return
 			}
+			require.True(t, ok, w.Body.String())
+			require.Equal(t, modelID, prepared.modelID)
+
+			// Exhaust the actual retry path to verify the complete set of eligible deployments.
+			cred := prepared.cred
+			got := []string{cred.Name}
+			tried := GetTried(prepared.request.Context())
+			attempted := map[string]bool{cred.Name: true}
+			for attempt := 1; attempt <= len(credentials); attempt++ {
+				next, _, ready, _ := proxy.nextCrossTypeRetryCredential(prepared.request, prepared, logCtx, cred, tried, attempted, attempt, true)
+				if !ready {
+					break
+				}
+				require.False(t, attempted[next.Name], "retry selected an already attempted deployment")
+				attempted[next.Name] = true
+				got = append(got, next.Name)
+				cred = next
+			}
+			require.ElementsMatch(t, tt.want, got)
 		})
 	}
 }
