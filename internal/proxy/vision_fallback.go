@@ -136,6 +136,11 @@ func (p *Proxy) rewriteVisionImages(w http.ResponseWriter, r *http.Request, root
 		return result, true
 	}
 	mode := p.visionFallback.Mode
+	if restricted, _ := r.Context().Value(routingRestrictedContextKey{}).(bool); restricted && mode == config.VisionFallbackDescribe {
+		// A hidden call to another model must not send this restricted request's
+		// images to an unrelated provider. Native vision remains unaffected.
+		return result, true
+	}
 	if mode != config.VisionFallbackStrip && mode != config.VisionFallbackDescribe {
 		return result, true
 	}
@@ -236,6 +241,9 @@ func (p *Proxy) applyVisionFallbackToBase(
 	modelID string,
 	format visionBodyFormat,
 ) ([]byte, bool) {
+	if logCtx.Scope.HasCredentialRestriction() {
+		r = r.WithContext(context.WithValue(r.Context(), routingRestrictedContextKey{}, true))
+	}
 	if logCtx.IsProxyRequest {
 		r = r.WithContext(context.WithValue(r.Context(), visionPeerRequestKey{}, true))
 	}

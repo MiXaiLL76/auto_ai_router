@@ -388,6 +388,10 @@ By default, models can also be declared directly inside a credential via the `mo
 
 See [Load Balancing](../advanced/balancing.md) for details on multi-credential routing.
 
+For operator-managed restrictions on an individual key and selected models, see
+[Model pools](../advanced/model_pools.md). Pool membership uses existing model
+deployments and does not create additional rate-limit capacity.
+
 Set `supports_vision: false` on a model that cannot accept images; what happens to images
 sent to it is configured in the top-level `vision_fallback` section. See
 [Vision Fallback](../advanced/vision_fallback.md).
