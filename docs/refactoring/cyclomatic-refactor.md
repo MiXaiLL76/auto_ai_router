@@ -222,28 +222,41 @@ Target: `proxyRequest` becomes a driver of ≤ 60 lines, each stage a method on
 | `p.finalizeNoResponse(w, r, scope, attemptState)` (shared tail: fallback, transport classification, 429/502/499) | 3200-3428    | 20 → 8 after splitting fallback vs classification |
 | `p.relayResponse(w, r, prepared, scope, resp)`                                                                   | 3429-4274    |                                      80 → see 5.5 |
 
-```go
-type requestScope struct {
-    requestID string
-    eventID   string
-    start     time.Time
-    logCtx    *RequestLogContext
-}
-
-func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
-    scope := p.newRequestScope(r)
-    prepared, ok := p.orchestrateRequest(w, r, scope.logCtx)
-    if !ok {
-        return
-    }
-    ...
-    if p.serveProxyLike(...) || p.serveDirect(...) { return }
-}
-```
-
 Mechanical rule for every phase: **move code, do not rewrite it**. Signatures
 change, statements do not. This keeps the diff reviewable and the invariants
 checkable by reading.
+
+### 5.2.1 What Phase 1 delivered
+
+Three goto-free stages were extracted, each ending the request, so each could
+be moved verbatim:
+
+| New function                   | File                      | Complexity now | Source    |
+| ------------------------------ | ------------------------- | -------------: | --------- |
+| `(*Proxy).newRequestScope`     | `request_scope.go`        |             12 | 2129-2176 |
+| `(*Proxy).relayProxyResponse`  | `request_stages.go`       |             73 | 2497-2807 |
+| `(*Proxy).relayDirectResponse` | `request_relay_direct.go` |            187 | 3084-3925 |
+
+Measured effect: `proxyRequest` 394 → 133, `proxy.go` 4434 → 3268 lines.
+
+A constraint the plan above underestimated: **the retry loops cannot be
+extracted before `goto dispatch` is gone.** The proxy path, the direct path
+and the shared attempt counter are one block joined by that jump, so
+`serveProxyLike`/`serveDirect` require Phase 2 first — and Phase 2 itself
+re-indents the remaining body (a `for` around both paths), which is why it is
+cheaper after the response tails have moved out.
+
+Revised order for Workstream B:
+
+1. ~~extract the goto-free response tails~~ (done, this branch);
+2. split the two relays along their own seams — the streaming plan table
+   (§5.3) for both of them, then the non-streaming pipeline (§5.4);
+3. convert `goto dispatch` to a `for` around the two paths, extract
+   `serveProxyLike`/`serveDirect` with `attemptOutcome`/`retryState` (§5.3);
+4. reduce the driver to the setup → orchestrate → dispatch → relay chain.
+
+Steps 2 and 3 are independent and can land in either order; step 3 is easier
+once step 2 has shrunk the relays it will call.
 
 ### 5.3 Phase 2 — retry loop → attempt result
 
@@ -341,13 +354,13 @@ a follow-up if it ever pays for itself.
 
 ## 6. Sequencing and PRs
 
-| PR              | Contents                                                                  | Risk        | Est. effort |
-| --------------- | ------------------------------------------------------------------------- | ----------- | ----------- |
-| 1 (this branch) | Workstream A (`Validate`) + this document                                 | low         | 0.5 day     |
-| 2               | Phase 1 for `proxyRequest`: stage extraction only, no control-flow change | medium      | 1 day       |
-| 3               | Phase 3: streaming plan table (removes ~350 lines of duplication)         | medium      | 1 day       |
-| 4               | Phase 4: non-streaming pipeline + finalization                            | medium-high | 1-2 days    |
-| 5               | Phase 2: attempt result/driver, `goto` removal                            | high        | 1-2 days    |
+| PR  | Contents                                                                | Risk        | Est. effort |
+| --- | ----------------------------------------------------------------------- | ----------- | ----------- |
+| 1   | Workstream A (`Validate`) + this document                               | low         | 0.5 day     |
+| 2   | Phase 1: setup + both response relays extracted (this branch)           | low-medium  | done        |
+| 3   | Streaming plan table in both relays (removes ~350 lines of duplication) | medium      | 1 day       |
+| 4   | Non-streaming pipeline + finalization in both relays                    | medium-high | 1-2 days    |
+| 5   | Attempt result/driver, `goto` removal, `serveProxyLike`/`serveDirect`   | high        | 1-2 days    |
 
 Rationale for the order: PRs 2-4 are local moves that preserve control flow
 and can be reviewed statement by statement; the `goto` driver (PR 5) is the
