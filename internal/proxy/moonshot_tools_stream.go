@@ -63,7 +63,7 @@ func (p *Proxy) runMoonshotStreamToolLoop(
 		return result, err
 	}
 	// The final step's stream is what the client gets.
-	replayToolStream(w, resp, result.body)
+	p.replayToolStream(w, resp, r, modelID, logCtx, result.body)
 	return result, nil
 }
 
