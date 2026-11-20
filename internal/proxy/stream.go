@@ -1071,16 +1071,8 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 		})
 	}
 
-	var postFinish chatPostFinishDetector
-	observeJSON := func(value any) {
-		for _, violation := range postFinish.observeJSON(value) {
-			p.logger.WarnContext(respCtx(resp), "Provider sent text after finish_reason in Chat Completions stream",
-				"credential", credName, "model", modelID, "request_id", logContextRequestID(logCtx),
-				"choice_index", violation.index, "finish_reason", violation.finishReason, "delta_field", violation.field)
-		}
-	}
 	clientReader := normalizeSuccessfulResponseModelStream(
-		promanutils.NewSanitizingSSEReaderWithObserver(providerReader, clientVisibleResponseModel(logCtx, modelID), observeJSON),
+		promanutils.NewSanitizingSSEReader(providerReader, clientVisibleResponseModel(logCtx, modelID)),
 		resp.StatusCode,
 		logCtx,
 		modelID,
@@ -1625,8 +1617,7 @@ func (p *Proxy) streamToClient(
 	buf := streamBufPool.Get().(*[]byte)
 	defer streamBufPool.Put(buf)
 
-	// TTFT detection: separate from the bytes forwarded to the client via
-	// onChunk (forwarding must stay byte-for-byte immediate for latency). A real
+	// TTFT detection and onChunk observe the stream before client filtering. A real
 	// content/tool/reasoning delta can straddle multiple Read calls, or be
 	// preceded by content-free SSE events (ping, role-only delta) that arrive in
 	// their own Read — so lines accumulate across reads via ttftScan until a
@@ -1653,6 +1644,7 @@ func (p *Proxy) streamToClient(
 	if statusCode == 0 {
 		statusCode = http.StatusOK
 	}
+	finishFilter := p.newChatPostFinishFilter(ctx, w.Header(), endpoint, statusCode, modelID, logCtx)
 	preflightEnabled := statusCode >= http.StatusOK && statusCode < http.StatusMultipleChoices
 	committed := !preflightEnabled
 	if !preflightEnabled {
@@ -1762,20 +1754,22 @@ func (p *Proxy) streamToClient(
 				}
 			}
 			if committed {
-				if writeErr := writeStreamChunk(chunk); writeErr != nil {
+				if writeErr := writeStreamChunk(finishFilter.filter(chunk, false)); writeErr != nil {
 					return writeErr
 				}
 			}
 		}
 		if err != nil {
+			var tail []byte
 			if !committed {
 				if payload := initialCommit.FinalizeTerminalError(); payload != "" {
 					return writeEarlyStreamError(payload)
 				}
 				w.WriteHeader(statusCode)
-				if writeErr := writeStreamChunk(initialCommit.Release()); writeErr != nil {
-					return writeErr
-				}
+				tail = initialCommit.Release()
+			}
+			if writeErr := writeStreamChunk(finishFilter.filter(tail, true)); writeErr != nil {
+				return writeErr
 			}
 			if flushPending {
 				// No need to clear flushPending here — every path below

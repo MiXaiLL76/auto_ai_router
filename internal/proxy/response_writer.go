@@ -645,13 +645,24 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 		return finalize(err)
 	}
 
-	// Non-flushing fallback: copy as-is (token usage cannot be parsed reliably here).
+	// Non-flushing fallback: copy without incremental token accounting.
 	// Unlike the streamToClient path above, there's no preflight gate here to
 	// delay the header, so the real upstream status is committed immediately.
+	finishFilter := p.newChatPostFinishFilter(clientReq.Context(), w.Header(), endpointFromRequest(clientReq), resp.StatusCode, modelID, logCtx)
 	w.WriteHeader(resp.StatusCode)
 	var responseIDScanner clientResponseIDScanner
 	observedReader := io.TeeReader(clientReader, clientResponseIDObserver{scanner: &responseIDScanner, logCtx: logCtx})
-	if _, err := io.Copy(w, observedReader); err != nil {
+	var dst io.Writer = w
+	if finishFilter != nil {
+		dst = chatPostFinishWriter{dst: w, filter: finishFilter}
+	}
+	_, err := io.Copy(dst, observedReader)
+	if err == nil {
+		if tail := finishFilter.filter(nil, true); len(tail) > 0 {
+			_, err = w.Write(tail)
+		}
+	}
+	if err != nil {
 		if isClientDisconnectError(err) {
 			p.recordAbortedRequest(credName, endpointFromRequest(clientReq), modelID)
 		}
