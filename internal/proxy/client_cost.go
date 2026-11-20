@@ -757,6 +757,13 @@ func tokenUsageFromResponsesAPIUsage(
 		if tu.CacheCreation5mTokens == 0 && tu.CacheCreation1hTokens == 0 {
 			tu.CacheCreation5mTokens = details.TTL30mTokens
 		}
+		// Alibaba's Qwen4 splits its explicit cache write into a five-minute
+		// and a one-hour part; the one-hour write is billed at the price
+		// above the five-minute one.
+		if tu.CacheCreation5mTokens == 0 && tu.CacheCreation1hTokens == 0 {
+			tu.CacheCreation5mTokens = details.TTL5mTokens
+			tu.CacheCreation1hTokens = details.TTL1hTokens
+		}
 	}
 	if usage.ServerToolUse != nil {
 		tu.WebSearchRequests = usage.ServerToolUse.WebSearchRequests
