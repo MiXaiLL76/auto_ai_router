@@ -12,6 +12,22 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func TestModelRPMConfigPools(t *testing.T) {
+	t.Setenv("TEST_MODEL_POOL", "pool-02")
+	var models []ModelRPMConfig
+	require.NoError(t, yaml.Unmarshal([]byte(`
+- name: without-pools
+- name: empty-pools
+  pools: []
+- name: with-pools
+  pools: [pool-01, os.environ/TEST_MODEL_POOL]
+`), &models))
+	require.Len(t, models, 3)
+	assert.Empty(t, models[0].Pools)
+	assert.Empty(t, models[1].Pools)
+	assert.Equal(t, []string{"pool-01", "pool-02"}, models[2].Pools)
+}
+
 func TestLoad_ValidConfig(t *testing.T) {
 	// Create temporary config file
 	tmpDir := t.TempDir()

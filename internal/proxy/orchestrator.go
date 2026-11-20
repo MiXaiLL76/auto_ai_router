@@ -27,6 +27,8 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/security"
 )
 
+const routingProfilesKey = "air_routing_profiles"
+
 type orchestratedRequest struct {
 	request              *http.Request
 	body                 []byte // body with realModelID substituted (for non-proxy providers)
@@ -163,6 +165,27 @@ func (p *Proxy) orchestrateRequest(
 	r = withEffectiveCredentialDenylist(r, effectiveDenylist)
 	routingExclusions := p.reasoningOnlyExclusions(logCtx.ReasoningRequested)
 	reasoningExcluded := maps.Clone(routingExclusions)
+	if info := logCtx.TokenInfo; info != nil && p.modelManager != nil {
+		profiles := unionScopeLists(
+			metadataScopes(info.Metadata, routingProfilesKey),
+			metadataScopes(info.TeamMetadata, routingProfilesKey),
+			metadataScopes(info.OrganizationMetadata, routingProfilesKey),
+		)
+		if len(profiles) > 0 {
+			matching := p.modelManager.CredentialsInPools(modelID, profiles)
+			if len(matching) > 0 {
+				outside := p.balancer.CredentialNamesMatching(func(cred *config.CredentialConfig) bool {
+					return !matching[cred.Name]
+				})
+				if routingExclusions == nil {
+					routingExclusions = make(map[string]bool, len(outside))
+				}
+				for _, name := range outside {
+					routingExclusions[name] = true
+				}
+			}
+		}
+	}
 	for _, credentialName := range effectiveDenylist {
 		if p.balancer.IsProxyCredential(credentialName) {
 			continue
