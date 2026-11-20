@@ -14,12 +14,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestProxyRequest_MessagesPassthroughStillLogsUsageAndCost is an end-to-end guard that the
-// /v1/messages native-passthrough path (added so a real Anthropic Messages API request no
-// longer round-trips through Chat Completions shape) did not lose token/cost accounting.
-// The response side (ResponseTo->ChatToMessages, usage extraction) was never touched by the
-// passthrough change — this proves it by driving a full ProxyRequest call against a real
-// Anthropic-shaped upstream response and asserting the logged spend entry.
+// TestProxyRequest_MessagesPassthroughStillLogsUsageAndCost is an end-to-end guard for the
+// /v1/messages native-passthrough path (a real Anthropic Messages API request does not
+// round-trip through Chat Completions shape): the client gets the upstream body as sent,
+// only the model renamed, while billing still reads the usage from the Chat form
+// ResponseTo builds. It drives a full ProxyRequest call against a real Anthropic-shaped
+// upstream response and asserts both the client body and the logged spend entry.
 func TestProxyRequest_MessagesPassthroughStillLogsUsageAndCost(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/v1/messages", r.URL.Path)
@@ -28,7 +28,8 @@ func TestProxyRequest_MessagesPassthroughStillLogsUsageAndCost(t *testing.T) {
 		_, _ = w.Write([]byte(`{
 			"id":"msg_e2e","type":"message","role":"assistant","model":"claude-opus-4-7",
 			"content":[{"type":"text","text":"hi there"}],
-			"stop_reason":"end_turn",
+			"stop_reason":"end_turn","stop_sequence":null,
+			"container":{"id":"container_e2e","expires_at":"2026-10-13T00:00:00Z"},
 			"usage":{"input_tokens":100,"output_tokens":40,"cache_read_input_tokens":10,"cache_creation_input_tokens":5}
 		}`))
 	}))
@@ -71,12 +72,14 @@ func TestProxyRequest_MessagesPassthroughStillLogsUsageAndCost(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, w.Code)
 
-	// Client still gets an Anthropic Messages-shaped response (ChatToMessages ran).
+	// Client gets the upstream Messages response as is: container has no Chat
+	// equivalent, so only the relay keeps it (ChatToMessages would drop it).
 	var clientBody map[string]interface{}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &clientBody))
 	assert.Equal(t, "message", clientBody["type"])
-	assert.Contains(t, clientBody, "stop_sequence")
-	assert.Nil(t, clientBody["stop_sequence"])
+	assert.Equal(t, "msg_e2e", clientBody["id"])
+	assert.Equal(t, "claude-e2e", clientBody["model"], "the provider's model name is replaced by the requested one")
+	assert.Equal(t, map[string]interface{}{"id": "container_e2e", "expires_at": "2026-10-13T00:00:00Z"}, clientBody["container"])
 	usage, ok := clientBody["usage"].(map[string]interface{})
 	require.True(t, ok, "client response must carry usage")
 	assert.NotZero(t, usage["input_tokens"])
@@ -94,8 +97,8 @@ func TestProxyRequest_MessagesPassthroughStillLogsUsageAndCost(t *testing.T) {
 
 // TestProxyRequest_MessagesPassthroughStreamingStillLogsUsageAndCost is the streaming
 // counterpart — this is the shape real Claude Code traffic actually uses (stream:true) and
-// exercises handleMessagesAPIStreaming's separate StreamTo->TransformChatStreamToMessages
-// pipeline instead of the non-streaming ResponseTo->ChatToMessages one.
+// exercises handleMessagesAPIStreaming's PassthroughMessagesStream relay, where the input
+// and cache counts reported only in message_start must reach the final message_delta.
 func TestProxyRequest_MessagesPassthroughStreamingStillLogsUsageAndCost(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/v1/messages", r.URL.Path)

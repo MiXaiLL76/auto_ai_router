@@ -31,20 +31,20 @@ ______________________________________________________________________
 
 ### Optional — Sampling & Output
 
-| Parameter               | Type         | Default | Description                                                                                                       |
-| ----------------------- | ------------ | ------- | ----------------------------------------------------------------------------------------------------------------- |
-| `temperature`           | number       | 1       | Sampling temperature 0-2. Higher = more random. **Not supported by reasoning models** (o1/o3/o4-mini/gpt-5).      |
-| `top_p`                 | number       | 1       | Nucleus sampling (0-1). **Not supported by reasoning models.**                                                    |
-| `frequency_penalty`     | number       | 0       | Penalize repeated tokens (-2.0 to 2.0). **Not supported by reasoning models.**                                    |
-| `presence_penalty`      | number       | 0       | Penalize already-present tokens (-2.0 to 2.0). **Not supported by reasoning models.**                             |
-| `max_tokens`            | integer      | —       | Legacy max output tokens. **Not supported by reasoning models** (use `max_completion_tokens`).                    |
-| `max_completion_tokens` | integer      | —       | Upper bound for output tokens including reasoning tokens. Required for reasoning models.                          |
-| `n`                     | integer      | 1       | Number of completions to generate per request.                                                                    |
-| `stop`                  | string/array | null    | Up to 4 sequences where generation halts.                                                                         |
-| `seed`                  | integer      | —       | Deterministic sampling (best-effort). **Not supported by reasoning models.**                                      |
-| `logprobs`              | boolean      | false   | Return log probabilities of output tokens. **Not supported by reasoning models.**                                 |
-| `top_logprobs`          | integer      | —       | Number of top log-prob tokens to return (0-20). Requires `logprobs: true`. **Not supported by reasoning models.** |
-| `logit_bias`            | object       | null    | Token ID to bias (-100 to 100). **Not supported by reasoning models.**                                            |
+| Parameter               | Type         | Default | Description                                                                                                                             |
+| ----------------------- | ------------ | ------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `temperature`           | number       | 1       | Sampling temperature 0-2. Higher = more random. **Not supported by reasoning models while reasoning is on** (o1/o3/o4-mini/gpt-5+).     |
+| `top_p`                 | number       | 1       | Nucleus sampling (0-1). **Not supported by reasoning models while reasoning is on.**                                                    |
+| `frequency_penalty`     | number       | 0       | Penalize repeated tokens (-2.0 to 2.0). **Not supported by reasoning models while reasoning is on.**                                    |
+| `presence_penalty`      | number       | 0       | Penalize already-present tokens (-2.0 to 2.0). **Not supported by reasoning models while reasoning is on.**                             |
+| `max_tokens`            | integer      | —       | Legacy max output tokens. **Not supported by reasoning models** (use `max_completion_tokens`).                                          |
+| `max_completion_tokens` | integer      | —       | Upper bound for output tokens including reasoning tokens. Required for reasoning models.                                                |
+| `n`                     | integer      | 1       | Number of completions to generate per request.                                                                                          |
+| `stop`                  | string/array | null    | Up to 4 sequences where generation halts.                                                                                               |
+| `seed`                  | integer      | —       | Deterministic sampling (best-effort). **Not supported by reasoning models.**                                                            |
+| `logprobs`              | boolean      | false   | Return log probabilities of output tokens. **Not supported by reasoning models while reasoning is on.**                                 |
+| `top_logprobs`          | integer      | —       | Number of top log-prob tokens to return (0-20). Requires `logprobs: true`. **Not supported by reasoning models while reasoning is on.** |
+| `logit_bias`            | object       | null    | Token ID to bias (-100 to 100). **Not supported by reasoning models.**                                                                  |
 
 ### Optional — Tools & Functions
 
@@ -67,9 +67,9 @@ ______________________________________________________________________
 
 ### Optional — Reasoning (o1/o3/o4-mini/gpt-5)
 
-| Parameter          | Type   | Default | Description                                              |
-| ------------------ | ------ | ------- | -------------------------------------------------------- |
-| `reasoning_effort` | string | —       | `"low"`, `"medium"`, `"high"`. Controls reasoning depth. |
+| Parameter          | Type   | Default | Description                                                                                 |
+| ------------------ | ------ | ------- | ------------------------------------------------------------------------------------------- |
+| `reasoning_effort` | string | —       | `"none"` (models that support it), `"low"`, `"medium"`, `"high"`. Controls reasoning depth. |
 
 ### Optional — Streaming
 
@@ -303,13 +303,16 @@ ______________________________________________________________________
 
 ### Reasoning Models (o1, o3, o3-mini, o3-pro, o4-mini, gpt-5, gpt-5-mini, gpt-5-nano, gpt-5.1, gpt-5.2)
 
-**Not supported** (will error):
+**Rejected by OpenAI while reasoning is on** (the router drops them; accepted with reasoning off, see the note below):
 
 - `temperature` (fixed at 1)
 - `top_p` (fixed at 1)
 - `frequency_penalty`
 - `presence_penalty`
 - `logprobs` / `top_logprobs`
+
+**Not supported** (will error):
+
 - `logit_bias`
 - `max_tokens` (use `max_completion_tokens` instead)
 - `seed`
@@ -317,10 +320,10 @@ ______________________________________________________________________
 
 **Supported exclusively:**
 
-- `reasoning_effort` — `"low"`, `"medium"`, `"high"`
+- `reasoning_effort` — `"low"`, `"medium"`, `"high"`, and `"none"` on models that support it
 - `max_completion_tokens` — includes both visible output and reasoning tokens
 
-> **Note:** Some parameters (e.g., `temperature`) may be accepted on newer GPT-5.2 with `reasoning_effort: "none"`, but are rejected on other reasoning models.
+> **Note:** Reasoning models that support `reasoning_effort: "none"` (e.g. GPT-5.1+, GPT-6 Sol/Luna) accept `temperature`, `top_p`, the penalties and `logprobs` / `top_logprobs` while reasoning is off: `reasoning_effort: "none"`, or no effort on GPT-5.1 to GPT-5.4, which default to `"none"` (GPT-5.5+ default to `"medium"`). The router keeps `temperature`, `top_p` and the penalties in that case and drops them in every other case; it always drops `logprobs` / `top_logprobs` for reasoning models.
 
 ______________________________________________________________________
 

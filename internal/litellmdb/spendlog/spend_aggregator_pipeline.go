@@ -37,9 +37,13 @@ type spendLogRecord struct {
 	Status                   string
 	RequestID                string
 	TeamID                   string
-	OrganizationID           string
-	EndUser                  string
-	SkipDaily                bool
+	// BillingTeamID is the team the event is billed to. TeamID may be replaced
+	// by the credential name (credential_name_as_team_id), so billing decisions
+	// must use this field instead.
+	BillingTeamID  string
+	OrganizationID string
+	EndUser        string
+	SkipDaily      bool
 }
 
 // spendRoute ties together the three spellings AIR needs for one supported
@@ -57,6 +61,12 @@ type spendRoute struct {
 // so the bare fragment must stay last.
 var spendRoutes = []spendRoute{
 	{"acompletion", "/chat/completions", "/chat/completions"},
+	// LiteLLM calls its native Anthropic route anthropic_messages, but (as of
+	// litellm route_llm_request.ROUTE_ENDPOINT_MAPPING) does not list it there
+	// at all, so its own daily aggregation leaves the endpoint dimension NULL
+	// for this call_type. Mirror that exactly with "" rather than inventing an
+	// endpoint value LiteLLM itself never writes.
+	{"anthropic_messages", "/messages", ""},
 	{"aembedding", "/embeddings", "/embeddings"},
 	{"aresponses", "/responses", "/responses"},
 	{"aimage_generation", "/images/generations", "/image/generations"},
@@ -66,6 +76,11 @@ var spendRoutes = []spendRoute{
 	{"aspeech", "/audio/speech", "/audio/speech"},
 	{"amoderation", "/moderations", "/moderations"},
 	{"arerank", "/rerank", "/rerank"},
+	// The native System One API (/v1/systemone) has no LiteLLM counterpart, so
+	// its call_type and endpoint follow LiteLLM's naming rather than mirror a
+	// value LiteLLM writes; without a row here its spend would skip the daily
+	// aggregation (unknown path -> empty call_type).
+	{"asystemone", "/systemone", "/systemone"},
 	{"atext_completion", "/completions", "/completions"},
 }
 
@@ -108,9 +123,8 @@ func dailyEndpoint(callType string) string {
 // writer owns every column it inserted.
 //
 // The date bucket is the wall-clock date of StartTime in timezone (UTC when
-// nil), matching TO_CHAR("startTime", 'YYYY-MM-DD') on the UTC wall clock
-// LiteLLM stores in the timestamp-without-time-zone column only while it
-// stays UTC.
+// nil). "startTime" is stored in UTC, so the bucket matches LiteLLM's
+// TO_CHAR("startTime", 'YYYY-MM-DD') only while timezone is UTC.
 func buildSpendLogRecords(
 	inserted []insertedSpendEntry,
 	logger *slog.Logger,
@@ -143,6 +157,7 @@ func buildSpendLogRecords(
 			Status:                   entry.Status,
 			RequestID:                item.requestID,
 			TeamID:                   entry.TeamID,
+			BillingTeamID:            entry.BillingTeamID,
 			OrganizationID:           entry.OrganizationID,
 			EndUser:                  entry.EndUser,
 		}
@@ -188,6 +203,14 @@ func buildSpendLogRecords(
 			}
 		} else {
 			record.Endpoint = dailyEndpoint(rawCallType)
+		}
+
+		if record.SkipDaily && record.Spend != 0 {
+			// Keep the raw row and counters recoverable, but make missing paid
+			// projections visible even with production's error-only logging.
+			logger.Error("[DB] "+scope+": paid spend skipped daily aggregation",
+				"call_type", effectiveCallType, "request_id", record.RequestID,
+				"model", record.Model, "spend", record.Spend)
 		}
 
 		records = append(records, record)
@@ -283,10 +306,18 @@ func sortedDailyKeys[K dailyLockOrdered, V any](aggregations map[K]V) []K {
 // that inserted the source rows. The first error aborts the pipeline because a
 // PostgreSQL transaction is unusable after a statement error and must roll back.
 func (sl *Logger) runAggregators(aggCtx context.Context, tx dailySpendExecer, scope string, records []spendLogRecord) error {
+	includeTeamSpendInUserSpend := sl.config.TeamSpendUpdatesUserSpend()
 	dailyRecords := make([]spendLogRecord, 0, len(records))
+	userRecords := make([]spendLogRecord, 0, len(records))
 	for _, record := range records {
-		if !record.SkipDaily {
-			dailyRecords = append(dailyRecords, record)
+		if record.SkipDaily {
+			continue
+		}
+		dailyRecords = append(dailyRecords, record)
+		// Same policy as LiteLLM_UserTable in aggregateSpendUpdates: team-billed
+		// spend stays out of the user projection when the flag is off.
+		if includeTeamSpendInUserSpend || record.BillingTeamID == "" {
+			userRecords = append(userRecords, record)
 		}
 	}
 	aggregators := []struct {
@@ -296,7 +327,7 @@ func (sl *Logger) runAggregators(aggCtx context.Context, tx dailySpendExecer, sc
 		{"User", func() error {
 			c, cn := context.WithTimeout(aggCtx, 30*time.Second)
 			defer cn()
-			return aggregateDailyUserSpendLogs(c, tx, sl.logger, dailyRecords)
+			return aggregateDailyUserSpendLogs(c, tx, sl.logger, userRecords)
 		}},
 		{"Team", func() error {
 			c, cn := context.WithTimeout(aggCtx, 30*time.Second)

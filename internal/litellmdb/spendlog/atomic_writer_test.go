@@ -406,6 +406,11 @@ func (tx *atomicTestTx) Exec(_ context.Context, sql string, _ ...any) (pgconn.Co
 }
 
 func (tx *atomicTestTx) Query(_ context.Context, sql string, args ...any) (pgx.Rows, error) {
+	if sql == queries.QuerySelectKeysBudgetWindows {
+		// No key of these batches has budget windows. Kept out of queries,
+		// which these tests read as the spend log insert sequence.
+		return &atomicTestRows{}, nil
+	}
 	tx.queries = append(tx.queries, sql)
 	tx.queryArgs = append(tx.queryArgs, append([]any(nil), args...))
 	switch {
@@ -531,4 +536,36 @@ func assignAtomicTestValue(destination, source any) error {
 		return nil
 	}
 	return errors.New("incompatible scan value")
+}
+
+func TestAtomicWriterExcludesTeamSpendFromDailyUserSpendWhenDisabled(t *testing.T) {
+	logger := newAtomicTestLogger()
+	disabled := false
+	logger.config.IncludeTeamSpendInUserSpend = &disabled
+	teamEvent := atomicTestEntry("req-team")
+	teamEvent.BillingTeamID = "team-1" // team key; UserID comes from X-AIR-User-Id
+	personal := atomicTestEntry("req-personal")
+	personal.UserID = "user-2"
+	personal.TeamID = ""
+	tx := &atomicTestTx{insertedIDs: []string{teamEvent.RequestID, personal.RequestID}}
+
+	_, err := logger.commitBatchTransaction(context.Background(), tx, []*models.SpendLogEntry{teamEvent, personal})
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, countSQLContaining(tx.committedSQL, `INSERT INTO "LiteLLM_DailyUserSpend"`),
+		"only the personal event reaches the daily user projection")
+	assert.Equal(t, 2, countSQLContaining(tx.committedSQL, `INSERT INTO "LiteLLM_DailyTeamSpend"`),
+		"team aggregates are unaffected by the flag")
+}
+
+func TestAtomicWriterIncludesTeamSpendInDailyUserSpendByDefault(t *testing.T) {
+	logger := newAtomicTestLogger()
+	teamEvent := atomicTestEntry("req-team")
+	teamEvent.BillingTeamID = "team-1"
+	tx := &atomicTestTx{insertedIDs: []string{teamEvent.RequestID}}
+
+	_, err := logger.commitBatchTransaction(context.Background(), tx, []*models.SpendLogEntry{teamEvent})
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, countSQLContaining(tx.committedSQL, `INSERT INTO "LiteLLM_DailyUserSpend"`))
 }

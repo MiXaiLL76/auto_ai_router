@@ -326,10 +326,7 @@ func writeChatStreamChunk(output io.Writer, chatID, model string, timestamp int6
 }
 
 // writeThinkingBlocksChunk writes a chunk carrying thinking_blocks on the
-// delta. openai.OpenAIStreamingDelta has no ThinkingBlocks field -- same
-// reason injectThinkingBlocks (response_to_chat.go) patches raw JSON
-// instead of widening a struct shared by every converter -- so this builds
-// the chunk by hand rather than through OpenAIStreamingChunk.
+// delta, built by hand (it predates openai.OpenAIStreamingDelta.ThinkingBlocks).
 func writeThinkingBlocksChunk(output io.Writer, chatID, model string, timestamp int64, blocks []responsesReasoningBlock) error {
 	chunk := map[string]interface{}{
 		"id": chatID, "object": "chat.completion.chunk", "created": timestamp, "model": model,

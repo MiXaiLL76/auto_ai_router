@@ -3,7 +3,6 @@ package anthropic
 import (
 	"encoding/json"
 	"fmt"
-	"strconv"
 	"strings"
 
 	converterutil "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
@@ -31,24 +30,10 @@ func SamplingRemoved(model string) bool {
 	if strings.Contains(lower, "mythos") {
 		return true
 	}
-	match := claudeVersionPattern.FindStringSubmatch(lower)
-	if match == nil {
-		return false
-	}
-	major, err := strconv.Atoi(match[1])
-	if err != nil {
-		return false
-	}
-	if major >= 5 {
-		return true
-	}
-	// 4.x: sampling removed from 4.7 onward (4.6 still accepts it). A long trailing number
-	// (a date suffix, len > 2) is not a real minor, so such a bare-4 id is treated as old.
-	if major != 4 || len(match[2]) == 0 || len(match[2]) > 2 {
-		return false
-	}
-	minor, err := strconv.Atoi(match[2])
-	return err == nil && minor >= 7
+	// 4.x: sampling removed from 4.7 onward (4.6 still accepts it). claudeVersion reads a
+	// date suffix as no minor, so such a bare-4 id is treated as old.
+	_, major, minor, ok := claudeVersion(lower)
+	return ok && (major >= 5 || major == 4 && minor >= 7)
 }
 
 // OpenAIToAnthropic converts an OpenAI Chat Completions request body to Anthropic Messages API
@@ -143,15 +128,26 @@ func OpenAIToAnthropic(openAIBody []byte, model string, isRealAnthropicBackend b
 		thinkingParam = req.Thinking
 	}
 	reasoningEffort := openAIReasoningEffort(req)
-	if tc, oc := mapThinkingConfig(thinkingParam, reasoningEffort, anthropicReq.Model); tc != nil {
+	tc, oc := mapThinkingConfig(thinkingParam, reasoningEffort, anthropicReq.Model)
+	effort := ""
+	if oc != nil {
+		effort = oc.Effort
+	}
+	if err := validateBetweenTools(tc, effort); err != nil {
+		return nil, err
+	}
+	if err := validateThinkingOffEffort(tc, effort, anthropicReq.Model); err != nil {
+		return nil, err
+	}
+	if tc != nil {
 		anthropicReq.Thinking = tc
 		anthropicReq.OutputConfig = oc
-		maxTokens, betas, temp := applyThinkingSideEffects(tc, oc, anthropicReq.MaxTokens, anthropicReq.AnthropicBeta)
+		maxTokens, betas, temp := applyThinkingSideEffects(tc, oc, anthropicReq.Model, anthropicReq.MaxTokens, anthropicReq.AnthropicBeta)
 		anthropicReq.MaxTokens = maxTokens
 		anthropicReq.AnthropicBeta = betas
 		// Do not re-introduce temperature on models that reject sampling params.
-		if !dropSampling {
-			anthropicReq.Temperature = &temp
+		if temp != nil && !dropSampling {
+			anthropicReq.Temperature = temp
 		}
 	} else if !isRealAnthropicBackend {
 		// This Anthropic-shaped request may be handled by a real Claude model
@@ -164,7 +160,8 @@ func OpenAIToAnthropic(openAIBody []byte, model string, isRealAnthropicBackend b
 		// answer (mirrors the same default-off safeguard the Vertex
 		// converter applies via disableThinkingConfig). Send an explicit
 		// disable so every backend gets the same unambiguous signal.
-		anthropicReq.Thinking = &AnthropicThinking{Type: "disabled"}
+		// Claude models that can't run without thinking get none (nil): see thinkingOff.
+		anthropicReq.Thinking = thinkingOff(model, "")
 	}
 
 	// user → metadata.user_id
@@ -230,33 +227,38 @@ func OpenAIToAnthropic(openAIBody []byte, model string, isRealAnthropicBackend b
 	if req.ResponseFormat != nil {
 		if rfMap, ok := req.ResponseFormat.(map[string]interface{}); ok {
 			rfType, _ := rfMap["type"].(string)
-			applied := false
-			if rfType == "json_schema" {
-				if jsonSchema, ok := rfMap["json_schema"].(map[string]interface{}); ok {
-					if schema := jsonSchema["schema"]; schema != nil {
-						if anthropicReq.OutputConfig == nil {
-							anthropicReq.OutputConfig = &AnthropicOutputConfig{}
-						}
-						anthropicReq.OutputConfig.Format = &AnthropicJSONOutputFormat{
-							Type:   "json_schema",
-							Schema: normalizeSchemaForAnthropicOutput(schema),
-						}
-						applied = true
-					}
-				}
+			var schema interface{}
+			if jsonSchema, ok := rfMap["json_schema"].(map[string]interface{}); ok {
+				schema = jsonSchema["schema"]
 			}
-			if !applied && (rfType == "json_object" || rfType == "json_schema") {
-				jsonInstruction := buildJSONResponseInstruction()
-				if systemContent, ok := anthropicReq.System.(string); ok {
-					anthropicReq.System = systemContent + jsonInstruction
-				} else if anthropicReq.System == nil {
-					anthropicReq.System = strings.TrimPrefix(jsonInstruction, "\n\n")
-				}
-			}
+			ApplyJSONResponseFormat(&anthropicReq, rfType, schema)
 		}
 	}
 
 	return json.Marshal(anthropicReq)
+}
+
+// ApplyJSONResponseFormat maps an OpenAI-style JSON response format type and schema onto req.
+func ApplyJSONResponseFormat(req *AnthropicRequest, formatType string, schema interface{}) {
+	if formatType == "json_schema" && schema != nil {
+		if req.OutputConfig == nil {
+			req.OutputConfig = &AnthropicOutputConfig{}
+		}
+		req.OutputConfig.Format = &AnthropicJSONOutputFormat{
+			Type:   "json_schema",
+			Schema: normalizeSchemaForAnthropicOutput(schema),
+		}
+		return
+	}
+	if formatType != "json_object" && formatType != "json_schema" {
+		return
+	}
+	jsonInstruction := buildJSONResponseInstruction()
+	if systemContent, ok := req.System.(string); ok {
+		req.System = systemContent + jsonInstruction
+	} else if req.System == nil {
+		req.System = strings.TrimPrefix(jsonInstruction, "\n\n")
+	}
 }
 
 // normalizeSchemaForAnthropicOutput returns a deep copy of schema with three

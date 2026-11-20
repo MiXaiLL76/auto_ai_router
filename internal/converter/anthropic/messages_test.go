@@ -470,6 +470,13 @@ func TestOpenAIToAnthropic_ReasoningEffortPrecedence(t *testing.T) {
 	assert.Equal(t, "high", request["output_config"].(map[string]interface{})["effort"])
 }
 
+// TestOpenAIToAnthropic_ReasoningObjectCanDisableTopLevelEffort checks that
+// a nested reasoning.effort of "none" wins over a top-level reasoning_effort
+// and turns thinking off.
+//
+// Opus 5 thinks by default and takes an explicit "disabled" to say otherwise,
+// so the request must carry that field: without it the model reasons anyway
+// and the client gets exactly the behaviour it asked to avoid.
 func TestOpenAIToAnthropic_ReasoningObjectCanDisableTopLevelEffort(t *testing.T) {
 	result, err := OpenAIToAnthropic([]byte(`{
 		"model":"claude-opus-5",
@@ -481,7 +488,8 @@ func TestOpenAIToAnthropic_ReasoningObjectCanDisableTopLevelEffort(t *testing.T)
 
 	var request map[string]interface{}
 	require.NoError(t, json.Unmarshal(result, &request))
-	assert.NotContains(t, request, "thinking")
+	require.Contains(t, request, "thinking")
+	assert.Equal(t, "disabled", request["thinking"].(map[string]interface{})["type"])
 	assert.NotContains(t, request, "output_config")
 }
 
@@ -659,6 +667,33 @@ func TestOpenAIToAnthropic_ClaudeModelOmitsThinkingByDefault(t *testing.T) {
 	var request map[string]interface{}
 	require.NoError(t, json.Unmarshal(result, &request))
 	assert.NotContains(t, request, "thinking")
+}
+
+// Thinking off on Claude 5 models, which think when "thinking" is omitted: Sonnet 5.5
+// takes between_tools ("disabled" is a 400 there), and the gateway default-off sends
+// nothing to a model that can't turn thinking off.
+func TestOpenAIToAnthropic_ThinkingOffOnClaude5(t *testing.T) {
+	convert := func(t *testing.T, body, model string, realBackend bool) map[string]interface{} {
+		t.Helper()
+		out, err := OpenAIToAnthropic([]byte(body), model, realBackend)
+		require.NoError(t, err)
+		var request map[string]interface{}
+		require.NoError(t, json.Unmarshal(out, &request))
+		return request
+	}
+	const plain = `{"model":"m","messages":[{"role":"user","content":"hi"}]}`
+	const none = `{"model":"m","reasoning_effort":"none","messages":[{"role":"user","content":"hi"}]}`
+	betweenTools := map[string]interface{}{"type": "between_tools"}
+
+	for _, realBackend := range []bool{true, false} {
+		got := convert(t, none, "claude-sonnet-5-5", realBackend)
+		assert.Equal(t, betweenTools, got["thinking"])
+		assert.NotContains(t, got, "temperature")
+	}
+	assert.Equal(t, betweenTools, convert(t, plain, "claude-sonnet-5-5", false)["thinking"], "gateway default-off")
+	for _, model := range []string{"claude-opus-5-5", "claude-fable-5-1", "claude-mythos-5-1"} {
+		assert.NotContains(t, convert(t, plain, model, false), "thinking", "%s can't turn thinking off", model)
+	}
 }
 
 func TestExtractSystemBlocks(t *testing.T) {

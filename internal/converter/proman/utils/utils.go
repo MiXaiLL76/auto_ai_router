@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/converter/publicrefusal"
 )
 
 const MaxSanitizingSSELineBytes = 1 << 20
@@ -117,6 +118,10 @@ type sanitizingSSEReader struct {
 }
 
 func NewSanitizingSSEReader(source io.Reader, displayModel string) io.Reader {
+	return newSanitizingSSEReader(source, displayModel)
+}
+
+func newSanitizingSSEReader(source io.Reader, displayModel string) *sanitizingSSEReader {
 	return &sanitizingSSEReader{
 		reader:       bufio.NewReader(source),
 		displayModel: displayModel,
@@ -126,10 +131,7 @@ func NewSanitizingSSEReader(source io.Reader, displayModel string) io.Reader {
 func NewSanitizingSSEReadCloser(source io.ReadCloser, displayModel string) io.ReadCloser {
 	return &sanitizingSSEReadCloser{
 		source: source,
-		reader: &sanitizingSSEReader{
-			reader:       bufio.NewReader(source),
-			displayModel: displayModel,
-		},
+		reader: newSanitizingSSEReader(source, displayModel),
 	}
 }
 
@@ -223,6 +225,9 @@ func sanitizeJSONEnvelope(value *any, displayModel string) bool {
 
 func sanitizeEnvelopeMap(obj map[string]any, displayModel string) bool {
 	changed := sanitizeEnvelopeFields(obj, displayModel)
+	if publicrefusal.SanitizeEnvelope(obj) {
+		changed = true
+	}
 	if errObj, ok := obj["error"].(map[string]any); ok {
 		if _, hasMessage := errObj["message"]; hasMessage {
 			errObj["message"] = "Request failed"

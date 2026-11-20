@@ -152,17 +152,15 @@ func TestProxyRequest_ForwardsMessagesBetaAsHeader(t *testing.T) {
 			outbound := <-captured
 			var body map[string]any
 			require.NoError(t, json.Unmarshal(outbound.body, &body))
-			if providerType == config.ProviderTypeAnthropic {
-				// Anthropic is passthrough-eligible by default (IsPassthroughMessagesForProvider):
-				// the request is forwarded natively, so the client's own body-level
-				// anthropic_beta survives (merged into the header) alongside the synthesized
-				// effort beta, instead of being discarded by the Messages->Chat->Messages
-				// round trip. The real Anthropic API rejects "anthropic_beta" as a body field
-				// outright, so ExtractBetaHeader must strip it from the body either way.
-				assert.Equal(t, "client-beta,prompt-caching-2024-07-31,effort-2025-11-24", outbound.header)
-			} else {
-				assert.Equal(t, "client-beta,prompt-caching-2024-07-31", outbound.header)
-			}
+			// Anthropic is passthrough-eligible by default (IsPassthroughMessagesForProvider):
+			// the request is forwarded natively, so the client's own body-level
+			// anthropic_beta survives (merged into the header) instead of being discarded
+			// by the Messages->Chat->Messages round trip, and the client's explicit effort
+			// is kept as sent (no effort beta: the router set no effort of its own). The
+			// real Anthropic API rejects "anthropic_beta" as a body field outright, so
+			// ExtractBetaHeader must strip it from the body either way.
+			assert.Equal(t, "client-beta,prompt-caching-2024-07-31", outbound.header)
+			assert.Equal(t, map[string]any{"effort": "high"}, body["output_config"])
 			assert.NotContains(t, body, "anthropic_beta")
 		})
 	}

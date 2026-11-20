@@ -85,6 +85,15 @@ type responseCompatibilityWriter struct {
 	streamErr      error
 	closeOnce      sync.Once
 	closeErr       error
+	// costInjector and streamCostInjector, when set, let the router re-add
+	// its own final cost to the body/stream after the LiteLLM transform has
+	// already stripped any provider-reported cost from "usage" -- see
+	// wireCostInjectionForCompatWriter in client_cost.go. Set from
+	// proxyRequest, once logCtx exists -- which is after this writer is
+	// already constructed in WithResponseCompatibility, hence the late,
+	// mutable fields rather than constructor parameters.
+	costInjector       func([]byte) []byte
+	streamCostInjector func(io.Reader) io.Reader
 }
 
 func newResponseCompatibilityWriter(
@@ -182,6 +191,13 @@ func (w *responseCompatibilityWriter) Close() error {
 			Headers:    providerHeaders,
 			Body:       w.body.Bytes(),
 		})
+		// Re-add the router's own cost after the transform: Transform already
+		// stripped any provider-reported one from "usage", and cannot tell
+		// AIR's own injected figure apart from that (see
+		// wireCostInjectionForCompatWriter).
+		if w.costInjector != nil {
+			result.Body = w.costInjector(result.Body)
+		}
 		mergeHeaders(result.Headers, preservedHeaders)
 		copyHeaders(w.target.Header(), result.Headers)
 		w.target.Header().Set("Content-Length", itoa(len(result.Body)))
@@ -207,6 +223,12 @@ func (w *responseCompatibilityWriter) startStream() {
 	w.streamDone = make(chan error, 1)
 	go func() {
 		stream := w.transformer.Stream(w.compatContext(), reader)
+		// Same re-add-after-transform as Close(), for the streaming case:
+		// Stream already strips any provider-reported cost from every
+		// event's usage the same way Transform does for the whole body.
+		if w.streamCostInjector != nil {
+			stream = w.streamCostInjector(stream)
+		}
 		_, err := io.Copy(flushingWriter{target: w.target}, stream)
 		_ = reader.CloseWithError(err)
 		w.streamDone <- err
@@ -238,12 +260,42 @@ func looksLikeEventStream(body []byte) bool {
 		bytes.HasPrefix(trimmed, []byte(":"))
 }
 
+// preservedRouterHeaders are the response headers the router writes itself
+// after the compatibility writer has been constructed. The cost headers are
+// computed only once the request's cost is known (setResponseCostHeader runs at
+// the end of proxyRequest), so they are not in initialHeaders; without this set
+// splitHeaders would hand them to the LiteLLM transformer as provider headers
+// and TransformHeaders would drop them — a client served in
+// response_compatibility: litellm never sees the cost header.
+//
+// The set is deliberately limited to the cost headers. Everything else the
+// router adds late stays on the provider path: X-Credential-Name and the AIR
+// signaling headers are internal and must not be surfaced to end users, and the
+// compatibility layer dropping them is the existing, intended behaviour.
+//
+// The names are router-owned: setResponseCostHeader is the only writer and it
+// is gated by the organization's response_cost_mode, and copyResponseHeaders
+// already refuses to copy a provider's value under either name, so preserving
+// them cannot leak an upstream header or bypass the policy.
+var preservedRouterHeaders = map[string]struct{}{
+	http.CanonicalHeaderKey(HeaderResponseCost):  {},
+	http.CanonicalHeaderKey(HeaderCostBreakdown): {},
+}
+
 func (w *responseCompatibilityWriter) splitHeaders() (http.Header, http.Header) {
 	provider := w.header.Clone()
 	preserved := make(http.Header)
 	for key, initialValues := range w.initialHeaders {
 		if slices.Equal(provider.Values(key), initialValues) {
 			preserved[key] = append([]string(nil), initialValues...)
+			provider.Del(key)
+		}
+	}
+	// Router-set cost headers are preserved even when they were added after the
+	// constructor snapshot; the transformer must only filter provider headers.
+	for key := range provider {
+		if _, ok := preservedRouterHeaders[http.CanonicalHeaderKey(key)]; ok {
+			preserved[key] = append([]string(nil), provider.Values(key)...)
 			provider.Del(key)
 		}
 	}

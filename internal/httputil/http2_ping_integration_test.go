@@ -116,8 +116,8 @@ func clientThrough(t *testing.T, proxyAddr string, serverCert *x509.Certificate,
 	transport.TLSClientConfig = &tls.Config{RootCAs: pool}
 	// Setting TLSClientConfig/DialContext at all normally suppresses
 	// Transport's own opportunistic HTTP/2 setup (see onceSetNextProtoDefaults
-	// in net/http/transport.go) — production newTransport never touches
-	// either field, so this only matters for this test's proxy redirection.
+	// in net/http/transport.go). newTransport sets it for its own dial; this
+	// test replaces the TLS config and the dial, so it says so again.
 	transport.ForceAttemptHTTP2 = true
 	transport.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
 		var d net.Dialer

@@ -46,7 +46,7 @@ const (
 			$21, $22, $23, $24, $25, $26,
 			'{}'::jsonb, '{}'::jsonb, '{}'::jsonb
 		)
-		ON CONFLICT (request_id) DO NOTHING
+		ON CONFLICT DO NOTHING
 	`
 
 	// QueryClaimSpendLogEventOwner reports whether the spend row with the given
@@ -264,6 +264,6 @@ func BuildBatchInsertQuery(count int) string {
 		b.WriteString(", '{}'::jsonb, '{}'::jsonb, '{}'::jsonb)")
 	}
 
-	b.WriteString(" ON CONFLICT (request_id) DO NOTHING RETURNING request_id")
+	b.WriteString(" ON CONFLICT DO NOTHING RETURNING request_id")
 	return b.String()
 }

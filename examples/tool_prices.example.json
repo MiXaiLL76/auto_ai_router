@@ -1,0 +1,10 @@
+{
+  "tool_prices": {
+    "moonshot": {
+      "search_cost_per_call": 0.013,
+      "search_pro_cost_per_call": 0.013,
+      "fetch_cost_per_call": 0.013,
+      "rate": 1.3
+    }
+  }
+}

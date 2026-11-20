@@ -114,7 +114,7 @@ func (p *Proxy) handleNativeResponsesWebSocket(client *websocket.Conn, r *http.R
 		s.clientAborted = true
 		clientMessages = nil
 		if drainTimer == nil {
-			drainTimer = time.NewTimer(streamDrainTimeout)
+			drainTimer = time.NewTimer(StreamDrainTimeout)
 			drainDone = drainTimer.C
 		}
 	}
@@ -445,6 +445,7 @@ func (s *nativeWSSession) connect(logCtx *RequestLogContext) error {
 	if cred.IsProxyLike() {
 		headers.Set(HeaderAIRProxyClient, "1")
 		headers.Set(HeaderLegacyAIRProxyClient, "1")
+		setForwardedSessionHeader(headers, cred, logCtx)
 		if carriesCredentialDenylist(cred) {
 			if err := setCredentialDenylistHeader(headers, effectiveCredentialDenylist(logCtx.Request.Context())); err != nil {
 				return err

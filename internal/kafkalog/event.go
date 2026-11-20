@@ -6,12 +6,15 @@ import "time"
 // topic for every logged request. The struct is a superset of
 // litellmdb/models.SpendLogEntry: credential/server metadata is broken out
 // into typed fields instead of one JSON blob, so ClickHouse can ingest it
-// with JSONEachRow and query it with plain GROUP BY (no Nested/Tuple types).
+// with JSONEachRow and query it with plain GROUP BY. The one nested field is
+// Attempts.
 //
 // Request/response body capture is intentionally out of scope here (separate
 // ТЗ/PR) — the Body* fields are always zero-value placeholders.
 type SpendEvent struct {
-	RequestID string    `json:"request_id"`
+	RequestID string `json:"request_id"`
+	// TraceID is the OpenTelemetry trace id of the request's spans.
+	TraceID   string    `json:"trace_id,omitempty"`
 	StartTime time.Time `json:"start_time"`
 	EndTime   time.Time `json:"end_time"`
 	// CompletionStartTime is the time-to-first-token (TTFT) timestamp, nil
@@ -25,8 +28,32 @@ type SpendEvent struct {
 	// and ttft_ms are derived timings, so duration_ms decomposes as
 	// upstream_send_ms + "time the upstream took".
 	UpstreamSendMs *int64 `json:"upstream_send_ms,omitempty"`
-	DurationMs     int64  `json:"duration_ms"`
-	TTFTMs         *int64 `json:"ttft_ms,omitempty"`
+	// RetryMs, ConnWaitMs and TTFBMs divide the time after upstream_send_ms
+	// for the serving credential's attempt.
+	//
+	// RetryMs is the first upstream send to the serving attempt's send.
+	RetryMs *int64 `json:"retry_ms,omitempty"`
+	// ConnWaitMs is the serving attempt asking for a connection to having one.
+	ConnWaitMs *int64 `json:"conn_wait_ms,omitempty"`
+	// ConnReused is whether that connection was a pooled one.
+	ConnReused *bool `json:"conn_reused,omitempty"`
+	// TTFBMs is the serving attempt's request written to the first byte of
+	// the response.
+	TTFBMs *int64 `json:"ttfb_ms,omitempty"`
+	// UpstreamAttempts is the number of times the request was sent upstream.
+	UpstreamAttempts int `json:"upstream_attempts"`
+	// Exit is the exit the serving attempt left through: the name its proxy
+	// gave itself in the Via of its reply to CONNECT.
+	Exit string `json:"exit,omitempty"`
+	// ExitRTTMs and ExitConnectMs are the round trip to that exit and the
+	// exit's connect to the provider (its Server-Timing), measured when the
+	// connection was opened.
+	ExitRTTMs     *int64 `json:"exit_rtt_ms,omitempty"`
+	ExitConnectMs *int64 `json:"exit_connect_ms,omitempty"`
+	// Attempts is every upstream attempt of the request, in the order sent.
+	Attempts   []Attempt `json:"attempts,omitempty"`
+	DurationMs int64     `json:"duration_ms"`
+	TTFTMs     *int64    `json:"ttft_ms,omitempty"`
 
 	CallType     string `json:"call_type"`
 	APIBase      string `json:"api_base"`
@@ -49,6 +76,7 @@ type SpendEvent struct {
 	ServerRouterID string `json:"server_router_id"`
 	ServerVersion  string `json:"server_version"`
 	ServerCommit   string `json:"server_commit"`
+	ServiceName    string `json:"service_name"`
 
 	PromptTokens           int `json:"prompt_tokens"`
 	CompletionTokens       int `json:"completion_tokens"`
@@ -60,6 +88,7 @@ type SpendEvent struct {
 	CacheCreationTokens    int `json:"cache_creation_tokens"`
 	CacheCreation5mTokens  int `json:"cache_creation_5m_tokens"`
 	CacheCreation1hTokens  int `json:"cache_creation_1h_tokens"`
+	CacheCreation12hTokens int `json:"cache_creation_12h_tokens"`
 	// CacheType is the explicit-cache mode marker (converter.CacheTypeExplicit,
 	// i.e. "ephemeral", for Alibaba/Qwen) — present even when the request's
 	// cache cost ended up zero (no explicit tariff configured, or free), so
@@ -75,6 +104,26 @@ type SpendEvent struct {
 	OutputImageTokens        int    `json:"output_image_tokens"`
 	WebSearchRequests        int    `json:"web_search_requests"`
 	WebSearchContextSize     string `json:"web_search_context_size,omitempty"`
+	// WebFetchRequests counts the billable web fetches the router executed
+	// (a fetch that returned page content).
+	WebFetchRequests int `json:"web_fetch_requests"`
+	// MoonshotSearchRequests, MoonshotSearchProRequests and
+	// MoonshotFetchRequests count the router's own Moonshot calls that
+	// succeeded and produced something: a Basic search, a Pro search, and a
+	// fetch that returned page content. A failed or empty call is not
+	// counted -- and not charged.
+	MoonshotSearchRequests    int `json:"moonshot_search_requests"`
+	MoonshotSearchProRequests int `json:"moonshot_search_pro_requests"`
+	MoonshotFetchRequests     int `json:"moonshot_fetch_requests"`
+	// MoonshotSearchCost, MoonshotSearchProCost and MoonshotFetchCost are
+	// what those calls cost, at the tool price document's per-call prices.
+	// They are apart from the model's own token costs, and they are what
+	// the built-in tools' costs (web_search_cost, web_fetch_cost) are for
+	// the model's own tools: the difference is that these are the ROUTER's
+	// calls, on a provider's search API, not the model's.
+	MoonshotSearchCost    float64 `json:"moonshot_search_cost"`
+	MoonshotSearchProCost float64 `json:"moonshot_search_pro_cost"`
+	MoonshotFetchCost     float64 `json:"moonshot_fetch_cost"`
 	// Built-in server-side tool usage beyond web search (xAI).
 	XSearchCalls           int `json:"x_search_calls"`
 	XSearchPosts           int `json:"x_search_posts"`
@@ -99,6 +148,7 @@ type SpendEvent struct {
 	ImageCost             float64 `json:"image_cost"`
 	VideoInputCost        float64 `json:"video_input_cost"`
 	WebSearchCost         float64 `json:"web_search_cost"`
+	WebFetchCost          float64 `json:"web_fetch_cost"`
 	XSearchCost           float64 `json:"x_search_cost"`
 	CodeExecutionCost     float64 `json:"code_execution_cost"`
 	AttachmentSearchCost  float64 `json:"attachment_search_cost"`
@@ -114,24 +164,81 @@ type SpendEvent struct {
 	// total_cost.
 	ProviderReportedCost *float64 `json:"provider_reported_cost,omitempty"`
 
-	APIKeyHash     string `json:"api_key_hash"`
-	UserID         string `json:"user_id"`
-	TeamID         string `json:"team_id"`
-	OrganizationID string `json:"organization_id"`
-	EndUser        string `json:"end_user"`
-	KeyAlias       string `json:"key_alias,omitempty"`
-	UserAlias      string `json:"user_alias,omitempty"`
-	TeamAlias      string `json:"team_alias,omitempty"`
+	APIKeyHash        string `json:"api_key_hash"`
+	UserID            string `json:"user_id"`
+	TeamID            string `json:"team_id"`
+	OrganizationID    string `json:"organization_id"`
+	EndUser           string `json:"end_user"`
+	KeyAlias          string `json:"key_alias,omitempty"`
+	UserAlias         string `json:"user_alias,omitempty"`
+	TeamAlias         string `json:"team_alias,omitempty"`
+	OrganizationAlias string `json:"organization_alias,omitempty"`
 
 	RequesterIP string  `json:"requester_ip"`
 	SessionID   string  `json:"session_id"`
 	OverheadMs  float64 `json:"overhead_ms"`
+
+	// CacheEligibilitySource is the client-supplied signal, if any, that made
+	// this request eligible for the router's automatic Anthropic
+	// cache_control injection: "session_header", "session_body",
+	// "safety_identifier", "user_field", "previous_response_id", or empty
+	// when the client sent none of those. safety_identifier and user_field
+	// are kept apart because the latter is routinely just an
+	// application-level end-user id with no session intent at all.
+	CacheEligibilitySource string `json:"cache_eligibility_source,omitempty"`
+	// CacheControlOutcome is "client_supplied" (the client's own request
+	// already carried cache_control), "router_injected" (this router added
+	// it), "none" (neither happened, though the request/model shape could
+	// have supported it), or empty when the credential's wire protocol
+	// doesn't use cache_control at all (non-Anthropic-family provider).
+	CacheControlOutcome string `json:"cache_control_outcome,omitempty"`
+
+	// CacheMarkersIn* count cache_control markers on the client's own
+	// request body, by where they sit -- CacheControlOutcome only looks at
+	// messages/system, so these are what catches a marker the client placed
+	// on a tool definition instead (Anthropic allows that, and the router's
+	// own tool converter forwards it verbatim -- it reaches the provider and
+	// can cause real cache reads/writes that CacheControlOutcome's "none"
+	// can't explain). Counted once per request, independent of which
+	// credential serves it. CacheMarkersInTTL1h is how many of the three
+	// counts specify the 1h extended TTL rather than the 5m default.
+	CacheMarkersInSystem   int `json:"cache_markers_in_system"`
+	CacheMarkersInMessages int `json:"cache_markers_in_messages"`
+	CacheMarkersInTools    int `json:"cache_markers_in_tools"`
+	CacheMarkersInTTL1h    int `json:"cache_markers_in_ttl_1h"`
+	// CacheMarkersOut* are the same four counts, but on the final body this
+	// attempt actually sent to its Anthropic-wire credential -- zero across
+	// all four when no Anthropic-wire credential was ever attempted.
+	// Comparing In and Out answers what the diagnosis in #381 alone could
+	// not: whether a marker the client sent actually survived the router's
+	// conversion pipeline to reach the provider.
+	CacheMarkersOutSystem   int `json:"cache_markers_out_system"`
+	CacheMarkersOutMessages int `json:"cache_markers_out_messages"`
+	CacheMarkersOutTools    int `json:"cache_markers_out_tools"`
+	CacheMarkersOutTTL1h    int `json:"cache_markers_out_ttl_1h"`
 
 	// Placeholder fields for the deferred request/response body capture PR.
 	// Always false/0 — no capture logic exists yet.
 	BodyCaptured      bool `json:"body_captured"`
 	BodyRequestBytes  int  `json:"body_request_bytes"`
 	BodyResponseBytes int  `json:"body_response_bytes"`
+}
+
+// Attempt is one upstream attempt of a request.
+type Attempt struct {
+	Credential        string    `json:"credential"`
+	Exit              string    `json:"exit,omitempty"`
+	Kind              string    `json:"kind"` // "first" | "retry" | "fallback"
+	RetryReason       string    `json:"retry_reason,omitempty"`
+	HTTPStatus        int       `json:"http_status"`
+	UpstreamRequestID string    `json:"upstream_request_id,omitempty"`
+	ErrorType         string    `json:"error_type,omitempty"`
+	ErrorMessage      string    `json:"error_message,omitempty"`
+	StartTime         time.Time `json:"start_time"`
+	DurationMs        int64     `json:"duration_ms"`
+	TTFBMs            *int64    `json:"ttfb_ms,omitempty"`
+	ConnReused        *bool     `json:"conn_reused,omitempty"`
+	IsFinal           bool      `json:"is_final"`
 }
 
 // Key returns the Kafka record key (request_id), guaranteeing all events for
@@ -180,6 +287,13 @@ type RawBodyEvent struct {
 	// maxErrorBodyRawBytes. Same capture sites as SpendEvent.ErrorMessage
 	// used to populate before this event type existed, just uncapped at 512
 	// bytes.
+	//
+	// Published verbatim: it is the provider describing its own failure, and
+	// it is the only field that says WHY a request failed ("usage limit
+	// reached", "content policy violation", ...). The one exception is a
+	// credential whose error text echoes the caller's own credential back
+	// (CometAPI, ProMan) -- that body is reduced to a byte count, so the
+	// credential does not ride along with it.
 	ResponseBody string `json:"response_body,omitempty"`
 	// RequestBody is the client's own request body (e.g. the prompt),
 	// capped at the same limit as ResponseBody. Only ever populated when
@@ -200,6 +314,13 @@ type RawBodyEvent struct {
 	// mid-stream error was detected after the response had already committed
 	// (nothing left to mask at that point -- the client already received
 	// those exact bytes as they streamed through).
+	//
+	// Published verbatim: the router masked this body before writing it to
+	// the client, so what lands here is a classified message from a fixed
+	// list, a code and a param -- never the provider's free text. The
+	// CometAPI/ProMan exception of ResponseBody applies here as well: on a
+	// mid-stream failure this body IS the provider's raw bytes, so
+	// publishing it verbatim would publish the credential with them.
 	ClientResponseBody string `json:"client_response_body,omitempty"`
 }
 
@@ -207,6 +328,68 @@ type RawBodyEvent struct {
 // partitioning so a request's spend event and raw-body event -- when both
 // are published -- land on the same partition and stay orderable.
 func (e *RawBodyEvent) Key() []byte {
+	if e == nil {
+		return nil
+	}
+	return []byte(e.RequestID)
+}
+
+// RouterResponseEvent is what the router ANSWERED to the client, published
+// to its own Kafka topic (default "router-responses", see
+// KafkaRouterResponsesConfig) and its own ClickHouse table.
+//
+// It is deliberately a separate event type from RawBodyEvent rather than
+// another field on it: the two carry different streams with different
+// volumes and different retentions. Raw-body events are the rare error path
+// (a failed request's bodies); these are every request's answer, which is a
+// high-volume stream an operator usually enables only for a debugging
+// window. Keeping them apart lets the retention of each be sized on its own
+// and keeps the spend log -- billed on, kept for years -- free of response
+// bodies.
+//
+// The body is the response AFTER the router's own transformations: model
+// alias resolution, the Responses/Chat shape conversion, the cost injection.
+// That is the point of the event -- it answers "what did this key actually
+// get", which neither the spend log nor the request body can.
+type RouterResponseEvent struct {
+	RequestID      string    `json:"request_id"`
+	ServerRouterID string    `json:"server_router_id"`
+	StartTime      time.Time `json:"start_time"`
+	EndTime        time.Time `json:"end_time"`
+	HTTPStatus     int       `json:"http_status"`
+	// Status is the canonical "success"/"failure" the spend log uses for
+	// the same request, so the two can be joined and compared without
+	// inferring the outcome from the HTTP status (a mid-stream error is a
+	// failure with a 2xx HTTP status).
+	Status string `json:"status"`
+	// ErrorClass and ErrorOrigin carry the same values the spend log's
+	// failure rows carry, for the failed requests -- so a response body can
+	// be read next to why it failed.
+	ErrorClass  string `json:"error_class,omitempty"`
+	ErrorOrigin string `json:"error_origin,omitempty"`
+	// Model is the client-facing model name (the one the client asked
+	// for), and RealModel the provider-side one, so a row explains which
+	// alias produced which answer.
+	Model     string `json:"model,omitempty"`
+	RealModel string `json:"real_model,omitempty"`
+	// Credential is the credential that served the request.
+	Credential string `json:"credential,omitempty"`
+	// ResponseBody is the body the client received, capped at
+	// maxRouterResponseBodyBytes. Masked per
+	// KafkaRouterResponsesConfig.RedactSensitiveFields: the model's own
+	// text becomes "REDACTED" while the structure survives.
+	ResponseBody string `json:"response_body,omitempty"`
+	// IsStreaming is true when the client asked for a stream. The captured
+	// body for a streamed request is the reassembled (non-stream) shape the
+	// router produced for it -- for a client that asked for a stream, that is
+	// NOT what the client received, and the field says so.
+	IsStreaming bool `json:"is_streaming,omitempty"`
+}
+
+// Key returns the Kafka record key (request_id), matching the other event
+// types' partitioning so a request's spend, raw-body and response events
+// land on the same partition and stay orderable.
+func (e *RouterResponseEvent) Key() []byte {
 	if e == nil {
 		return nil
 	}

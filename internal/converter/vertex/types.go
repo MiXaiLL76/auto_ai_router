@@ -6,6 +6,13 @@ import "google.golang.org/genai"
 type VertexStreamingChunk struct {
 	Candidates    []*genai.Candidate                          `json:"candidates,omitempty"`
 	UsageMetadata *genai.GenerateContentResponseUsageMetadata `json:"usageMetadata,omitempty"`
+	ModelVersion  string                                      `json:"modelVersion,omitempty"`
+	// PromptFeedback carries the prompt-level content block. Vertex/Gemini send
+	// it only in the first stream chunk and only when no candidates were
+	// generated because the prompt itself was refused (see the genai SDK's own
+	// doc on GenerateContentResponsePromptFeedback). Dropping it here made such
+	// a refusal look like a provider-side empty stream.
+	PromptFeedback *genai.GenerateContentResponsePromptFeedback `json:"promptFeedback,omitempty"`
 }
 
 type VertexGenerationConfig struct {

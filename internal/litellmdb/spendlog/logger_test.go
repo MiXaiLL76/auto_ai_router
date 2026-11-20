@@ -164,7 +164,7 @@ func TestBuildBatchInsertQuery(t *testing.T) {
 		assert.Contains(t, query, "$1")
 		assert.Contains(t, query, "$26")
 		assert.NotContains(t, query, "$27") // 26 params + 3 empty-object constants
-		assert.Contains(t, query, "ON CONFLICT (request_id) DO NOTHING")
+		assert.Contains(t, query, "ON CONFLICT DO NOTHING")
 	})
 
 	t.Run("multiple entries", func(t *testing.T) {
@@ -493,7 +493,7 @@ func TestLogger_SQLInjectionPrevention(t *testing.T) {
 					query := queries.BuildBatchInsertQuery(1)
 					assert.NotEmpty(t, query)
 					assert.Contains(t, query, "INSERT INTO")
-					assert.Contains(t, query, "ON CONFLICT (request_id) DO NOTHING")
+					assert.Contains(t, query, "ON CONFLICT DO NOTHING")
 
 					// Verify batch params work with multiple entries
 					batch := []*models.SpendLogEntry{entry}
@@ -694,4 +694,28 @@ func TestLogger_SQLInjectionPrevention_ParameterEscaping(t *testing.T) {
 			assert.Equal(t, testValue, batchParams[17]) // Metadata from first entry
 		})
 	}
+}
+
+// pgx writes a time's wall clock into the zone-less "startTime", "endTime" and
+// "completionStartTime" columns, so a value in the pod's local zone would be
+// stored shifted.
+func TestGetSpendLogParams_TimestampsInUTC(t *testing.T) {
+	utc := time.Date(2026, 9, 16, 12, 0, 0, 0, time.UTC)
+	msk := time.FixedZone("MSK", 3*3600)
+	completion := utc.Add(time.Second).In(msk)
+	entry := &models.SpendLogEntry{
+		StartTime:           utc.In(msk),
+		EndTime:             utc.Add(2 * time.Second).In(msk),
+		CompletionStartTime: &completion,
+	}
+
+	params := GetSpendLogParams(entry)
+
+	assert.Equal(t, utc, params[7])
+	assert.Equal(t, utc.Add(2*time.Second), params[8])
+	assert.Equal(t, utc.Add(time.Second), *params[10].(*time.Time))
+	assert.Equal(t, msk, entry.CompletionStartTime.Location(), "entry is not mutated")
+
+	entry.CompletionStartTime = nil
+	assert.Nil(t, GetSpendLogParams(entry)[10])
 }

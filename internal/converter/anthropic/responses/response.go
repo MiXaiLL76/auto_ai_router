@@ -35,6 +35,15 @@ func buildAnthropicResponse(
 ) *responses.Response {
 	status, incompleteDetails := anthropicStopReasonToStatus(ar.StopReason)
 	output, droppedTruncatedToolCall := anthropicContentToOutputItems(ar.Content)
+	if refusal := anthropicRefusalItem(ar.StopReason, ar.StopDetails); refusal != nil {
+		output = append(output, *refusal)
+	}
+	if len(output) == 0 {
+		output = []responses.OutputItem{{
+			Type: "message", ID: responses.GenerateItemID("msg_"), Status: "completed", Role: "assistant",
+			Content: []responses.OutputContent{{Type: "output_text", Text: "", Annotations: []responses.Annotation{}}},
+		}}
+	}
 	if droppedTruncatedToolCall && status == "completed" {
 		// stop_reason "tool_use" maps to "completed" above on the assumption that a
 		// tool_use block always finished -- true for canonical Anthropic, not
@@ -110,23 +119,10 @@ func anthropicContentToOutputItems(blocks []anthropic.ContentBlock) ([]responses
 			// either); their content surfaces via the text block's
 			// citations above instead — nothing to do here.
 
-		case "thinking":
+		case "thinking", "redacted_thinking":
 			// Flush any accumulated text first.
 			flushMessage()
-			reasoningItem := responses.OutputItem{
-				Type:   "reasoning",
-				ID:     responses.GenerateItemID("rs_"),
-				Status: "completed",
-			}
-			if block.Thinking != "" {
-				reasoningItem.Summary = []responses.OutputContent{
-					{Type: "summary_text", Text: block.Thinking},
-				}
-			}
-			if block.Signature != "" {
-				reasoningItem.EncryptedContent = block.Signature
-			}
-			output = append(output, reasoningItem)
+			output = append(output, reasoningOutputItem(responses.GenerateItemID("rs_"), block.Thinking, thinkingEncryptedContent(block)))
 
 		case "tool_use":
 			// Flush accumulated text before a tool call.
@@ -180,16 +176,6 @@ func anthropicContentToOutputItems(blocks []anthropic.ContentBlock) ([]responses
 	}
 
 	flushMessage()
-
-	if len(output) == 0 {
-		output = []responses.OutputItem{{
-			Type:    "message",
-			ID:      responses.GenerateItemID("msg_"),
-			Status:  "completed",
-			Role:    "assistant",
-			Content: []responses.OutputContent{{Type: "output_text", Text: "", Annotations: []responses.Annotation{}}},
-		}}
-	}
 
 	return output, droppedTruncatedToolCall
 }
@@ -252,6 +238,8 @@ func anthropicStopReasonToStatus(stopReason string) (string, *responses.Incomple
 		return "incomplete", &responses.IncompleteDetails{Reason: "max_output_tokens"}
 	case "stop_sequence":
 		return "completed", nil
+	case "refusal":
+		return "incomplete", &responses.IncompleteDetails{Reason: "content_filter"}
 	case "pause_turn":
 		// A long-running server-tool turn (e.g. an extended web_search loop)
 		// was paused mid-flight, not finished. Per Anthropic's docs, the
@@ -293,7 +281,7 @@ func anthropicUsageToUsage(au *anthropic.AnthropicUsage) *responses.Usage {
 		OutputTokens:        au.OutputTokens,
 		TotalTokens:         totalInputTokens + au.OutputTokens,
 		InputTokensDetails:  inputDetails,
-		OutputTokensDetails: responses.OutputDetails{},
+		OutputTokensDetails: responses.OutputDetails{ReasoningTokens: au.ReasoningTokens()},
 	}
 	if au.ServerToolUse != nil && au.ServerToolUse.WebSearchRequests > 0 {
 		usage.ServerToolUse = &responses.ServerToolUseDetails{

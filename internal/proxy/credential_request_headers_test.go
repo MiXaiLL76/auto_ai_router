@@ -345,7 +345,10 @@ func TestProxyRequestDebugLogMasksCredentialRequestHeaders(t *testing.T) {
 	prx.logger = slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	w := httptest.NewRecorder()
 
-	prx.ProxyRequest(w, newRequestHeadersClientRequest("/v1/chat/completions", requestHeadersCases[0].body))
+	request := newRequestHeadersClientRequest("/v1/chat/completions", requestHeadersCases[0].body)
+	request.Header.Set("Cookie", "session=client-cookie-secret")
+	request.Header.Set("X-Litellm-Api-Key", "client-litellm-secret")
+	prx.ProxyRequest(w, request)
 
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 	out := logs.String()
@@ -353,6 +356,9 @@ func TestProxyRequestDebugLogMasksCredentialRequestHeaders(t *testing.T) {
 	assert.Contains(t, out, `"X-Provider-Token":"[credential request_headers]"`)
 	assert.NotContains(t, out, "s3cr3t")
 	assert.NotContains(t, out, "provider-key")
+	assert.NotContains(t, out, "client-cookie-secret")
+	assert.NotContains(t, out, "client-litellm-secret")
+	assert.Contains(t, out, "***cookie***")
 	// A removed header is not in the outbound request, so it is not logged at all.
 	assert.NotContains(t, out, "X-Client-Hint")
 }

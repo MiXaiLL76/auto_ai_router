@@ -148,6 +148,67 @@ func TestClientAuthenticationRejectsInvalidCredentialsWithoutChangingErrorContra
 	}
 }
 
+// TestClientAuthenticationBudgetRefusalNamesTheKeyLimit pins the 402 text per
+// budget level: a key's own max_budget says so, every holder level (user,
+// team, organization, memberships) keeps the long-standing "Budget exceeded",
+// and the status/type contract stays 402/insufficient_quota for all of them.
+func TestClientAuthenticationBudgetRefusalNamesTheKeyLimit(t *testing.T) {
+	tests := []struct {
+		key  string
+		err  error
+		want string
+	}{
+		{key: "key-limit", err: &dbmodels.BudgetExceededError{Level: dbmodels.BudgetLevelKey}, want: "Key budget exceeded"},
+		{key: "key-day-window", err: &dbmodels.BudgetExceededError{Level: dbmodels.BudgetLevelKey, Window: "1d"}, want: "Key 1d budget exceeded"},
+		{key: "key-month-window", err: &dbmodels.BudgetExceededError{Level: dbmodels.BudgetLevelKey, Window: "1mo"}, want: "Key 1mo budget exceeded"},
+		{key: "user-budget", err: &dbmodels.BudgetExceededError{Level: dbmodels.BudgetLevelUser}, want: "Budget exceeded"},
+		{key: "team-budget", err: &dbmodels.BudgetExceededError{Level: dbmodels.BudgetLevelTeam}, want: "Budget exceeded"},
+		{key: "org-member-budget", err: &dbmodels.BudgetExceededError{Level: dbmodels.BudgetLevelOrganizationMember}, want: "Budget exceeded"},
+		{key: "bare-sentinel", err: litellmdb.ErrBudgetExceeded, want: "Budget exceeded"},
+	}
+	db := &clientAuthTestDB{errors: map[string]error{}}
+	for _, tt := range tests {
+		db.errors[tt.key] = tt.err
+	}
+	prx := newClientAuthTestProxy(t, db, "http://example.invalid", config.ProviderTypeOpenAI, "provider-key")
+
+	for _, tt := range tests {
+		t.Run(tt.key, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			req.Header.Set("Authorization", "Bearer "+tt.key)
+			w := httptest.NewRecorder()
+			logCtx := &RequestLogContext{Request: req}
+
+			ok := prx.authenticateRequest(w, req, logCtx, true)
+
+			assert.False(t, ok)
+			assertAuthErrorShape(t, w, http.StatusPaymentRequired)
+			var response APIErrorResponse
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
+			assert.Equal(t, tt.want, response.Error.Message)
+			assert.Equal(t, http.StatusPaymentRequired, logCtx.HTTPStatus)
+		})
+	}
+}
+
+// A key whose budget_limits AIR cannot enforce is refused with 503: no budget
+// is known to be spent (not 402), and the key must not pass unlimited.
+func TestClientAuthenticationUnsupportedBudgetWindowFailsClosed(t *testing.T) {
+	db := &clientAuthTestDB{errors: map[string]error{"hourly-window": litellmdb.ErrBudgetWindowUnsupported}}
+	prx := newClientAuthTestProxy(t, db, "http://example.invalid", config.ProviderTypeOpenAI, "provider-key")
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("Authorization", "Bearer hourly-window")
+	w := httptest.NewRecorder()
+	logCtx := &RequestLogContext{Request: req}
+
+	assert.False(t, prx.authenticateRequest(w, req, logCtx, true))
+	assertAuthErrorShape(t, w, http.StatusServiceUnavailable)
+	var response APIErrorResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
+	assert.Equal(t, "Key budget window not supported", response.Error.Message)
+	assert.Equal(t, http.StatusServiceUnavailable, logCtx.HTTPStatus)
+}
+
 // TestClientAuthenticationDBUnavailableFailsClosedNotSilent guards against the
 // regression where a LiteLLM DB connection failure during auth left the
 // ResponseWriter untouched: net/http then sent an implicit 200 with an empty

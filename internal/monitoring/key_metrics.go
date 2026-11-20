@@ -50,12 +50,13 @@ const (
 
 // Info label names accepted in monitoring.key_metrics.info_labels.
 const (
-	KeyInfoLabelKeyAlias       = "key_alias"
-	KeyInfoLabelUserID         = "user_id"
-	KeyInfoLabelUserEmail      = "user_email"
-	KeyInfoLabelTeamID         = "team_id"
-	KeyInfoLabelTeamAlias      = "team_alias"
-	KeyInfoLabelOrganizationID = "organization_id"
+	KeyInfoLabelKeyAlias          = "key_alias"
+	KeyInfoLabelUserID            = "user_id"
+	KeyInfoLabelUserEmail         = "user_email"
+	KeyInfoLabelTeamID            = "team_id"
+	KeyInfoLabelTeamAlias         = "team_alias"
+	KeyInfoLabelOrganizationID    = "organization_id"
+	KeyInfoLabelOrganizationAlias = "organization_alias"
 )
 
 // KeyInfoLabels lists every supported info label.
@@ -66,6 +67,7 @@ var KeyInfoLabels = []string{
 	KeyInfoLabelTeamID,
 	KeyInfoLabelTeamAlias,
 	KeyInfoLabelOrganizationID,
+	KeyInfoLabelOrganizationAlias,
 }
 
 // DefaultKeyInfoLabels is used when info_labels is not configured (nil; an
@@ -77,19 +79,21 @@ var DefaultKeyInfoLabels = []string{
 	KeyInfoLabelTeamID,
 	KeyInfoLabelTeamAlias,
 	KeyInfoLabelOrganizationID,
+	KeyInfoLabelOrganizationAlias,
 }
 
 // KeyIdentity describes the authenticated caller of one request.
 type KeyIdentity struct {
 	// Key is the exposed key label: a hash prefix, KeyLabelMaster, or empty
 	// when the request is not attributable to a key (nothing is recorded).
-	Key            string
-	KeyAlias       string
-	UserID         string
-	UserEmail      string
-	TeamID         string
-	TeamAlias      string
-	OrganizationID string
+	Key               string
+	KeyAlias          string
+	UserID            string
+	UserEmail         string
+	TeamID            string
+	TeamAlias         string
+	OrganizationID    string
+	OrganizationAlias string
 }
 
 func (id KeyIdentity) infoValue(label string) string {
@@ -106,6 +110,8 @@ func (id KeyIdentity) infoValue(label string) string {
 		return id.TeamAlias
 	case KeyInfoLabelOrganizationID:
 		return id.OrganizationID
+	case KeyInfoLabelOrganizationAlias:
+		return id.OrganizationAlias
 	}
 	return ""
 }

@@ -11,14 +11,15 @@ import (
 
 // Errors exported from models
 var (
-	ErrModuleDisabled   = models.ErrModuleDisabled
-	ErrTokenNotFound    = models.ErrTokenNotFound
-	ErrTokenBlocked     = models.ErrTokenBlocked
-	ErrTeamBlocked      = models.ErrTeamBlocked
-	ErrTokenExpired     = models.ErrTokenExpired
-	ErrBudgetExceeded   = models.ErrBudgetExceeded
-	ErrModelNotAllowed  = models.ErrModelNotAllowed
-	ErrConnectionFailed = models.ErrConnectionFailed
+	ErrModuleDisabled          = models.ErrModuleDisabled
+	ErrTokenNotFound           = models.ErrTokenNotFound
+	ErrTokenBlocked            = models.ErrTokenBlocked
+	ErrTeamBlocked             = models.ErrTeamBlocked
+	ErrTokenExpired            = models.ErrTokenExpired
+	ErrBudgetExceeded          = models.ErrBudgetExceeded
+	ErrBudgetWindowUnsupported = models.ErrBudgetWindowUnsupported
+	ErrModelNotAllowed         = models.ErrModelNotAllowed
+	ErrConnectionFailed        = models.ErrConnectionFailed
 )
 
 // Config type alias for backwards compatibility

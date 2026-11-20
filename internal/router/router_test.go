@@ -452,6 +452,7 @@ func TestCanonicalPublicPath(t *testing.T) {
 		{"/responses", "/v1/responses"},
 		{"/responses/resp_123", "/v1/responses/resp_123"},
 		{"/responses/resp_123/", "/v1/responses/resp_123/"},
+		{"/systemone", "/v1/systemone"},
 		{"/v1/chat/completions", "/v1/chat/completions"},
 		{"/health", "/health"},
 	}

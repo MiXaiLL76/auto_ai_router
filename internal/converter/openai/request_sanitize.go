@@ -33,6 +33,35 @@ func DropEmptyTools(body []byte) []byte {
 	return out
 }
 
+// DropNullParams removes the listed top-level keys whose value is JSON null. A client
+// that sends "max_tokens": null means "no limit set", but a key that is present
+// counts as set for ApplyDefaultParams, so the default would never be filled in.
+// Returns body unchanged when none of the keys is null or the body is not a JSON object.
+func DropNullParams(body []byte, keys ...string) []byte {
+	if !bytes.Contains(body, []byte("null")) {
+		return body
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(body, &top); err != nil || top == nil {
+		return body
+	}
+	changed := false
+	for _, key := range keys {
+		if raw, ok := top[key]; ok && bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			delete(top, key)
+			changed = true
+		}
+	}
+	if !changed {
+		return body
+	}
+	out, err := json.Marshal(top)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
 // MapReasoningEffort rewrites every reasoning effort the request carries through
 // resolve: the Chat Completions reasoning_effort, the vLLM
 // chat_template_kwargs.reasoning_effort and the Responses reasoning.effort. resolve

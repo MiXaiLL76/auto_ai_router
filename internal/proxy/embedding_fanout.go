@@ -186,6 +186,10 @@ func (p *Proxy) doEmbedContentFanOut(attempt embedContentFanOut, replies *embedC
 			req.ContentLength = int64(len(body))
 			req.Header.Set("Content-Length", strconv.Itoa(len(body)))
 
+			// p.client, not p.attemptClient(cred, ...): embeddings never stream,
+			// so this fan-out never qualifies as useFastHeaderClient -- a
+			// credential's own response_header_timeout override, if it has one,
+			// does not apply here either.
 			resp, err := p.client.Do(req) //nolint:gosec // G704: template's URL, host comes from the matched credential
 			if err != nil {
 				results[i].err = err

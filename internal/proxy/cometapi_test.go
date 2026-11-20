@@ -104,14 +104,28 @@ func TestIsDeepSeekModel(t *testing.T) {
 	}
 }
 
-func TestAppendResponseBodyForLogs_CometKeepsMaskedFlagAndLogsBody(t *testing.T) {
-	cred := &config.CredentialConfig{Type: config.ProviderTypeCometAPI}
+func TestAppendResponseBodyForLogsOmitsBody(t *testing.T) {
 	body := `{"error":{"code":"permission_denied","message":"` + strings.Repeat("model access denied ", 50) + `","type":"comet_api_error"}}`
+	cred := &config.CredentialConfig{Type: config.ProviderTypeCometAPI}
 
 	args := appendResponseBodyForLogs([]any{}, cred, body)
 
 	assert.Contains(t, args, "response_body_masked")
 	assert.Contains(t, args, true)
 	assert.Contains(t, args, "response_body")
+	assert.NotContains(t, args, body)
+}
+
+// A credential that is not CometAPI/ProMan is not masked: appendResponseBodyForLogs
+// restores the real body (truncated for very long fields), which is this unified
+// error logger's whole documented purpose -- "everything needed for debugging".
+func TestAppendResponseBodyForLogsKeepsBodyForOrdinaryCredential(t *testing.T) {
+	body := `{"error":{"message":"invalid request"}}`
+	cred := &config.CredentialConfig{Type: config.ProviderTypeOpenAI}
+
+	args := appendResponseBodyForLogs([]any{}, cred, body)
+
+	assert.Contains(t, args, "response_body")
 	assert.Contains(t, args, body)
+	assert.NotContains(t, args, "response_body_masked")
 }

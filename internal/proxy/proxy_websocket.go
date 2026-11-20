@@ -389,12 +389,15 @@ outerLoop:
 		// itself is skipped by the metrics middleware.
 		turnCtx, finishKeyTurn := p.withKeyTurn(internalReq.Context())
 		internalReq = internalReq.WithContext(turnCtx)
+		// One request on the trace too: a span beneath the session's.
+		internalReq, turnSpanDone := innerRequestSpan(internalReq)
 
 		// Run ProxyRequest in a goroutine; wait for the turn to finish.
 		turnDone := make(chan struct{})
 		go func() {
 			defer close(turnDone)
 			p.ProxyRequest(wsWriter, internalReq)
+			turnSpanDone(wsWriter.status)
 
 			// ProxyRequest returned. If it produced a non-SSE error body (e.g. HTTP 4xx
 			// before streaming started), forward it and close the turn.

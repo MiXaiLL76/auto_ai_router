@@ -216,6 +216,30 @@ func TestShouldRetryWithFallback_ContentPolicyMarkers(t *testing.T) {
 	}
 }
 
+// TestShouldRetryWithFallback_CredentialScopedBlockStillRetries covers a
+// production incident: a credential's session got blocked by the provider
+// ("session_blocked_by_cyber_policy"), whose own wording says "This session
+// is blocked by content policy" -- plain English that also matches the
+// "content policy" non-retryable marker. Without the credentialScopedMarkers
+// check ahead of it, this credential-scoped failure (a different credential
+// answers the same request fine) was wrongly treated as a content-scoped one
+// (every credential would refuse identically) and never retried.
+func TestShouldRetryWithFallback_CredentialScopedBlockStillRetries(t *testing.T) {
+	body := `{"error":{"code":"session_blocked_by_cyber_policy","message":"This session is blocked by content policy","type":"permission_error"}}`
+
+	for _, status := range []int{http.StatusBadRequest, http.StatusForbidden} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			shouldRetry, _ := ShouldRetryWithFallback(status, []byte(body))
+			assert.True(t, shouldRetry, "a credential-scoped session block must stay retryable even though its wording matches a content-policy marker")
+		})
+	}
+
+	// A genuine content-policy refusal must still be non-retryable -- this
+	// fix must not have widened the marker match itself.
+	genuine, _ := ShouldRetryWithFallback(http.StatusBadRequest, []byte(`{"error":{"message":"The prompt was blocked by the provider's content policy"}}`))
+	assert.False(t, genuine, "a genuine content-policy refusal must remain non-retryable")
+}
+
 func TestShouldRetryWithFallback_ModelErrorBodies(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -712,13 +736,32 @@ func TestShouldRetryWithFallback_DeterministicBadRequest(t *testing.T) {
 		`{"error":{"code":400,"message":"Thinking level is unsupported: THINKING_LEVEL_MINIMAL","status":"INVALID_ARGUMENT"}}`,
 		`{"error":{"code":400,"message":"Unsupported MIME type: application/octet-stream","status":"INVALID_ARGUMENT"}}`,
 		`{"error":{"code":400,"message":"* GenerateContentRequest.contents[2].parts[0].data: required oneof field 'data' must have one initialized field","status":"INVALID_ARGUMENT"}}`,
-		`{"error":{"code":400,"message":"Unable to submit request because it has a maxOutputTokens value of 100000 but the supported range is from 1 (inclusive) to 65537 (exclusive)."}}`,
 	}
 	for _, body := range bodies {
 		t.Run(body[:60], func(t *testing.T) {
 			shouldRetry, _ := ShouldRetryWithFallback(http.StatusBadRequest, []byte(body))
 			if shouldRetry {
 				t.Errorf("expected no retry for deterministic bad request, got retry")
+			}
+		})
+	}
+}
+
+// A limit/range rejection is credential-specific, not a request fault: the same
+// public model id is served by backends with different limits (Vertex caps
+// maxOutputTokens at 65536, while Google AI Studio and aggregator accounts allow
+// more), so the identical request succeeds on the next credential type. It must
+// stay retryable, or the cascade stops on the first Vertex credential and hides
+// the credentials that would have served it.
+func TestShouldRetryWithFallback_RangeLimitRejectionRetries(t *testing.T) {
+	bodies := []string{
+		`{"error":{"code":400,"message":"Unable to submit request because it has a maxOutputTokens value of 100000 but the supported range is from 1 (inclusive) to 65537 (exclusive)."}}`,
+	}
+	for _, body := range bodies {
+		t.Run(body[:60], func(t *testing.T) {
+			shouldRetry, _ := ShouldRetryWithFallback(http.StatusBadRequest, []byte(body))
+			if !shouldRetry {
+				t.Errorf("expected a retry for a range/limit rejection, got none")
 			}
 		})
 	}

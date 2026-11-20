@@ -13,14 +13,20 @@ The same metrics can also be **pushed** to an OTLP collector instead of (or in a
 
 ## Available Metrics
 
-| Metric                                     | Type      | Description                                                |
-| ------------------------------------------ | --------- | ---------------------------------------------------------- |
-| `auto_ai_router_credential_rpm_current`    | Gauge     | Current RPM usage per credential                           |
-| `auto_ai_router_credential_tpm_current`    | Gauge     | Current TPM usage per credential                           |
-| `auto_ai_router_credential_banned`         | Gauge     | Ban status per credential (1 = banned)                     |
-| `auto_ai_router_requests_total`            | Counter   | Total requests processed                                   |
-| `auto_ai_router_requests_duration_seconds` | Histogram | Request latency distribution                               |
-| `auto_ai_router_aborted_requests_total`    | Counter   | Client-aborted requests by credential, model, and endpoint |
+| Metric                                              | Type      | Description                                                  |
+| --------------------------------------------------- | --------- | ------------------------------------------------------------ |
+| `auto_ai_router_credential_rpm_current`             | Gauge     | Current RPM usage per credential                             |
+| `auto_ai_router_credential_tpm_current`             | Gauge     | Current TPM usage per credential                             |
+| `auto_ai_router_credential_banned`                  | Gauge     | Ban status per credential (1 = banned)                       |
+| `auto_ai_router_requests_total`                     | Counter   | Total requests processed                                     |
+| `auto_ai_router_requests_duration_seconds`          | Histogram | Request latency distribution                                 |
+| `auto_ai_router_aborted_requests_total`             | Counter   | Client-aborted requests by credential, model, and endpoint   |
+| `auto_ai_router_loop_gate_streams_total`            | Counter   | Streams watched by the [loop gate](../advanced/loop_gate.md) |
+| `auto_ai_router_loop_gate_firings_total`            | Counter   | Looping generations seen by the loop gate, by channel        |
+| `auto_ai_router_loop_gate_words_after_firing_total` | Counter   | Words generated after a loop gate firing                     |
+| `auto_ai_router_loop_gate_restarts_total`           | Counter   | Looping generations the loop gate restarted (enforce)        |
+| `auto_ai_router_loop_gate_recovered_total`          | Counter   | Restarted generations that finished without a cut            |
+| `auto_ai_router_loop_gate_cuts_total`               | Counter   | Streams the loop gate cut short (enforce)                    |
 
 ## Per-Key Metrics
 
@@ -33,7 +39,7 @@ monitoring:
     enabled: true
     # Owner labels on auto_ai_router_key_info. Default (unset): all but
     # user_email; [] disables owner labels (the info series keeps only `key`).
-    info_labels: [key_alias, user_id, team_id, team_alias, organization_id]
+    info_labels: [key_alias, user_id, team_id, team_alias, organization_id, organization_alias]
     max_keys: 5000 # distinct keys; later keys are counted as key="__other__" (0 = unlimited)
     idle_ttl: 24h # drop series of keys without traffic this long (0 = never)
 ```
@@ -49,7 +55,7 @@ monitoring:
 - Owner labels are only on `auto_ai_router_key_info`; join them in PromQL on `(key, instance)`. Every replica exports its own info series for the keys it served, so joining on `key` alone fails with "many-to-many matching" as soon as there is more than one replica. With `otel.enabled` only (no `/metrics` scrape), make sure the OTLP pipeline still gives each replica a distinct `instance` label (e.g. from `service.instance.id`), or the join fails the same way. Changing a key's alias replaces its info series, so the join stays one-to-one.
 - The join drops `key="__other__"` (no info series), so once `max_keys` is reached every joined panel silently undercounts. The bundled Grafana dashboards show it as the "Overflow (`__other__`)" value of the Key RPM stat; alert on `sum(rate(auto_ai_router_key_requests_total{key="__other__"}[5m])) > 0` and raise `max_keys`.
 
-`info_labels` values: `key_alias`, `user_id`, `user_email`, `team_id`, `team_alias`, `organization_id`. `/metrics` is usually unauthenticated inside the cluster, so `user_email` is opt-in.
+`info_labels` values: `key_alias`, `user_id`, `user_email`, `team_id`, `team_alias`, `organization_id`, `organization_alias`. `/metrics` is usually unauthenticated inside the cluster, so `user_email` is opt-in.
 
 Example queries:
 

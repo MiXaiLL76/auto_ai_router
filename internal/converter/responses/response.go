@@ -141,7 +141,7 @@ func ChatToResponse(body []byte, opts ...ChatToResponseOption) ([]byte, error) {
 			msgContent := convertChatMessageContent(choice.Message.Content)
 			if choice.Message.Refusal != "" {
 				msgContent = append(msgContent, OutputContent{
-					Type:    "output_refusal",
+					Type:    "refusal",
 					Refusal: choice.Message.Refusal,
 				})
 			}

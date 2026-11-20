@@ -64,6 +64,26 @@ curl -X POST http://localhost:8080/v1/messages \
 
 Set `"stream": true` to receive Anthropic-compatible `message_start`, content block, `message_delta`, and `message_stop` SSE events. Both `x-api-key` and `Authorization: Bearer ...` authentication are supported.
 
+### Classifier refusals
+
+An Anthropic `stop_reason: "refusal"` remains a refusal, including on Bedrock
+and native Messages routes. Chat Completions exposes it as `finish_reason: "content_filter"` plus `message.refusal` (`delta.refusal` when streaming).
+With `litellm_compat`, a non-streaming refusal is under
+`message.provider_specific_fields.refusal`. Responses exposes a refusal output
+item and `incomplete_details.reason: "content_filter"`.
+
+The router generates a public explanation from the recognized Anthropic
+category (`cyber`, `bio`, `frontier_llm`, `reasoning_extraction`, or
+`general_harms`). It does not forward arbitrary provider explanations,
+unknown category strings, fallback credit tokens or private `stop_details`
+extensions. For an absent or unknown category, the client receives an explicit
+refusal with an unspecified reason. This describes the classifier decision,
+not proof that the client's intended use violated a policy.
+
+Valid refusals keep HTTP 200, usage accounting and the existing routing/retry
+behavior. Malformed native JSON or SSE is not relayed unfiltered. Text, tool
+arguments and thinking blocks are not rewritten by this refusal policy.
+
 ## Responses API
 
 The router supports the [OpenAI Responses API](../advanced/responses.md) with native provider integration for Anthropic, Comet API, Vertex AI, and AWS Bedrock.

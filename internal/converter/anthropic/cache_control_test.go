@@ -193,3 +193,96 @@ func TestInjectCacheControl_EmptyMessages(t *testing.T) {
 	body := []byte(`{"model":"claude","messages":[]}`)
 	assert.Equal(t, body, InjectCacheControl(body))
 }
+
+// Found in production: cache_control_outcome='client_supplied' on ~87% of a
+// sample where CountCacheMarkers (cache_markers.go) independently counted
+// zero markers anywhere in the same body -- this function's own detection
+// was less strict than that diagnostic's, so a bogus "cache_control" field
+// (an empty object some client/SDK round-trips on every block regardless of
+// whether caching was requested, rather than omitting the key) made
+// InjectCacheControl believe a marker was already there and skip injecting
+// its own, silently losing caching for that request.
+func TestInjectCacheControlOutcome_EmptyCacheControlObjectIsNotAMarker(t *testing.T) {
+	body := []byte(`{
+		"model": "claude-3-5-sonnet",
+		"messages": [
+			{"role": "system", "content": "Be concise."},
+			{"role": "user", "content": "First question"},
+			{"role": "assistant", "content": "First answer"},
+			{"role": "user", "content": [
+				{"type": "text", "text": "Current question", "cache_control": {}}
+			]}
+		]
+	}`)
+
+	result, outcome := InjectCacheControlOutcome(body)
+	assert.Equal(t, CacheControlRouterInjected, outcome,
+		"an empty cache_control object is not a real marker: the router must still inject its own")
+
+	m := parseBody(t, result)
+	messages := m["messages"].([]interface{})
+	sysContent := messages[0].(map[string]interface{})["content"].([]interface{})
+	assert.Equal(t, map[string]interface{}{"type": "ephemeral"}, sysContent[0].(map[string]interface{})["cache_control"])
+}
+
+func TestInjectCacheControlOutcome_NullCacheControlIsNotAMarker(t *testing.T) {
+	body := []byte(`{
+		"model": "claude-3-5-sonnet",
+		"messages": [
+			{"role": "system", "content": "Be concise."},
+			{"role": "user", "content": [
+				{"type": "text", "text": "Hello", "cache_control": null}
+			]}
+		]
+	}`)
+
+	_, outcome := InjectCacheControlOutcome(body)
+	assert.Equal(t, CacheControlRouterInjected, outcome)
+}
+
+func TestInjectCacheControlOutcome_NonEphemeralCacheControlIsNotAMarker(t *testing.T) {
+	body := []byte(`{
+		"model": "claude-3-5-sonnet",
+		"messages": [
+			{"role": "system", "content": "Be concise."},
+			{"role": "user", "content": [
+				{"type": "text", "text": "Hello", "cache_control": {"type": "persistent"}}
+			]}
+		]
+	}`)
+
+	_, outcome := InjectCacheControlOutcome(body)
+	assert.Equal(t, CacheControlRouterInjected, outcome,
+		"only type:ephemeral is a real Anthropic cache_control marker")
+}
+
+func TestInjectCacheControlOutcome_NativeSystemFieldEmptyCacheControlObjectIsNotAMarker(t *testing.T) {
+	body := []byte(`{
+		"model": "claude-3-5-sonnet",
+		"system": [{"type": "text", "text": "Be concise.", "cache_control": {}}],
+		"messages": [
+			{"role": "user", "content": "Hello"}
+		]
+	}`)
+
+	_, outcome := InjectCacheControlOutcome(body)
+	assert.Equal(t, CacheControlRouterInjected, outcome)
+}
+
+func TestInjectCacheControlOutcome_RealMarkerStillDetectedAsClientSupplied(t *testing.T) {
+	// Sanity check alongside the false-positive tests above: a genuine
+	// ephemeral marker must still be recognized as client-supplied.
+	body := []byte(`{
+		"model": "claude-3-5-sonnet",
+		"messages": [
+			{"role": "user", "content": [
+				{"type": "text", "text": "Q", "cache_control": {"type": "ephemeral", "ttl": "1h"}}
+			]},
+			{"role": "user", "content": "Current"}
+		]
+	}`)
+
+	result, outcome := InjectCacheControlOutcome(body)
+	assert.Equal(t, CacheControlClientSupplied, outcome)
+	assert.Equal(t, body, result, "client_supplied must leave the body untouched")
+}

@@ -16,6 +16,7 @@ type ResponseParams struct {
 	PreviousResponseID interface{}
 	Store              bool
 	ToolChoice         interface{}
+	Text               interface{} // echoed text config (ResponsesMetadata.Text); nil = {format: {type: "text"}}
 }
 
 // NewResponse builds a fully-populated Responses API object with schema-required defaults.
@@ -33,6 +34,14 @@ func NewResponse(p ResponseParams) *Response {
 	toolChoice := p.ToolChoice
 	if toolChoice == nil {
 		toolChoice = "auto"
+	}
+	text := p.Text
+	if text == nil {
+		text = map[string]interface{}{
+			"format": map[string]interface{}{
+				"type": "text",
+			},
+		}
 	}
 
 	return &Response{
@@ -65,12 +74,8 @@ func NewResponse(p ResponseParams) *Response {
 		Truncation:         "disabled",
 		ServiceTier:        "default",
 		ToolChoice:         toolChoice,
-		Text: map[string]interface{}{
-			"format": map[string]interface{}{
-				"type": "text",
-			},
-		},
-		MaxToolCalls: nil,
+		Text:               text,
+		MaxToolCalls:       nil,
 	}
 }
 
@@ -200,6 +205,52 @@ func BuildReasoningSummaryPartDoneEvent(itemID string, outputIndex, summaryIndex
 		"output_index":  outputIndex,
 		"summary_index": summaryIndex,
 		"part":          BuildReasoningSummaryPart(text),
+	}
+}
+
+// BuildRefusalDoneEvent builds the response.refusal.done event closing a
+// streamed refusal part.
+func BuildRefusalDoneEvent(itemID string, outputIndex, contentIndex int, refusal string) map[string]interface{} {
+	return map[string]interface{}{
+		"type":          "response.refusal.done",
+		"item_id":       itemID,
+		"output_index":  outputIndex,
+		"content_index": contentIndex,
+		"refusal":       refusal,
+	}
+}
+
+// BuildReasoningTextDoneEvent builds the response.reasoning_text.done event
+// closing a streamed reasoning_text part.
+func BuildReasoningTextDoneEvent(itemID string, outputIndex, contentIndex int, text string) map[string]interface{} {
+	return map[string]interface{}{
+		"type":          "response.reasoning_text.done",
+		"item_id":       itemID,
+		"output_index":  outputIndex,
+		"content_index": contentIndex,
+		"text":          text,
+	}
+}
+
+// BuildFunctionCallArgumentsDoneEvent builds the
+// response.function_call_arguments.done event closing a streamed function call's
+// arguments.
+func BuildFunctionCallArgumentsDoneEvent(itemID string, outputIndex int, arguments string) map[string]interface{} {
+	return map[string]interface{}{
+		"type":         "response.function_call_arguments.done",
+		"item_id":      itemID,
+		"output_index": outputIndex,
+		"arguments":    arguments,
+	}
+}
+
+// BuildOutputItemDoneEvent builds the response.output_item.done event closing
+// the output item at outputIndex with its final state.
+func BuildOutputItemDoneEvent(outputIndex int, item interface{}) map[string]interface{} {
+	return map[string]interface{}{
+		"type":         "response.output_item.done",
+		"output_index": outputIndex,
+		"item":         item,
 	}
 }
 

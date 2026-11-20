@@ -51,3 +51,33 @@ func TestMapReasoningEffort(t *testing.T) {
 	}
 	assert.True(t, strings.Contains(string(MapReasoningEffort([]byte(`{"reasoning_effort":"minimal"}`), nil)), "minimal"))
 }
+
+func TestDropNullParams(t *testing.T) {
+	keys := []string{"max_tokens", "max_completion_tokens", "max_output_tokens"}
+
+	t.Run("null limits are removed, the rest stays", func(t *testing.T) {
+		out := decodeBody(t, DropNullParams([]byte(`{"model":"m","max_tokens":null,"max_completion_tokens":null,"max_output_tokens":null,"temperature":null}`), keys...))
+		assert.NotContains(t, out, "max_tokens")
+		assert.NotContains(t, out, "max_completion_tokens")
+		assert.NotContains(t, out, "max_output_tokens")
+		assert.Contains(t, out, "temperature", "only the listed keys are touched")
+		assert.Equal(t, "m", out["model"])
+	})
+
+	t.Run("a numeric limit is kept", func(t *testing.T) {
+		out := decodeBody(t, DropNullParams([]byte(`{"model":"m","max_tokens":128,"max_completion_tokens":null}`), keys...))
+		assert.EqualValues(t, 128, out["max_tokens"])
+		assert.NotContains(t, out, "max_completion_tokens")
+	})
+
+	t.Run("body returned unchanged when nothing is null", func(t *testing.T) {
+		for _, body := range []string{
+			`{"model":"m","max_tokens":128}`,
+			`{"model":"m","note":"null"}`,
+			`{"model":"m"}`,
+			`not json null`,
+		} {
+			assert.Equal(t, body, string(DropNullParams([]byte(body), keys...)), body)
+		}
+	})
+}

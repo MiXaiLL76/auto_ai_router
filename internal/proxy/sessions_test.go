@@ -34,23 +34,22 @@ func TestSessionStoreExpiresEntries(t *testing.T) {
 	assert.Equal(t, 0, store.Len())
 }
 
-func TestSessionStoreGetRefreshesExpiry(t *testing.T) {
+func TestSessionStoreSetRefreshesExpiryGetDoesNot(t *testing.T) {
 	now := time.Date(2026, time.August, 24, 12, 0, 0, 0, time.UTC)
 	store := NewSessionStore(10 * time.Minute)
 	store.now = func() time.Time { return now }
 	store.Set("session-1", "anthropic/claude-sonnet-4.6", "anthropic-cred-1")
 
+	// A served turn (Set) extends the binding.
+	now = now.Add(9 * time.Minute)
+	store.Set("session-1", "anthropic/claude-sonnet-4.6", "anthropic-cred-1")
 	now = now.Add(9 * time.Minute)
 	cred, ok := store.Get("session-1", "anthropic/claude-sonnet-4.6")
 	require.True(t, ok)
 	assert.Equal(t, "anthropic-cred-1", cred)
 
-	now = now.Add(9 * time.Minute)
-	cred, ok = store.Get("session-1", "anthropic/claude-sonnet-4.6")
-	require.True(t, ok)
-	assert.Equal(t, "anthropic-cred-1", cred)
-
-	now = now.Add(11 * time.Minute)
+	// Lookups alone do not: a binding whose credential stopped serving expires.
+	now = now.Add(2 * time.Minute)
 	_, ok = store.Get("session-1", "anthropic/claude-sonnet-4.6")
 	assert.False(t, ok)
 }

@@ -11,7 +11,7 @@ This page covers two features that keep such requests from multiplying:
 
 ```yaml
 server:
-  max_provider_retries: 2      # extra same-type credentials per request (default 2 = 3 attempts)
+  max_provider_retries: 2      # extra credentials of any type per request (default 2 = 3 attempts)
   max_fallback_attempts: 5     # fallback hops per request chain (default 5)
 
 retry:
@@ -78,7 +78,7 @@ retry:
 
 ### Built-in markers
 
-`non_retryable_markers` (any status): `content policy`, `content management policy`, `policy violation`.
+`non_retryable_markers` (any status): `content policy`, `content_policy`, `content filter`, `content_filter`, `content moderation`, `inappropriate content`, `safety violation`, `safety_violation`, `prompt_blocked`, `prompt blocked`, `blocked by content`, `content management policy`, `policy violation`, `data_inspection_failed`.
 
 `bad_request_markers` (400 only): `penalty is not enabled`, `thinking level is unsupported`, `thinking level minimal is not supported`, `unsupported mime type`, `required oneof field`, `but the supported range is from`.
 

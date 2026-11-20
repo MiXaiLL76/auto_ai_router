@@ -72,7 +72,7 @@ Anthropic-compatible providers that expect `Authorization: Bearer <token>`.
 
 Anthropic is fully supported via the [Responses API](../advanced/responses.md). Requests are converted natively to the Anthropic Messages API — no Chat Completions intermediate format is used.
 
-Supported features: streaming, `store` / `previous_response_id` multi-turn, tools, thinking/reasoning.
+Supported features: streaming, `store` / `previous_response_id` multi-turn, tools, thinking/reasoning, `text.format` (mapped like `response_format`).
 
 ### Responses Files and Documents
 
@@ -96,7 +96,7 @@ The router accepts requests in **OpenAI Chat Completion format** and automatical
 | ----------------------- | ------------------------ | --------------------------------------------------- |
 | `temperature`           | `temperature`            | Set to 1.0 automatically when thinking is enabled   |
 | `top_p`                 | `top_p`                  |                                                     |
-| `max_tokens`            | `max_tokens`             | Defaults to 4096 if not set                         |
+| `max_tokens`            | `max_tokens`             | Defaults to 32000 for Claude, 4096 for others       |
 | `max_completion_tokens` | `max_tokens`             | Fallback if `max_tokens` is empty                   |
 | `stop`                  | `stop_sequences`         | Accepts string or array                             |
 | `stream`                | `stream`                 |                                                     |
@@ -104,6 +104,7 @@ The router accepts requests in **OpenAI Chat Completion format** and automatical
 | `tool_choice`           | `tool_choice`            | See [tool_choice](#tool_choice)                     |
 | `user`                  | `metadata.user_id`       | User tracking                                       |
 | `reasoning_effort`      | `thinking.budget_tokens` | See [Thinking](#extended-thinking)                  |
+| `response_format`       | `output_config.format`   | Native `json_schema`; `json_object` via prompt      |
 
 #### extra_body Parameters
 
@@ -116,7 +117,7 @@ The router accepts requests in **OpenAI Chat Completion format** and automatical
 
 These OpenAI parameters have no Anthropic equivalent and are silently ignored:
 
-`n`, `frequency_penalty`, `presence_penalty`, `seed`, `response_format`, `logprobs`, `top_logprobs`, `modalities`, `service_tier`, `store`, `parallel_tool_calls`, `prediction`
+`n`, `frequency_penalty`, `presence_penalty`, `seed`, `logprobs`, `top_logprobs`, `modalities`, `service_tier`, `store`, `parallel_tool_calls`, `prediction`
 
 ### Message Conversion
 

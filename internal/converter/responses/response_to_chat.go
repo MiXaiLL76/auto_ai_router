@@ -241,13 +241,8 @@ func nonNilSummary(s []OutputContent) []OutputContent {
 }
 
 // injectThinkingBlocks patches "thinking_blocks" onto choices[0].message in
-// an already-marshaled Chat Completions response body. openai.
-// OpenAIResponseMessage (the response-side message type) has no
-// ThinkingBlocks field -- that field only exists on openai.OpenAIMessage,
-// the *request*-side type, since it's normally something a client echoes
-// back rather than something AIR's own response builders populate. Patching
-// the raw JSON here avoids widening a struct shared by every converter in
-// the codebase just for this one round trip.
+// an already-marshaled Chat Completions response body (this predates
+// openai.OpenAIResponseMessage.ThinkingBlocks, which the Anthropic converter fills).
 func injectThinkingBlocks(body []byte, blocks []responsesReasoningBlock) ([]byte, error) {
 	var resp map[string]interface{}
 	if err := json.Unmarshal(body, &resp); err != nil {

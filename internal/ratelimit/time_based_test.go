@@ -74,15 +74,27 @@ func TestTimeBasedRateLimiter_MultipleKeys(t *testing.T) {
 	err = limiter.Wait(ctx, "key2", interval)
 	assert.NoError(t, err)
 
-	// Sleep 25ms
+	// Sleep 25ms. The sleep is measured rather than assumed: a loaded machine
+	// (a CI runner under parallel packages) can overshoot it by tens of
+	// milliseconds, and the waits below are computed from the interval, not
+	// from the sleep's nominal length.
+	sleepStart := time.Now()
 	time.Sleep(25 * time.Millisecond)
+	slept := time.Since(sleepStart)
 
-	// Call Wait for key1 again - should wait ~35ms (60-25)
+	// Call Wait for key1 again - should wait the rest of the interval
+	// (60 - slept). The floor is what the interval still owes, minus a small
+	// tolerance for the clock's own resolution; asserting the nominal 30ms
+	// instead failed whenever the sleep above overshot.
+	remaining := interval - slept
 	start := time.Now()
 	err = limiter.Wait(ctx, "key1", interval)
 	assert.NoError(t, err)
 	elapsed := time.Since(start)
-	assert.GreaterOrEqual(t, elapsed, 30*time.Millisecond, "key1 should wait ~35ms")
+	assert.GreaterOrEqual(t, elapsed, remaining-10*time.Millisecond,
+		"key1 should wait out the rest of its interval")
+	assert.Less(t, elapsed, interval,
+		"key1 must not wait longer than its interval")
 
 	// Immediately after (before key2's interval expires), call Wait for key2
 	// It should return immediately since total time is ~60ms from its first call
@@ -90,8 +102,13 @@ func TestTimeBasedRateLimiter_MultipleKeys(t *testing.T) {
 	err = limiter.Wait(ctx, "key2", interval)
 	assert.NoError(t, err)
 	elapsed = time.Since(start)
-	// key2 had 25ms sleep + 35ms wait for key1 = 60ms total, so it returns immediately
-	assert.Less(t, elapsed, 10*time.Millisecond, "key2 interval should have expired")
+	// key2 had the sleep + key1's wait = the full interval, so it returns
+	// immediately. The bound is the interval itself: a loaded machine may
+	// have spent longer in the two waits above than planned, in which case
+	// key2's interval has already expired and it returns immediately too --
+	// either way it must not block.
+	assert.Less(t, elapsed, interval,
+		"key2's own interval is independent of key1's and must have expired by now")
 }
 
 func TestTimeBasedRateLimiter_ContextCancellation(t *testing.T) {

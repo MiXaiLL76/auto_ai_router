@@ -211,6 +211,97 @@ func (m *DefaultRawBodyManager) Shutdown(ctx context.Context) error {
 	return err
 }
 
+// ==================== RouterResponseManager ====================
+
+// RouterResponseManager is the router-response write-path interface: what
+// the router answered to the client, published to its own topic. Same
+// lifecycle as the other managers, and kept as its own interface for the
+// same reason RawBodyManager is one (a caller holding a Manager cannot
+// accidentally publish a response body).
+type RouterResponseManager interface {
+	// LogRouterResponse queues a router-response event. Returns an error
+	// only if the event could not be queued.
+	LogRouterResponse(event *RouterResponseEvent) error
+
+	IsEnabled() bool
+	IsHealthy() bool
+	Stats() Stats
+	Shutdown(ctx context.Context) error
+}
+
+// NoopRouterResponseManager is a no-op implementation used when the
+// router-response publishing is disabled (the default).
+type NoopRouterResponseManager struct{}
+
+// NewNoopRouterResponseManager creates a new no-op router-response manager.
+func NewNoopRouterResponseManager() *NoopRouterResponseManager {
+	return &NoopRouterResponseManager{}
+}
+
+func (n *NoopRouterResponseManager) LogRouterResponse(_ *RouterResponseEvent) error { return nil }
+func (n *NoopRouterResponseManager) IsEnabled() bool                                { return false }
+func (n *NoopRouterResponseManager) IsHealthy() bool                                { return false }
+func (n *NoopRouterResponseManager) Stats() Stats                                   { return Stats{} }
+func (n *NoopRouterResponseManager) Shutdown(_ context.Context) error               { return nil }
+
+// DefaultRouterResponseManager is the real implementation of
+// RouterResponseManager.
+type DefaultRouterResponseManager struct {
+	logger *Logger[*RouterResponseEvent]
+	log    *slog.Logger
+}
+
+// NewRouterResponse creates a new RouterResponseManager instance and starts
+// its background producer. cfg is a plain kafkalog.Config pointed at the
+// router-responses topic (same brokers/TLS/SASL as the spend-log cfg is the
+// common case, but that's the caller's choice, not enforced here).
+func NewRouterResponse(cfg *Config) (RouterResponseManager, error) {
+	cfg.ApplyDefaults()
+
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+
+	logger, err := NewLogger[*RouterResponseEvent](cfg)
+	if err != nil {
+		return nil, err
+	}
+	logger.Start()
+
+	m := &DefaultRouterResponseManager{
+		logger: logger,
+		log:    cfg.Logger,
+	}
+
+	cfg.Logger.Info("Kafka router-response logger initialized",
+		"brokers", cfg.Brokers,
+		"topic", cfg.Topic,
+		"log_queue_size", cfg.LogQueueSize,
+	)
+
+	return m, nil
+}
+
+func (m *DefaultRouterResponseManager) LogRouterResponse(event *RouterResponseEvent) error {
+	if event == nil {
+		return nil
+	}
+	return m.logger.Log(event)
+}
+
+func (m *DefaultRouterResponseManager) IsEnabled() bool { return true }
+
+func (m *DefaultRouterResponseManager) IsHealthy() bool { return m.logger.IsHealthy() }
+
+func (m *DefaultRouterResponseManager) Stats() Stats { return m.logger.Stats() }
+
+func (m *DefaultRouterResponseManager) Shutdown(ctx context.Context) error {
+	m.log.Info("Shutting down Kafka router-response logger...")
+	err := m.logger.Shutdown(ctx)
+	m.log.Info("Kafka router-response logger shutdown complete")
+	return err
+}
+
 // ==================== Compile-time interface checks ====================
 
 var _ Manager = (*DefaultManager)(nil)

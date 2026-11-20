@@ -1019,6 +1019,38 @@ func TestRequestToChat_TextFormat(t *testing.T) {
 	assert.NotContains(t, parsed, "text")
 }
 
+func TestExtractResponsesMetadata_TextFormat(t *testing.T) {
+	format := map[string]interface{}{"type": "json_schema", "name": "person", "strict": true, "schema": map[string]interface{}{"type": "object"}}
+
+	meta := ExtractResponsesMetadata([]byte(`{"model":"m","input":"hi","text":{"format":{"type":"json_schema","name":"person","strict":true,"schema":{"type":"object"}},"verbosity":"low"}}`))
+	assert.Equal(t, map[string]interface{}{"format": format}, meta.Text, "only the format is echoed")
+
+	assert.Nil(t, ExtractResponsesMetadata([]byte(`{"model":"m","input":"hi","text":{"verbosity":"low"}}`)).Text)
+	assert.Nil(t, ExtractResponsesMetadata([]byte(`{"model":"m","input":"hi"}`)).Text)
+
+	for _, malformed := range []string{
+		`"json_object"`,
+		`{}`,
+		`{"type":false}`,
+		`{"type":"unknown"}`,
+		`{"type":"json_schema","name":"p"}`,
+		`{"type":"json_schema","name":42,"schema":{"type":"object"}}`,
+		`{"type":"json_schema","name":"p","schema":{"type":"object"},"strict":"yes"}`,
+		`{"type":"json_schema","name":"p","schema":{"type":"object"},"description":1}`,
+	} {
+		meta := ExtractResponsesMetadata([]byte(`{"model":"m","input":"hi","text":{"format":` + malformed + `}}`))
+		assert.Nil(t, meta.Text, "malformed format %s is not echoed", malformed)
+	}
+	for _, valid := range []string{
+		`{"type":"text"}`,
+		`{"type":"json_object"}`,
+		`{"type":"json_schema","name":"p","schema":{},"strict":null,"description":null}`,
+	} {
+		meta := ExtractResponsesMetadata([]byte(`{"model":"m","input":"hi","text":{"format":` + valid + `}}`))
+		assert.NotNil(t, meta.Text, "format %s is echoed", valid)
+	}
+}
+
 func TestRequestToChat_PreservesOtherFields(t *testing.T) {
 	body := `{
 		"model": "gpt-4o",

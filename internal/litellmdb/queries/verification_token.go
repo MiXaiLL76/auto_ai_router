@@ -22,6 +22,9 @@ SELECT
   t.blocked as token_blocked,
   t.models as token_models,
   t.metadata as token_metadata,
+  -- When enabled, read through the row's JSON so an old schema yields NULL.
+  -- The disabled path avoids materializing the token row as JSON.
+  CASE WHEN $2::boolean THEN to_jsonb(t) -> 'budget_limits' ELSE NULL::jsonb END as token_budget_limits,
 
   -- ============ User ============
   u.user_id as user_id_check,
@@ -48,6 +51,7 @@ SELECT
 
   -- ============ Organization ============
   o.organization_id as org_id_check,
+  o.organization_alias as org_alias,
   o.spend as org_spend,
   b_org.max_budget as org_max_budget,
   b_org.tpm_limit as org_tpm_limit,

@@ -520,6 +520,25 @@ func TestResponsesRequestToAnthropic_ReasoningEffortNone(t *testing.T) {
 	assert.Nil(t, ar["thinking"])
 }
 
+// Sonnet 5.5 thinks when "thinking" is omitted and rejects "disabled": effort none turns
+// thinking off with between_tools, which takes no effort and no betas.
+func TestResponsesRequestToAnthropic_ReasoningEffortNoneOnSonnet55(t *testing.T) {
+	convert := func(model string) map[string]interface{} {
+		result, err := ResponsesRequestToAnthropic([]byte(`{"model":"m","input":"test","reasoning":{"effort":"none"}}`), model)
+		require.NoError(t, err)
+		var ar map[string]interface{}
+		require.NoError(t, json.Unmarshal(result, &ar))
+		return ar
+	}
+	ar := convert("claude-sonnet-5-5")
+	assert.Equal(t, map[string]interface{}{"type": "between_tools"}, ar["thinking"])
+	assert.NotContains(t, ar, "output_config")
+	assert.NotContains(t, ar, "anthropic_beta")
+	assert.NotContains(t, ar, "temperature")
+
+	assert.NotContains(t, convert("claude-opus-4-7"), "thinking")
+}
+
 func TestResponsesRequestToAnthropic_ConversationHistory(t *testing.T) {
 	body := `{
 		"model": "claude-opus-4-5",
@@ -820,4 +839,108 @@ func TestResponsesRequestToAnthropic_ReasoningItemWithEncryptedContent(t *testin
 		}
 	}
 	assert.True(t, foundThinking, "expected thinking block with signature")
+}
+
+func TestResponsesRequestToAnthropic_TextFormatJSONSchema(t *testing.T) {
+	body := `{
+		"model": "claude-haiku-4-5",
+		"input": "Name a city",
+		"text": {
+			"format": {
+				"type": "json_schema",
+				"name": "city",
+				"strict": true,
+				"schema": {
+					"type": "object",
+					"properties": {"city": {"type": "string"}},
+					"required": ["city"]
+				}
+			}
+		}
+	}`
+
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-haiku-4-5")
+	require.NoError(t, err)
+
+	var ar map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &ar))
+
+	outputConfig := ar["output_config"].(map[string]interface{})
+	format := outputConfig["format"].(map[string]interface{})
+	assert.Equal(t, "json_schema", format["type"])
+	assert.NotContains(t, format, "name")
+	assert.NotContains(t, format, "strict")
+
+	schema := format["schema"].(map[string]interface{})
+	assert.Equal(t, false, schema["additionalProperties"])
+	assert.Equal(t, []interface{}{"city"}, schema["required"])
+	assert.NotContains(t, ar, "system")
+}
+
+func TestResponsesRequestToAnthropic_TextFormatJSONSchemaWithEffort(t *testing.T) {
+	body := `{
+		"model": "claude-opus-4-8",
+		"input": "Name a city",
+		"reasoning": {"effort": "high"},
+		"text": {
+			"format": {
+				"type": "json_schema",
+				"name": "city",
+				"schema": {
+					"type": "object",
+					"properties": {"city": {"type": "string"}},
+					"required": ["city"],
+					"additionalProperties": false
+				}
+			}
+		}
+	}`
+
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-8")
+	require.NoError(t, err)
+
+	var ar map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &ar))
+
+	outputConfig := ar["output_config"].(map[string]interface{})
+	assert.Equal(t, "high", outputConfig["effort"])
+	format := outputConfig["format"].(map[string]interface{})
+	assert.Equal(t, "json_schema", format["type"])
+}
+
+func TestResponsesRequestToAnthropic_TextFormatJSONObject(t *testing.T) {
+	body := `{
+		"model": "claude-haiku-4-5",
+		"instructions": "Be brief.",
+		"input": "Name a city",
+		"text": {"format": {"type": "json_object"}}
+	}`
+
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-haiku-4-5")
+	require.NoError(t, err)
+
+	var ar map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &ar))
+
+	assert.NotContains(t, ar, "output_config")
+	system := ar["system"].(string)
+	assert.Contains(t, system, "Be brief.")
+	assert.Contains(t, system, "valid JSON only")
+}
+
+func TestResponsesRequestToAnthropic_TextFormatText(t *testing.T) {
+	body := `{
+		"model": "claude-haiku-4-5",
+		"input": "Name a city",
+		"text": {"format": {"type": "text"}}
+	}`
+
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-haiku-4-5")
+	require.NoError(t, err)
+
+	var ar map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &ar))
+
+	assert.NotContains(t, ar, "output_config")
+	assert.NotContains(t, ar, "system")
 }

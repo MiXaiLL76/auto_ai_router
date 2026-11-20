@@ -120,6 +120,59 @@ reasoning_only: os.environ/TEST_REASONING_ONLY
 	assert.True(t, credential.ReasoningOnly)
 }
 
+func TestCredentialConfigSystemOne(t *testing.T) {
+	var credential CredentialConfig
+	err := yaml.Unmarshal([]byte(`
+name: typesafe
+type: openai
+api_key: key
+base_url: https://api.typesafe.ai
+system_one: true
+`), &credential)
+
+	require.NoError(t, err)
+	assert.True(t, credential.SystemOne)
+}
+
+func TestCredentialConfigDeepSeekTools(t *testing.T) {
+	var credential CredentialConfig
+	err := yaml.Unmarshal([]byte(`
+name: deepseek
+type: openai
+api_key: key
+base_url: https://api.deepseek.com
+deepseek_tools: true
+`), &credential)
+
+	require.NoError(t, err)
+	assert.True(t, credential.DeepSeekTools)
+}
+
+func TestConfig_Validate_SystemOneOnlyForOpenAIWire(t *testing.T) {
+	newConfig := func(cred CredentialConfig) *Config {
+		return &Config{
+			Server: ServerConfig{
+				Port:           8080,
+				MaxBodySizeMB:  10,
+				MasterKey:      "test-key",
+				RequestTimeout: 30 * time.Second,
+			},
+			Credentials: []CredentialConfig{cred},
+			Fail2Ban:    Fail2BanConfig{MaxAttempts: 3},
+		}
+	}
+	for _, credType := range []ProviderType{ProviderTypeOpenAI, ProviderTypeVLLM} {
+		cfg := newConfig(CredentialConfig{Name: "ok", Type: credType, APIKey: "key", BaseURL: "https://api.typesafe.ai", RPM: 60, SystemOne: true})
+		require.NoError(t, cfg.Validate(), credType)
+	}
+	for _, credType := range []ProviderType{ProviderTypeAnthropic, ProviderTypeProxy, ProviderTypeAIR} {
+		cfg := newConfig(CredentialConfig{Name: "bad", Type: credType, APIKey: "key", BaseURL: "https://example.com", RPM: 60, SystemOne: true})
+		err := cfg.Validate()
+		require.Error(t, err, credType)
+		assert.Contains(t, err.Error(), "system_one needs an OpenAI-wire credential")
+	}
+}
+
 func TestLoad_ResponseHeadersModeFromEnvironment(t *testing.T) {
 	t.Setenv("TEST_RESPONSE_HEADER_MODE", "ALLOWLIST")
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
@@ -224,6 +277,31 @@ proxy_usage_format: normalized
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "proxy_usage_format is no longer supported")
 	assert.Contains(t, err.Error(), "type: air")
+}
+
+func TestConfigRedisHealthKeyPrefix(t *testing.T) {
+	configPath := t.TempDir() + "config.yaml"
+	err := os.WriteFile(configPath, []byte(`server:
+  port: 8080
+  master_key: "sk-test-master-key"
+
+credentials:
+  - name: "provider_1"
+    type: "openai"
+    api_key: "sk-xxxx"
+    base_url: "https://api.openai.com"
+
+redis:
+  enabled: true
+  addresses: ["127.0.0.1:6379"]
+  health_key_prefix: "health:"
+`), 0644)
+	require.NoError(t, err)
+
+	cfg, err := Load(configPath)
+	require.NoError(t, err)
+	assert.Equal(t, "health:", cfg.Redis.HealthKeyPrefix, "health_key_prefix parsed")
+	assert.Equal(t, "rl:", cfg.Redis.KeyPrefix, "plain key_prefix unaffected")
 }
 
 func TestConfig_ValidateAIRCredential(t *testing.T) {
@@ -1504,6 +1582,43 @@ credentials:
 	}
 }
 
+func TestServerConfig_ShutdownTimeout(t *testing.T) {
+	tests := []struct {
+		name     string
+		yamlLine string
+		expected time.Duration
+	}{
+		{name: "explicit", yamlLine: "  shutdown_timeout: 960s\n", expected: 960 * time.Second},
+		{name: "default when omitted", yamlLine: "", expected: DefaultShutdownTimeout},
+		{name: "non-positive falls back to default", yamlLine: "  shutdown_timeout: 0s\n", expected: DefaultShutdownTimeout},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			configPath := filepath.Join(tmpDir, "config.yaml")
+
+			configContent := `
+server:
+  port: 8080
+  max_body_size_mb: 10
+  master_key: "sk-test"
+` + tt.yamlLine + `
+credentials:
+  - name: "test"
+    type: "openai"
+    api_key: "sk-test"
+    base_url: "https://api.openai.com"
+`
+			require.NoError(t, os.WriteFile(configPath, []byte(configContent), 0644))
+
+			cfg, err := Load(configPath)
+			require.NoError(t, err)
+			assert.Equal(t, tt.expected, cfg.Server.ShutdownTimeout)
+		})
+	}
+}
+
 func TestRedisConfig_BalancerKeyPrefix(t *testing.T) {
 	t.Setenv("TEST_BALANCER_PREFIX", "env-balancer:")
 	tests := []struct {
@@ -1802,6 +1917,142 @@ monitoring:
 	assert.Equal(t, 5, cfg.Server.MaxProviderRetries, "Custom MaxProviderRetries should be 5")
 }
 
+func TestConfig_Validate_AnthropicDefaultMaxTokens(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   int
+		wantErr bool
+	}{
+		{"default value", AnthropicDefaultMaxTokens, false},
+		{"zero (= use the default)", 0, false},
+		{"custom value", 16000, false},
+		{"negative value", -1, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{
+				Server: ServerConfig{
+					Port:                      8080,
+					MaxBodySizeMB:             10,
+					MasterKey:                 "test-key",
+					RequestTimeout:            30 * time.Second,
+					AnthropicDefaultMaxTokens: tt.value,
+				},
+				Credentials: []CredentialConfig{
+					{Name: "test", Type: "openai", APIKey: "key", BaseURL: "http://test.com", RPM: 10},
+				},
+				Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
+			}
+			err := cfg.Validate()
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), "invalid anthropic_default_max_tokens")
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestLoad_AnthropicDefaultMaxTokens(t *testing.T) {
+	tests := []struct {
+		name    string
+		line    string
+		want    int
+		wantErr string
+	}{
+		{"omitted uses the default", "", AnthropicDefaultMaxTokens, ""},
+		{"custom value", "  anthropic_default_max_tokens: 16000\n", 16000, ""},
+		{"zero is kept, the proxy then uses the default", "  anthropic_default_max_tokens: 0\n", 0, ""},
+		{"negative is rejected", "  anthropic_default_max_tokens: -5\n", 0, "invalid anthropic_default_max_tokens"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			configContent := `
+server:
+  port: 8080
+  max_body_size_mb: 10
+  request_timeout: 30s
+  master_key: "sk-test"
+` + tt.line + `
+fail2ban:
+  max_attempts: 3
+  ban_duration: permanent
+  error_codes: [401]
+
+credentials:
+  - name: "test"
+    type: "openai"
+    api_key: "sk-test"
+    base_url: "https://api.openai.com"
+    rpm: 10
+
+monitoring:
+  prometheus_enabled: false
+`
+			require.NoError(t, os.WriteFile(configPath, []byte(configContent), 0644))
+
+			cfg, err := Load(configPath)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, cfg.Server.AnthropicDefaultMaxTokens)
+		})
+	}
+}
+
+func TestLoad_MaxConnectionLifetime(t *testing.T) {
+	tests := []struct {
+		name    string
+		line    string
+		want    time.Duration
+		wantErr bool
+	}{
+		{"unset keeps connections while reused", "", 0, false},
+		{"duration", "  max_connection_lifetime: 10m\n", 10 * time.Minute, false},
+		{"negative", "  max_connection_lifetime: -1m\n", 0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			configContent := `
+server:
+  port: 8080
+  max_body_size_mb: 10
+  request_timeout: 30s
+  master_key: "sk-test"
+` + tt.line + `
+fail2ban:
+  max_attempts: 3
+  ban_duration: permanent
+  error_codes: [401]
+
+credentials:
+  - name: "test"
+    type: "openai"
+    api_key: "sk-test"
+    base_url: "https://api.openai.com"
+    rpm: 10
+`
+			require.NoError(t, os.WriteFile(configPath, []byte(configContent), 0644))
+			cfg, err := Load(configPath)
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "invalid max_connection_lifetime")
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, cfg.Server.MaxConnectionLifetime)
+		})
+	}
+}
+
 func TestLoad_SessionStickyDefaults(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.yaml")
@@ -1951,6 +2202,20 @@ func TestServerConfigStrictAllTeamModelsACL(t *testing.T) {
 	var strict ServerConfig
 	require.NoError(t, yaml.Unmarshal([]byte("strict_all_team_models_acl: true"), &strict))
 	assert.True(t, strict.StrictAllTeamModelsACL)
+}
+
+func TestServerConfigMirrorCacheWriteTokensDefaultsToTrue(t *testing.T) {
+	// PR #355 already shipped this mirroring unconditionally for Anthropic-type
+	// credentials; the flag only adds Requesty to it and a way to turn the
+	// whole thing off, not a way to opt in from a stricter default — an empty
+	// config must not silently revert #355's behavior.
+	var defaults ServerConfig
+	require.NoError(t, yaml.Unmarshal([]byte("{}"), &defaults))
+	assert.True(t, defaults.MirrorCacheWriteTokens)
+
+	var disabled ServerConfig
+	require.NoError(t, yaml.Unmarshal([]byte("mirror_cache_write_tokens: false"), &disabled))
+	assert.False(t, disabled.MirrorCacheWriteTokens)
 }
 
 func TestLoad_ModelAlias(t *testing.T) {
@@ -2542,4 +2807,30 @@ credentials:
 	require.NoError(t, err)
 	assert.Equal(t, VisionFallbackReject, cfg.VisionFallback.Mode)
 	assert.Equal(t, DefaultVisionMaxImages, cfg.VisionFallback.MaxImages, "absent section still gets the default limit")
+}
+
+func TestConfigAccountEventsReaderInterval(t *testing.T) {
+	configPath := t.TempDir() + "config.yaml"
+	err := os.WriteFile(configPath, []byte(`server:
+  port: 8080
+  master_key: "sk-test-master-key"
+
+credentials:
+  - name: "provider_1"
+    type: "openai"
+    api_key: "sk-xxxx"
+    base_url: "https://api.openai.com"
+
+account_events:
+  enabled: true
+  topic: "account-events"
+  reader_interval: 750ms
+`), 0644)
+	require.NoError(t, err)
+
+	cfg, err := Load(configPath)
+	require.NoError(t, err)
+	assert.True(t, cfg.AccountEvents.Enabled)
+	assert.Equal(t, "account-events", cfg.AccountEvents.Topic)
+	assert.Equal(t, 750*time.Millisecond, cfg.AccountEvents.ReaderInterval)
 }

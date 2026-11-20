@@ -10,13 +10,12 @@ func TestReplaceBodyParamGPT6(t *testing.T) {
 		t.Run(model, func(t *testing.T) {
 			body := []byte(`{"max_tokens":100,"max_completion_tokens":200,"max_output_tokens":300,"temperature":0.5,"top_p":0.9,"logprobs":true,"top_logprobs":3,"reasoning_effort":"max","frequency_penalty":0.1}`)
 			got := bodyToMap(t, ReplaceBodyParam(model, body))
-			for _, key := range []string{"max_tokens", "temperature", "top_p", "logprobs", "top_logprobs"} {
+			for _, key := range []string{"max_tokens", "temperature", "top_p", "logprobs", "top_logprobs", "frequency_penalty"} {
 				assert.NotContains(t, got, key)
 			}
 			assert.Equal(t, float64(200), got["max_completion_tokens"])
 			assert.Equal(t, float64(300), got["max_output_tokens"])
 			assert.Equal(t, "max", got["reasoning_effort"])
-			assert.Equal(t, 0.1, got["frequency_penalty"])
 			assert.Equal(t, float64(100), bodyToMap(t, ReplaceBodyParam(model, []byte(`{"max_tokens":100}`)))["max_completion_tokens"])
 		})
 	}
@@ -44,7 +43,7 @@ func TestReplaceResponsesBodyParamGPT6(t *testing.T) {
 
 func TestGPT6RulesLeaveOtherModelsUnchanged(t *testing.T) {
 	body := []byte(`{"temperature":0.5,"include":["message.output_text.logprobs"]}`)
-	for _, model := range []string{"gpt-5.6-sol", "gpt-4o", "gpt-60", "my-gpt-6-astra"} {
+	for _, model := range []string{"gpt-4o", "gpt-60", "my-gpt-6-astra"} {
 		assert.Equal(t, body, ReplaceResponsesBodyParam(model, body), model)
 	}
 	for _, model := range []string{"gpt-60", "my-gpt-6-astra"} {

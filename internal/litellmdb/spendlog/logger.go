@@ -701,6 +701,9 @@ func (sl *Logger) writeBatchInTransaction(ctx context.Context, tx pgx.Tx, batch 
 	if err := executeSpendUpdates(ctx, tx, spendUpdates); err != nil {
 		return nil, fmt.Errorf("spend updates: %w", err)
 	}
+	if err := sl.updateKeyBudgetWindows(ctx, tx, insertedEntries(accountingBatch)); err != nil {
+		return nil, fmt.Errorf("key budget windows: %w", err)
+	}
 
 	// Daily aggregates are built from the in-memory entries. Re-reading the
 	// just-inserted rows from LiteLLM_SpendLogs is a heavy query on the LiteLLM

@@ -128,6 +128,54 @@ var (
 		[]string{"credential", "model", "endpoint"},
 	)
 
+	LoopGateStreamsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_loop_gate_streams_total",
+			Help: "Total number of streamed generations watched by the loop gate detector",
+		},
+		[]string{"credential", "model", "mode"},
+	)
+
+	LoopGateFiringsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_loop_gate_firings_total",
+			Help: "Total number of streamed generations the loop gate detector saw looping, by text channel (content or reasoning)",
+		},
+		[]string{"credential", "model", "channel", "mode"},
+	)
+
+	LoopGateWordsAfterFiringTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_loop_gate_words_after_firing_total",
+			Help: "Total number of words a looping generation produced after the loop gate detector fired",
+		},
+		[]string{"credential", "model", "channel", "mode"},
+	)
+
+	LoopGateCutsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_loop_gate_cuts_total",
+			Help: "Total number of streamed generations the loop gate cut short (enforce mode), by the looping text channel",
+		},
+		[]string{"credential", "model", "channel"},
+	)
+
+	LoopGateRestartsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_loop_gate_restarts_total",
+			Help: "Total number of looping streamed generations the loop gate restarted (enforce mode), by the looping text channel",
+		},
+		[]string{"credential", "model", "channel"},
+	)
+
+	LoopGateRecoveredTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_loop_gate_recovered_total",
+			Help: "Total number of restarted streamed generations that then finished without being cut",
+		},
+		[]string{"credential", "model"},
+	)
+
 	CredentialRPMCurrent = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "auto_ai_router_credential_rpm_current",
@@ -333,6 +381,50 @@ var (
 		prometheus.GaugeOpts{
 			Name: "auto_ai_router_kafka_raw_body_logger_healthy",
 			Help: "Kafka broker connectivity for raw-body publishing (1 = healthy, 0 = unhealthy)",
+		},
+	)
+
+	// Router-response logger stats mirror the raw-body gauges above for the
+	// separate, independently-toggleable router-response write-path.
+	KafkaRouterResponseLoggerQueuedTotal = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_kafka_router_response_logger_queued_total",
+			Help: "Cumulative number of router-response events queued for Kafka publishing",
+		},
+	)
+
+	KafkaRouterResponseLoggerProducedTotal = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_kafka_router_response_logger_produced_total",
+			Help: "Cumulative number of router-response events successfully produced to Kafka",
+		},
+	)
+
+	KafkaRouterResponseLoggerDroppedTotal = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_kafka_router_response_logger_dropped_total",
+			Help: "Cumulative number of router-response events dropped because the producer queue was full",
+		},
+	)
+
+	KafkaRouterResponseLoggerErrorsTotal = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_kafka_router_response_logger_errors_total",
+			Help: "Cumulative number of router-response events that failed to produce after all retries",
+		},
+	)
+
+	KafkaRouterResponseLoggerDLQSize = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_kafka_router_response_logger_dlq_size",
+			Help: "Current number of batches held in the Kafka router-response logger dead letter queue",
+		},
+	)
+
+	KafkaRouterResponseLoggerHealthy = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_kafka_router_response_logger_healthy",
+			Help: "Kafka broker connectivity for router-response publishing (1 = healthy, 0 = unhealthy)",
 		},
 	)
 
@@ -608,6 +700,55 @@ func (m *Metrics) RecordAbortedRequest(credential, endpoint, model string) {
 	AbortedRequestsTotal.WithLabelValues(credential, model, endpoint).Inc()
 }
 
+// RecordLoopGateStream counts a stream watched by the loop gate detector.
+func (m *Metrics) RecordLoopGateStream(credential, model, mode string) {
+	if !m.isEnabled() {
+		return
+	}
+	LoopGateStreamsTotal.WithLabelValues(credential, model, mode).Inc()
+}
+
+// RecordLoopGateFiring counts a loop gate firing on one text channel.
+func (m *Metrics) RecordLoopGateFiring(credential, model, channel, mode string) {
+	if !m.isEnabled() {
+		return
+	}
+	LoopGateFiringsTotal.WithLabelValues(credential, model, channel, mode).Inc()
+}
+
+// RecordLoopGateWordsAfterFiring adds the words a looping channel produced
+// after its firing, recorded once at the end of the stream.
+func (m *Metrics) RecordLoopGateWordsAfterFiring(credential, model, channel, mode string, words int) {
+	if !m.isEnabled() || words <= 0 {
+		return
+	}
+	LoopGateWordsAfterFiringTotal.WithLabelValues(credential, model, channel, mode).Add(float64(words))
+}
+
+// RecordLoopGateCut counts a stream the loop gate cut short.
+func (m *Metrics) RecordLoopGateCut(credential, model, channel string) {
+	if !m.isEnabled() {
+		return
+	}
+	LoopGateCutsTotal.WithLabelValues(credential, model, channel).Inc()
+}
+
+// RecordLoopGateRestart counts a looping generation the loop gate restarted.
+func (m *Metrics) RecordLoopGateRestart(credential, model, channel string) {
+	if !m.isEnabled() {
+		return
+	}
+	LoopGateRestartsTotal.WithLabelValues(credential, model, channel).Inc()
+}
+
+// RecordLoopGateRecovered counts a restarted generation that finished uncut.
+func (m *Metrics) RecordLoopGateRecovered(credential, model string) {
+	if !m.isEnabled() {
+		return
+	}
+	LoopGateRecoveredTotal.WithLabelValues(credential, model).Inc()
+}
+
 func (m *Metrics) UpdateCredentialRPM(credential string, rpm int) {
 	m.updateCredentialMetric(CredentialRPMCurrent, credential, rpm)
 }
@@ -686,6 +827,24 @@ func (m *Metrics) UpdateKafkaSpendLoggerStats(queued, produced, dropped, errors 
 		h = 1.0
 	}
 	KafkaSpendLoggerHealthy.Set(h)
+}
+
+// UpdateKafkaRouterResponseLoggerStats mirrors UpdateKafkaRawBodyLoggerStats
+// for the separate router-response write-path.
+func (m *Metrics) UpdateKafkaRouterResponseLoggerStats(queued, produced, dropped, errors uint64, dlqSize int, healthy bool) {
+	if !m.isEnabled() {
+		return
+	}
+	KafkaRouterResponseLoggerQueuedTotal.Set(float64(queued))
+	KafkaRouterResponseLoggerProducedTotal.Set(float64(produced))
+	KafkaRouterResponseLoggerDroppedTotal.Set(float64(dropped))
+	KafkaRouterResponseLoggerErrorsTotal.Set(float64(errors))
+	KafkaRouterResponseLoggerDLQSize.Set(float64(dlqSize))
+	h := 0.0
+	if healthy {
+		h = 1.0
+	}
+	KafkaRouterResponseLoggerHealthy.Set(h)
 }
 
 // UpdateKafkaRawBodyLoggerStats mirrors UpdateKafkaSpendLoggerStats for the

@@ -4,10 +4,16 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"reflect"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
+	"github.com/mixaill76/auto_ai_router/internal/litellmdb/queries"
 	"github.com/mixaill76/auto_ai_router/internal/security"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -757,10 +763,44 @@ func TestAuthenticator_ValidateToken_NonSKToken(t *testing.T) {
 	hashedToken := "pre-hashed-token" // Not prefixed with sk-
 	cache.Set(hashedToken, tokenInfo)
 
-	// Validate should find it using the same hashing logic (no-op for non-sk-)
+	// A non-sk- token is rejected even when the cache holds it
 	info, err := auth.ValidateToken(context.Background(), "pre-hashed-token")
-	assert.NoError(t, err)
+	assert.ErrorIs(t, err, models.ErrTokenNotFound)
+	assert.Nil(t, info)
+}
+
+func TestAuthenticator_ValidateToken_RejectsKeyHash(t *testing.T) {
+	cache, err := NewCache(100, time.Minute)
+	require.NoError(t, err)
+
+	auth := NewAuthenticator(nil, cache, slog.Default())
+
+	hashedToken := HashToken("sk-test-token-123")
+	cache.Set(hashedToken, &models.TokenInfo{Token: hashedToken, UserID: "user1"})
+
+	info, err := auth.ValidateToken(context.Background(), "sk-test-token-123")
+	require.NoError(t, err)
 	assert.Equal(t, "user1", info.UserID)
+
+	info, err = auth.ValidateToken(context.Background(), hashedToken)
+	assert.ErrorIs(t, err, models.ErrTokenNotFound)
+	assert.Nil(t, info)
+}
+
+func TestAuthenticator_ValidateToken_RejectsMasterKeyHash(t *testing.T) {
+	cache, err := NewCache(100, time.Minute)
+	require.NoError(t, err)
+
+	auth := NewAuthenticator(nil, cache, slog.Default())
+	require.NoError(t, auth.FetchMasterKey(context.Background(), "sk-master-key"))
+
+	info, err := auth.ValidateToken(context.Background(), "sk-master-key")
+	require.NoError(t, err)
+	assert.True(t, info.IsMasterKey)
+
+	info, err = auth.ValidateToken(context.Background(), HashToken("sk-master-key"))
+	assert.ErrorIs(t, err, models.ErrTokenNotFound)
+	assert.Nil(t, info)
 }
 
 func TestAuthenticator_CacheHitRate(t *testing.T) {
@@ -814,4 +854,289 @@ func TestFetchMasterKey_EmptyConfigAndNoDB(t *testing.T) {
 	assert.ErrorIs(t, auth.FetchMasterKey(context.Background(), ""), models.ErrTokenNotFound)
 	_, ok := cache.Get(HashToken(""))
 	assert.False(t, ok)
+}
+
+// tokenQueryColumns names QueryValidateTokenWithHierarchy's SELECT list in
+// order: a column's "as" alias, else its name after the table prefix.
+func tokenQueryColumns(t *testing.T) []string {
+	t.Helper()
+	query := queries.QueryValidateTokenWithHierarchy
+	from := strings.Index(query, `FROM "LiteLLM_VerificationToken"`)
+	require.Positive(t, from, "FROM clause not found")
+
+	var columns []string
+	for _, line := range strings.Split(query[:from], "\n") {
+		line = strings.TrimSuffix(strings.TrimSpace(line), ",")
+		if line == "" || line == "SELECT" || strings.HasPrefix(line, "--") {
+			continue
+		}
+		if _, alias, ok := strings.Cut(line, " as "); ok {
+			line = alias
+		} else if _, column, ok := strings.Cut(line, "."); ok {
+			line = column
+		}
+		columns = append(columns, line)
+	}
+	return columns
+}
+
+// columnRow is a token query row in which every column holds a value naming
+// it: text its column's name, a number its column's position, JSON
+// {"column": name}. A Scan destination that reads a column other than the one
+// meant for it then holds the wrong name or number.
+type columnRow []string
+
+func (r columnRow) Scan(dest ...any) error {
+	if len(dest) != len(r) {
+		return fmt.Errorf("%d columns into %d destinations", len(r), len(dest))
+	}
+	for i, column := range r {
+		target := reflect.ValueOf(dest[i]).Elem()
+		if target.Kind() == reflect.Pointer { // a nullable column
+			target.Set(reflect.New(target.Type().Elem()))
+			target = target.Elem()
+		}
+		switch v := target.Addr().Interface().(type) {
+		case *string:
+			*v = column
+		case *float64:
+			*v = float64(i)
+		case *int64:
+			*v = int64(i)
+		case *bool:
+			*v = true
+		case *time.Time:
+			*v = time.Unix(int64(i), 0)
+		case *[]string:
+			*v = []string{column}
+		case *[]byte:
+			*v = []byte(`{"column":"` + column + `"}`)
+		default:
+			return fmt.Errorf("column %s: unexpected destination %T", column, dest[i])
+		}
+	}
+	return nil
+}
+
+// The token query's SELECT list and tokenFromRow's Scan are positional: a
+// column moved in one and not the other reads a neighbour into a field (or
+// fails every uncached token lookup on its type), so every field must hold
+// the value of the column named for it.
+func TestAuthenticator_TokenFromRow_ReadsEachColumnIntoItsField(t *testing.T) {
+	columns := tokenQueryColumns(t)
+	at := func(column string) int {
+		i := slices.Index(columns, column)
+		require.GreaterOrEqual(t, i, 0, "column %s not in the query", column)
+		return i
+	}
+	number := func(column string) *float64 {
+		v := float64(at(column))
+		return &v
+	}
+	limit := func(column string) *int64 {
+		v := int64(at(column))
+		return &v
+	}
+	metadata := func(column string) map[string]interface{} {
+		return map[string]interface{}{"column": column}
+	}
+	expires := time.Unix(int64(at("expires")), 0)
+	teamBlocked := true
+
+	info, err := NewAuthenticator(nil, nil, slog.Default()).WithBudgetWindows(true).tokenFromRow(columnRow(columns), "hash")
+	require.NoError(t, err)
+	assert.Equal(t, &models.TokenInfo{
+		Token:                "token",
+		KeyName:              "key_name",
+		KeyAlias:             "key_alias",
+		UserID:               "user_id",
+		TeamID:               "team_id",
+		OrganizationID:       "organization_id",
+		DirectOrganizationID: "organization_id",
+		TeamOrganizationID:   "team_organization_id",
+		Spend:                float64(at("token_spend")),
+		MaxBudget:            number("token_max_budget"),
+		TPMLimit:             limit("token_tpm_limit"),
+		RPMLimit:             limit("token_rpm_limit"),
+		Expires:              &expires,
+		Models:               []string{"token_models"},
+		UserModels:           []string{"user_models"},
+		TeamModels:           []string{"team_models"},
+		Blocked:              true,
+
+		UserAlias:     "user_alias",
+		UserEmail:     "user_email",
+		UserMaxBudget: number("user_max_budget"),
+		UserSpend:     number("user_spend"),
+		UserTPMLimit:  limit("user_tpm_limit"),
+		UserRPMLimit:  limit("user_rpm_limit"),
+
+		TeamAlias:     "team_alias",
+		TeamMaxBudget: number("team_max_budget"),
+		TeamSpend:     number("team_spend"),
+		TeamBlocked:   &teamBlocked,
+		TeamTPMLimit:  limit("team_tpm_limit"),
+		TeamRPMLimit:  limit("team_rpm_limit"),
+
+		OrganizationAlias: "org_alias",
+		OrgSpend:          number("org_spend"),
+		OrgMaxBudget:      number("org_max_budget"),
+		OrgTPMLimit:       limit("org_tpm_limit"),
+		OrgRPMLimit:       limit("org_rpm_limit"),
+
+		TeamMemberSpend:     number("team_member_spend"),
+		TeamMemberMaxBudget: number("team_member_max_budget"),
+		TeamMemberTPMLimit:  limit("team_member_tpm_limit"),
+		TeamMemberRPMLimit:  limit("team_member_rpm_limit"),
+		TeamMemberModels:    []string{"team_member_models"},
+
+		OrgMemberSpend:     number("org_member_spend"),
+		OrgMemberMaxBudget: number("org_member_max_budget"),
+		OrgMemberTPMLimit:  limit("org_member_tpm_limit"),
+		OrgMemberRPMLimit:  limit("org_member_rpm_limit"),
+
+		Metadata:             metadata("token_metadata"),
+		TeamMetadata:         metadata("team_metadata"),
+		OrganizationMetadata: metadata("org_metadata"),
+
+		// {"column": "token_budget_limits"} is no budget_limits list: the key
+		// gets one unenforceable window and Validate refuses it.
+		BudgetWindows: []models.BudgetWindow{{}},
+	}, info)
+}
+
+func TestAuthenticator_TokenFromRow_IgnoresBudgetLimitsWhenDisabled(t *testing.T) {
+	info, err := NewAuthenticator(nil, nil, slog.Default()).tokenFromRow(columnRow(tokenQueryColumns(t)), "hash")
+	require.NoError(t, err)
+	assert.Empty(t, info.BudgetWindows)
+}
+
+// A cached token carries the spend of the budget window it was loaded in.
+// Once that window has ended the cache entry is not checked against it: the
+// token is reloaded (here the reload fails, as there is no database).
+func TestAuthenticator_ValidateToken_ReloadsATokenFromAnEndedBudgetWindow(t *testing.T) {
+	cache, err := NewCache(100, time.Hour)
+	require.NoError(t, err)
+	auth := NewAuthenticator(nil, cache, slog.Default()).WithBudgetWindows(true)
+
+	now := time.Now().UTC()
+	day, ok := models.ParseBudgetDuration("1d")
+	require.True(t, ok)
+	current, _ := day.Bounds(now, models.BudgetCalendar{})
+	window := models.BudgetWindow{BudgetLimit: models.BudgetLimit{Duration: "1d", MaxBudget: 10}, Spend: 1}
+
+	window.Start = current
+	cache.Set(HashToken("sk-current-window"), &models.TokenInfo{Token: "current", BudgetWindows: []models.BudgetWindow{window}})
+	info, err := auth.ValidateToken(context.Background(), "sk-current-window")
+	require.NoError(t, err)
+	assert.Equal(t, "current", info.Token)
+
+	window.Start = current.AddDate(0, 0, -1)
+	cache.Set(HashToken("sk-ended-window"), &models.TokenInfo{Token: "ended", BudgetWindows: []models.BudgetWindow{window}})
+	_, err = auth.ValidateToken(context.Background(), "sk-ended-window")
+	assert.ErrorIs(t, err, models.ErrConnectionFailed)
+}
+
+// budgetWindowConn serves only the indexed window-row lookup.
+type budgetWindowConn struct {
+	rows    [][]any
+	rowsErr error
+	queries int
+}
+
+func (c *budgetWindowConn) Query(_ context.Context, sql string, _ ...any) (pgx.Rows, error) {
+	c.queries++
+	if sql != queries.QuerySelectKeyBudgetWindowSpend {
+		return nil, fmt.Errorf("unexpected query %q", sql)
+	}
+	if c.rowsErr != nil {
+		return nil, c.rowsErr
+	}
+	return &budgetWindowRows{rows: c.rows, index: -1}, nil
+}
+
+type budgetWindowRows struct {
+	pgx.Rows
+	rows  [][]any
+	index int
+}
+
+func (r *budgetWindowRows) Next() bool { r.index++; return r.index < len(r.rows) }
+func (r *budgetWindowRows) Close()     {}
+func (r *budgetWindowRows) Err() error { return nil }
+func (r *budgetWindowRows) Scan(dest ...any) error {
+	row := r.rows[r.index]
+	*dest[0].(*string) = row[0].(string)
+	*dest[1].(*time.Time) = row[1].(time.Time)
+	*dest[2].(*float64) = row[2].(float64)
+	return nil
+}
+
+func TestAuthenticator_LoadBudgetWindowSpend(t *testing.T) {
+	moscow, err := time.LoadLocation("Europe/Moscow")
+	require.NoError(t, err)
+	now := time.Date(2026, 3, 10, 22, 30, 0, 0, time.UTC) // 11 March, 01:30 Moscow
+	dayStart := time.Date(2026, 3, 10, 21, 0, 0, 0, time.UTC)
+	monthStart := time.Date(2026, 2, 28, 21, 0, 0, 0, time.UTC)
+	windows := func() []models.BudgetWindow {
+		return []models.BudgetWindow{
+			{BudgetLimit: models.BudgetLimit{Duration: "1d", MaxBudget: 10}},
+			{BudgetLimit: models.BudgetLimit{Duration: "1mo", MaxBudget: 100}},
+			{BudgetLimit: models.BudgetLimit{Duration: "2d", MaxBudget: 1}},
+		}
+	}
+	auth := NewAuthenticator(nil, nil, slog.Default()).WithBudgetCalendar(models.BudgetCalendar{Location: moscow})
+
+	t.Run("row on the current window", func(t *testing.T) {
+		conn := &budgetWindowConn{
+			rows: [][]any{{"1d", dayStart, 4.0}, {"1mo", monthStart, 40.0}},
+		}
+		info := &models.TokenInfo{Token: "tok", BudgetWindows: windows()}
+		require.NoError(t, auth.loadBudgetWindowSpend(context.Background(), conn, info, now))
+		assert.Equal(t, []models.BudgetWindow{
+			{BudgetLimit: models.BudgetLimit{Duration: "1d", MaxBudget: 10}, Start: dayStart, Spend: 4},
+			{BudgetLimit: models.BudgetLimit{Duration: "1mo", MaxBudget: 100}, Start: monthStart, Spend: 40},
+			{BudgetLimit: models.BudgetLimit{Duration: "2d", MaxBudget: 1}},
+		}, info.BudgetWindows)
+		assert.Equal(t, 1, conn.queries)
+	})
+
+	t.Run("earlier row starts at zero; missing row uses cumulative spend", func(t *testing.T) {
+		conn := &budgetWindowConn{
+			rows: [][]any{{"1d", dayStart.AddDate(0, 0, -1), 9.0}},
+		}
+		info := &models.TokenInfo{Token: "tok", Spend: 2.5, BudgetWindows: windows()}
+		require.NoError(t, auth.loadBudgetWindowSpend(context.Background(), conn, info, now))
+		assert.Zero(t, info.BudgetWindows[0].Spend)
+		assert.Equal(t, 2.5, info.BudgetWindows[1].Spend)
+		assert.Equal(t, 1, conn.queries)
+	})
+
+	t.Run("enabled mechanism needs the window table", func(t *testing.T) {
+		conn := &budgetWindowConn{rowsErr: &pgconn.PgError{Code: "42P01"}}
+		info := &models.TokenInfo{Token: "tok", BudgetWindows: windows()}
+		assert.ErrorIs(t, auth.loadBudgetWindowSpend(context.Background(), conn, info, now), models.ErrBudgetWindowUnsupported)
+	})
+
+	t.Run("other database errors fail the lookup", func(t *testing.T) {
+		conn := &budgetWindowConn{rowsErr: &pgconn.PgError{Code: "57P01"}}
+		info := &models.TokenInfo{Token: "tok", BudgetWindows: windows()}
+		assert.Error(t, auth.loadBudgetWindowSpend(context.Background(), conn, info, now))
+	})
+
+	t.Run("a key without windows reads nothing", func(t *testing.T) {
+		conn := &budgetWindowConn{rowsErr: fmt.Errorf("must not be called")}
+		require.NoError(t, auth.loadBudgetWindowSpend(context.Background(), conn, &models.TokenInfo{Token: "tok"}, now))
+		assert.Zero(t, conn.queries)
+	})
+}
+
+func TestAuthenticator_BudgetWindows(t *testing.T) {
+	auth := NewAuthenticator(nil, nil, slog.Default())
+	assert.Nil(t, auth.budgetWindows(nil, "hash"))
+	assert.Nil(t, auth.budgetWindows([]byte(`[]`), "hash"))
+	assert.Equal(t, []models.BudgetWindow{{BudgetLimit: models.BudgetLimit{Duration: "7d", MaxBudget: 5}}},
+		auth.budgetWindows([]byte(`[{"budget_duration":"7d","max_budget":5}]`), "hash"))
+	assert.Equal(t, []models.BudgetWindow{{}}, auth.budgetWindows([]byte(`[{"budget_duration":"7d"}]`), "hash"),
+		"an unreadable budget_limits refuses the key")
 }

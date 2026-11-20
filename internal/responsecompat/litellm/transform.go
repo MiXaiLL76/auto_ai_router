@@ -337,35 +337,49 @@ func hasMeaningfulError(value any) bool {
 	}
 }
 
+// errorStatus maps a provider's error value to the HTTP status the client
+// should see.
+//
+// It delegates to upstreamerror.ExtractErrorSignals and
+// ClassifyProviderErrorSignals -- the same two functions the native (non-compat)
+// path's own classification uses (statusCodeFromProviderBodyError /
+// statusCodeFromProviderStreamError). The compatibility layer used to
+// re-implement this independently: a narrower content-policy-only check (see
+// git history) with no rate_limit/timeout/overloaded/server_error keyword
+// handling and a 422 default instead of a 502, so the same provider body
+// could classify differently depending on which path it took. One
+// implementation, shared, cannot drift from itself.
+//
+// value is not necessarily a map: a provider may answer {"error":"boom"} or
+// {"error":400} too, which ExtractErrorSignals also reads. Re-marshaling it
+// to JSON is the one conversion needed to hand it to ExtractErrorSignals,
+// which the proxy's own callers reach more directly (they already hold
+// json.RawMessage).
 func errorStatus(value any) int {
-	if body, ok := value.(map[string]any); ok {
-		if code, ok := body["code"].(float64); ok && code >= 400 && code <= 599 {
-			return int(code)
-		}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return http.StatusUnprocessableEntity
 	}
-	return http.StatusUnprocessableEntity
+	signals, ok := upstreamerror.ExtractErrorSignals(raw)
+	if !ok {
+		return http.StatusUnprocessableEntity
+	}
+	return upstreamerror.ClassifyProviderErrorSignals(signals)
 }
 
-// normalizeError builds the litellm-compatible error body for a non-2xx
-// response. Status 400 is run through the same signal-based classifier as
-// native mode's maskedUpstreamErrorBody (see upstreamerror.ClassifyBadRequest)
-// to surface which parameter was rejected — this only ever extracts a short,
-// pre-vetted message from a small fixed set plus a narrow field/param name,
-// never the raw provider message text, so it's safe to run on a body that
-// hasn't been trusted yet (see TestTransformError: raw provider bodies with
-// embedded credential names or internal URLs must never reach the client
-// verbatim, for 429 or otherwise). Other statuses keep their fixed generic
-// message, matching native mode exactly.
+// normalizeError builds the LiteLLM-compatible error body for a non-2xx
+// response. Upstream diagnostics use the same classifier as native mode.
 func normalizeError(status int, body []byte) []byte {
 	message := "Request failed"
 	code := fmt.Sprintf("%d", status)
 	var param *string
 	switch status {
-	case http.StatusBadRequest:
-		classified := upstreamerror.ClassifyBadRequest(body)
-		message = classified.Message
-		code = classified.Code
-		param = classified.Param
+	case http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound:
+		if classified, ok := upstreamerror.ClassifyStatus(status, body); ok {
+			message = classified.Message
+			code = classified.Code
+			param = classified.Param
+		}
 	case http.StatusTooManyRequests:
 		message = "Rate limit exceeded"
 	case http.StatusRequestTimeout, http.StatusGatewayTimeout:

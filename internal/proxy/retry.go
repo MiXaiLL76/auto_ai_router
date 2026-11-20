@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/scope"
+	"github.com/mixaill76/auto_ai_router/internal/upstreamerror"
 )
 
 // RetryReason describes why a request is being retried
@@ -21,6 +23,7 @@ const (
 	RetryReasonAuthErr    RetryReason = "auth_error"
 	RetryReasonNetErr     RetryReason = "network_error"
 	RetryReasonPaymentErr RetryReason = "payment_error"
+	RetryReasonEmpty      RetryReason = "empty_stream"
 )
 
 // TriedCredentialsKey is the context key for tracking attempted credentials
@@ -44,6 +47,16 @@ type retryPolicy struct {
 	credentialOverrides map[string]map[int]struct{}
 	nonRetryableMarkers [][]byte
 	badRequestMarkers   [][]byte
+	// credentialScopedMarkers are checked BEFORE nonRetryableMarkers: a
+	// provider signal here reads as a content-policy refusal in plain
+	// English (so it would otherwise match a content-policy marker) but is
+	// actually about the credential/session that served the request, not
+	// the request itself -- a different credential answers the same request
+	// fine. Not configurable: unlike the content-policy/bad-request marker
+	// lists, which an operator may reasonably want to extend, this list only
+	// exists to keep a wording collision from silently flipping a
+	// credential-scoped failure into a non-retryable one.
+	credentialScopedMarkers [][]byte
 }
 
 // defaultRetryPolicy is the built-in policy, used when a Proxy has none configured.
@@ -52,11 +65,12 @@ var defaultRetryPolicy = newRetryPolicy(config.DefaultRetryConfig())
 func newRetryPolicy(cfg config.RetryConfig) *retryPolicy {
 	cfg = cfg.WithDefaults()
 	rp := &retryPolicy{
-		statusCodes:         statusCodeSet(cfg.StatusCodes),
-		providerOverrides:   make(map[config.ProviderType]map[int]struct{}, len(cfg.ProviderOverrides)),
-		credentialOverrides: make(map[string]map[int]struct{}, len(cfg.CredentialOverrides)),
-		nonRetryableMarkers: markerBytes(cfg.NonRetryableMarkers),
-		badRequestMarkers:   markerBytes(cfg.BadRequestMarkers),
+		statusCodes:             statusCodeSet(cfg.StatusCodes),
+		providerOverrides:       make(map[config.ProviderType]map[int]struct{}, len(cfg.ProviderOverrides)),
+		credentialOverrides:     make(map[string]map[int]struct{}, len(cfg.CredentialOverrides)),
+		nonRetryableMarkers:     markerBytes(cfg.NonRetryableMarkers),
+		badRequestMarkers:       markerBytes(cfg.BadRequestMarkers),
+		credentialScopedMarkers: markerBytes(upstreamerror.CredentialScopedMarkers),
 	}
 	for providerType, override := range cfg.ProviderOverrides {
 		rp.providerOverrides[providerType] = statusCodeSet(override.StatusCodes)
@@ -109,6 +123,16 @@ func (rp *retryPolicy) shouldRetry(cred *config.CredentialConfig, statusCode int
 	}
 	bodyLower := bytes.ToLower(respBody)
 
+	// Checked BEFORE the content-policy markers: this credential's own
+	// session got blocked, not the request -- production carries e.g.
+	// "This session is blocked by content policy" for exactly this signal,
+	// which would otherwise match the "content policy" marker below and
+	// wrongly treat a credential-scoped block (every OTHER credential still
+	// answers fine) as if it were a content-scoped refusal (every credential
+	// would refuse identically).
+	if containsAnyMarker(bodyLower, rp.credentialScopedMarkers) {
+		return true, retryReasonForStatus(statusCode)
+	}
 	// The provider refused the content itself; every other credential would too.
 	if containsAnyMarker(bodyLower, rp.nonRetryableMarkers) {
 		return false, ""
@@ -237,7 +261,15 @@ func (p *Proxy) TryFallbackProxy(
 		maxAttempts = defaultMaxFallbackAttempts
 	}
 
+	// System One never streams, so no streaming entry path armed the prompt
+	// estimate that systemOneUsage bills a reply without usage on; in
+	// writeFallbackResponse it has no request body of its own.
+	if logCtx != nil && logCtx.IsSystemOne {
+		p.setPromptTokensEstimate(logCtx, body, modelID)
+	}
+
 	exitReason := "no_fallback_available"
+	attemptReason := originalReason
 	var lastProxyResp *ProxyResponse
 	var lastFallbackCred *config.CredentialConfig
 
@@ -319,8 +351,10 @@ func (p *Proxy) TryFallbackProxy(
 		// Add jitter (0-50ms) to prevent thundering herd when multiple requests fail simultaneously
 		jitter := time.Duration(rand.IntN(50)) * time.Millisecond
 		time.Sleep(jitter)
+		httputil.AttemptsFrom(r.Context()).Next(httputil.AttemptFallback, string(attemptReason))
 		proxyResp, fwdErr := p.forwardToProxy(w, r, modelID, fallbackCred, body, start, logCtx)
 		if fwdErr != nil {
+			attemptReason = RetryReasonNetErr
 			// Mid-chain failure — the next fallback is tried; the final outcome
 			// is logged at ERROR when the response is written to the client.
 			p.logger.WarnContext(r.Context(), "Fallback proxy request failed, trying next fallback",
@@ -346,10 +380,11 @@ func (p *Proxy) TryFallbackProxy(
 			return p.writeFallbackResponse(w, r, proxyResp, fallbackCred, modelID, originalCredName, logCtx, start)
 		}
 
-		shouldRetry, _ := p.shouldRetry(fallbackCred, proxyResp.StatusCode, proxyResp.Body)
+		shouldRetry, retryReason := p.shouldRetry(fallbackCred, proxyResp.StatusCode, proxyResp.Body)
 		if !shouldRetry {
 			return p.writeFallbackResponse(w, r, proxyResp, fallbackCred, modelID, originalCredName, logCtx, start)
 		}
+		attemptReason = retryReason
 
 		p.logger.WarnContext(r.Context(), "Fallback credential returned retryable error, trying next fallback",
 			"fallback_credential", fallbackCred.Name,
@@ -378,6 +413,11 @@ func (p *Proxy) writeFallbackResponse(
 	logCtx *RequestLogContext,
 	start time.Time,
 ) (bool, string) {
+	// Validate native Messages before final status metrics and usage accounting.
+	// writeProxyResponse also guards this boundary when called directly.
+	if !proxyResp.IsStreaming && r.URL.Path == "/v1/messages" {
+		sanitizeProxyRefusalResponse(proxyResp, logCtx)
+	}
 	if logCtx != nil {
 		logCtx.Credential = fallbackCred
 		logCtx.TargetURL = fallbackCred.BaseURL
@@ -497,6 +537,7 @@ func (p *Proxy) writeFallbackResponse(
 		// decode, not derived from each other — see
 		// converter.ExtractTotalTokensAndUsageWithOptions's doc comment.
 		tokens, usage := extractOpenAITokensAndUsage(proxyResp.Body, usageOptions)
+		tokens, usage = p.systemOneUsage(r.Context(), logCtx, fallbackCred.Name, proxyResp.StatusCode, nil, modelID, tokens, usage)
 		if logCtx != nil {
 			logCtx.TokenUsage = usage
 			if logCtx.IsImageGeneration && proxyResp.StatusCode < http.StatusBadRequest {
@@ -542,8 +583,8 @@ func (p *Proxy) writeFallbackResponse(
 	}
 	if logCtx != nil && logCtx.Status == "success" {
 		logCtx.RequestCompleted = true
-		p.setSessionBinding(logCtx.SessionID, modelID, fallbackCred.Name)
-		p.logger.DebugContext(r.Context(), "Session-sticky routing: updated session after failover",
+		p.bindSessionAfterSuccess(logCtx, modelID, fallbackCred.Name)
+		p.logger.DebugContext(r.Context(), "Session-sticky routing: failover served the session",
 			"session_id", logCtx.SessionID,
 			"old_credential", originalCredName,
 			"new_credential", fallbackCred.Name,

@@ -1,6 +1,7 @@
 package vertex
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
@@ -113,6 +114,146 @@ func TestBuildGenerationConfig_DefaultThinkingDisable(t *testing.T) {
 		assert.True(t, cfg.ThinkingConfig.IncludeThoughts)
 		assert.Equal(t, genai.ThinkingLevelHigh, cfg.ThinkingConfig.ThinkingLevel)
 	})
+}
+
+// TestBuildGenerationConfig_ThinkingSourcePrecedence: a top-level field (where the
+// OpenAI SDKs put extra_body keys) wins over a literal extra_body object.
+func TestBuildGenerationConfig_ThinkingSourcePrecedence(t *testing.T) {
+	for _, req := range []*openai.OpenAIRequest{
+		{ThinkingLevel: "high", ExtraBody: map[string]interface{}{"thinking_level": "minimal"}},
+		{
+			ThinkingConfig: map[string]interface{}{"thinking_level": "high"},
+			ExtraBody:      map[string]interface{}{"thinking_config": map[string]interface{}{"thinking_level": "minimal"}},
+		},
+	} {
+		cfg := buildGenerationConfig(req, "gemini-3-flash-preview")
+		require.NotNil(t, cfg.ThinkingConfig)
+		assert.Equal(t, genai.ThinkingLevelHigh, cfg.ThinkingConfig.ThinkingLevel)
+	}
+}
+
+// TestBuildGenerationConfig_ThinkingRulesShared pins that every thinking source
+// (reasoning_effort, the shorthands, a native thinking_config, top level or
+// extra_body) resolves by the same rules on every non-profiled Gemini model:
+// level names in any case or Gemini's enum spelling, xhigh/max as high, a budget
+// on a level-based model as the level of the same depth and vice versa, and never
+// a zero budget gemini-2.5-pro would reject.
+func TestBuildGenerationConfig_ThinkingRulesShared(t *testing.T) {
+	budget := func(v int32) *int32 { return &v }
+	tests := []struct {
+		name   string
+		model  string
+		body   string
+		level  genai.ThinkingLevel
+		budget *int32
+	}{
+		{name: "2.5-pro unknown effort is dynamic, capped", model: "gemini-2.5-pro",
+			body: `{"max_tokens":1000,"extra_body":{"reasoning_effort":"auto"}}`, budget: budget(500)},
+		{name: "2.5-pro xhigh is high", model: "gemini-2.5-pro",
+			body: `{"extra_body":{"reasoning_effort":"xhigh"}}`, budget: budget(24576)},
+		{name: "2.5-flash extra_body budget", model: "gemini-2.5-flash",
+			body: `{"extra_body":{"thinking_budget":2048}}`, budget: budget(2048)},
+		{name: "2.5-flash level becomes its budget", model: "gemini-2.5-flash",
+			body: `{"extra_body":{"thinking_level":"medium"}}`, budget: budget(8192)},
+		{name: "2.5-pro level none keeps thinking on", model: "gemini-2.5-pro",
+			body: `{"thinking_level":"none"}`, budget: budget(-1)},
+		{name: "2.5 image model gets no budget from a level", model: "gemini-2.5-flash-image",
+			body: `{"extra_body":{"thinking_level":"high"}}`},
+		{name: "3-pro upper-case level", model: "gemini-3-pro-preview",
+			body: `{"thinking_level":"HIGH"}`, level: genai.ThinkingLevelHigh},
+		{name: "3-pro Gemini enum spelling in thinkingConfig", model: "gemini-3-pro-preview",
+			body: `{"thinkingConfig":{"thinkingLevel":"THINKING_LEVEL_HIGH"}}`, level: genai.ThinkingLevelHigh},
+		{name: "3-pro xhigh effort", model: "gemini-3-pro-preview",
+			body: `{"reasoning_effort":"xhigh"}`, level: genai.ThinkingLevelHigh},
+		{name: "3-pro budget becomes its level", model: "gemini-3-pro-preview",
+			body: `{"extra_body":{"thinking_budget":24576}}`, level: genai.ThinkingLevelHigh},
+		{name: "3-flash budget becomes its level", model: "gemini-3-flash-preview",
+			body: `{"thinking_config":{"thinkingBudget":6000}}`, level: genai.ThinkingLevelMedium},
+		{name: "3-flash dynamic budget leaves the level to the model", model: "gemini-3-flash-preview",
+			body: `{"thinking_budget":-1}`},
+		{name: "3-flash level none is its floor, as reasoning_effort none", model: "gemini-3-flash-preview",
+			body: `{"thinking_level":"none"}`, level: genai.ThinkingLevelMinimal},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var req openai.OpenAIRequest
+			require.NoError(t, json.Unmarshal([]byte(tt.body), &req))
+			cfg := buildGenerationConfig(&req, tt.model)
+			require.NotNil(t, cfg)
+			require.NotNil(t, cfg.ThinkingConfig)
+			assert.Equal(t, tt.level, cfg.ThinkingConfig.ThinkingLevel)
+			assert.Equal(t, tt.budget, cfg.ThinkingConfig.ThinkingBudget)
+		})
+	}
+}
+
+// TestBuildGenerationConfig_UnusableThinkingConfigKeepsDefault pins that a thinking
+// source which sets nothing (an empty object, a budget that is not a number) counts
+// as absent: the next source or the default decides, and a 2.5 model is not left
+// thinking on its own under an empty ThinkingConfig.
+func TestBuildGenerationConfig_UnusableThinkingConfigKeepsDefault(t *testing.T) {
+	budget := func(v int32) *int32 { return &v }
+	tests := []struct {
+		name            string
+		model           string
+		body            string
+		level           genai.ThinkingLevel
+		budget          *int32
+		includeThoughts bool
+	}{
+		{name: "string extra_body.thinking_budget", model: "gemini-2.5-flash",
+			body: `{"extra_body":{"thinking_budget":"1024"}}`, budget: budget(0)},
+		{name: "string top-level thinking_budget", model: "gemini-2.5-flash",
+			body: `{"thinking_budget":"1024"}`, budget: budget(0)},
+		{name: "empty thinking_config", model: "gemini-2.5-flash",
+			body: `{"thinking_config":{}}`, budget: budget(0)},
+		{name: "empty extra_body thinkingConfig", model: "gemini-2.5-flash",
+			body: `{"extra_body":{"thinkingConfig":{}}}`, budget: budget(0)},
+		{name: "string budget inside thinking_config", model: "gemini-3-flash-preview",
+			body: `{"thinking_config":{"thinking_budget":"high"}}`, level: genai.ThinkingLevelMinimal},
+		{name: "empty config falls through to reasoning_effort", model: "gemini-2.5-flash",
+			body: `{"thinking_config":{},"reasoning_effort":"medium"}`, budget: budget(8192)},
+		{name: "empty top-level config, usable one in extra_body", model: "gemini-2.5-flash",
+			body: `{"thinking_config":{},"extra_body":{"thinking_config":{"thinking_budget":2048}}}`, budget: budget(2048)},
+		// include_thoughts alone asks for thinking at the model's own depth.
+		{name: "include_thoughts alone", model: "gemini-2.5-flash",
+			body: `{"thinking_config":{"include_thoughts":true}}`, includeThoughts: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var req openai.OpenAIRequest
+			require.NoError(t, json.Unmarshal([]byte(tt.body), &req))
+			cfg := buildGenerationConfig(&req, tt.model)
+			require.NotNil(t, cfg)
+			require.NotNil(t, cfg.ThinkingConfig)
+			assert.Equal(t, tt.level, cfg.ThinkingConfig.ThinkingLevel)
+			assert.Equal(t, tt.budget, cfg.ThinkingConfig.ThinkingBudget)
+			assert.Equal(t, tt.includeThoughts, cfg.ThinkingConfig.IncludeThoughts)
+		})
+	}
+}
+
+// TestReasoningNoneOnModelWithoutThinking pins that disabling thinking on a model
+// that has none (Gemini 2.0) sends no ThinkingConfig on every source, where a zero
+// budget could be rejected, the same as the Responses API route.
+func TestReasoningNoneOnModelWithoutThinking(t *testing.T) {
+	for _, body := range []string{
+		`{"reasoning_effort":"none"}`,
+		`{"reasoning_effort":"disable"}`,
+		`{"extra_body":{"reasoning_effort":"none"}}`,
+		`{"thinking":{"type":"disabled"}}`,
+		`{"max_tokens":100}`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			var req openai.OpenAIRequest
+			require.NoError(t, json.Unmarshal([]byte(body), &req))
+			cfg := buildGenerationConfig(&req, "gemini-2.0-flash")
+			require.NotNil(t, cfg)
+			assert.Nil(t, cfg.ThinkingConfig)
+		})
+	}
+	assert.Nil(t, MapReasoningEffortToThinkingConfig("none", "gemini-2.0-flash"))
+	assert.Nil(t, DefaultThinkingConfig("gemini-2.0-flash"))
 }
 
 func TestApplyExtraBodyToConfig(t *testing.T) {

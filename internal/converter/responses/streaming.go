@@ -68,6 +68,9 @@ type streamAccumulator struct {
 	messageStarted bool
 	// Stable message item ID (generated once, reused across all events)
 	messageItemID string
+	// Refusals have their own item so they never reuse an output_text part.
+	refusalItemID      string
+	refusalOutputIndex int
 	// Whether completion events have been emitted (via [DONE])
 	completed bool
 	// Monotonic sequence counter for SSE events (required by OpenAI SDK)
@@ -80,6 +83,7 @@ type streamAccumulator struct {
 	storeFlag          bool
 	previousResponseID string
 	requestMetadata    map[string]string
+	requestText        interface{}
 }
 
 // allocOutputIndex reserves the output_index for an output item being opened.
@@ -299,6 +303,7 @@ func transformChatStreamToResponsesInner(
 		acc.storeFlag = meta.Store
 		acc.previousResponseID = meta.PreviousResponseID
 		acc.requestMetadata = meta.Metadata
+		acc.requestText = meta.Text
 	}
 
 	callOnComplete := func() {
@@ -485,16 +490,16 @@ func transformChatStreamToResponsesInner(
 			if err := closeReasoningItem(writer, acc); err != nil {
 				return err
 			}
-			if !acc.messageStarted {
-				if err := emitMessageStartEvents(writer, acc); err != nil {
+			if acc.refusalItemID == "" {
+				if err := emitRefusalStartEvents(writer, acc); err != nil {
 					return err
 				}
 			}
 			acc.fullRefusal += choice.Delta.Refusal
 			refusalEvent := map[string]interface{}{
 				"type":          "response.refusal.delta",
-				"item_id":       acc.messageItemID,
-				"output_index":  acc.messageOutputIndex,
+				"item_id":       acc.refusalItemID,
+				"output_index":  acc.refusalOutputIndex,
 				"content_index": 0,
 				"delta":         choice.Delta.Refusal,
 			}
@@ -647,6 +652,9 @@ func completedOutputItems(acc *streamAccumulator) []OutputItem {
 			Arguments: tc.arguments,
 		}})
 	}
+	if acc.fullRefusal != "" {
+		items = append(items, indexedItem{acc.refusalOutputIndex, completedRefusalItem(acc)})
+	}
 
 	slices.SortStableFunc(items, func(a, b indexedItem) int {
 		return cmp.Compare(a.outputIndex, b.outputIndex)
@@ -721,6 +729,7 @@ func buildTypedCompletedResponse(acc *streamAccumulator) *Response {
 		PreviousResponseID: prevRespID,
 		Store:              acc.storeFlag,
 		ToolChoice:         "auto",
+		Text:               acc.requestText,
 	})
 }
 
@@ -869,15 +878,21 @@ func emitCompletionEvents(w io.Writer, acc *streamAccumulator) error {
 	}
 
 	// Close refusal part if any refusal text was accumulated
-	if acc.messageStarted && acc.fullRefusal != "" {
-		refusalDoneEvent := map[string]interface{}{
-			"type":          "response.refusal.done",
-			"item_id":       acc.messageItemID,
-			"output_index":  msgOutputIndex,
-			"content_index": 0,
-			"refusal":       acc.fullRefusal,
-		}
+	if acc.fullRefusal != "" {
+		refusalDoneEvent := BuildRefusalDoneEvent(acc.refusalItemID, acc.refusalOutputIndex, 0, acc.fullRefusal)
 		if err := writeSSEWithSeq(w, "response.refusal.done", refusalDoneEvent, acc); err != nil {
+			return err
+		}
+		item := completedRefusalItem(acc)
+		if err := writeSSEWithSeq(w, "response.content_part.done", map[string]interface{}{
+			"type": "response.content_part.done", "item_id": acc.refusalItemID,
+			"output_index": acc.refusalOutputIndex, "content_index": 0, "part": item.Content[0],
+		}, acc); err != nil {
+			return err
+		}
+		if err := writeSSEWithSeq(w, "response.output_item.done", map[string]interface{}{
+			"type": "response.output_item.done", "output_index": acc.refusalOutputIndex, "item": item,
+		}, acc); err != nil {
 			return err
 		}
 	}
@@ -961,6 +976,7 @@ func buildInProgressResponse(acc *streamAccumulator) map[string]interface{} {
 		PreviousResponseID: prevRespID,
 		Store:              acc.storeFlag,
 		ToolChoice:         "auto",
+		Text:               acc.requestText,
 	}))
 }
 
@@ -1029,6 +1045,7 @@ func buildCompletedResponse(acc *streamAccumulator) map[string]interface{} {
 		PreviousResponseID: prevRespID,
 		Store:              acc.storeFlag,
 		ToolChoice:         "auto",
+		Text:               acc.requestText,
 	}))
 }
 

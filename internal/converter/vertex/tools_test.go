@@ -3,8 +3,10 @@ package vertex
 import (
 	"testing"
 
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/genai"
 )
 
 // TestConvertToolCallsToGenaiParts_NestedFormat verifies conversion of
@@ -21,7 +23,7 @@ func TestConvertToolCallsToGenaiParts_NestedFormat(t *testing.T) {
 		},
 	}
 
-	parts := convertToolCallsToGenaiParts(toolCalls)
+	parts := convertToolCallsToGenaiParts(toolCalls, false)
 
 	if len(parts) != 1 {
 		t.Fatalf("expected 1 part, got %d", len(parts))
@@ -50,7 +52,7 @@ func TestConvertToolCallsToGenaiParts_FlatFormat(t *testing.T) {
 		},
 	}
 
-	parts := convertToolCallsToGenaiParts(toolCalls)
+	parts := convertToolCallsToGenaiParts(toolCalls, false)
 
 	if len(parts) != 1 {
 		t.Fatalf("expected 1 part, got %d", len(parts))
@@ -86,7 +88,7 @@ func TestConvertToolCallsToGenaiParts_FlatOverridesNested(t *testing.T) {
 		},
 	}
 
-	parts := convertToolCallsToGenaiParts(toolCalls)
+	parts := convertToolCallsToGenaiParts(toolCalls, false)
 
 	if len(parts) != 1 {
 		t.Fatalf("expected 1 part, got %d", len(parts))
@@ -121,7 +123,7 @@ func TestConvertToolCallsToGenaiParts_EmptyFuncName(t *testing.T) {
 		},
 	}
 
-	parts := convertToolCallsToGenaiParts(toolCalls)
+	parts := convertToolCallsToGenaiParts(toolCalls, false)
 
 	if len(parts) != 0 {
 		t.Fatalf("expected 0 parts for empty funcName, got %d", len(parts))
@@ -130,12 +132,12 @@ func TestConvertToolCallsToGenaiParts_EmptyFuncName(t *testing.T) {
 
 // TestConvertToolCallsToGenaiParts_EmptySlice verifies nil return for empty input.
 func TestConvertToolCallsToGenaiParts_EmptySlice(t *testing.T) {
-	parts := convertToolCallsToGenaiParts(nil)
+	parts := convertToolCallsToGenaiParts(nil, false)
 	if parts != nil {
 		t.Fatalf("expected nil for nil input, got %v", parts)
 	}
 
-	parts = convertToolCallsToGenaiParts([]interface{}{})
+	parts = convertToolCallsToGenaiParts([]interface{}{}, false)
 	if parts != nil {
 		t.Fatalf("expected nil for empty input, got %v", parts)
 	}
@@ -151,7 +153,7 @@ func TestConvertToolCallsToGenaiParts_InvalidArguments(t *testing.T) {
 		},
 	}
 
-	parts := convertToolCallsToGenaiParts(toolCalls)
+	parts := convertToolCallsToGenaiParts(toolCalls, false)
 
 	if len(parts) != 1 {
 		t.Fatalf("expected 1 part, got %d", len(parts))
@@ -181,7 +183,7 @@ func TestConvertToolCallsToGenaiParts_ThoughtSignatureFallback(t *testing.T) {
 		},
 	}
 
-	parts := convertToolCallsToGenaiParts(toolCalls)
+	parts := convertToolCallsToGenaiParts(toolCalls, false)
 
 	if len(parts) != 1 {
 		t.Fatalf("expected 1 part, got %d", len(parts))
@@ -217,7 +219,8 @@ func TestConvertOpenAIToolsToVertex_FunctionGrouping(t *testing.T) {
 		},
 	}
 
-	result := convertOpenAIToolsToVertex(openAITools)
+	result, err := convertOpenAIToolsToVertex(openAITools)
+	require.NoError(t, err)
 
 	assert.True(t, result.HasFunctionDecls, "should have function declarations")
 	assert.False(t, result.HasBuiltinTools, "should not have builtin tools")
@@ -244,7 +247,8 @@ func TestConvertOpenAIToolsToVertex_BuiltinToolsOnly(t *testing.T) {
 		map[string]interface{}{"type": "web_search"},
 	}
 
-	result := convertOpenAIToolsToVertex(openAITools)
+	result, err := convertOpenAIToolsToVertex(openAITools)
+	require.NoError(t, err)
 
 	assert.False(t, result.HasFunctionDecls, "should not have function declarations")
 	assert.True(t, result.HasBuiltinTools, "should have builtin tools")
@@ -257,7 +261,8 @@ func TestConvertOpenAIToolsToVertex_URLContext(t *testing.T) {
 		map[string]interface{}{"type": "url_context"},
 	}
 
-	result := convertOpenAIToolsToVertex(openAITools)
+	result, err := convertOpenAIToolsToVertex(openAITools)
+	require.NoError(t, err)
 
 	assert.False(t, result.HasFunctionDecls, "should not have function declarations")
 	assert.True(t, result.HasBuiltinTools, "url_context is a builtin tool")
@@ -283,7 +288,8 @@ func TestConvertOpenAIToolsToVertex_MixedToolsDropsFunctions(t *testing.T) {
 		},
 	}
 
-	result := convertOpenAIToolsToVertex(openAITools)
+	result, err := convertOpenAIToolsToVertex(openAITools)
+	require.NoError(t, err)
 
 	assert.True(t, result.HasFunctionDecls, "should detect function declarations")
 	assert.True(t, result.HasBuiltinTools, "should detect builtin tools")
@@ -435,4 +441,49 @@ func TestConvertGoogleSearchRetrieval(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestConvertToolCallsToGenaiParts_ThoughtSignatureFromID covers clients that drop
+// provider_specific_fields but echo the tool call id (OpenAI Agents SDK): the
+// signature embedded into the id by the response side must be restored (#266).
+func TestConvertToolCallsToGenaiParts_ThoughtSignatureFromID(t *testing.T) {
+	signature := []byte("real-signature")
+	resp := convertGenaiToOpenAIFunctionCall(&genai.FunctionCall{Name: "get_weather"}, signature, false)
+
+	parts := convertToolCallsToGenaiParts([]interface{}{
+		map[string]interface{}{
+			"id":       resp.ID,
+			"type":     "function",
+			"function": map[string]interface{}{"name": "get_weather", "arguments": "{}"},
+		},
+	}, false)
+	require.Len(t, parts, 1)
+	assert.Equal(t, signature, parts[0].ThoughtSignature)
+}
+
+// TestConvertToolCallsToGenaiParts_ProviderFieldsWinOverID verifies the decode
+// priority: provider_specific_fields first, then the id suffix.
+func TestConvertToolCallsToGenaiParts_ProviderFieldsWinOverID(t *testing.T) {
+	parts := convertToolCallsToGenaiParts([]interface{}{
+		map[string]interface{}{
+			"id":       converterutil.EncodeToolCallIDWithSignature("call_1", []byte("from-id")),
+			"function": map[string]interface{}{"name": "get_weather", "arguments": "{}"},
+			"provider_specific_fields": map[string]interface{}{
+				"thought_signature": converterutil.EncodeBase64([]byte("from-fields")),
+			},
+		},
+	}, false)
+	require.Len(t, parts, 1)
+	assert.Equal(t, []byte("from-fields"), parts[0].ThoughtSignature)
+}
+
+func TestConvertVertexFunctionCallToStreamingOpenAI_EmbedsSignatureInID(t *testing.T) {
+	signature := []byte("stream-signature")
+	tc := convertVertexFunctionCallToStreamingOpenAI(&genai.FunctionCall{Name: "f"}, signature, 0, false)
+
+	_, decoded := converterutil.SplitToolCallIDSignature(tc.ID)
+	assert.Equal(t, signature, decoded)
+
+	tc = convertVertexFunctionCallToStreamingOpenAI(&genai.FunctionCall{Name: "f"}, nil, 0, false)
+	assert.NotContains(t, tc.ID, converterutil.ThoughtSignatureSeparator)
 }
