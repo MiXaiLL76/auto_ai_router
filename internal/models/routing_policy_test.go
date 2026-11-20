@@ -120,3 +120,16 @@ func BenchmarkRoutingPoolLookup(b *testing.B) {
 		})
 	}
 }
+
+func TestRoutingPoolOrganizationMappingCannotReuseOriginalMembership(t *testing.T) {
+	m := New(testhelpers.NewTestLogger(), 100, []config.ModelRPMConfig{
+		{Name: "public-model", Credential: "a", Pools: []string{"one"}},
+		{Name: "mapped-model", Credential: "b", Pools: []string{"two"}},
+	})
+	p := &RoutingPolicy{Models: []string{"public-model"}, Pools: []string{"one"}}
+	v, err := m.RestrictToModelPools(scope.PublicContext(), p, "public-model", "mapped-model")
+	require.NoError(t, err)
+	assert.True(t, v.HasCredentialRestriction(), "organization mapping retains the public model restriction")
+	assert.False(t, v.AllowsCredential("a"), "original model membership does not authorize the mapped model")
+	assert.False(t, v.AllowsCredential("b"), "the mapped deployment is outside the permitted pool")
+}
