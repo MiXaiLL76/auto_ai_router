@@ -521,6 +521,60 @@ func TestProxyRequest_PublishesBothBodiesVerbatim(t *testing.T) {
 	assert.Contains(t, stub.events[0].RequestBody, "[REDACTED]")
 }
 
+// TestProxyRequest_ForceStreamTerminalErrorPublishesMaskedBody reproduces the
+// production leak: force_stream_for_ttft sends a non-streaming request
+// upstream as "stream": true, and the provider (Alibaba DashScope's
+// compatible-mode, serving qwen/deepseek) answers 2xx but ends the stream
+// with a terminal "data_inspection_failed" error event instead of content.
+//
+// resolveCapturedProviderStreamError/markProxyProviderStreamError stamp
+// logCtx.ClientResponseBody with the provider's raw payload under the
+// assumption that those bytes were already relayed live to the client -- true
+// for a genuinely streaming client, false here: the response is still being
+// buffered for reassembly, so nothing has reached the client yet. Before this
+// fix, finishSimulatedNonStream published the spend/raw-body row via
+// finalizeStreamingLog BEFORE recomputing ClientResponseBody as the masked
+// body, so the raw provider text (and its internal completion id) reached
+// Kafka/ClickHouse verbatim even though the HTTP response to the client was
+// correctly masked.
+func TestProxyRequest_ForceStreamTerminalErrorPublishesMaskedBody(t *testing.T) {
+	terminalError := `data: {"error":{"code":"data_inspection_failed","param":null,"message":"Output data may contain inappropriate content.","type":"data_inspection_failed"},"id":"chatcmpl-0cb313ad-33cf-9e44-8446-957c0e7f2939"}` + "\n\n"
+	mockServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, terminalError+"data: [DONE]\n\n")
+	}))
+	defer mockServer.Close()
+
+	stub := &stubKafkaRawBodyManager{enabled: true}
+	prx := NewTestProxyBuilder().
+		WithSingleCredential("alibaba-main", config.ProviderTypeOpenAI, mockServer.URL, "upstream-key-1").
+		WithForceStreamForTTFT(true).
+		Build()
+	prx.rawBodyLog = stub
+	prx.kafkaLog = &stubKafkaManager{enabled: true}
+	setTestModelPrice(prx, "deepseek-v4.1-flash", &pricingmodels.ModelPrice{})
+
+	reqBody := `{"model":"deepseek-v4.1-flash","messages":[{"role":"user","content":"Hello"}],"stream":false}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+	require.Len(t, stub.events, 1)
+	// The client's HTTP response was always masked -- the regression is in
+	// what got published alongside it.
+	assert.NotContains(t, w.Body.String(), "data_inspection_failed")
+	assert.NotContains(t, stub.events[0].ClientResponseBody, "data_inspection_failed",
+		"the published ClientResponseBody must be the router's masked body, not the provider's raw terminal-stream-error payload")
+	assert.NotContains(t, stub.events[0].ClientResponseBody, "chatcmpl-0cb313ad-33cf-9e44-8446-957c0e7f2939",
+		"the provider's internal completion id must not leak into the published client-response body")
+	assert.JSONEq(t, w.Body.String(), stub.events[0].ClientResponseBody)
+}
+
 func TestProviderBodyCannotEscapeViaSpendErrorMessage(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
 	logCtx := testLogCtx(t)
