@@ -115,3 +115,30 @@ func TestRoutingProfileUpdatedBindingRechecksSticky(t *testing.T) {
 		assert.Zero(t, f.calls[i].Load())
 	}
 }
+
+func TestRoutingProfileRebindingMovesStickyOnlyInsideNewPool(t *testing.T) {
+	f := newRoutingProfileFixture(t)
+	registry, err := routermodels.LoadRoutingProfiles([]config.RoutingProfileConfig{
+		{ID: "pool-a", Rules: []config.RoutingRuleConfig{{Models: []string{"model-a"}, CredentialAllowlist: []string{"provider-a"}}}},
+		{ID: "pool-b", Rules: []config.RoutingRuleConfig{{Models: []string{"model-a"}, CredentialAllowlist: []string{"provider-b"}}}},
+	}, f.credentials, f.proxy.modelManager)
+	require.NoError(t, err)
+	f.proxy.routingProfiles = registry
+	body := `{"model":"model-a","messages":[],"user":"same-session"}`
+	w := f.request("restricted-key", "/v1/chat/completions", body)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Equal(t, int32(1), f.calls[0].Load())
+	// The next auth snapshot has a different valid profile. Cached model
+	// visibility and the old sticky binding must not preserve the old pool.
+	f.proxy.LiteLLMDB.(*organizationPolicyTestDB).tokens["restricted-key"].Metadata = map[string]interface{}{"air_routing_profiles": []string{"pool-b"}}
+	w = f.request("restricted-key", "/v1/chat/completions", body)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Equal(t, int32(1), f.calls[0].Load())
+	assert.Equal(t, int32(1), f.calls[1].Load())
+	assert.Zero(t, f.calls[2].Load())
+	assert.Zero(t, f.calls[3].Load())
+	// The same session label on an unrestricted key still uses its normal pool.
+	w = f.request("other-key", "/v1/chat/completions", body)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Equal(t, int32(1), f.calls[2].Load())
+}
