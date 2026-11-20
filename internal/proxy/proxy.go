@@ -2564,6 +2564,43 @@ dispatch:
 				"credential", cred.Name, "status", proxyResp.StatusCode)
 			streamCompleted := false
 
+			// A non-2xx response from a proxy-like credential is not a stream to
+			// relay -- every format-specific branch below (convertedMessages,
+			// passthroughResponses, convertedResp, and the generic writer they
+			// fall through to) is written for a 2xx body, and none of them masks
+			// an error: a production incident showed exactly this (a credential's
+			// raw 400 body -- its own nonstandard error shape -- reaching the
+			// client byte-for-byte because nothing here ever classified it, the
+			// same gap handlePassthroughResponsesStreaming had for the
+			// Codex-passthrough branch specifically, fixed separately). Read the
+			// body and classify it the same way the non-streaming path
+			// (statusCodeFromProviderBodyError + writeProxyResponse, above) does,
+			// instead of falling into any of the branches below.
+			if proxyResp.StatusCode >= http.StatusBadRequest {
+				body, readErr := p.readLimitedResponseBody(proxyResp.StreamBody)
+				_ = proxyResp.StreamBody.Close()
+				if readErr != nil {
+					body = nil
+				}
+				masked := maskedUpstreamErrorBody(proxyResp.StatusCode, logCtx.RequestID, body)
+				p.logUpstreamError(r.Context(), "Proxy request completed with error status (streaming)", proxyResp.StatusCode, cred, modelID, body,
+					"url", security.RedactURLForLog(cred.BaseURL),
+					"request_id", logCtx.RequestID)
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Content-Length", fmt.Sprintf("%d", len(masked)))
+				dropRepresentationIntegrityHeaders(w.Header())
+				w.WriteHeader(proxyResp.StatusCode)
+				_, _ = w.Write(masked)
+				logCtx.Status = "failure"
+				logCtx.HTTPStatus = proxyResp.StatusCode
+				logCtx.ErrorMsg = classifiedErrorMessage(proxyResp.StatusCode, body)
+				logCtx.ErrorBodyRaw = extractErrorBodyRaw(body)
+				logCtx.ClientResponseBody = extractErrorBodyRaw(masked)
+				logCtx.TargetURL = cred.BaseURL
+				p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, proxyResp.StatusCode, time.Since(start))
+				return
+			}
+
 			if prepared.convertedMessages && proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
 				defer func() {
 					if closeErr := proxyResp.StreamBody.Close(); closeErr != nil {
@@ -4151,14 +4188,21 @@ dispatch:
 							logCtx.TokenUsage = &converter.TokenUsage{}
 						}
 						applyDeepSeekToolUsageTo(logCtx.TokenUsage, loopUsage)
+						logCtx.DeepSeekToolUsage = loopUsage
 					}
-					err := p.handleProviderStreaming(w, resp, cred, realModelID, modelID, logCtx)
-					if err != nil {
-						p.logStreamHandlerError(r.Context(), "Failed to handle provider streaming response", err,
-							"credential", cred.Name, "provider", cred.Type, "model", modelID, "request_id", logCtx.RequestID)
-					} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-						streamCompleted = true
-					}
+					// The loop read the provider's stream whole (and closed it)
+					// before it ran the tool, so the original response cannot
+					// be relayed: reading it would give the client a 200 with
+					// an empty stream and the log an "invalid Read on closed
+					// Body" instead of the real failure.
+					//
+					// The client gets the failure instead.
+					logCtx.Status = "failure"
+					logCtx.HTTPStatus = http.StatusBadGateway
+					logCtx.ErrorMsg = "the router-run tool loop failed"
+					logCtx.StreamOutcome = "stream_error"
+					WriteErrorBadGateway(w, "the upstream failed to answer after the router ran a tool")
+					streamCompleted = true
 				default:
 					if streamLoopRan {
 						// The loop buffered the stream itself, so the usual
@@ -4167,10 +4211,14 @@ dispatch:
 						// here -- and the streaming log reads its figures from
 						// the last chunk, so the chunk carries the loop's
 						// summed usage rather than the last step's.
-						if logCtx.TokenUsage == nil {
-							logCtx.TokenUsage = &converter.TokenUsage{}
-						}
-						applyDeepSeekToolUsageTo(logCtx.TokenUsage, loopUsage)
+						//
+						// The loop's usage is handed to the log rather than
+						// applied here: the log reads the chunk's own usage
+						// afterwards, and only then does the loop's figure --
+						// the sum of every step's -- replace it. Applied
+						// before, the log's own reading would overwrite the
+						// cached and reasoning tokens with the last step's.
+						logCtx.DeepSeekToolUsage = loopUsage
 						p.finalizeStreamingLog(logCtx, loopTotalTokens,
 							withDeepSeekToolUsage(loopLastChunk, loopUsage),
 							"openai", resp.StatusCode, false)

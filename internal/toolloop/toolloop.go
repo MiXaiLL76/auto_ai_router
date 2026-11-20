@@ -17,6 +17,14 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 )
 
+// ErrNothingToRun is returned when a step's tool calls are none of the
+// router's own.
+//
+// The step cannot go on: there is no tool to run and nothing to add to the
+// conversation, so the request would be sent again unchanged -- and the
+// client would pay for it twice.
+var ErrNothingToRun = errors.New("toolloop: no tool of the router's to run")
+
 // ErrAborted ends the cycle when the client went away.
 //
 // It is one sentinel for every provider, so the dispatch in the router
@@ -170,20 +178,36 @@ func (cycle *Cycle) NextBody(ctx context.Context, responseBody []byte) ([]byte, 
 	assistant := assistantToolCallMessage(response)
 	results := make([]map[string]any, 0, len(response.Choices))
 	if len(response.Choices) > 0 {
-		for _, call := range response.Choices[0].Message.ToolCalls {
-			if !cycle.runner.Owns(call.Function.Name) {
-				continue
-			}
+		for _, call := range OwnedCalls(callsFromResponse(response), cycle.runner) {
 			content, ok := cycle.results[call.ID]
 			if !ok {
-				content = cycle.runner.Run(ctx, call.Function.Name, call.Function.Arguments)
+				content = cycle.runner.Run(ctx, call.Name, call.Arguments)
 				cycle.results[call.ID] = content
 			}
-			results = append(results, toolResultMessage(call.ID, call.Function.Name, content))
+			results = append(results, toolResultMessage(call.ID, call.Name, content))
 		}
+	}
+	if len(results) == 0 {
+		// None of the calls is the router's own: there is nothing to run and
+		// nothing to add to the conversation. Sending the request again would
+		// be sending the very same request -- the provider would answer the
+		// same way, and the client would be billed for the request twice.
+		return nil, ErrNothingToRun
 	}
 	cycle.messages = appendToolResults(cycle.messages, assistant, results)
 	return cycle.bodyWithMessages()
+}
+
+// callsFromResponse reads every tool call out of a Chat Completions response.
+func callsFromResponse(response openai.OpenAIResponse) []ToolCall {
+	if len(response.Choices) == 0 {
+		return nil
+	}
+	calls := make([]ToolCall, 0, len(response.Choices[0].Message.ToolCalls))
+	for _, call := range response.Choices[0].Message.ToolCalls {
+		calls = append(calls, ToolCall{ID: call.ID, Name: call.Function.Name, Arguments: call.Function.Arguments})
+	}
+	return calls
 }
 
 // FinalBody builds the body for the loop's last request: the conversation
@@ -256,7 +280,11 @@ func (cycle *Cycle) NextBodyFromToolCalls(ctx context.Context, calls []ToolCall)
 		results = append(results, toolResultMessage(call.ID, call.Name, content))
 	}
 	if len(toolCalls) == 0 {
-		return cycle.body, nil
+		// None of the calls is the router's own: there is nothing to run and
+		// nothing to add to the conversation. Sending the request again would
+		// be sending the very same request -- the provider would answer the
+		// same way, and the client would be billed for the request twice.
+		return nil, ErrNothingToRun
 	}
 	assistant["tool_calls"] = toolCalls
 	cycle.messages = appendToolResults(cycle.messages, assistant, results)
@@ -292,6 +320,21 @@ type ToolCall struct {
 	Arguments string
 }
 
+// OwnedCalls keeps the tool calls the router owns.
+//
+// The router runs only its own tools: a client's own function tool is the
+// upstream's to serve, and the router neither runs it nor counts it as a
+// reason to loop.
+func OwnedCalls(calls []ToolCall, runner Runner) []ToolCall {
+	owned := make([]ToolCall, 0, len(calls))
+	for _, call := range calls {
+		if runner.Owns(call.Name) {
+			owned = append(owned, call)
+		}
+	}
+	return owned
+}
+
 // CallsFromResponse reads the tool calls the router owns out of a Chat
 // Completions response.
 //
@@ -305,14 +348,11 @@ func CallsFromResponse(body []byte, runner Runner) []ToolCall {
 	if len(response.Choices) == 0 {
 		return nil
 	}
-	calls := make([]ToolCall, 0, len(response.Choices[0].Message.ToolCalls))
+	all := make([]ToolCall, 0, len(response.Choices[0].Message.ToolCalls))
 	for _, call := range response.Choices[0].Message.ToolCalls {
-		if !runner.Owns(call.Function.Name) {
-			continue
-		}
-		calls = append(calls, ToolCall{ID: call.ID, Name: call.Function.Name, Arguments: call.Function.Arguments})
+		all = append(all, ToolCall{ID: call.ID, Name: call.Function.Name, Arguments: call.Function.Arguments})
 	}
-	return calls
+	return OwnedCalls(all, runner)
 }
 
 // assistantToolCallMessage builds the assistant message that carries the
