@@ -16,8 +16,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestKeyRoutingPolicyCannotBypassUsingPerCredentialModelAliases(t *testing.T) {
-	f := newKeyRoutingFixture(t)
+func TestRoutingProfileCannotBypassUsingPerCredentialModelAliases(t *testing.T) {
+	f := newRoutingProfileFixture(t)
 	var routes []config.ModelRPMConfig
 	for i, credential := range f.credentials[:3] {
 		for _, name := range []string{"model-a", "alternate-name"} {
@@ -30,7 +30,7 @@ func TestKeyRoutingPolicyCannotBypassUsingPerCredentialModelAliases(t *testing.T
 	f.proxy.modelManager = manager
 	f.proxy.balancer.SetModelChecker(manager)
 	var err error
-	f.proxy.keyRoutingPolicies, err = routermodels.LoadKeyRoutingPolicies([]config.KeyRoutingPolicyConfig{{ID: "pool-a", KeyHash: "os.environ/TEST_ROUTING_CLIENT_HASH", Rules: []config.KeyRoutingRuleConfig{{Models: []string{"model-a"}, CredentialAllowlist: []string{"provider-a", "provider-b"}}}}}, f.credentials, manager)
+	f.proxy.routingProfiles, err = routermodels.LoadRoutingProfiles([]config.RoutingProfileConfig{{ID: "pool-a", Rules: []config.RoutingRuleConfig{{Models: []string{"model-a"}, CredentialAllowlist: []string{"provider-a", "provider-b"}}}}}, f.credentials, manager)
 	require.NoError(t, err)
 	f.proxy.priceRegistry.MergeDB(map[string]*routermodels.ModelPrice{"alternate-name": {}})
 	w := f.request("restricted-key", "/v1/chat/completions", `{"model":"alternate-name","messages":[]}`)
@@ -42,8 +42,8 @@ func TestKeyRoutingPolicyCannotBypassUsingPerCredentialModelAliases(t *testing.T
 	assert.Equal(t, int32(1), f.calls[2].Load(), "another key in the same organization keeps ordinary routing")
 }
 
-func TestKeyRoutingPolicyPreservesOrganizationMappingAndBilling(t *testing.T) {
-	f := newKeyRoutingFixture(t)
+func TestRoutingProfilePreservesOrganizationMappingAndBilling(t *testing.T) {
+	f := newRoutingProfileFixture(t)
 	registry, err := routermodels.LoadOrganizationPolicies([]config.OrganizationPolicyConfig{{
 		OrganizationID: "org", PriceProfileID: "profile-a",
 		ModelPricesLink: writeProxyPolicyPrices(t, `{"vendor/model-a":{"input_cost_per_token":0.001,"output_cost_per_token":0.002}}`),
@@ -68,8 +68,8 @@ func TestKeyRoutingPolicyPreservesOrganizationMappingAndBilling(t *testing.T) {
 	assert.Equal(t, "vendor/model-a", spend["public_model_name"])
 }
 
-func TestKeyRoutingPolicyDoesNotGrantModelAccess(t *testing.T) {
-	f := newKeyRoutingFixture(t)
+func TestRoutingProfileDoesNotGrantModelAccess(t *testing.T) {
+	f := newRoutingProfileFixture(t)
 	f.proxy.strictAllTeamModelsACL = true
 	f.proxy.LiteLLMDB.(*organizationPolicyTestDB).tokens["restricted-key"].Models = []string{"model-b"}
 	w := f.request("restricted-key", "/v1/chat/completions", `{"model":"model-a","messages":[]}`)
@@ -79,8 +79,8 @@ func TestKeyRoutingPolicyDoesNotGrantModelAccess(t *testing.T) {
 	}
 }
 
-func TestKeyRoutingPolicyRestoredHistoryMayUsePermittedAccount(t *testing.T) {
-	f := newKeyRoutingFixture(t)
+func TestRoutingProfileRestoredHistoryMayUsePermittedAccount(t *testing.T) {
+	f := newRoutingProfileFixture(t)
 	f.proxy.responseStore = &fakeResponseStore{entry: &responsestore.StoredEntry{
 		CredentialName:   "provider-other",
 		AccumulatedInput: json.RawMessage(`[{"role":"user","content":"earlier"}]`),
@@ -92,8 +92,8 @@ func TestKeyRoutingPolicyRestoredHistoryMayUsePermittedAccount(t *testing.T) {
 	assert.Zero(t, f.calls[2].Load())
 }
 
-func TestKeyRoutingPolicyMissingHistoryFailsClosed(t *testing.T) {
-	f := newKeyRoutingFixture(t)
+func TestRoutingProfileMissingHistoryFailsClosed(t *testing.T) {
+	f := newRoutingProfileFixture(t)
 	w := f.request("restricted-key", "/v1/responses", `{"model":"model-a","input":"next","previous_response_id":"unknown"}`)
 	assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
 	for i := range f.calls {
@@ -101,8 +101,8 @@ func TestKeyRoutingPolicyMissingHistoryFailsClosed(t *testing.T) {
 	}
 }
 
-func TestKeyRoutingPolicyConcurrentKeysRemainIsolated(t *testing.T) {
-	f := newKeyRoutingFixture(t)
+func TestRoutingProfileConcurrentKeysRemainIsolated(t *testing.T) {
+	f := newRoutingProfileFixture(t)
 	var group sync.WaitGroup
 	for i := 0; i < 12; i++ {
 		for _, key := range []string{"restricted-key", "other-key"} {

@@ -646,7 +646,7 @@ type Config struct {
 	BanDecisionsExternal      bool
 	PriceRegistry             *models.ModelPriceRegistry // Model pricing information (optional)
 	OrganizationPolicies      *models.OrganizationPolicyRegistry
-	KeyRoutingPolicies        *models.KeyRoutingPolicyRegistry
+	RoutingProfiles           *models.RoutingProfileRegistry
 	MaxProviderRetries        int                        // Max same-type credential retries (default: 2)
 	MaxFallbackAttempts       int                        // Max fallback proxy hops per request chain (default: 5)
 	AnthropicDefaultMaxTokens int                        // max_tokens sent to a Claude model when the client sends none (default: 32000)
@@ -753,7 +753,7 @@ type Proxy struct {
 	banDecisionsExternal         bool                           // external ban source wired (see recordBanSignal)
 	priceRegistry                *models.ModelPriceRegistry     // Model pricing information (optional)
 	organizationPolicies         *models.OrganizationPolicyRegistry
-	keyRoutingPolicies           *models.KeyRoutingPolicyRegistry
+	routingProfiles              *models.RoutingProfileRegistry
 	maxProviderRetries           int                  // Max same-type credential retries on provider errors
 	retryPolicy                  *retryPolicy         // compiled Config.Retry
 	maxFallbackAttempts          int                  // Max fallback proxy hops per request chain
@@ -907,7 +907,7 @@ func New(cfg *Config) *Proxy {
 		banDecisionsExternal:             cfg.BanDecisionsExternal,
 		priceRegistry:                    cfg.PriceRegistry,
 		organizationPolicies:             cfg.OrganizationPolicies,
-		keyRoutingPolicies:               cfg.KeyRoutingPolicies,
+		routingProfiles:                  cfg.RoutingProfiles,
 		maxProviderRetries:               cfg.MaxProviderRetries,
 		maxFallbackAttempts:              cfg.MaxFallbackAttempts,
 		anthropicDefaultMaxTokens:        cfg.AnthropicDefaultMaxTokens,
@@ -1268,7 +1268,7 @@ func (p *Proxy) executeProxyRequest(
 	start time.Time,
 	logCtx *RequestLogContext,
 ) (*ProxyResponse, error) {
-	if err := checkKeyRoutingCredential(logCtx, cred); err != nil {
+	if err := checkRoutingCredential(logCtx, cred); err != nil {
 		return nil, err
 	}
 	// Build target URL
@@ -1637,8 +1637,8 @@ func (p *Proxy) sendToCredential(
 	attemptedCreds map[string]bool,
 	embedFanOutReplies *embedContentFanOutReplies,
 ) (outcome credentialSendOutcome, done bool, isClientGone bool, shouldRetry bool, retryReason RetryReason, transportErr error) {
-	if err := checkKeyRoutingCredential(logCtx, cred); err != nil {
-		rejectKeyRoutingSend(w, logCtx)
+	if err := checkRoutingCredential(logCtx, cred); err != nil {
+		rejectRoutingSend(w, logCtx)
 		return credentialSendOutcome{}, true, false, false, "", nil
 	}
 	// A retry or model switch may replay Gemini's signed tool IDs through an

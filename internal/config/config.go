@@ -286,7 +286,7 @@ type Config struct {
 	PublicModelAlias     map[string]string          `yaml:"public_model_alias,omitempty"`
 	AcceptedModelAlias   map[string]string          `yaml:"accepted_model_alias,omitempty"`
 	OrganizationPolicies []OrganizationPolicyConfig `yaml:"organization_policies,omitempty"`
-	KeyRoutingPolicies   []KeyRoutingPolicyConfig   `yaml:"key_routing_policies,omitempty"`
+	RoutingProfiles      []RoutingProfileConfig     `yaml:"routing_profiles,omitempty"`
 	LiteLLMDB            LiteLLMDBConfig            `yaml:"litellm_db,omitempty"`
 	Redis                RedisConfig                `yaml:"redis,omitempty"`
 	// AccountEvents configures publishing outcome events to the health
@@ -328,7 +328,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		PublicModelAlias     map[string]string          `yaml:"public_model_alias,omitempty"`
 		AcceptedModelAlias   map[string]string          `yaml:"accepted_model_alias,omitempty"`
 		OrganizationPolicies []OrganizationPolicyConfig `yaml:"organization_policies,omitempty"`
-		KeyRoutingPolicies   []KeyRoutingPolicyConfig   `yaml:"key_routing_policies,omitempty"`
+		RoutingProfiles      []RoutingProfileConfig     `yaml:"routing_profiles,omitempty"`
 		LiteLLMDB            LiteLLMDBConfig            `yaml:"litellm_db,omitempty"`
 		Redis                RedisConfig                `yaml:"redis,omitempty"`
 		AccountEvents        AccountEventsConfig        `yaml:"account_events,omitempty"`
@@ -358,7 +358,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.PublicModelAlias = raw.PublicModelAlias
 	c.AcceptedModelAlias = raw.AcceptedModelAlias
 	c.OrganizationPolicies = raw.OrganizationPolicies
-	c.KeyRoutingPolicies = raw.KeyRoutingPolicies
+	c.RoutingProfiles = raw.RoutingProfiles
 	c.LiteLLMDB = raw.LiteLLMDB
 	c.Redis = raw.Redis
 	c.AccountEvents = raw.AccountEvents
@@ -2672,11 +2672,11 @@ func (c *Config) Normalize() {
 }
 
 func (c *Config) Validate() error {
-	if len(c.KeyRoutingPolicies) > 0 {
+	if len(c.RoutingProfiles) > 0 {
 		if !c.LiteLLMDB.Enabled || !c.LiteLLMDB.IsRequired {
-			return fmt.Errorf("key_routing_policies requires litellm_db enabled and is_required")
+			return fmt.Errorf("routing_profiles requires litellm_db enabled and is_required")
 		}
-		if err := ValidateKeyRoutingPolicies(c.KeyRoutingPolicies, c.Credentials); err != nil {
+		if err := ValidateRoutingProfiles(c.RoutingProfiles, c.Credentials); err != nil {
 			return err
 		}
 	}

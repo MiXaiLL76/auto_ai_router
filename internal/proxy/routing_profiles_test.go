@@ -20,16 +20,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type keyRoutingFixture struct {
+type routingProfileFixture struct {
 	proxy       *Proxy
 	credentials []config.CredentialConfig
 	calls       [4]atomic.Int32
 	statuses    [4]atomic.Int32
 }
 
-func newKeyRoutingFixture(t *testing.T) *keyRoutingFixture {
+func newRoutingProfileFixture(t *testing.T) *routingProfileFixture {
 	t.Helper()
-	f := &keyRoutingFixture{}
+	f := &routingProfileFixture{}
 	for i, name := range []string{"provider-a", "provider-b", "provider-other", "fallback-router"} {
 		i := i
 		server := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -74,16 +74,16 @@ func newKeyRoutingFixture(t *testing.T) *keyRoutingFixture {
 	manager.SetCredentials(f.credentials)
 	manager.SetModelAliases(map[string]string{"vendor/model-a": "model-a"})
 	manager.SetAcceptedModelAliases(map[string]string{"friendly-name": "vendor/model-a"})
-	t.Setenv("TEST_ROUTING_CLIENT_HASH", strings.Repeat("a", 64))
-	policies, err := routermodels.LoadKeyRoutingPolicies([]config.KeyRoutingPolicyConfig{{ID: "pool-a", KeyHash: "os.environ/TEST_ROUTING_CLIENT_HASH", Rules: []config.KeyRoutingRuleConfig{{Models: []string{"vendor/model-a"}, CredentialAllowlist: []string{"provider-a", "provider-b"}}}}}, f.credentials, manager)
+
+	policies, err := routermodels.LoadRoutingProfiles([]config.RoutingProfileConfig{{ID: "pool-a", Rules: []config.RoutingRuleConfig{{Models: []string{"vendor/model-a"}, CredentialAllowlist: []string{"provider-a", "provider-b"}}}}}, f.credentials, manager)
 	require.NoError(t, err)
 	builder := NewTestProxyBuilder().WithCredentials(f.credentials...).WithSessionSticky(5 * time.Minute)
 	builder.config.ModelManager = manager
 	builder.config.MaxProviderRetries = 3
 	f.proxy = builder.Build()
-	f.proxy.keyRoutingPolicies = policies
+	f.proxy.routingProfiles = policies
 	f.proxy.LiteLLMDB = &organizationPolicyTestDB{tokens: map[string]*dbmodels.TokenInfo{
-		"restricted-key": {Token: strings.Repeat("a", 64), UserID: "user", OrganizationID: "org", DirectOrganizationID: "org"},
+		"restricted-key": {Metadata: map[string]interface{}{"air_routing_profiles": []string{"pool-a"}}, Token: strings.Repeat("a", 64), UserID: "user", OrganizationID: "org", DirectOrganizationID: "org"},
 		"other-key":      {Token: strings.Repeat("b", 64), UserID: "user", OrganizationID: "org", DirectOrganizationID: "org"},
 	}}
 	f.proxy.priceRegistry = routermodels.NewModelPriceRegistry()
@@ -91,7 +91,7 @@ func newKeyRoutingFixture(t *testing.T) *keyRoutingFixture {
 	return f
 }
 
-func (f *keyRoutingFixture) request(key, endpoint, body string) *httptest.ResponseRecorder {
+func (f *routingProfileFixture) request(key, endpoint, body string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPost, endpoint, strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+key)
 	req.Header.Set("Content-Type", "application/json")
@@ -104,8 +104,8 @@ func (f *keyRoutingFixture) request(key, endpoint, body string) *httptest.Respon
 	return w
 }
 
-func TestKeyRoutingPolicyIsolatesKeyModelAndAliases(t *testing.T) {
-	f := newKeyRoutingFixture(t)
+func TestRoutingProfileIsolatesKeyModelAndAliases(t *testing.T) {
+	f := newRoutingProfileFixture(t)
 	for _, model := range []string{"model-a", "vendor/model-a", "friendly-name"} {
 		w := f.request("restricted-key", "/v1/chat/completions", fmt.Sprintf(`{"model":%q,"messages":[],"metadata":{"air_routing_profile":"unrestricted"}}`, model))
 		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
@@ -120,10 +120,10 @@ func TestKeyRoutingPolicyIsolatesKeyModelAndAliases(t *testing.T) {
 	assert.Equal(t, int32(2), f.calls[2].Load())
 }
 
-func TestKeyRoutingPolicySurvivesRetriesAndExhaustion(t *testing.T) {
+func TestRoutingProfileSurvivesRetriesAndExhaustion(t *testing.T) {
 	for _, exhaust := range []bool{false, true} {
 		t.Run(fmt.Sprint(exhaust), func(t *testing.T) {
-			f := newKeyRoutingFixture(t)
+			f := newRoutingProfileFixture(t)
 			f.statuses[0].Store(http.StatusInternalServerError)
 			if exhaust {
 				f.statuses[1].Store(http.StatusInternalServerError)
@@ -142,10 +142,10 @@ func TestKeyRoutingPolicySurvivesRetriesAndExhaustion(t *testing.T) {
 	}
 }
 
-func TestKeyRoutingPolicyOverridesStickyAndRetainsAllowedBinding(t *testing.T) {
+func TestRoutingProfileOverridesStickyAndRetainsAllowedBinding(t *testing.T) {
 	for _, name := range []string{"provider-other", "provider-b"} {
 		t.Run(name, func(t *testing.T) {
-			f := newKeyRoutingFixture(t)
+			f := newRoutingProfileFixture(t)
 			info, err := f.proxy.LiteLLMDB.ValidateToken(t.Context(), "restricted-key")
 			require.NoError(t, err)
 			key := f.proxy.stickySessionKey(&RequestLogContext{Token: "restricted-key", TokenInfo: info, SessionID: "session"})
@@ -162,8 +162,8 @@ func TestKeyRoutingPolicyOverridesStickyAndRetainsAllowedBinding(t *testing.T) {
 	}
 }
 
-func TestKeyRoutingPolicyBansAndOrganizationDenylistStillApply(t *testing.T) {
-	f := newKeyRoutingFixture(t)
+func TestRoutingProfileBansAndOrganizationDenylistStillApply(t *testing.T) {
+	f := newRoutingProfileFixture(t)
 	f.proxy.balancer.AdminBan("provider-a", "model-a", time.Minute, "test")
 	registry, err := routermodels.LoadOrganizationPolicies([]config.OrganizationPolicyConfig{{OrganizationID: "org", CredentialDenylist: []string{"provider-b"}}}, f.proxy.modelManager, routermodels.OrganizationPolicyLoadOptions{LiteLLMDBEnabled: true, LiteLLMDBRequired: true})
 	require.NoError(t, err)
@@ -175,13 +175,13 @@ func TestKeyRoutingPolicyBansAndOrganizationDenylistStillApply(t *testing.T) {
 	}
 }
 
-func TestKeyRoutingPolicyResponsesAndStreaming(t *testing.T) {
+func TestRoutingProfileResponsesAndStreaming(t *testing.T) {
 	for _, request := range []struct{ endpoint, body string }{
 		{"/v1/responses", `{"model":"model-a","input":"hello"}`},
 		{"/v1/messages", `{"model":"model-a","max_tokens":16,"messages":[{"role":"user","content":"hello"}]}`},
 		{"/v1/chat/completions", `{"model":"model-a","messages":[],"stream":true}`},
 	} {
-		f := newKeyRoutingFixture(t)
+		f := newRoutingProfileFixture(t)
 		w := f.request("restricted-key", request.endpoint, request.body)
 		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 		assert.Equal(t, int32(1), f.calls[0].Load())
@@ -190,8 +190,8 @@ func TestKeyRoutingPolicyResponsesAndStreaming(t *testing.T) {
 	}
 }
 
-func TestKeyRoutingPolicyRejectsOpaquePreviousResponseOutsidePool(t *testing.T) {
-	f := newKeyRoutingFixture(t)
+func TestRoutingProfileRejectsOpaquePreviousResponseOutsidePool(t *testing.T) {
+	f := newRoutingProfileFixture(t)
 	f.proxy.responseStore = &fakeResponseStore{entry: &responsestore.StoredEntry{CredentialName: "provider-other"}}
 	w := f.request("restricted-key", "/v1/responses", `{"model":"model-a","input":"hello","previous_response_id":"opaque-id"}`)
 	assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
@@ -200,12 +200,12 @@ func TestKeyRoutingPolicyRejectsOpaquePreviousResponseOutsidePool(t *testing.T) 
 	}
 }
 
-func TestKeyRoutingPolicyFinalSendGuard(t *testing.T) {
-	f := newKeyRoutingFixture(t)
+func TestRoutingProfileFinalSendGuard(t *testing.T) {
+	f := newRoutingProfileFixture(t)
 	logCtx := &RequestLogContext{Scope: scope.PublicContext().RestrictCredentials([]string{"provider-a"})}
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	_, err := f.proxy.executeProxyRequest(req, &f.credentials[3], "model-a", []byte(`{}`), time.Now(), logCtx)
-	require.ErrorIs(t, err, errKeyRoutingPolicy)
+	require.ErrorIs(t, err, errRoutingProfile)
 	w := httptest.NewRecorder()
 	_, done, _, retry, _, _ := f.proxy.sendToCredential(req, w, logCtx, &f.credentials[2], nil, "model-a", "model-a", nil, false, false, false, 0, time.Now(), nil, nil)
 	assert.True(t, done)
@@ -216,8 +216,8 @@ func TestKeyRoutingPolicyFinalSendGuard(t *testing.T) {
 	}
 }
 
-func TestKeyRoutingPolicyRateLimitsDoNotOpenOtherRoutes(t *testing.T) {
-	f := newKeyRoutingFixture(t)
+func TestRoutingProfileRateLimitsDoNotOpenOtherRoutes(t *testing.T) {
+	f := newRoutingProfileFixture(t)
 	for _, name := range []string{"provider-a", "provider-b"} {
 		f.proxy.rateLimiter.AddCredential(name, 1)
 		f.proxy.rateLimiter.SetCredentialCurrentUsage(name, 1, 0)
@@ -235,8 +235,8 @@ func TestKeyRoutingPolicyRateLimitsDoNotOpenOtherRoutes(t *testing.T) {
 	assert.Equal(t, int32(1), f.calls[0].Load())
 }
 
-func TestKeyRoutingPolicyOpaqueContinuationNeverRetriesAnotherAccount(t *testing.T) {
-	f := newKeyRoutingFixture(t)
+func TestRoutingProfileOpaqueContinuationNeverRetriesAnotherAccount(t *testing.T) {
+	f := newRoutingProfileFixture(t)
 	f.proxy.responseStore = &fakeResponseStore{entry: &responsestore.StoredEntry{CredentialName: "provider-a"}}
 	f.statuses[0].Store(http.StatusInternalServerError)
 	w := f.request("restricted-key", "/v1/responses", `{"model":"model-a","input":"hello","previous_response_id":"opaque-id"}`)
@@ -247,13 +247,13 @@ func TestKeyRoutingPolicyOpaqueContinuationNeverRetriesAnotherAccount(t *testing
 	}
 }
 
-func TestKeyRoutingPolicyRejectsInternalVisionDescription(t *testing.T) {
+func TestRoutingProfileRejectsInternalVisionDescription(t *testing.T) {
 	u := &visionUpstream{}
 	prx, db := newVisionProxy(t, newVisionUpstream(t, u).URL, describeFallback())
-	t.Setenv("TEST_VISION_KEY_HASH", strings.Repeat("c", 64))
-	db.tokens["token"].Token = strings.Repeat("c", 64)
+
+	db.tokens["token"].Metadata = map[string]interface{}{"air_routing_profiles": []string{"vision-test"}}
 	var err error
-	prx.keyRoutingPolicies, err = routermodels.LoadKeyRoutingPolicies([]config.KeyRoutingPolicyConfig{{ID: "vision-test", KeyHash: "os.environ/TEST_VISION_KEY_HASH", Rules: []config.KeyRoutingRuleConfig{{Models: []string{"glm"}, CredentialAllowlist: []string{"vllm-node"}}}}}, prx.balancer.GetCredentialsSnapshot(), prx.modelManager)
+	prx.routingProfiles, err = routermodels.LoadRoutingProfiles([]config.RoutingProfileConfig{{ID: "vision-test", Rules: []config.RoutingRuleConfig{{Models: []string{"glm"}, CredentialAllowlist: []string{"vllm-node"}}}}}, prx.balancer.GetCredentialsSnapshot(), prx.modelManager)
 	require.NoError(t, err)
 	w := sendVisionRequest(t, prx, "/v1/chat/completions", `{"model":"glm","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"`+visionTestImage+`"}}]}]}`)
 	assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
@@ -261,24 +261,33 @@ func TestKeyRoutingPolicyRejectsInternalVisionDescription(t *testing.T) {
 	assert.Empty(t, bodies, "an internal helper model must not receive a restricted payload")
 }
 
-func TestKeyRoutingPolicyNativeWebSocket(t *testing.T) {
-	t.Setenv("TEST_WS_KEY_HASH", strings.Repeat("d", 64))
-	f := newNativeWSFixture(t, config.ProviderTypeOpenAI, "", func(p *Proxy) {
-		db := p.LiteLLMDB.(*nativeWSTestDB)
-		db.tokens["client-key"].Token = strings.Repeat("d", 64)
-		var err error
-		p.keyRoutingPolicies, err = routermodels.LoadKeyRoutingPolicies([]config.KeyRoutingPolicyConfig{{ID: "ws-test", KeyHash: "os.environ/TEST_WS_KEY_HASH", Rules: []config.KeyRoutingRuleConfig{{Models: []string{"astra"}, CredentialAllowlist: []string{"upstream"}}}}}, p.balancer.GetCredentialsSnapshot(), p.modelManager)
-		require.NoError(t, err)
-	})
-	wsWrite(t, f.client, `{"type":"response.create","model":"astra","input":"hello"}`)
-	upstream := f.upstream(t)
-	wsEvent(t, upstream, "response.create")
-	wsWrite(t, upstream, wsCreated("resp-test"))
-	wsEvent(t, f.client, "response.created")
-	wsWrite(t, upstream, wsCompleted("resp-test"))
-	wsEvent(t, f.client, "response.completed")
-	f.entry(t)
-	f.proxy.balancer.AdminBan("upstream", "astra", time.Minute, "test")
-	wsWrite(t, f.client, `{"type":"response.create","model":"astra","previous_response_id":"resp-test","input":"next"}`)
-	wsEvent(t, f.client, "error")
+func TestRoutingProfileNativeWebSocket(t *testing.T) {
+	for _, change := range []string{"ban", "binding"} {
+		t.Run(change, func(t *testing.T) {
+			f := newNativeWSFixture(t, config.ProviderTypeOpenAI, "", func(p *Proxy) {
+				db := p.LiteLLMDB.(*nativeWSTestDB)
+				db.tokens["client-key"].Metadata = map[string]interface{}{"air_routing_profiles": []string{"ws-test"}}
+				var err error
+				p.routingProfiles, err = routermodels.LoadRoutingProfiles([]config.RoutingProfileConfig{{ID: "ws-test", Rules: []config.RoutingRuleConfig{{Models: []string{"astra"}, CredentialAllowlist: []string{"upstream"}}}}}, p.balancer.GetCredentialsSnapshot(), p.modelManager)
+				require.NoError(t, err)
+			})
+			wsWrite(t, f.client, `{"type":"response.create","model":"astra","input":"hello"}`)
+			upstream := f.upstream(t)
+			wsEvent(t, upstream, "response.create")
+			wsWrite(t, upstream, wsCreated("resp-test"))
+			wsEvent(t, f.client, "response.created")
+			wsWrite(t, upstream, wsCompleted("resp-test"))
+			wsEvent(t, f.client, "response.completed")
+			f.entry(t)
+			if change == "ban" {
+				f.proxy.balancer.AdminBan("upstream", "astra", time.Minute, "test")
+			} else {
+				f.db.mu.Lock()
+				f.db.tokens["client-key"].Metadata = map[string]interface{}{"air_routing_profiles": []string{"removed-profile"}}
+				f.db.mu.Unlock()
+			}
+			wsWrite(t, f.client, `{"type":"response.create","model":"astra","previous_response_id":"resp-test","input":"next"}`)
+			wsEvent(t, f.client, "error")
+		})
+	}
 }

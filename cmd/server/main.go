@@ -255,7 +255,7 @@ func main() {
 	}
 	modelManager.SetExternalModelIDs(cfg.Video.ModelIDs())
 	organizationPolicies := loadOrganizationPoliciesOrExit(log, cfg, modelManager)
-	keyRoutingPolicies := loadKeyRoutingPoliciesOrExit(log, cfg, modelManager)
+	routingProfiles := loadRoutingProfilesOrExit(log, cfg, modelManager)
 	if !organizationPolicies.Empty() {
 		log.Info("Organization policies loaded", "count", len(cfg.OrganizationPolicies))
 	}
@@ -354,7 +354,7 @@ func main() {
 		BanDecisionsExternal:         banDecisionsExternal,
 		PriceRegistry:                priceRegistry,
 		OrganizationPolicies:         organizationPolicies,
-		KeyRoutingPolicies:           keyRoutingPolicies,
+		RoutingProfiles:              routingProfiles,
 		MaxProviderRetries:           cfg.Server.MaxProviderRetries,
 		Retry:                        cfg.Retry,
 		MaxFallbackAttempts:          cfg.Server.MaxFallbackAttempts,
@@ -688,10 +688,10 @@ func loadOrganizationPoliciesOrExit(log *slog.Logger, cfg *config.Config, modelM
 	return policies
 }
 
-func loadKeyRoutingPoliciesOrExit(log *slog.Logger, cfg *config.Config, modelManager *models.Manager) *models.KeyRoutingPolicyRegistry {
-	policies, err := models.LoadKeyRoutingPolicies(cfg.KeyRoutingPolicies, cfg.Credentials, modelManager)
+func loadRoutingProfilesOrExit(log *slog.Logger, cfg *config.Config, modelManager *models.Manager) *models.RoutingProfileRegistry {
+	policies, err := models.LoadRoutingProfiles(cfg.RoutingProfiles, cfg.Credentials, modelManager)
 	if err != nil {
-		log.Error("Failed to load key routing policies", "error", err)
+		log.Error("Failed to load routing profiles", "error", err)
 		os.Exit(1)
 	}
 	return policies

@@ -4,7 +4,7 @@ Auto AI Router is configured via a YAML file passed with the `-config` flag.
 
 See the full example in [`config.yaml.example`](https://github.com/MiXaiLL76/auto_ai_router/blob/main/config.yaml.example).
 
-To constrain selected models of one virtual key to approved provider accounts, see [Per-key model routing policies](../advanced/key_routing.md).
+To constrain selected models of a virtual key, team or organization to approved provider accounts, see [Credential routing profiles](../advanced/routing_profiles.md).
 
 ## Full Example
 
