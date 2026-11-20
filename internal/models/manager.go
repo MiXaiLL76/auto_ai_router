@@ -404,12 +404,13 @@ type ModelsResponse struct {
 	Data   []Model `json:"data"`
 }
 
-// ModelLimits stores RPM and TPM limits for a model
+// ModelLimits stores limits and routing settings for a model entry.
 type ModelLimits struct {
 	RPM        int
 	TPM        int
 	Weight     int    // Weighted round-robin weight (0 = unset, falls back to credential default / 1)
 	Credential string // If set, limits apply only to this credential
+	Pools      []string
 }
 
 type ScopeMetadata struct {
@@ -554,6 +555,7 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 				TPM:        staticModel.TPM,
 				Weight:     staticModel.Weight,
 				Credential: staticModel.Credential,
+				Pools:      slices.Clone(staticModel.Pools),
 			})
 			// Register real model name mapping if Model field differs from Name.
 			// Credential-specific entries go into the per-credential map so that the
@@ -1609,6 +1611,7 @@ func (m *Manager) UpdateDBModels(dbModels []config.ModelRPMConfig, staticCreds [
 			TPM:        dm.TPM,
 			Weight:     dm.Weight,
 			Credential: dm.Credential,
+			Pools:      slices.Clone(dm.Pools),
 		})
 		// Only apply DB real name if not already defined in static config.
 		// Static YAML takes priority: model_table sync must not override
@@ -2331,6 +2334,32 @@ func (m *Manager) GetCredentialsForModel(modelID string) []string {
 	result := make([]string, len(creds))
 	copy(result, creds)
 	return result
+}
+
+// CredentialsInPools returns the credential assignments for a model that
+// match a routing pool. A nil result means no restriction, either because
+// no pools match or because a matching entry applies to every credential.
+func (m *Manager) CredentialsInPools(modelID string, pools []string) map[string]bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var matching map[string]bool
+	for _, entry := range m.modelLimits[modelID] {
+		for _, pool := range entry.Pools {
+			if pool == "" || !slices.Contains(pools, pool) {
+				continue
+			}
+			if entry.Credential == "" {
+				return nil
+			}
+			if matching == nil {
+				matching = make(map[string]bool)
+			}
+			matching[entry.Credential] = true
+			break
+		}
+	}
+	return matching
 }
 
 // hasModelInCredentials checks if modelID is assigned to credentialName in modelToCredentials map

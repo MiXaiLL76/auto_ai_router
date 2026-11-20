@@ -13,6 +13,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
+	dbmodels "github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
@@ -1476,4 +1477,45 @@ func TestProxyRequest_UnsupportedProManRequestWithoutFallbackReturnsLocalError(t
 	assert.Contains(t, w.Body.String(), unsupportedCredentialRequestMessage)
 	assert.NotContains(t, strings.ToLower(w.Body.String()), "proman")
 	assert.Equal(t, int32(0), atomic.LoadInt32(&promanCalls))
+}
+
+func TestOrchestrateRequestRoutingPools(t *testing.T) {
+	logger := testhelpers.NewTestLogger()
+	credentials := []config.CredentialConfig{
+		{Name: "general", Type: config.ProviderTypeOpenAI, RPM: 50, BaseURL: "http://general.local"},
+		{Name: "pooled", Type: config.ProviderTypeOpenAI, RPM: 50, BaseURL: "http://pooled.local"},
+	}
+	builder := NewTestProxyBuilder().WithCredentials(credentials...)
+	manager := models.New(logger, 50, []config.ModelRPMConfig{
+		{Name: "gpt-oss", Credential: "general"},
+		{Name: "gpt-oss", Credential: "pooled", Pools: []string{"pool-01"}},
+		{Name: "gpt4.1", Credential: "general"},
+	})
+	manager.LoadModelsFromConfig(credentials)
+	builder.config.ModelManager = manager
+	proxy := builder.Build()
+
+	metadata := map[string]interface{}{"air_routing_profiles": []interface{}{"pool-01"}}
+	for _, tt := range []struct {
+		name, model, credential string
+		info                    dbmodels.TokenInfo
+	}{
+		{name: "key", model: "gpt-oss", credential: "pooled", info: dbmodels.TokenInfo{Metadata: metadata}},
+		{name: "team", model: "gpt-oss", credential: "pooled", info: dbmodels.TokenInfo{TeamMetadata: metadata}},
+		{name: "organization", model: "gpt-oss", credential: "pooled", info: dbmodels.TokenInfo{OrganizationMetadata: metadata}},
+		{name: "unpooled model", model: "gpt4.1", credential: "general", info: dbmodels.TokenInfo{Metadata: metadata}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"`+tt.model+`","messages":[]}`))
+			req = withTrustedClientAuth(req, "client-key", &tt.info)
+			w := httptest.NewRecorder()
+			prepared, ok := proxy.orchestrateRequest(w, req, &RequestLogContext{})
+			require.True(t, ok, w.Body.String())
+			require.Equal(t, tt.credential, prepared.cred.Name)
+			require.Equal(t, tt.model, prepared.modelID)
+			if tt.credential == "pooled" {
+				require.True(t, GetTried(prepared.request.Context())["general"], "retries must also exclude the deployment outside the pool")
+			}
+		})
+	}
 }

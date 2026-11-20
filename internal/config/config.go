@@ -146,12 +146,13 @@ func TrimVLLMProviderPrefix(model string) string {
 
 // ModelRPMConfig represents RPM and TPM limits for a specific model
 type ModelRPMConfig struct {
-	Name       string `yaml:"name"`
-	Model      string `yaml:"model,omitempty"` // Real model name sent to provider (alias for Name if different)
-	RPM        int    `yaml:"rpm"`
-	TPM        int    `yaml:"tpm"`
-	Weight     int    `yaml:"weight"`               // Weighted round-robin weight (0 = use credential default / 1)
-	Credential string `yaml:"credential,omitempty"` // If set, model is only available for this credential
+	Name       string   `yaml:"name"`
+	Model      string   `yaml:"model,omitempty"` // Real model name sent to provider (alias for Name if different)
+	RPM        int      `yaml:"rpm"`
+	TPM        int      `yaml:"tpm"`
+	Weight     int      `yaml:"weight"`               // Weighted round-robin weight (0 = use credential default / 1)
+	Credential string   `yaml:"credential,omitempty"` // If set, model is only available for this credential
+	Pools      []string `yaml:"pools,omitempty"`
 
 	// PassthroughResponses controls whether Responses API requests for this model
 	// are forwarded as-is to the provider's native /v1/responses endpoint instead
@@ -221,6 +222,7 @@ func (m *ModelRPMConfig) UnmarshalYAML(value *yaml.Node) error {
 		TPM                  string              `yaml:"tpm"`
 		Weight               string              `yaml:"weight"`
 		Credential           string              `yaml:"credential,omitempty"`
+		Pools                []string            `yaml:"pools,omitempty"`
 		PassthroughResponses string              `yaml:"passthrough_responses,omitempty"`
 		WebSocketResponses   string              `yaml:"websocket_responses,omitempty"`
 		PassthroughMessages  string              `yaml:"passthrough_messages,omitempty"`
@@ -238,6 +240,10 @@ func (m *ModelRPMConfig) UnmarshalYAML(value *yaml.Node) error {
 	m.Name = resolveEnvString(temp.Name)
 	m.Model = resolveEnvString(temp.Model)
 	m.Credential = resolveEnvString(temp.Credential)
+	m.Pools = temp.Pools
+	for i, pool := range m.Pools {
+		m.Pools[i] = strings.TrimSpace(resolveEnvString(pool))
+	}
 	m.LoopGate = temp.LoopGate
 	m.ReasoningEffortMap = nil
 	if !temp.ReasoningEffortMap.IsEmpty() {
