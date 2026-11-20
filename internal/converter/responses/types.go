@@ -282,9 +282,16 @@ type CacheCreationTokenDetails struct {
 // CacheWriteTokensDetails is OpenAI's cache-write TTL breakdown for the
 // 30-minute and 12-hour retentions (cache_write_tokens_details), the latter
 // priced above the former.
+//
+// Alibaba's Qwen4 models report their explicit cache's split in the same
+// object, under the two TTLs its own cache has: ttl_5m_tokens (the default
+// five-minute write) and ttl_1h_tokens (the one-hour write, priced above the
+// former). They are the tiers Anthropic calls 5m and 1h.
 type CacheWriteTokensDetails struct {
 	TTL30mTokens int `json:"ttl_30m_tokens,omitempty"`
 	TTL12hTokens int `json:"ttl_12h_tokens,omitempty"`
+	TTL5mTokens  int `json:"ttl_5m_tokens,omitempty"`
+	TTL1hTokens  int `json:"ttl_1h_tokens,omitempty"`
 }
 
 // OutputDetails represents a breakdown of output token usage.

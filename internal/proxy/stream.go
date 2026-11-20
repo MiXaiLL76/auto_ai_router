@@ -356,6 +356,13 @@ func (o *openAIStreamUsageExtractor) responsesAPIUsageInfo(
 	if cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
 		cacheCreation5mTokens = usage.InputTokensDetails.CacheWriteTokensDetails.TTL30mTokens
 	}
+	// Alibaba's Qwen4 splits its explicit cache write in the Responses API's
+	// cache_write_tokens_details as ttl_5m_tokens and ttl_1h_tokens: the two
+	// tiers Anthropic calls 5m and 1h, each billed at its own rate.
+	if cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
+		cacheCreation5mTokens = usage.InputTokensDetails.CacheWriteTokensDetails.TTL5mTokens
+		cacheCreation1hTokens = usage.InputTokensDetails.CacheWriteTokensDetails.TTL1hTokens
+	}
 	if cacheCreationTokens == 0 {
 		cacheCreationTokens = cacheCreation5mTokens + cacheCreation1hTokens + cacheCreation12hTokens
 	}
@@ -436,6 +443,10 @@ type responsesAPIUsage struct {
 		CacheWriteTokensDetails struct {
 			TTL30mTokens int `json:"ttl_30m_tokens,omitempty"`
 			TTL12hTokens int `json:"ttl_12h_tokens,omitempty"`
+			// Alibaba's Qwen4 explicit cache: the split of the write into a
+			// five-minute and a one-hour part.
+			TTL5mTokens int `json:"ttl_5m_tokens,omitempty"`
+			TTL1hTokens int `json:"ttl_1h_tokens,omitempty"`
 		} `json:"cache_write_tokens_details,omitempty"`
 		CacheCreationTokenDetails struct {
 			Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
@@ -2156,6 +2167,13 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 						logCtx.TokenUsage.CacheCreation12hTokens = details.TTL12hTokens
 						if logCtx.TokenUsage.CacheCreation5mTokens == 0 && logCtx.TokenUsage.CacheCreation1hTokens == 0 {
 							logCtx.TokenUsage.CacheCreation5mTokens = details.TTL30mTokens
+						}
+						// Alibaba's Qwen4 splits its explicit cache write into a
+						// five-minute and a one-hour part; the one-hour write is
+						// billed at the price above the five-minute one.
+						if logCtx.TokenUsage.CacheCreation5mTokens == 0 && logCtx.TokenUsage.CacheCreation1hTokens == 0 {
+							logCtx.TokenUsage.CacheCreation5mTokens = details.TTL5mTokens
+							logCtx.TokenUsage.CacheCreation1hTokens = details.TTL1hTokens
 						}
 					}
 					logCtx.TokenUsage.AudioInputTokens = normalizeStreamAudioInput(
