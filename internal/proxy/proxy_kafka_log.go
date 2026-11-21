@@ -150,6 +150,7 @@ func (p *Proxy) buildKafkaSpendEvent(
 
 	event := &kafkalog.SpendEvent{
 		RequestID:           logCtx.spendRequestID(),
+		AirEventID:          logCtx.EventID,
 		TraceID:             traceID(logCtx.Context()),
 		StartTime:           logCtx.StartTime,
 		EndTime:             endTime,

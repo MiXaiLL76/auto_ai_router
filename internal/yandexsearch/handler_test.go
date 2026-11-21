@@ -15,6 +15,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	dbmodels "github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
+	"github.com/mixaill76/auto_ai_router/internal/requestid"
 	"github.com/mixaill76/auto_ai_router/internal/scope"
 )
 
@@ -438,4 +439,40 @@ func TestHandlerDoesNotPublishKafkaEventForNonBilledStatus(t *testing.T) {
 	assert.Equal(t, http.StatusBadGateway, resp.Code)
 	assert.Empty(t, spend.calls, "a non-2xx is not billed")
 	assert.Empty(t, kafka.events, "and has no analytics spend event either")
+}
+
+// TestHandlerMintsDistinctAirEventIDPerCall covers two calls that carry the
+// same request id, as they do when a trusted inbound traceparent is reused:
+// each Kafka event must still get its own air_event_id, for both the billed
+// and the indeterminate-timeout path, while the Postgres row keeps the
+// request id as its AirEventID (its replay handling is out of this change).
+func TestHandlerMintsDistinctAirEventIDPerCall(t *testing.T) {
+	for name, searcher := range map[string]fakeSearcher{
+		"success":               {status: http.StatusOK, body: []byte(`{}`)},
+		"indeterminate timeout": {err: context.DeadlineExceeded},
+	} {
+		t.Run(name, func(t *testing.T) {
+			spend := &fakeSpend{}
+			kafka := &fakeKafka{}
+			cfg := baseHandlerConfig(allowedAuth("k1"), searcher, spend)
+			cfg.Kafka = kafka
+			handler := NewHandler(cfg)
+
+			const sharedRequestID = "4bf92f3577b34da6a3ce929d0e0e4736"
+			for range 2 {
+				req := newRequest(validSearchBody)
+				handler.ServeHTTP(httptest.NewRecorder(), req.WithContext(requestid.WithID(req.Context(), sharedRequestID)))
+			}
+
+			require.Len(t, spend.calls, 2)
+			require.Len(t, kafka.events, 2)
+			for i, event := range kafka.events {
+				assert.Equal(t, sharedRequestID, event.RequestID)
+				assert.NotEmpty(t, event.AirEventID)
+				assert.NotEqual(t, sharedRequestID, event.AirEventID, "air_event_id must not come from the client-influenced request id")
+				assert.Equal(t, sharedRequestID, spend.calls[i].AirEventID, "the Postgres row must keep its AirEventID")
+			}
+			assert.NotEqual(t, kafka.events[0].AirEventID, kafka.events[1].AirEventID)
+		})
+	}
 }
