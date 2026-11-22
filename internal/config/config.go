@@ -1398,7 +1398,7 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 	if err := value.Decode(&temp); err != nil {
 		return err
 	}
-	if hasYAMLKey(value, "proxy_usage_format") {
+	if mappingValue(value, "proxy_usage_format") != nil {
 		name := resolveEnvString(temp.Name)
 		if name == "" {
 			name = "<unnamed>"
@@ -1488,18 +1488,6 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 	}
 
 	return nil
-}
-
-func hasYAMLKey(value *yaml.Node, key string) bool {
-	if value == nil || value.Kind != yaml.MappingNode {
-		return false
-	}
-	for i := 0; i+1 < len(value.Content); i += 2 {
-		if value.Content[i].Value == key {
-			return true
-		}
-	}
-	return false
 }
 
 type MonitoringConfig struct {
@@ -2313,42 +2301,42 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
-	if !hasMappingKey(&root, "fail2ban") {
+	if mappingValue(&root, "fail2ban") == nil {
 		cfg.Fail2Ban = defaultFail2BanConfig()
 	}
 
-	if !hasMappingKey(&root, "monitoring") {
+	if mappingValue(&root, "monitoring") == nil {
 		cfg.Monitoring = defaultMonitoringConfig()
 	}
 
-	if !hasMappingKey(&root, "redis") {
+	if mappingValue(&root, "redis") == nil {
 		cfg.Redis = defaultRedisConfig()
 	}
 
-	if !hasMappingKey(&root, "account_events") {
+	if mappingValue(&root, "account_events") == nil {
 		cfg.AccountEvents = defaultAccountEventsConfig()
 	}
 
-	if !hasMappingKey(&root, "litellm_db") {
+	if mappingValue(&root, "litellm_db") == nil {
 		cfg.LiteLLMDB = defaultLiteLLMDBConfig()
 	}
 
-	if !hasMappingKey(&root, "otel") {
+	if mappingValue(&root, "otel") == nil {
 		cfg.OTEL = defaultOTELConfig()
 	}
 
-	if !hasMappingKey(&root, "kafka") {
+	if mappingValue(&root, "kafka") == nil {
 		cfg.Kafka = defaultKafkaConfig()
 	}
 
 	// A null value ("vision_fallback:" with every child commented out) is present
 	// but never reaches VisionFallbackConfig.UnmarshalYAML, so it needs the defaults too.
-	if !hasMappingKey(&root, "vision_fallback") || mappingValueIsNull(&root, "vision_fallback") {
+	if node := mappingValue(&root, "vision_fallback"); node == nil || node.Tag == "!!null" {
 		cfg.VisionFallback = defaultVisionFallbackConfig()
 	}
 	cfg.VisionFallback.ApplyDefaults()
 
-	if !hasMappingKey(&root, "loop_gate") || mappingValueIsNull(&root, "loop_gate") {
+	if node := mappingValue(&root, "loop_gate"); node == nil || node.Tag == "!!null" {
 		cfg.LoopGate = DefaultLoopGateConfig()
 	}
 	cfg.LoopGate.ApplyDefaults()
@@ -2357,34 +2345,11 @@ func Load(path string) (*Config, error) {
 	// MonitoringConfig.UnmarshalYAML is only called when a "monitoring:" key is present in YAML.
 	cfg.Monitoring.HealthCheckPath = "/health"
 
-	// Resolve env variables in model_alias values
-	if cfg.ModelAlias != nil {
-		resolved := make(map[string]string, len(cfg.ModelAlias))
-		for alias, target := range cfg.ModelAlias {
-			resolved[resolveEnvString(alias)] = resolveEnvString(target)
-		}
-		cfg.ModelAlias = resolved
-	}
-	if cfg.ClientModelIDs != nil {
-		resolved := make([]string, len(cfg.ClientModelIDs))
-		for index, modelID := range cfg.ClientModelIDs {
-			resolved[index] = resolveEnvString(modelID)
-		}
-		cfg.ClientModelIDs = resolved
-	}
-	if cfg.PublicModelAlias != nil {
-		resolved := make(map[string]string, len(cfg.PublicModelAlias))
-		for alias, target := range cfg.PublicModelAlias {
-			resolved[resolveEnvString(alias)] = resolveEnvString(target)
-		}
-		cfg.PublicModelAlias = resolved
-	}
-	if cfg.AcceptedModelAlias != nil {
-		resolved := make(map[string]string, len(cfg.AcceptedModelAlias))
-		for alias, target := range cfg.AcceptedModelAlias {
-			resolved[resolveEnvString(alias)] = resolveEnvString(target)
-		}
-		cfg.AcceptedModelAlias = resolved
+	cfg.ModelAlias = resolveModelAliases(cfg.ModelAlias)
+	cfg.PublicModelAlias = resolveModelAliases(cfg.PublicModelAlias)
+	cfg.AcceptedModelAlias = resolveModelAliases(cfg.AcceptedModelAlias)
+	for i, modelID := range cfg.ClientModelIDs {
+		cfg.ClientModelIDs[i] = resolveEnvString(modelID)
 	}
 
 	if cfg.Credentials == nil {
@@ -2395,36 +2360,7 @@ func Load(path string) (*Config, error) {
 		cfg.Models = []ModelRPMConfig{}
 	}
 
-	if cfg.ModelAlias == nil {
-		cfg.ModelAlias = map[string]string{}
-	}
-	if cfg.PublicModelAlias == nil {
-		cfg.PublicModelAlias = map[string]string{}
-	}
-	if cfg.AcceptedModelAlias == nil {
-		cfg.AcceptedModelAlias = map[string]string{}
-	}
-
-	// Extract models from credentials and add to main Models list
-	// Models defined in credentials are "unpacked" to the main models list
-	for _, cred := range cfg.Credentials {
-		for _, model := range cred.Models {
-			// Create a copy of the model with the credential reference set
-			expandedModel := model
-			if expandedModel.Credential == "" {
-				expandedModel.Credential = cred.Name
-			}
-			if expandedModel.Name == "" {
-				continue
-			}
-			cfg.Models = append(cfg.Models, expandedModel)
-		}
-	}
-
-	// Clear models from credentials (they have been unpacked to main Models)
-	for i := range cfg.Credentials {
-		cfg.Credentials[i].Models = nil
-	}
+	cfg.expandCredentialModels()
 
 	// Normalize credentials
 	cfg.Normalize()
@@ -2434,6 +2370,30 @@ func Load(path string) (*Config, error) {
 	}
 
 	return &cfg, nil
+}
+
+func resolveModelAliases(aliases map[string]string) map[string]string {
+	resolved := make(map[string]string, len(aliases))
+	for alias, target := range aliases {
+		resolved[resolveEnvString(alias)] = resolveEnvString(target)
+	}
+	return resolved
+}
+
+func (c *Config) expandCredentialModels() {
+	for i := range c.Credentials {
+		cred := &c.Credentials[i]
+		for _, model := range cred.Models {
+			if model.Name == "" {
+				continue
+			}
+			if model.Credential == "" {
+				model.Credential = cred.Name
+			}
+			c.Models = append(c.Models, model)
+		}
+		cred.Models = nil
+	}
 }
 
 func defaultFail2BanConfig() Fail2BanConfig {
@@ -2557,24 +2517,6 @@ func defaultOTELConfig() OTELConfig {
 	return cfg
 }
 
-func hasMappingKey(node *yaml.Node, key string) bool {
-	if node == nil {
-		return false
-	}
-	if node.Kind == yaml.DocumentNode && len(node.Content) > 0 {
-		node = node.Content[0]
-	}
-	if node.Kind != yaml.MappingNode {
-		return false
-	}
-	for i := 0; i+1 < len(node.Content); i += 2 {
-		if node.Content[i].Value == key {
-			return true
-		}
-	}
-	return false
-}
-
 // mappingValue returns the value node of key in the top-level mapping, or
 // nil when the key is absent.
 func mappingValue(node *yaml.Node, key string) *yaml.Node {
@@ -2595,505 +2537,10 @@ func mappingValue(node *yaml.Node, key string) *yaml.Node {
 	return nil
 }
 
-// mappingValueIsNull reports whether key is present in the top-level mapping with an
-// empty or explicit null value.
-func mappingValueIsNull(node *yaml.Node, key string) bool {
-	if node == nil {
-		return false
-	}
-	if node.Kind == yaml.DocumentNode && len(node.Content) > 0 {
-		node = node.Content[0]
-	}
-	if node.Kind != yaml.MappingNode {
-		return false
-	}
-	for i := 0; i+1 < len(node.Content); i += 2 {
-		if node.Content[i].Value == key {
-			return node.Content[i+1].Tag == "!!null"
-		}
-	}
-	return false
-}
-
-// validateLoopGateCombinations resolves the loop gate settings of every
-// credential and model pair, so a credential or model override that is valid
-// alone but not together with the inherited values (cut_min_ratio below the
-// effective min_ratio) fails at startup instead of disabling the gate at
-// request time. A model's loop_gate is looked up as at request time
-// (models.Manager.GetLoopGateOverride): a model entry without a credential
-// serves every credential, except one with its own entry for that model and a
-// loop_gate of its own, which wins there.
-func (c *Config) validateLoopGateCombinations() error {
-	// model name -> credential ("" = every credential) -> the entry, the last
-	// one winning as in the models manager.
-	gates := make(map[string]map[string]ModelRPMConfig)
-	var names []string
-	for _, model := range c.Models {
-		if model.LoopGate == nil {
-			continue
-		}
-		if gates[model.Name] == nil {
-			gates[model.Name] = make(map[string]ModelRPMConfig)
-			names = append(names, model.Name)
-		}
-		gates[model.Name][model.Credential] = model
-	}
-	for _, cred := range c.Credentials {
-		if _, err := c.LoopGate.Resolve(cred.Type, cred.LoopGate); err != nil {
-			return fmt.Errorf("credential %s: %w", cred.Name, err)
-		}
-		for _, name := range names {
-			model, ok := gates[name][cred.Name]
-			if !ok {
-				if model, ok = gates[name][""]; !ok {
-					continue
-				}
-			}
-			if _, err := c.LoopGate.Resolve(cred.Type, cred.LoopGate, model.LoopGate); err != nil {
-				return fmt.Errorf("model %s on credential %s: %w", model.Name, cred.Name, err)
-			}
-		}
-	}
-	return nil
-}
-
 // Normalize cleans up configuration values
 func (c *Config) Normalize() {
 	// Remove /v1 suffix from base_url to avoid duplication
 	for i := range c.Credentials {
 		c.Credentials[i].BaseURL = strings.TrimSuffix(c.Credentials[i].BaseURL, "/v1")
 	}
-}
-
-func (c *Config) Validate() error {
-	if err := c.Video.Validate(); err != nil {
-		return err
-	}
-	if err := c.YandexSearch.Validate(); err != nil {
-		return err
-	}
-	if err := c.VisionFallback.Validate(); err != nil {
-		return err
-	}
-	if err := c.LoopGate.Validate(); err != nil {
-		return err
-	}
-	for _, cred := range c.Credentials {
-		if err := cred.LoopGate.Validate("credential " + cred.Name + " loop_gate"); err != nil {
-			return err
-		}
-	}
-	for _, model := range c.Models {
-		if err := model.LoopGate.Validate("model " + model.Name + " loop_gate"); err != nil {
-			return err
-		}
-	}
-	if err := c.validateLoopGateCombinations(); err != nil {
-		return err
-	}
-	if c.VisionFallback.Mode == VisionFallbackDescribe {
-		for _, model := range c.Models {
-			if model.Name == c.VisionFallback.DescribeModel && model.SupportsVision != nil && !*model.SupportsVision {
-				return fmt.Errorf("vision_fallback.describe_model %q is declared supports_vision: false", model.Name)
-			}
-		}
-	}
-	if c.Server.Port <= 0 || c.Server.Port > 65535 {
-		return fmt.Errorf("invalid port: %d", c.Server.Port)
-	}
-
-	if c.Server.MaxBodySizeMB <= 0 {
-		return fmt.Errorf("invalid max_body_size_mb: %d", c.Server.MaxBodySizeMB)
-	}
-
-	if c.Server.ResponseBodyMultiplier <= 0 {
-		c.Server.ResponseBodyMultiplier = 10
-	}
-	switch c.Server.ResponseCompatibility {
-	case "", "native":
-		c.Server.ResponseCompatibility = "native"
-	case "litellm":
-	default:
-		return fmt.Errorf("invalid response_compatibility: %s (must be native or litellm)", c.Server.ResponseCompatibility)
-	}
-
-	if c.Server.ResponseHeaders.Mode == "" {
-		c.Server.ResponseHeaders.Mode = ResponseHeaderModePassthrough
-	}
-	if c.Server.ResponseHeaders.Mode != ResponseHeaderModePassthrough && c.Server.ResponseHeaders.Mode != ResponseHeaderModeAllowlist {
-		return fmt.Errorf("response_headers.mode must be passthrough or allowlist, got %q", c.Server.ResponseHeaders.Mode)
-	}
-
-	// -1 means unlimited timeout
-	if c.Server.RequestTimeout < 0 && c.Server.RequestTimeout != -1 {
-		return fmt.Errorf("invalid request_timeout: %v", c.Server.RequestTimeout)
-	}
-
-	// A non-positive interval would make the ticker panic; fall back to the default.
-	if c.Server.ModelPricesSyncInterval <= 0 {
-		c.Server.ModelPricesSyncInterval = DefaultModelPricesSyncInterval
-	}
-
-	// A non-positive timeout would cut every in-flight request on stop; fall back to the default.
-	if c.Server.ShutdownTimeout <= 0 {
-		c.Server.ShutdownTimeout = DefaultShutdownTimeout
-	}
-
-	// Validate logging level
-	if c.Server.LoggingLevel != "" {
-		validLevels := map[string]bool{"info": true, "debug": true, "error": true}
-		if !validLevels[c.Server.LoggingLevel] {
-			return fmt.Errorf("invalid logging_level: %s (must be info, debug, or error)", c.Server.LoggingLevel)
-		}
-	} else {
-		c.Server.LoggingLevel = "info" // Default to info
-	}
-
-	// Validate master_key
-	if c.Server.MasterKey == "" {
-		return fmt.Errorf("master_key is required")
-	}
-
-	// Validate and normalize default_models_rpm
-	// -1 means unlimited RPM, 0 is treated as unlimited
-	if c.Server.DefaultModelsRPM == 0 {
-		c.Server.DefaultModelsRPM = -1 // Convert 0 to unlimited (-1)
-	} else if c.Server.DefaultModelsRPM < -1 {
-		return fmt.Errorf("invalid default_models_rpm: %d (must be -1 for unlimited or positive number)", c.Server.DefaultModelsRPM)
-	}
-
-	// ReadTimeout equals RequestTimeout (not configurable via YAML)
-	c.Server.ReadTimeout = c.Server.RequestTimeout
-
-	// Validate AnthropicDefaultMaxTokens (0 = use default of 32000)
-	if c.Server.AnthropicDefaultMaxTokens < 0 {
-		return fmt.Errorf("invalid anthropic_default_max_tokens: %d (must be >= 0)", c.Server.AnthropicDefaultMaxTokens)
-	}
-
-	// Validate MaxProviderRetries
-	if c.Server.MaxProviderRetries < 0 {
-		return fmt.Errorf("invalid max_provider_retries: %d (must be >= 0)", c.Server.MaxProviderRetries)
-	}
-
-	// Validate MaxFallbackAttempts (0 = use default of 5)
-	if c.Server.MaxFallbackAttempts < 0 {
-		return fmt.Errorf("invalid max_fallback_attempts: %d (must be >= 0)", c.Server.MaxFallbackAttempts)
-	}
-	if c.Server.MaxConnectionLifetime < 0 {
-		return fmt.Errorf("invalid max_connection_lifetime: %s (must be >= 0)", c.Server.MaxConnectionLifetime)
-	}
-	if c.Server.SessionStickyTTL < 0 {
-		return fmt.Errorf("invalid session_sticky_ttl_minutes: %d (must be >= 0)", c.Server.SessionStickyTTL)
-	}
-
-	// Validate IdleTimeout against WriteTimeout
-	if c.Server.IdleTimeout == 0 {
-		c.Server.IdleTimeout = c.Server.WriteTimeout * 2
-	}
-
-	if c.Fail2Ban.MaxAttempts <= 0 {
-		return fmt.Errorf("invalid max_attempts: %d", c.Fail2Ban.MaxAttempts)
-	}
-
-	if len(c.Credentials) == 0 && !c.LiteLLMDB.Enabled {
-		return fmt.Errorf("no credentials configured")
-	}
-
-	if err := ValidateOrganizationPolicies(c.OrganizationPolicies); err != nil {
-		return err
-	}
-
-	// Validate Fail2Ban error code rules for duplicates
-	seenErrorCodes := make(map[int]bool)
-	for _, rule := range c.Fail2Ban.ErrorCodeRules {
-		if seenErrorCodes[rule.Code] {
-			return fmt.Errorf("fail2ban: duplicate error_code_rules for code %d", rule.Code)
-		}
-		seenErrorCodes[rule.Code] = true
-	}
-
-	// Validate each credential's error_code_rules override for duplicates
-	for credName, override := range c.Fail2Ban.CredentialOverrides {
-		seen := make(map[int]bool)
-		for _, rule := range override.ErrorCodeRules {
-			if seen[rule.Code] {
-				return fmt.Errorf("fail2ban: duplicate error_code_rules for code %d in credential_overrides[%s]", rule.Code, credName)
-			}
-			seen[rule.Code] = true
-		}
-	}
-
-	for i, cred := range c.Credentials {
-		if cred.Name == "" {
-			return fmt.Errorf("credential %d: name is required", i)
-		}
-
-		if _, err := ParseProxyURL(cred.ProxyURL); err != nil {
-			return fmt.Errorf("credential %s: %w", cred.Name, err)
-		}
-
-		// Validate provider type
-		if !cred.Type.IsValid() {
-			return fmt.Errorf("credential %s: invalid type: %s (must be 'openai', 'vertex-ai', 'gemini', 'anthropic', 'cometapi', 'proman', 'bedrock', 'proxy', 'air', or 'vllm')", cred.Name, cred.Type)
-		}
-		if cred.AuthType != "" && cred.AuthType != "bearer" && cred.AuthType != "x-api-key" {
-			return fmt.Errorf("credential %s: invalid auth_type: %s (must be 'bearer' or 'x-api-key')", cred.Name, cred.AuthType)
-		}
-		if cred.OpenAIProtocol && cred.Type != ProviderTypeCometAPI {
-			return fmt.Errorf("credential %s: openai_proto is only supported for 'cometapi' type, got: %s", cred.Name, cred.Type)
-		}
-		if cred.GoogleProtocol && cred.Type != ProviderTypeCometAPI {
-			return fmt.Errorf("credential %s: google_proto is only supported for 'cometapi' type, got: %s", cred.Name, cred.Type)
-		}
-		if cred.OpenAIProtocol && cred.GoogleProtocol {
-			return fmt.Errorf("credential %s: openai_proto and google_proto are mutually exclusive", cred.Name)
-		}
-		if cred.SystemOne && cred.EffectiveProviderType() != ProviderTypeOpenAI {
-			return fmt.Errorf("credential %s: system_one needs an OpenAI-wire credential (openai, vllm), got: %s", cred.Name, cred.Type)
-		}
-		if err := validateCredentialRequestHeaders(cred.Name, cred.Type, cred.RequestHeaders); err != nil {
-			return err
-		}
-
-		// Validate by provider type
-		switch cred.Type {
-		case ProviderTypeProxy, ProviderTypeAIR:
-			// base_url is required for remote router/proxy credentials
-			if cred.BaseURL == "" {
-				return fmt.Errorf("credential %s: base_url is required for %s type", cred.Name, cred.Type)
-			}
-			// Validate base_url is a valid URL
-			if err := validateBaseURL(cred.Name, cred.BaseURL); err != nil {
-				return err
-			}
-			// api_key is optional for proxy/AIR
-
-		case ProviderTypeVLLM:
-			// vLLM serves an OpenAI-compatible API and is commonly deployed without
-			// --api-key, so base_url is required but api_key is optional.
-			if cred.BaseURL == "" {
-				return fmt.Errorf("credential %s: base_url is required for vllm type", cred.Name)
-			}
-			if err := validateBaseURL(cred.Name, cred.BaseURL); err != nil {
-				return err
-			}
-
-		case ProviderTypeVertexAI:
-			// For Vertex AI, project_id and location are required
-			if cred.ProjectID == "" {
-				return fmt.Errorf("credential %s: project_id is required for vertex-ai type", cred.Name)
-			}
-			if cred.Location == "" {
-				return fmt.Errorf("credential %s: location is required for vertex-ai type", cred.Name)
-			}
-			// API Key is required for Vertex AI (Express Mode)
-			if cred.APIKey == "" && cred.CredentialsFile == "" && cred.CredentialsJSON == "" {
-				return fmt.Errorf("credential %s: api_key, credentials_file, or credentials_json is required for vertex-ai type", cred.Name)
-			}
-			// Validate credentials_file exists if provided
-			if cred.CredentialsFile != "" {
-				if _, err := os.Stat(cred.CredentialsFile); err != nil {
-					return fmt.Errorf("credential %s: credentials_file does not exist or is not accessible: %w", cred.Name, err)
-				}
-			}
-			// base_url is optional for Vertex AI (will be constructed dynamically)
-
-		case ProviderTypeGemini:
-			// For Gemini (Google AI Studio), api_key and base_url are required
-			if cred.APIKey == "" {
-				return fmt.Errorf("credential %s: api_key is required for gemini type", cred.Name)
-			}
-			if cred.BaseURL == "" {
-				return fmt.Errorf("credential %s: base_url is required for gemini type", cred.Name)
-			}
-			if err := validateBaseURL(cred.Name, cred.BaseURL); err != nil {
-				return err
-			}
-
-		default:
-			// For OpenAI and Anthropic, require APIKey and BaseURL
-			if cred.APIKey == "" {
-				return fmt.Errorf("credential %s: api_key is required", cred.Name)
-			}
-			if cred.BaseURL == "" {
-				return fmt.Errorf("credential %s: base_url is required", cred.Name)
-			}
-			// Validate base_url is a valid URL
-			if err := validateBaseURL(cred.Name, cred.BaseURL); err != nil {
-				return err
-			}
-		}
-
-		// -1 means unlimited RPM
-		if cred.RPM <= 0 && !isUnlimited(cred.RPM) {
-			return fmt.Errorf("credential %s: invalid rpm: %d (must be -1 for unlimited or positive number)", cred.Name, cred.RPM)
-		}
-		// TPM: 0 or -1 means unlimited, positive means limited
-		if cred.TPM < -1 {
-			return fmt.Errorf("credential %s: invalid tpm: %d (must be -1 or 0 for unlimited, or positive number)", cred.Name, cred.TPM)
-		}
-		// Weight: 0 means default (1), positive means a higher share. Negative is invalid.
-		if cred.Weight < 0 {
-			return fmt.Errorf("credential %s: invalid weight: %d (must be 0 for default or positive number)", cred.Name, cred.Weight)
-		}
-		if cred.FallbackPriority < 0 {
-			return fmt.Errorf("credential %s: invalid fallback_priority: %d (must be >= 0)", cred.Name, cred.FallbackPriority)
-		}
-		if cred.IsFallback && cred.FallbackPriority > 0 {
-			return fmt.Errorf("credential %s: invalid fallback_priority: fallback credentials cannot set fallback_priority", cred.Name)
-		}
-		if cred.Priority < 0 {
-			return fmt.Errorf("credential %s: invalid priority: %d (must be >= 0)", cred.Name, cred.Priority)
-		}
-		if cred.Priority > 0 && cred.FallbackPriority > 0 {
-			return fmt.Errorf("credential %s: invalid priority: cannot set both priority and fallback_priority", cred.Name)
-		}
-		if cred.IsFallback && cred.Priority > 0 && cred.Priority != FallbackPriorityGroup {
-			return fmt.Errorf("credential %s: invalid priority: fallback credentials cannot set priority (always tried last, pinned to group %d)", cred.Name, FallbackPriorityGroup)
-		}
-		// Pin every fallback credential to the last priority group (shared with the
-		// DB-credential path via NormalizeFallbackPriority).
-		c.Credentials[i].NormalizeFallbackPriority()
-	}
-
-	for _, model := range c.Models {
-		if model.Weight < 0 {
-			return fmt.Errorf("model %s: invalid weight: %d (must be 0 for default or positive number)", model.Name, model.Weight)
-		}
-	}
-
-	// client_model_ids is an explicit product boundary. When present (including
-	// an empty list), AIR must not infer public request identifiers from provider
-	// backend names. Keep it exact and require compatibility aliases to resolve
-	// into that advertised canonical set.
-	if c.ClientModelIDs != nil {
-		clientIDs := make(map[string]struct{}, len(c.ClientModelIDs))
-		for _, modelID := range c.ClientModelIDs {
-			if modelID == "" {
-				return fmt.Errorf("client_model_ids must not contain an empty model ID")
-			}
-			if _, duplicate := clientIDs[modelID]; duplicate {
-				return fmt.Errorf("client_model_ids contains duplicate model ID %q", modelID)
-			}
-			clientIDs[modelID] = struct{}{}
-		}
-		for label, aliases := range map[string]map[string]string{
-			"public_model_alias":   c.PublicModelAlias,
-			"accepted_model_alias": c.AcceptedModelAlias,
-		} {
-			for alias, target := range aliases {
-				if _, exists := clientIDs[target]; !exists {
-					return fmt.Errorf("%s %q targets %q outside client_model_ids", label, alias, target)
-				}
-				if _, collision := clientIDs[alias]; collision {
-					return fmt.Errorf("%s %q collides with client_model_ids", label, alias)
-				}
-			}
-		}
-	}
-
-	// Validate Redis config
-	if c.Redis.Enabled {
-		if len(c.Redis.InitAddresses) == 0 {
-			return fmt.Errorf("redis.addresses is required when redis is enabled")
-		}
-	}
-
-	// Validate OTEL config
-	if c.OTEL.Enabled {
-		if c.OTEL.Protocol != "grpc" && c.OTEL.Protocol != "http" {
-			return fmt.Errorf("otel.protocol must be 'grpc' or 'http', got: %s", c.OTEL.Protocol)
-		}
-		if c.OTEL.Endpoint == "" {
-			return fmt.Errorf("otel.endpoint is required when otel is enabled")
-		}
-		if c.OTEL.TraceSampleRatio < 0 || c.OTEL.TraceSampleRatio > 1 {
-			return fmt.Errorf("otel.trace_sample_ratio must be in [0.0, 1.0], got: %f", c.OTEL.TraceSampleRatio)
-		}
-	}
-
-	// Validate LiteLLM DB config
-	if c.LiteLLMDB.Enabled {
-		if c.LiteLLMDB.DatabaseURL == "" {
-			return fmt.Errorf("litellm_db.database_url is required when enabled")
-		}
-		if !strings.HasPrefix(c.LiteLLMDB.DatabaseURL, "postgres://") && !strings.HasPrefix(c.LiteLLMDB.DatabaseURL, "postgresql://") {
-			return fmt.Errorf("litellm_db.database_url must start with postgres:// or postgresql://, got: %s", c.LiteLLMDB.DatabaseURL)
-		}
-		if c.LiteLLMDB.EnforceBudgetReservation && c.LiteLLMDB.BudgetReservationTTL <= 0 {
-			return fmt.Errorf("litellm_db.budget_reservation_ttl must be positive when budget reservation is enabled")
-		}
-		if c.LiteLLMDB.EnforceBudgetReservation && c.LiteLLMDB.DefaultEstimatedCompletionTokens <= 0 {
-			return fmt.Errorf("litellm_db.default_estimated_completion_tokens must be positive when budget reservation is enabled")
-		}
-		if c.LiteLLMDB.LogWorkers <= 0 {
-			return fmt.Errorf("litellm_db.log_workers must be positive, got: %d", c.LiteLLMDB.LogWorkers)
-		}
-	}
-
-	if c.Kafka.Enabled {
-		if len(c.Kafka.Brokers) == 0 {
-			return fmt.Errorf("kafka.brokers is required when kafka is enabled")
-		}
-		if c.Kafka.Topic == "" {
-			return fmt.Errorf("kafka.topic is required when kafka is enabled")
-		}
-		if c.Kafka.LogQueueSize <= 0 {
-			return fmt.Errorf("kafka.log_queue_size must be positive, got: %d", c.Kafka.LogQueueSize)
-		}
-		if c.Kafka.LogBatchSize <= 0 {
-			return fmt.Errorf("kafka.log_batch_size must be positive, got: %d", c.Kafka.LogBatchSize)
-		}
-		if c.Kafka.LogFlushInterval <= 0 {
-			return fmt.Errorf("kafka.log_flush_interval must be positive, got: %s", c.Kafka.LogFlushInterval)
-		}
-		if c.Kafka.LogWorkers <= 0 {
-			return fmt.Errorf("kafka.log_workers must be positive, got: %d", c.Kafka.LogWorkers)
-		}
-		switch c.Kafka.SASLMechanism {
-		case "", "PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512":
-		default:
-			return fmt.Errorf("kafka.sasl_mechanism unsupported, got: %s", c.Kafka.SASLMechanism)
-		}
-		if c.Kafka.SASLMechanism != "" && (c.Kafka.SASLUsername == "" || c.Kafka.SASLPassword == "") {
-			return fmt.Errorf("kafka.sasl_username and kafka.sasl_password are required when kafka.sasl_mechanism is set")
-		}
-	}
-
-	if c.Kafka.RawBodies.Enabled {
-		if !c.Kafka.Enabled {
-			return fmt.Errorf("kafka.raw_bodies.enabled requires kafka.enabled=true")
-		}
-		if c.Kafka.RawBodies.Topic == "" {
-			return fmt.Errorf("kafka.raw_bodies.topic is required when kafka.raw_bodies is enabled")
-		}
-		if c.Kafka.RawBodies.Topic == c.Kafka.Topic {
-			return fmt.Errorf("kafka.raw_bodies.topic must differ from kafka.topic")
-		}
-	}
-
-	if c.Kafka.RouterResponses.Enabled {
-		if !c.Kafka.Enabled {
-			return fmt.Errorf("kafka.router_responses.enabled requires kafka.enabled=true")
-		}
-		if c.Kafka.RouterResponses.Topic == "" {
-			return fmt.Errorf("kafka.router_responses.topic is required when kafka.router_responses is enabled")
-		}
-		// Its own topic, distinct from the spend-log topic and from the
-		// raw-bodies topic: the three carry different streams with different
-		// retention, and a shared topic would mix a response body into the
-		// spend log (which is billed on and kept for years).
-		if c.Kafka.RouterResponses.Topic == c.Kafka.Topic {
-			return fmt.Errorf("kafka.router_responses.topic must differ from kafka.topic")
-		}
-		if c.Kafka.RouterResponses.Topic == c.Kafka.RawBodies.Topic {
-			return fmt.Errorf("kafka.router_responses.topic must differ from kafka.raw_bodies.topic")
-		}
-	}
-
-	if !c.Kafka.Enabled && c.LiteLLMDB.DisableSpendLogsWrite {
-		return fmt.Errorf("invalid config: litellm_db.disable_spend_logs_write=true requires kafka.enabled=true, otherwise spend logs are lost entirely")
-	}
-
-	return nil
 }
