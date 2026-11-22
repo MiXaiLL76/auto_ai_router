@@ -8,6 +8,26 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestCalculateTokenCosts_IndependentInputAndOutputTiers(t *testing.T) {
+	usage := &converter.TokenUsage{
+		PromptTokens:      256_001,
+		CompletionTokens:  250_000,
+		AudioOutputTokens: 50_000,
+	}
+	price := &ModelPrice{
+		InputCostPerToken:           1e-6,
+		InputCostPerTokenAbove256k:  4e-6,
+		OutputCostPerToken:          2e-6,
+		OutputCostPerTokenAbove200k: 3e-6,
+	}
+	costs := CalculateTokenCosts(usage, price)
+	assert.InDelta(t, 256_001*4e-6, costs.InputCost, 1e-12)
+	// The input tier has no output rate. Split the regular output using the
+	// full completion count, while audio falls back to the base output rate.
+	assert.InDelta(t, 160_000*2e-6+40_000*3e-6, costs.OutputCost, 1e-12)
+	assert.InDelta(t, 50_000*2e-6, costs.AudioOutputCost, 1e-12)
+}
+
 func TestCalculateTokenCosts_RegularTokensOnly(t *testing.T) {
 	usage := &converter.TokenUsage{
 		PromptTokens:     100,

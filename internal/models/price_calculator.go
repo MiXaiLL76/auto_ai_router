@@ -239,170 +239,126 @@ func CalculateTokenCostsWithResolver(usage *converter.TokenUsage, price *ModelPr
 	if usage == nil || price == nil {
 		return nil
 	}
-
 	normalizedUsage := *usage
 	usage = normalizedUsage.Normalize()
 
-	costs := &converter.TokenCosts{}
-	promptTokens := converterutil.NonNegativeTokenCount(usage.PromptTokens)
-	completionTokens := converterutil.NonNegativeTokenCount(usage.CompletionTokens)
-	audioInputTokens := converterutil.NonNegativeTokenCount(usage.AudioInputTokens)
-	audioOutputTokens := converterutil.NonNegativeTokenCount(usage.AudioOutputTokens)
-	imageTokens := converterutil.NonNegativeTokenCount(usage.ImageTokens)
-	videoInputTokens := converterutil.NonNegativeTokenCount(usage.VideoInputTokens)
-	outputImageTokens := converterutil.NonNegativeTokenCount(usage.OutputImageTokens)
-	cachedOutputTokens := converterutil.NonNegativeTokenCount(usage.CachedOutputTokens)
-	outputTextTokens := converterutil.NonNegativeTokenCount(usage.OutputTextTokens)
-	reasoningTokens := converterutil.NonNegativeTokenCount(usage.ReasoningTokens)
-	acceptedPredictionTokens := converterutil.NonNegativeTokenCount(usage.AcceptedPredictionTokens)
-	rejectedPredictionTokens := converterutil.NonNegativeTokenCount(usage.RejectedPredictionTokens)
-	imageCount := converterutil.NonNegativeTokenCount(usage.ImageCount)
-
-	// Full-session tiers (32k/100k/128k/256k/272k/512k): the highest exceeded threshold
-	// whose rate is configured wins and applies to the WHOLE request, not
-	// just the excess. Falls back to the 200k proportional tier (unchanged
-	// below) when no full-session tier matches.
+	// Full-session rates are selected independently for each token category
+	// using the full prompt size. The regular output's proportional tier
+	// instead uses the completion size, regardless of the prompt size.
 	tiers := fullSessionTiers(price)
-	fullSessionInputRate, fullSessionInputMatched := fullSessionRate(tiers, promptTokens, func(t fullSessionTier) float64 { return t.inputRate })
-	fullSessionOutputRate, fullSessionOutputMatched := fullSessionRate(tiers, promptTokens, func(t fullSessionTier) float64 { return t.outputRate })
-	fullSessionCacheReadRate, fullSessionCacheReadMatched := fullSessionRate(tiers, promptTokens, func(t fullSessionTier) float64 { return t.cacheReadRate })
-	fullSessionCacheCreationTier, fullSessionCacheCreationMatched := fullSessionTierFor(tiers, promptTokens, func(t fullSessionTier) float64 { return t.cacheCreationRate })
-	fullSessionCacheCreationRate := fullSessionCacheCreationTier.cacheCreationRate
+	inputRate, inputTier := fullSessionRate(tiers, usage.PromptTokens, func(t fullSessionTier) float64 { return t.inputRate })
+	outputRate, outputTier := fullSessionRate(tiers, usage.PromptTokens, func(t fullSessionTier) float64 { return t.outputRate })
+	inputRate = rateOr(inputRate, price.InputCostPerToken)
+	outputRate = rateOr(outputRate, price.OutputCostPerToken)
+	proportional := !price.longContextFullRequest200kInclusive()
 
-	inputCostPerToken := price.InputCostPerToken
-	if fullSessionInputMatched {
-		inputCostPerToken = fullSessionInputRate
+	costs := &converter.TokenCosts{
+		InputCost: regularTokenCost(regularInputTokens(usage), usage.PromptTokens, inputRate,
+			price.InputCostPerTokenAbove200k, proportional && !inputTier),
+		OutputCost: regularTokenCost(regularOutputTokens(usage, price), usage.CompletionTokens, outputRate,
+			price.OutputCostPerTokenAbove200k, proportional && !outputTier),
+		AudioInputCost:  float64(usage.AudioInputTokens) * rateOr(price.InputCostPerAudioToken, inputRate),
+		AudioOutputCost: float64(usage.AudioOutputTokens) * rateOr(price.OutputCostPerAudioToken, outputRate),
 	}
-	outputCostPerToken := price.OutputCostPerToken
-	if fullSessionOutputMatched {
-		outputCostPerToken = fullSessionOutputRate
-	}
+	price.calculateCacheReadCosts(costs, usage, tiers, inputRate)
+	costs.CacheCreationCost = price.calculateCacheWriteCost(usage, tiers, inputRate)
+	price.calculateOutputDetailCosts(costs, usage, outputRate, outputTier)
+	price.calculateImageCosts(costs, usage, inputRate, outputRate)
+	price.calculateToolCosts(costs, usage, resolve)
 
-	cachedInputTokens := converterutil.NonNegativeTokenCount(usage.CachedInputTokens)
+	// Calculate total. Tool charges enter once, through ToolUsageCost (web
+	// search included).
+	costs.TotalCost = costs.InputCost +
+		costs.OutputCost +
+		costs.AudioInputCost +
+		costs.AudioOutputCost +
+		costs.ReasoningCost +
+		costs.CachedInputCost +
+		costs.ExplicitCachedInputCost +
+		costs.CacheCreationCost +
+		costs.CachedOutputCost +
+		costs.PredictionCost +
+		costs.ImageCost +
+		costs.VideoInputCost +
+		costs.ToolUsageCost
+	return costs
+}
+
+// rateOr uses zero as the unset-price sentinel used in price rows.
+func rateOr(rate, fallback float64) float64 {
+	if rate == 0 {
+		return fallback
+	}
+	return rate
+}
+
+// regularTokenCost allocates text tokens proportionally when the full input
+// or output crosses 200k. Integer division keeps the fractional token in the
+// base bracket. Keep the two products separate to preserve billing rounding.
+func regularTokenCost(tokens, total int, baseRate, aboveRate float64, proportional bool) float64 {
+	if proportional && aboveRate > 0 && total > tokenTiering200kThreshold {
+		above := int(int64(tokens) * int64(total-tokenTiering200kThreshold) / int64(total))
+		return float64(tokens-above)*baseRate + float64(above)*aboveRate
+	}
+	return float64(tokens) * baseRate
+}
+
+func regularInputTokens(usage *converter.TokenUsage) int {
 	cacheCreationTokens := converterutil.NonNegativeTokenCount(usage.CacheCreationTokens)
-
 	// Calculate "regular" input tokens by subtracting specialized token types.
 	// Vertex/OpenAI: audio/cached tokens are included in PromptTokens; Anthropic: same + cache creation.
 	// Image and video tokens are part of PromptTokens too, so only the text
 	// remainder is priced at the regular input rate.
-	regularInputTokens := promptTokens - audioInputTokens - cachedInputTokens - cacheCreationTokens - imageTokens - videoInputTokens
-	if regularInputTokens < 0 {
-		regularInputTokens = 0
-	}
+	regularInputTokens := usage.PromptTokens - usage.AudioInputTokens - usage.CachedInputTokens - cacheCreationTokens - usage.ImageTokens - usage.VideoInputTokens
+	return max(0, regularInputTokens)
+}
 
-	// Image tokens live inside PromptTokens, but a provider that serves a cached
-	// image reports the same tokens inside CachedInputTokens as well (some model
-	// does: prompt=340, cached=320, image=81). Charging the whole image bucket on
-	// top of the cached one then bills the overlap twice -- once at the cache-read
-	// rate and once at the image rate -- and the negative clamp above hides it.
-	// Video tokens share the same bucket; the overlap is taken off images first.
-	billableImageTokens := imageTokens
-	billableVideoTokens := videoInputTokens
-	if promptTokens > 0 {
-		overlap := audioInputTokens + cachedInputTokens + cacheCreationTokens + imageTokens + videoInputTokens - promptTokens
-		if overlap > 0 {
-			fromImages := min(overlap, imageTokens)
-			billableImageTokens = imageTokens - fromImages
-			billableVideoTokens = converterutil.NonNegativeTokenCount(videoInputTokens - (overlap - fromImages))
-		}
-	}
-
-	// The default 200k shape bills only the excess at the higher rate; a row
-	// with an explicit long-context mode is billed by that mode alone. An
-	// unrecognized mode value keeps the default rather than disabling both.
-	proportional200k := !price.longContextFullRequest200kInclusive()
-
-	// Regular input with full-session or 200k tiering
-	switch {
-	case fullSessionInputMatched:
-		costs.InputCost = float64(regularInputTokens) * inputCostPerToken
-	case proportional200k && price.InputCostPerTokenAbove200k > 0 && promptTokens > tokenTiering200kThreshold:
-		above := promptTokens - tokenTiering200kThreshold
-		// Distribute regular tokens proportionally between below/above threshold
-		regularAbove := int(int64(regularInputTokens) * int64(above) / int64(promptTokens))
-		regularBelow := regularInputTokens - regularAbove
-		costs.InputCost = float64(regularBelow)*price.InputCostPerToken +
-			float64(regularAbove)*price.InputCostPerTokenAbove200k
-	default:
-		costs.InputCost = float64(regularInputTokens) * inputCostPerToken
-	}
-
+func regularOutputTokens(usage *converter.TokenUsage, price *ModelPrice) int {
 	// Reasoning tokens are subtracted back out here because, by default,
 	// CompletionTokens already includes them (see ModelPrice.ReasoningTokensAdditive
 	// doc comment). Providers that report reasoning on top of CompletionTokens
 	// instead (ReasoningTokensAdditive=true) must skip this subtraction, or these
 	// tokens would be double-excluded: once here and once by never having been
 	// part of CompletionTokens to begin with.
-	reasoningTokensToSubtract := reasoningTokens
+	reasoningTokensToSubtract := usage.ReasoningTokens
 	if price.reasoningTokensAdditive(usage) {
 		reasoningTokensToSubtract = 0
 	}
-	regularOutputTokens := completionTokens - audioOutputTokens - reasoningTokensToSubtract -
-		acceptedPredictionTokens - rejectedPredictionTokens - outputImageTokens
+	regularOutputTokens := usage.CompletionTokens - usage.AudioOutputTokens - reasoningTokensToSubtract -
+		usage.AcceptedPredictionTokens - usage.RejectedPredictionTokens - usage.OutputImageTokens
 	// Explicit text tokens, when smaller, cap the derived value (see doc comment above).
-	if outputTextTokens > 0 && outputTextTokens < regularOutputTokens {
-		regularOutputTokens = outputTextTokens
+	if usage.OutputTextTokens > 0 && usage.OutputTextTokens < regularOutputTokens {
+		regularOutputTokens = usage.OutputTextTokens
 	}
-	if regularOutputTokens < 0 {
-		regularOutputTokens = 0
-	}
+	return max(0, regularOutputTokens)
+}
 
-	// Regular output with full-session or 200k tiering
-	switch {
-	case fullSessionOutputMatched:
-		costs.OutputCost = float64(regularOutputTokens) * outputCostPerToken
-	case proportional200k && price.OutputCostPerTokenAbove200k > 0 && completionTokens > tokenTiering200kThreshold:
-		above := completionTokens - tokenTiering200kThreshold
-		// Distribute regular tokens proportionally between below/above threshold
-		regularAbove := int(int64(regularOutputTokens) * int64(above) / int64(completionTokens))
-		regularBelow := regularOutputTokens - regularAbove
-		costs.OutputCost = float64(regularBelow)*price.OutputCostPerToken +
-			float64(regularAbove)*price.OutputCostPerTokenAbove200k
-	default:
-		costs.OutputCost = float64(regularOutputTokens) * outputCostPerToken
-	}
-
-	// Audio tokens with fallback to regular tokens
-	audioInputCost := price.InputCostPerAudioToken
-	if audioInputCost == 0 {
-		audioInputCost = inputCostPerToken
-	}
-	costs.AudioInputCost = float64(audioInputTokens) * audioInputCost
-
-	audioOutputCost := price.OutputCostPerAudioToken
-	if audioOutputCost == 0 {
-		audioOutputCost = outputCostPerToken
-	}
-	costs.AudioOutputCost = float64(audioOutputTokens) * audioOutputCost
-
+func (p *ModelPrice) calculateCacheReadCosts(costs *converter.TokenCosts, usage *converter.TokenUsage, tiers []fullSessionTier, inputCostPerToken float64) {
 	// Cached read tokens: prefer explicit cached price, fall back to LiteLLM alias,
 	// then fall back to regular rate (no discount known).
+	cachedInputTokens := usage.CachedInputTokens
+	promptTokens := usage.PromptTokens
 	cachedInputCost := 0.0
-	if !price.CacheReadInputTokensFree {
-		cachedInputCost = price.InputCostPerCachedToken
+	if !p.CacheReadInputTokensFree {
+		cachedInputCost = p.InputCostPerCachedToken
 		if cachedInputCost == 0 {
-			cachedInputCost = price.CacheReadInputTokenCost
+			cachedInputCost = p.CacheReadInputTokenCost
 		}
-		if fullSessionCacheReadMatched {
-			cachedInputCost = fullSessionCacheReadRate
-		} else if promptTokens > tokenTiering200kThreshold && price.CacheReadInputTokenCostAbove200k > 0 {
-			cachedInputCost = price.CacheReadInputTokenCostAbove200k
+		if rate, matched := fullSessionRate(tiers, promptTokens, func(t fullSessionTier) float64 { return t.cacheReadRate }); matched {
+			cachedInputCost = rate
+		} else if promptTokens > tokenTiering200kThreshold && p.CacheReadInputTokenCostAbove200k > 0 {
+			cachedInputCost = p.CacheReadInputTokenCostAbove200k
 		}
 		if cachedInputCost == 0 {
 			cachedInputCost = inputCostPerToken
 		}
 	}
-	cachedAudioTokens := converterutil.NonNegativeTokenCount(usage.CachedAudioInputTokens)
-	if cachedAudioTokens > cachedInputTokens {
-		cachedAudioTokens = cachedInputTokens
-	}
+	// Normalize already bounds cached audio by the total cached input.
+	cachedAudioTokens := usage.CachedAudioInputTokens
 	regularCachedTokens := cachedInputTokens - cachedAudioTokens
 	cachedAudioCost := 0.0
-	if !price.CacheReadInputTokensFree {
-		cachedAudioCost = price.CacheReadInputAudioTokenCost
-		if cachedAudioCost == 0 {
-			cachedAudioCost = cachedInputCost
-		}
+	if !p.CacheReadInputTokensFree {
+		cachedAudioCost = rateOr(p.CacheReadInputAudioTokenCost, cachedInputCost)
 	}
 
 	// Cached read tokens are priced differently depending on cache mode.
@@ -421,35 +377,31 @@ func CalculateTokenCostsWithResolver(usage *converter.TokenUsage, price *ModelPr
 	// without this feature).
 	if usage.CacheType == converter.CacheTypeExplicit && cachedInputTokens > 0 {
 		explicitCacheReadRate := 0.0
-		if !price.CacheReadInputTokensFree {
-			explicitCacheReadRate = price.ExplicitCacheReadInputTokenCost
+		if !p.CacheReadInputTokensFree {
+			explicitCacheReadRate = p.ExplicitCacheReadInputTokenCost
 			if rate, ok := fullSessionRate(tiers, promptTokens, func(t fullSessionTier) float64 { return t.explicitCacheReadRate }); ok {
 				explicitCacheReadRate = rate
 			}
 		}
 		if explicitCacheReadRate > 0 {
-			explicitCachedAudioCost := price.CacheReadInputAudioTokenCost
-			if explicitCachedAudioCost == 0 {
-				explicitCachedAudioCost = explicitCacheReadRate
-			}
-			costs.ExplicitCachedInputCost = float64(regularCachedTokens)*explicitCacheReadRate +
-				float64(cachedAudioTokens)*explicitCachedAudioCost
-		} else {
-			costs.ExplicitCachedInputCost = float64(regularCachedTokens)*cachedInputCost +
-				float64(cachedAudioTokens)*cachedAudioCost
+			cachedInputCost = explicitCacheReadRate
+			cachedAudioCost = rateOr(p.CacheReadInputAudioTokenCost, explicitCacheReadRate)
 		}
-	} else {
-		costs.CachedInputCost = float64(regularCachedTokens)*cachedInputCost +
-			float64(cachedAudioTokens)*cachedAudioCost
+		costs.ExplicitCachedInputCost = float64(regularCachedTokens)*cachedInputCost + float64(cachedAudioTokens)*cachedAudioCost
+		return
 	}
+	costs.CachedInputCost = float64(regularCachedTokens)*cachedInputCost + float64(cachedAudioTokens)*cachedAudioCost
+}
 
-	cacheCreationCost := price.CacheCreationInputTokenCost
-	cacheCreationFullSession := false
+func (p *ModelPrice) calculateCacheWriteCost(usage *converter.TokenUsage, tiers []fullSessionTier, inputCostPerToken float64) float64 {
+	promptTokens := usage.PromptTokens
+	cacheCreationTokens := converterutil.NonNegativeTokenCount(usage.CacheCreationTokens)
+	fullSessionCacheCreationTier, fullSessionCacheCreationMatched := fullSessionTierFor(tiers, promptTokens, func(t fullSessionTier) float64 { return t.cacheCreationRate })
+	cacheCreationCost := p.CacheCreationInputTokenCost
 	if fullSessionCacheCreationMatched {
-		cacheCreationCost = fullSessionCacheCreationRate
-		cacheCreationFullSession = true
-	} else if promptTokens > tokenTiering200kThreshold && price.CacheCreationInputTokenCostAbove200k > 0 {
-		cacheCreationCost = price.CacheCreationInputTokenCostAbove200k
+		cacheCreationCost = fullSessionCacheCreationTier.cacheCreationRate
+	} else if promptTokens > tokenTiering200kThreshold && p.CacheCreationInputTokenCostAbove200k > 0 {
+		cacheCreationCost = p.CacheCreationInputTokenCostAbove200k
 	}
 	if cacheCreationCost == 0 {
 		cacheCreationCost = inputCostPerToken
@@ -457,17 +409,17 @@ func CalculateTokenCostsWithResolver(usage *converter.TokenUsage, price *ModelPr
 	// 1-hour writes: a full-session tier bills them at its own 1-hour rate when
 	// it has one (the 100k tier), otherwise at its single write rate.
 	cacheCreation1hCost := cacheCreationCost
-	if cacheCreationFullSession {
+	if fullSessionCacheCreationMatched {
 		if rate := fullSessionCacheCreationTier.cacheCreation1hRate; rate > 0 {
 			cacheCreation1hCost = rate
 		}
 	} else {
-		cacheCreation1hCost = price.CacheCreationInputTokenCostAbove1hr
+		cacheCreation1hCost = p.CacheCreationInputTokenCostAbove1hr
 		if rate, ok := fullSessionRate(tiers, promptTokens, func(t fullSessionTier) float64 { return t.cacheCreation1hRate }); ok {
 			// A tier priced only for 1-hour writes still applies to them.
 			cacheCreation1hCost = rate
-		} else if promptTokens > tokenTiering200kThreshold && price.CacheCreationInputTokenCostAbove1hrAbove200k > 0 {
-			cacheCreation1hCost = price.CacheCreationInputTokenCostAbove1hrAbove200k
+		} else if promptTokens > tokenTiering200kThreshold && p.CacheCreationInputTokenCostAbove1hrAbove200k > 0 {
+			cacheCreation1hCost = p.CacheCreationInputTokenCostAbove1hrAbove200k
 		}
 		if cacheCreation1hCost == 0 {
 			cacheCreation1hCost = cacheCreationCost
@@ -485,7 +437,7 @@ func CalculateTokenCostsWithResolver(usage *converter.TokenUsage, price *ModelPr
 	// back to the base write rate only when the model prices no 12h tier at
 	// all — a model that does is never silently billed at the cheaper 30m
 	// rate.
-	cacheCreation12hCost := price.CacheCreationInputTokenCost12h
+	cacheCreation12hCost := p.CacheCreationInputTokenCost12h
 	if rate, ok := fullSessionRate(tiers, promptTokens, func(t fullSessionTier) float64 { return t.cacheCreation12hRate }); ok {
 		cacheCreation12hCost = rate
 	}
@@ -508,105 +460,114 @@ func CalculateTokenCostsWithResolver(usage *converter.TokenUsage, price *ModelPr
 		cacheCreation12hTokens = cacheCreationTokens - cacheCreation5mTokens - cacheCreation1hTokens
 	}
 	unclassifiedCacheCreationTokens := cacheCreationTokens - cacheCreation5mTokens - cacheCreation1hTokens - cacheCreation12hTokens
-	costs.CacheCreationCost = float64(unclassifiedCacheCreationTokens+cacheCreation5mTokens)*cacheCreationCost +
+	return float64(unclassifiedCacheCreationTokens+cacheCreation5mTokens)*cacheCreationCost +
 		float64(cacheCreation1hTokens)*cacheCreation1hCost +
 		float64(cacheCreation12hTokens)*cacheCreation12hCost
+}
 
-	cachedOutputCost := price.OutputCostPerCachedToken
-	if cachedOutputCost == 0 {
-		cachedOutputCost = outputCostPerToken
-	}
-	costs.CachedOutputCost = float64(cachedOutputTokens) * cachedOutputCost
+func (p *ModelPrice) calculateOutputDetailCosts(costs *converter.TokenCosts, usage *converter.TokenUsage, outputCostPerToken float64, fullSessionOutputMatched bool) {
+	cachedOutputCost := rateOr(p.OutputCostPerCachedToken, outputCostPerToken)
+	costs.CachedOutputCost = float64(usage.CachedOutputTokens) * cachedOutputCost
 
 	// Reasoning tokens with fallback. A long-context mode row bills reasoning
 	// with the rest of the output at the tier's output rate: there is no
 	// long-context reasoning rate, and the base reasoning rate would undercut it.
-	reasoningCost := price.OutputCostPerReasoningToken
-	if reasoningCost == 0 || (fullSessionOutputMatched && price.longContextFullRequest200kInclusive()) {
+	reasoningCost := p.OutputCostPerReasoningToken
+	if reasoningCost == 0 || (fullSessionOutputMatched && p.longContextFullRequest200kInclusive()) {
 		reasoningCost = outputCostPerToken
 	}
-	costs.ReasoningCost = float64(reasoningTokens) * reasoningCost
+	costs.ReasoningCost = float64(usage.ReasoningTokens) * reasoningCost
 
 	// Prediction tokens with fallback (accepted tokens)
-	predictionCost := price.OutputCostPerPredictionToken
-	if predictionCost == 0 {
-		predictionCost = outputCostPerToken
-	}
-	costs.PredictionCost = float64(acceptedPredictionTokens) * predictionCost
+	predictionCost := rateOr(p.OutputCostPerPredictionToken, outputCostPerToken)
+	costs.PredictionCost = float64(usage.AcceptedPredictionTokens) * predictionCost
 
 	// Rejected prediction tokens count as regular output tokens
-	costs.PredictionCost += float64(rejectedPredictionTokens) * outputCostPerToken
+	costs.PredictionCost += float64(usage.RejectedPredictionTokens) * outputCostPerToken
+}
+
+func (p *ModelPrice) calculateImageCosts(costs *converter.TokenCosts, usage *converter.TokenUsage, inputCostPerToken, outputCostPerToken float64) {
+	cacheCreationTokens := converterutil.NonNegativeTokenCount(usage.CacheCreationTokens)
+	// Image tokens live inside PromptTokens, but a provider that serves a cached
+	// image reports the same tokens inside CachedInputTokens as well (some model
+	// does: prompt=340, cached=320, image=81). Charging the whole image bucket on
+	// top of the cached one then bills the overlap twice -- once at the cache-read
+	// rate and once at the image rate -- and the negative clamp above hides it.
+	// Video tokens share the same bucket; the overlap is taken off images first.
+	billableImageTokens := usage.ImageTokens
+	billableVideoTokens := usage.VideoInputTokens
+	if usage.PromptTokens > 0 {
+		overlap := usage.AudioInputTokens + usage.CachedInputTokens + cacheCreationTokens + usage.ImageTokens + usage.VideoInputTokens - usage.PromptTokens
+		if overlap > 0 {
+			fromImages := min(overlap, usage.ImageTokens)
+			billableImageTokens = usage.ImageTokens - fromImages
+			billableVideoTokens = converterutil.NonNegativeTokenCount(usage.VideoInputTokens - (overlap - fromImages))
+		}
+	}
 
 	// Input image tokens are part of PromptTokens. Price them separately when a
 	// modality-specific rate exists, otherwise keep the regular input rate.
-	inputImageCost := price.InputCostPerImageToken
-	if inputImageCost == 0 {
-		inputImageCost = inputCostPerToken
-	}
+	inputImageCost := rateOr(p.InputCostPerImageToken, inputCostPerToken)
 	costs.ImageCost = float64(billableImageTokens) * inputImageCost
 
 	// Input video tokens: own rate when configured, otherwise the image rate
 	// (video used to be reported inside the image counter).
-	inputVideoCost := price.InputCostPerVideoToken
-	if inputVideoCost == 0 {
-		inputVideoCost = inputImageCost
-	}
+	inputVideoCost := rateOr(p.InputCostPerVideoToken, inputImageCost)
 	costs.VideoInputCost = float64(billableVideoTokens) * inputVideoCost
 
 	// Generated image tokens are part of CompletionTokens and must not also be
 	// charged as text. Prefer the token-based image rate when the provider reports
 	// a token breakdown; otherwise use the per-image price for Imagen-style APIs.
-	if outputImageTokens > 0 {
-		outputImageCost := price.OutputCostPerImageToken
-		if outputImageCost == 0 {
-			outputImageCost = outputCostPerToken
-		}
-		costs.ImageCost += float64(outputImageTokens) * outputImageCost
-	} else if imageCount > 0 {
-		costs.ImageCost += price.outputImageCost(imageCount, usage.ImageBilling)
+	if usage.OutputImageTokens > 0 {
+		outputImageCost := rateOr(p.OutputCostPerImageToken, outputCostPerToken)
+		costs.ImageCost += float64(usage.OutputImageTokens) * outputImageCost
+	} else if usage.ImageCount > 0 {
+		costs.ImageCost += p.outputImageCost(usage.ImageCount, usage.ImageBilling)
 	}
 	// Source images are only billed when the request actually produced output.
-	if imageCount > 0 || outputImageTokens > 0 {
-		costs.ImageCost += price.inputImageCost(usage.ImageBilling)
+	if usage.ImageCount > 0 || usage.OutputImageTokens > 0 {
+		costs.ImageCost += p.inputImageCost(usage.ImageBilling)
 	}
+}
 
-	webSearchRequests := converterutil.NonNegativeTokenCount(usage.WebSearchRequests)
+func (p *ModelPrice) calculateToolCosts(costs *converter.TokenCosts, usage *converter.TokenUsage, resolve PriceResolver) {
+	webSearchRequests := usage.WebSearchRequests
 	if webSearchRequests > 0 {
-		if price.webSearchBillingUnit() == "per_prompt" {
+		if p.webSearchBillingUnit() == "per_prompt" {
 			webSearchRequests = 1
 		}
 		costs.WebSearchCost = float64(webSearchRequests) *
-			price.webSearchCostPerQuery(usage.WebSearchContextSize)
+			p.webSearchCostPerQuery(usage.WebSearchContextSize)
 	}
 
 	// Other built-in server-side tools: per unit, never scaled by the
 	// long-context tier, which only applies to tokens.
-	costs.XSearchCost = float64(converterutil.NonNegativeTokenCount(usage.XSearchPosts))*price.XSearchCostPerPost +
-		float64(converterutil.NonNegativeTokenCount(usage.XSearchProfiles))*price.XSearchCostPerProfile
-	costs.CodeExecutionCost = float64(converterutil.NonNegativeTokenCount(usage.CodeExecutionCalls)) *
-		price.toolCostPerCall(ToolCodeExecution)
-	costs.AttachmentSearchCost = float64(converterutil.NonNegativeTokenCount(usage.AttachmentSearchCalls)) *
-		price.toolCostPerCall(ToolAttachmentSearch)
-	costs.CollectionsSearchCost = float64(converterutil.NonNegativeTokenCount(usage.CollectionsSearchCalls)) *
-		price.toolCostPerCall(ToolCollectionsSearch)
+	costs.XSearchCost = float64(usage.XSearchPosts)*p.XSearchCostPerPost +
+		float64(usage.XSearchProfiles)*p.XSearchCostPerProfile
+	costs.CodeExecutionCost = float64(usage.CodeExecutionCalls) *
+		p.toolCostPerCall(ToolCodeExecution)
+	costs.AttachmentSearchCost = float64(usage.AttachmentSearchCalls) *
+		p.toolCostPerCall(ToolAttachmentSearch)
+	costs.CollectionsSearchCost = float64(usage.CollectionsSearchCalls) *
+		p.toolCostPerCall(ToolCollectionsSearch)
 	// The built-in web fetch the router executed: billed per successful call
 	// (one that returned page content), never by tokens. A failed or empty
 	// fetch is never counted in usage.WebFetchRequests, so it costs nothing.
-	costs.WebFetchCost = float64(converterutil.NonNegativeTokenCount(usage.WebFetchRequests)) *
-		price.toolCostPerCall(ToolWebFetch)
+	costs.WebFetchCost = float64(usage.WebFetchRequests) *
+		p.toolCostPerCall(ToolWebFetch)
 	// The router's own Moonshot calls, billed at the tool price document's
 	// per-call prices. Each is charged only for a call that actually
 	// succeeded and produced something: the counters carry only those.
 	//
 	// The prices are the FINAL client prices -- the rate is already folded
 	// into them and is not applied again.
-	costs.MoonshotSearchCost = float64(converterutil.NonNegativeTokenCount(usage.MoonshotSearchRequests)) *
-		price.toolCostPerCall(ToolMoonshotSearch)
-	costs.MoonshotSearchProCost = float64(converterutil.NonNegativeTokenCount(usage.MoonshotSearchProRequests)) *
-		price.toolCostPerCall(ToolMoonshotSearchPro)
-	costs.MoonshotFetchCost = float64(converterutil.NonNegativeTokenCount(usage.MoonshotFetchRequests)) *
-		price.toolCostPerCall(ToolMoonshotFetch)
-	costs.ImageGenerationToolCost = price.imageGenerationToolCost(usage, resolve)
+	costs.MoonshotSearchCost = float64(usage.MoonshotSearchRequests) *
+		p.toolCostPerCall(ToolMoonshotSearch)
+	costs.MoonshotSearchProCost = float64(usage.MoonshotSearchProRequests) *
+		p.toolCostPerCall(ToolMoonshotSearchPro)
+	costs.MoonshotFetchCost = float64(usage.MoonshotFetchRequests) *
+		p.toolCostPerCall(ToolMoonshotFetch)
+	costs.ImageGenerationToolCost = p.imageGenerationToolCost(usage, resolve)
 	costs.ToolUsageCost = costs.WebSearchCost +
 		costs.WebFetchCost +
 		costs.MoonshotSearchCost +
@@ -617,24 +578,6 @@ func CalculateTokenCostsWithResolver(usage *converter.TokenUsage, price *ModelPr
 		costs.AttachmentSearchCost +
 		costs.CollectionsSearchCost +
 		costs.ImageGenerationToolCost
-
-	// Calculate total. Tool charges enter once, through ToolUsageCost (web
-	// search included).
-	costs.TotalCost = costs.InputCost +
-		costs.OutputCost +
-		costs.AudioInputCost +
-		costs.AudioOutputCost +
-		costs.ReasoningCost +
-		costs.CachedInputCost +
-		costs.ExplicitCachedInputCost +
-		costs.CacheCreationCost +
-		costs.CachedOutputCost +
-		costs.PredictionCost +
-		costs.ImageCost +
-		costs.VideoInputCost +
-		costs.ToolUsageCost
-
-	return costs
 }
 
 // longContextFullRequest200kInclusive reports whether the row opted into
