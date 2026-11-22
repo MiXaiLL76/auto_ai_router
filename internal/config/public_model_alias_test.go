@@ -11,6 +11,7 @@ import (
 
 func TestLoadPublicModelAliasesSeparatelyFromProviderAliases(t *testing.T) {
 	t.Setenv("CANONICAL_PUBLIC_MODEL", "openai/gpt-4.1")
+	t.Setenv("ACCEPTED_MODEL_ALIAS", "legacy-gpt-4.1")
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(`
 server:
@@ -23,11 +24,13 @@ credentials:
     base_url: https://provider.invalid
 monitoring: {}
 model_alias:
-  openai/gpt-4.1: gpt-4.1
+  os.environ/CANONICAL_PUBLIC_MODEL: gpt-4.1
 client_model_ids:
   - os.environ/CANONICAL_PUBLIC_MODEL
 public_model_alias:
   gpt-4.1: os.environ/CANONICAL_PUBLIC_MODEL
+accepted_model_alias:
+  os.environ/ACCEPTED_MODEL_ALIAS: os.environ/CANONICAL_PUBLIC_MODEL
 `), 0o600))
 
 	cfg, err := Load(path)
@@ -35,6 +38,7 @@ public_model_alias:
 	assert.Equal(t, map[string]string{"openai/gpt-4.1": "gpt-4.1"}, cfg.ModelAlias)
 	assert.Equal(t, []string{"openai/gpt-4.1"}, cfg.ClientModelIDs)
 	assert.Equal(t, map[string]string{"gpt-4.1": "openai/gpt-4.1"}, cfg.PublicModelAlias)
+	assert.Equal(t, map[string]string{"legacy-gpt-4.1": "openai/gpt-4.1"}, cfg.AcceptedModelAlias)
 }
 
 func TestClientModelIDsFailClosedOnDuplicateAndOutOfSurfaceAlias(t *testing.T) {
@@ -55,6 +59,13 @@ func TestClientModelIDsFailClosedOnDuplicateAndOutOfSurfaceAlias(t *testing.T) {
 			aliases: `public_model_alias:
   gpt-5: openai/gpt-5`,
 			wantError: `public_model_alias "gpt-5" targets "openai/gpt-5" outside client_model_ids`,
+		},
+		{
+			name:     "accepted alias target outside explicitly empty boundary",
+			boundary: "  []",
+			aliases: `accepted_model_alias:
+  legacy-gpt: openai/gpt-4.1`,
+			wantError: `accepted_model_alias "legacy-gpt" targets "openai/gpt-4.1" outside client_model_ids`,
 		},
 	}
 	for _, tt := range tests {
