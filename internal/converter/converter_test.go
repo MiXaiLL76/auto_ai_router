@@ -1433,6 +1433,37 @@ func TestExtractTokenUsage_ResponsesAPIStreamingEvent(t *testing.T) {
 	}
 }
 
+func TestExtractTokenUsage_MixedTopLevelAndNestedDetails(t *testing.T) {
+	body := []byte(`{
+		"usage": {
+			"completion_tokens": 8,
+			"total_tokens": 99,
+			"completion_tokens_details": {"image_tokens": 2}
+		},
+		"response": {"usage": {
+			"input_tokens": 21,
+			"output_tokens": 11,
+			"total_tokens": 11,
+			"input_tokens_details": {"image_tokens": 4},
+			"output_tokens_details": {"image_tokens": 5, "reasoning_tokens": 3}
+		}}
+	}`)
+	total, usage := ExtractTotalTokensAndUsageWithOptions(body, TokenUsageExtractionOptions{})
+	if total != 99 {
+		t.Fatalf("reported total = %d, want 99", total)
+	}
+	want := TokenUsage{
+		CompletionTokens:    8,
+		ImageTokens:         4,
+		OutputImageTokens:   2,
+		ReasoningTokens:     3,
+		ReasoningAccounting: ReasoningAccountingAdditive,
+	}
+	if usage == nil || *usage != want {
+		t.Fatalf("usage = %+v, want %+v", usage, want)
+	}
+}
+
 func TestExtractTokenUsage_WebSearchRequests(t *testing.T) {
 	tests := []struct {
 		name string

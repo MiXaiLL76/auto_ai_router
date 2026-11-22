@@ -1021,6 +1021,34 @@ func TestStreamTransform_ContentAndFinishReasonSameChunk(t *testing.T) {
 	assert.Contains(t, result, "\"status\":\"completed\"")
 }
 
+func TestStreamTransform_MixedDeltasBeforeFinishAndTrailingUsage(t *testing.T) {
+	input := buildSSEChunk(`{"choices":[{"delta":{"reasoning_content":"Think first","content":"Checking","tool_calls":[{"index":0,"id":"call_1","function":{"name":"lookup","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}`) +
+		buildSSEChunk(buildUsageChunk(10, 20, 30)) + "data: [DONE]\n\n"
+	var output bytes.Buffer
+	var completed []*Response
+	require.NoError(t, TransformChatStreamToResponses(strings.NewReader(input), &output, "test-model", func(response *Response) {
+		completed = append(completed, response)
+	}))
+	var sequence []string
+	for _, event := range parseSSEEvents(t, output.String()) {
+		name := event["_event"].(string)
+		switch name {
+		case "response.reasoning_summary_text.done", "response.output_text.delta",
+			"response.function_call_arguments.delta", "response.completed":
+			sequence = append(sequence, name)
+		}
+	}
+	require.Equal(t, []string{
+		"response.reasoning_summary_text.done",
+		"response.output_text.delta",
+		"response.function_call_arguments.delta",
+		"response.completed",
+	}, sequence)
+	require.Len(t, completed, 1)
+	require.NotNil(t, completed[0].Usage)
+	require.Equal(t, 30, completed[0].Usage.TotalTokens)
+}
+
 // TestStreamTransform_ContentAndFinishReasonNoDone verifies the same scenario
 // but without [DONE] (Gemini API doesn't send [DONE], stream just closes).
 func TestStreamTransform_ContentAndFinishReasonNoDone(t *testing.T) {

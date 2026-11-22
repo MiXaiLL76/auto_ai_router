@@ -3,6 +3,7 @@ package converter
 
 import (
 	"bytes"
+	"cmp"
 	"io"
 	"math"
 	"strings"
@@ -894,21 +895,15 @@ func ExtractTotalTokensAndUsageWithOptions(body []byte, opts TokenUsageExtractio
 // tokenUsageResponseShape — the shared tail end of both
 // ExtractTokenUsageWithOptions and ExtractTotalTokensAndUsageWithOptions.
 func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractionOptions) *TokenUsage {
+	nested := resp.Response.Usage
 	// Prefer Chat Completions tokens; fall back to Responses API / image tokens
-	promptTokensFromInputTokens := resp.Usage.PromptTokens == 0
-	promptTokens := resp.Usage.PromptTokens
-	if promptTokens == 0 {
-		promptTokens = resp.Usage.InputTokens
-	}
-	completionTokens := resp.Usage.CompletionTokens
-	if completionTokens == 0 {
-		completionTokens = resp.Usage.OutputTokens
-	}
+	promptTokens := cmp.Or(resp.Usage.PromptTokens, resp.Usage.InputTokens)
+	completionTokens := cmp.Or(resp.Usage.CompletionTokens, resp.Usage.OutputTokens)
 
 	// Fall back to nested Responses API streaming event format (response.completed event)
-	if promptTokens == 0 && completionTokens == 0 && resp.Response.Usage != nil {
-		promptTokens = resp.Response.Usage.InputTokens
-		completionTokens = resp.Response.Usage.OutputTokens
+	if promptTokens == 0 && completionTokens == 0 && nested != nil {
+		promptTokens = nested.InputTokens
+		completionTokens = nested.OutputTokens
 	}
 
 	// Each level's server-side tool usage object is decoded once; the
@@ -916,9 +911,9 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 	toolUsage, toolUsageReported := resp.Usage.ServerSideToolUsage()
 	usageRequests := resp.Usage.webSearchRequests(toolUsage)
 	var nestedUsageRequests reportedCount
-	if resp.Response.Usage != nil {
-		nestedToolUsage, nestedToolUsageReported := resp.Response.Usage.ServerSideToolUsage()
-		nestedUsageRequests = resp.Response.Usage.webSearchRequests(nestedToolUsage)
+	if nested != nil {
+		nestedToolUsage, nestedToolUsageReported := nested.ServerSideToolUsage()
+		nestedUsageRequests = nested.webSearchRequests(nestedToolUsage)
 		if !toolUsageReported {
 			toolUsage, toolUsageReported = nestedToolUsage, nestedToolUsageReported
 		}
@@ -934,302 +929,239 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 	// counter. It is added to the provider-reported count rather than
 	// replacing it: the two are different things (the provider's own
 	// server-side search, and the search the router ran for the model).
-	routerWebSearchRequests := resp.Usage.PromptTokensDetails.WebSearchRequests
-	if routerWebSearchRequests == 0 {
-		routerWebSearchRequests = resp.Usage.InputTokensDetails.WebSearchRequests
-	}
-	if routerWebSearchRequests == 0 && resp.Response.Usage != nil {
-		routerWebSearchRequests = resp.Response.Usage.InputTokensDetails.WebSearchRequests
+	routerWebSearchRequests := cmp.Or(resp.Usage.PromptTokensDetails.WebSearchRequests, resp.Usage.InputTokensDetails.WebSearchRequests)
+	if routerWebSearchRequests == 0 && nested != nil {
+		routerWebSearchRequests = nested.InputTokensDetails.WebSearchRequests
 	}
 
 	// The web fetches the router itself executed: it wrote the count into the
 	// body it returns, so the billing path reads it back like any other
 	// counter. Only a positive count counts -- a fetch that failed or returned
 	// nothing was never billed.
-	webFetchRequests := resp.Usage.WebFetchRequests
-	if webFetchRequests == 0 {
-		webFetchRequests = resp.Usage.PromptTokensDetails.WebFetchRequests
-	}
-	if webFetchRequests == 0 {
-		webFetchRequests = resp.Usage.InputTokensDetails.WebFetchRequests
-	}
-	if webFetchRequests == 0 && resp.Response.Usage != nil {
-		webFetchRequests = resp.Response.Usage.WebFetchRequests
-		if webFetchRequests == 0 {
-			webFetchRequests = resp.Response.Usage.InputTokensDetails.WebFetchRequests
-		}
+	webFetchRequests := cmp.Or(resp.Usage.WebFetchRequests, resp.Usage.PromptTokensDetails.WebFetchRequests,
+		resp.Usage.InputTokensDetails.WebFetchRequests)
+	if webFetchRequests == 0 && nested != nil {
+		webFetchRequests = cmp.Or(nested.WebFetchRequests, nested.InputTokensDetails.WebFetchRequests)
 	}
 
+	// Keep the existing usage presence check: token counts and upstream tool
+	// activity establish a usage record. Router counters and provider cost
+	// decorate that record after it exists.
 	if promptTokens == 0 && completionTokens == 0 && webSearchRequests == 0 &&
 		!toolUsageReported && imageToolGenerations == 0 && imageToolEdits == 0 {
 		return nil
 	}
 
-	// Merge detail fields: Chat Completions uses completion_tokens_details,
-	// Responses API uses output_tokens_details. Pick whichever is populated.
+	// Nested details are eligible when the top-level input counters are
+	// absent, even if a top-level output counter supplied completionTokens.
+	var nestedDetails *responsesUsageDetails
+	totalTokens := resp.Usage.TotalTokens
+	if resp.Usage.PromptTokens == 0 && resp.Usage.InputTokens == 0 && nested != nil {
+		nestedDetails = nested
+		totalTokens = nested.TotalTokens
+	}
+	cache := extractUsageCache(resp, nestedDetails, opts)
+	usage := extractUsageTokenDetails(resp, nestedDetails)
+	// Decided on the provider's own figures, before the Anthropic flat-cache
+	// correction below rewrites promptTokens (Anthropic sends no total_tokens).
+	var reasoningAccounting string
+	if !cache.flatRead && !cache.flatWrite {
+		reasoningAccounting = detectReasoningAccounting(promptTokens, completionTokens, usage.ReasoningTokens, totalTokens)
+	}
+	providerCost := resp.Usage.providerCostUSD()
+	if providerCost == 0 && nested != nil {
+		providerCost = nested.providerCostUSD()
+	}
+	// Anthropic's input_tokens excludes cache tokens; add them back so promptTokens
+	// matches the inclusive-total semantics CalculateTokenCosts subtracts cache from.
+	if resp.Usage.PromptTokens == 0 && cache.flatRead {
+		promptTokens += cache.read
+	}
+	if resp.Usage.PromptTokens == 0 && cache.flatWrite {
+		promptTokens += cache.write
+	}
+	cache.read, usage.CachedAudioInputTokens = converterutil.NormalizeCachedAudioBreakdown(cache.read, usage.CachedAudioInputTokens)
+	usage.AudioInputTokens = converterutil.NormalizeAudioInputTokens(
+		usage.AudioInputTokens,
+		cache.read,
+		usage.CachedAudioInputTokens,
+		opts.AudioInputIncludesCachedAudio,
+	)
+
+	usage.PromptTokens = promptTokens
+	usage.CompletionTokens = completionTokens
+	usage.CachedInputTokens = cache.read
+	usage.CacheType = cache.kind
+	usage.CacheCreationTokens = cache.write
+	usage.CacheCreation5mTokens = cache.write5m
+	usage.CacheCreation1hTokens = cache.write1h
+	usage.CacheCreation12hTokens = cache.write12h
+	usage.WebFetchRequests = webFetchRequests
+	usage.AcceptedPredictionTokens = resp.Usage.CompletionTokensDetails.AcceptedPredictionTokens
+	usage.RejectedPredictionTokens = resp.Usage.CompletionTokensDetails.RejectedPredictionTokens
+	usage.WebSearchRequests = webSearchRequests + routerWebSearchRequests
+	usage.ServerToolUsageReported = toolUsageReported
+	usage.XSearchCalls = toolUsage.XSearchCalls
+	usage.XSearchPosts = toolUsage.XPostsFetched
+	usage.XSearchProfiles = toolUsage.XUsersFetched
+	usage.CodeExecutionCalls = toolUsage.CodeExecutionCalls
+	usage.AttachmentSearchCalls = toolUsage.AttachmentSearchCalls
+	usage.CollectionsSearchCalls = toolUsage.CollectionsSearchCalls
+	usage.MCPCalls = toolUsage.MCPCalls
+	usage.ImageToolGenerations = imageToolGenerations
+	usage.ImageToolEdits = imageToolEdits
+	usage.ReasoningAccounting = reasoningAccounting
+	usage.ProviderCostUSD = providerCost
+	return usage.Normalize()
+}
+
+type usageCacheBreakdown struct {
+	read, write, write5m, write1h, write12h int
+	kind                                    string
+	flatRead, flatWrite                     bool
+}
+
+func (c usageCacheBreakdown) hasShortTTL() bool {
+	return c.write5m != 0 || c.write1h != 0
+}
+
+func (c usageCacheBreakdown) hasWrite() bool {
+	return c.write != 0 || c.write12h != 0 || c.hasShortTTL()
+}
+
+func extractUsageCache(resp *tokenUsageResponseShape, nested *responsesUsageDetails, opts TokenUsageExtractionOptions) usageCacheBreakdown {
+	usage := &resp.Usage
 	// Anthropic's usage object reports cache tokens as flat fields (cache_read_input_tokens,
 	// cache_creation_input_tokens) and its input_tokens is EXCLUSIVE of them, unlike the
 	// nested OpenAI/Responses API detail fields where prompt_tokens/input_tokens is INCLUSIVE.
 	// Track whether the flat Anthropic fields supplied the cache figures so promptTokens can
 	// be corrected back to the inclusive total CalculateTokenCosts expects.
-	anthropicFlatCacheRead := false
-	anthropicFlatCacheCreation := false
-
-	cachedTokens := resp.Usage.PromptTokensDetails.CachedTokens
-	if cachedTokens == 0 {
-		cachedTokens = resp.Usage.InputTokensDetails.CachedTokens
+	prompt := &usage.PromptTokensDetails
+	input := &usage.InputTokensDetails
+	cache := usageCacheBreakdown{
+		read: cmp.Or(prompt.CachedTokens, input.CachedTokens),
+		kind: cmp.Or(prompt.CacheType, input.CacheType, usage.CacheType),
 	}
-	cacheType := resp.Usage.PromptTokensDetails.CacheType
-	if cacheType == "" {
-		cacheType = resp.Usage.InputTokensDetails.CacheType
+	if cache.read == 0 && usage.CacheReadInputTokens > 0 {
+		cache.read = usage.CacheReadInputTokens
+		cache.flatRead = true
 	}
-	if cacheType == "" {
-		// Flat Anthropic/Messages-API-shaped extension field (see
-		// responsesUsageDetails.CacheType's doc comment).
-		cacheType = resp.Usage.CacheType
-	}
-	if cachedTokens == 0 && resp.Usage.CacheReadInputTokens > 0 {
-		cachedTokens = resp.Usage.CacheReadInputTokens
-		anthropicFlatCacheRead = true
-	}
-	cacheCreationTokens := resp.Usage.PromptTokensDetails.CacheCreationTokens
-	cacheCreation5mTokens := resp.Usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens
-	cacheCreation1hTokens := resp.Usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens
+	cache.write = prompt.CacheCreationTokens
+	cache.write5m = prompt.CacheCreationTokenDetails.Ephemeral5mInputTokens
+	cache.write1h = prompt.CacheCreationTokenDetails.Ephemeral1hInputTokens
 	// OpenAI's 12h cache-retention write (prompt_cache_retention:"12h") is a
 	// separate TTL tier reported under cache_write_tokens_details, and a single
 	// request may also carry a 30m tier alongside it; both are billed, each at
 	// its own rate. The 30m tier is not Anthropic's 5m one, so it fills the 5m
 	// slot only when no 5m/1h split was given.
-	cacheCreation12hTokens := resp.Usage.PromptTokensDetails.CacheWriteTokensDetails.TTL12hTokens
-	if cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
-		cacheCreation5mTokens = resp.Usage.PromptTokensDetails.CacheWriteTokensDetails.TTL30mTokens
+	cache.write12h = prompt.CacheWriteTokensDetails.TTL12hTokens
+	if !cache.hasShortTTL() {
+		cache.write5m = prompt.CacheWriteTokensDetails.TTL30mTokens
 	}
 	// Alibaba spells the TTL detail cache_creation.ephemeral_5m_input_tokens
 	// (nested in prompt_tokens_details, no _token_details suffix).
-	if cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
-		cacheCreation5mTokens = resp.Usage.PromptTokensDetails.CacheCreation.Ephemeral5mInputTokens
-		cacheCreation1hTokens = resp.Usage.PromptTokensDetails.CacheCreation.Ephemeral1hInputTokens
+	if !cache.hasShortTTL() {
+		cache.write5m = prompt.CacheCreation.Ephemeral5mInputTokens
+		cache.write1h = prompt.CacheCreation.Ephemeral1hInputTokens
 	}
-	cachedAudioTokens := resp.Usage.PromptTokensDetails.CachedAudioTokens
-	if cacheCreationTokens == 0 {
-		cacheCreationTokens = resp.Usage.PromptTokensDetails.CacheWriteTokens
+	if cache.write == 0 {
+		cache.write = prompt.CacheWriteTokens
 	}
-	if cacheCreationTokens == 0 && cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 && cacheCreation12hTokens == 0 {
-		cacheCreationTokens, cacheCreation5mTokens, cacheCreation1hTokens = resp.Usage.PromptTokensDetails.CachingWrite()
+	if !cache.hasWrite() {
+		cache.write, cache.write5m, cache.write1h = prompt.CachingWrite()
 	}
-	if cacheCreationTokens == 0 && cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 && cacheCreation12hTokens == 0 {
-		cacheCreationTokens = resp.Usage.InputTokensDetails.CacheCreationTokens
-		cacheCreation5mTokens = resp.Usage.InputTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens
-		cacheCreation1hTokens = resp.Usage.InputTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens
-		if cacheCreation12hTokens == 0 {
-			cacheCreation12hTokens = resp.Usage.InputTokensDetails.CacheWriteTokensDetails.TTL12hTokens
-			if cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
-				cacheCreation5mTokens = resp.Usage.InputTokensDetails.CacheWriteTokensDetails.TTL30mTokens
-			}
+	if !cache.hasWrite() {
+		cache.write = input.CacheCreationTokens
+		cache.write5m = input.CacheCreationTokenDetails.Ephemeral5mInputTokens
+		cache.write1h = input.CacheCreationTokenDetails.Ephemeral1hInputTokens
+		cache.write12h = input.CacheWriteTokensDetails.TTL12hTokens
+		if !cache.hasShortTTL() {
+			cache.write5m = input.CacheWriteTokensDetails.TTL30mTokens
 		}
 	}
 	// Alibaba's Qwen4 splits its explicit cache write in the Responses API's
 	// cache_write_tokens_details as ttl_5m_tokens and ttl_1h_tokens: the two
 	// tiers Anthropic calls 5m and 1h, each billed at its own rate.
-	if cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
-		cacheCreation5mTokens = resp.Usage.InputTokensDetails.CacheWriteTokensDetails.TTL5mTokens
-		cacheCreation1hTokens = resp.Usage.InputTokensDetails.CacheWriteTokensDetails.TTL1hTokens
+	if !cache.hasShortTTL() {
+		cache.write5m = input.CacheWriteTokensDetails.TTL5mTokens
+		cache.write1h = input.CacheWriteTokensDetails.TTL1hTokens
 	}
-	if cacheCreationTokens == 0 {
-		cacheCreationTokens = resp.Usage.InputTokensDetails.CacheWriteTokens
+	if cache.write == 0 {
+		cache.write = input.CacheWriteTokens
 	}
-	if cacheCreationTokens == 0 {
-		cacheCreationTokens = resp.Usage.CacheCreationInputTokens
-		if cacheCreationTokens > 0 {
-			anthropicFlatCacheCreation = true
+	if cache.write == 0 {
+		cache.write = usage.CacheCreationInputTokens
+		cache.flatWrite = cache.write > 0
+	}
+	if !cache.hasShortTTL() {
+		cache.write5m = usage.CacheCreation.Ephemeral5mInputTokens
+		cache.write1h = usage.CacheCreation.Ephemeral1hInputTokens
+		cache.flatWrite = cache.flatWrite || cache.write5m > 0 || cache.write1h > 0
+	}
+	if nested != nil {
+		cache.read = cmp.Or(cache.read, nested.InputTokensDetails.CachedTokens)
+		cache.kind = cmp.Or(cache.kind, nested.InputTokensDetails.CacheType, nested.CacheType)
+		// A missing aggregate switches the Responses cache-write fallback
+		// to the nested detail object as a group, including its two TTL fields.
+		if cache.write == 0 {
+			cache.write = nested.InputTokensDetails.CacheCreationTokens
+			cache.write5m = nested.InputTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens
+			cache.write1h = nested.InputTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens
 		}
-	}
-	if cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
-		cacheCreation5mTokens = resp.Usage.CacheCreation.Ephemeral5mInputTokens
-		cacheCreation1hTokens = resp.Usage.CacheCreation.Ephemeral1hInputTokens
-		if cacheCreation5mTokens > 0 || cacheCreation1hTokens > 0 {
-			anthropicFlatCacheCreation = true
-		}
-	}
-	if cachedAudioTokens == 0 {
-		cachedAudioTokens = resp.Usage.InputTokensDetails.CachedAudioTokens
-	}
-	audioIn := resp.Usage.PromptTokensDetails.AudioTokens
-	if audioIn == 0 {
-		audioIn = resp.Usage.InputTokensDetails.AudioTokens
-	}
-	inputImageTokens := resp.Usage.PromptTokensDetails.ImageTokens
-	if inputImageTokens == 0 {
-		inputImageTokens = resp.Usage.InputTokensDetails.ImageTokens
-	}
-	inputVideoTokens := resp.Usage.PromptTokensDetails.VideoTokens
-	if inputVideoTokens == 0 {
-		inputVideoTokens = resp.Usage.InputTokensDetails.VideoTokens
-	}
-	audioOut := resp.Usage.CompletionTokensDetails.AudioTokens
-	if audioOut == 0 {
-		audioOut = resp.Usage.OutputTokensDetails.AudioTokens
-	}
-	reasoning := resp.Usage.CompletionTokensDetails.ReasoningTokens
-	if reasoning == 0 {
-		reasoning = resp.Usage.OutputTokensDetails.ReasoningTokens
-	}
-	if reasoning == 0 {
-		reasoning = resp.Usage.OutputTokensDetails.ThinkingTokens
-	}
-	outputImageTokens := resp.Usage.CompletionTokensDetails.ImageTokens
-	if outputImageTokens == 0 {
-		outputImageTokens = resp.Usage.OutputTokensDetails.ImageTokens
-	}
-	cachedOutputTokens := resp.Usage.CompletionTokensDetails.CachedTokens
-	if cachedOutputTokens == 0 {
-		cachedOutputTokens = resp.Usage.OutputTokensDetails.CachedTokens
-	}
-	outputTextTokens := resp.Usage.CompletionTokensDetails.TextTokens
-	if outputTextTokens == 0 {
-		outputTextTokens = resp.Usage.OutputTokensDetails.TextTokens
-	}
-	initialPromptTokens := resp.Usage.PromptTokensDetails.InitialPromptTokens
-	if initialPromptTokens == 0 {
-		initialPromptTokens = resp.Usage.InputTokensDetails.InitialPromptTokens
-	}
-
-	// If tokens came from the nested response.completed event, use its detail fields
-	if resp.Usage.PromptTokens == 0 && resp.Usage.InputTokens == 0 && resp.Response.Usage != nil {
-		u := resp.Response.Usage
-		if cachedTokens == 0 {
-			cachedTokens = u.InputTokensDetails.CachedTokens
-		}
-		if cacheType == "" {
-			cacheType = u.InputTokensDetails.CacheType
-		}
-		if cacheType == "" {
-			cacheType = u.CacheType
-		}
-		if cacheCreationTokens == 0 {
-			cacheCreationTokens = u.InputTokensDetails.CacheCreationTokens
-			cacheCreation5mTokens = u.InputTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens
-			cacheCreation1hTokens = u.InputTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens
-		}
-		if cacheCreationTokens == 0 {
-			cacheCreationTokens = u.InputTokensDetails.CacheWriteTokens
+		if cache.write == 0 {
+			cache.write = nested.InputTokensDetails.CacheWriteTokens
 		}
 		// Alibaba's Qwen4 splits its explicit cache write into a five-minute
 		// and a one-hour part under cache_write_tokens_details.
-		if cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
-			cacheCreation5mTokens = u.InputTokensDetails.CacheWriteTokensDetails.TTL5mTokens
-			cacheCreation1hTokens = u.InputTokensDetails.CacheWriteTokensDetails.TTL1hTokens
-		}
-		if audioIn == 0 {
-			audioIn = u.InputTokensDetails.AudioTokens
-		}
-		if inputImageTokens == 0 {
-			inputImageTokens = u.InputTokensDetails.ImageTokens
-		}
-		if inputVideoTokens == 0 {
-			inputVideoTokens = u.InputTokensDetails.VideoTokens
-		}
-		if cachedAudioTokens == 0 {
-			cachedAudioTokens = u.InputTokensDetails.CachedAudioTokens
-		}
-		if audioOut == 0 {
-			audioOut = u.OutputTokensDetails.AudioTokens
-		}
-		if reasoning == 0 {
-			reasoning = u.OutputTokensDetails.ReasoningTokens
-		}
-		if inputImageTokens == 0 {
-			inputImageTokens = u.InputTokensDetails.ImageTokens
-		}
-		if outputImageTokens == 0 {
-			outputImageTokens = u.OutputTokensDetails.ImageTokens
-		}
-		if cachedOutputTokens == 0 {
-			cachedOutputTokens = u.OutputTokensDetails.CachedTokens
-		}
-		if outputTextTokens == 0 {
-			outputTextTokens = u.OutputTokensDetails.TextTokens
-		}
-		if initialPromptTokens == 0 {
-			initialPromptTokens = u.InputTokensDetails.InitialPromptTokens
+		if !cache.hasShortTTL() {
+			cache.write5m = nested.InputTokensDetails.CacheWriteTokensDetails.TTL5mTokens
+			cache.write1h = nested.InputTokensDetails.CacheWriteTokensDetails.TTL1hTokens
 		}
 	}
 	// Body never reports the TTL split for providers like Kimi/Moonshot
 	// (cache_creation_token_details stays null) — fall back to the
 	// header-sourced split when the body gave us none.
-	if cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
-		cacheCreation5mTokens = opts.CacheWriteTTLHeader5mTokens
-		cacheCreation1hTokens = opts.CacheWriteTTLHeader1hTokens
+	if !cache.hasShortTTL() {
+		cache.write5m = opts.CacheWriteTTLHeader5mTokens
+		cache.write1h = opts.CacheWriteTTLHeader1hTokens
 	}
-	if cacheCreationTokens == 0 {
-		cacheCreationTokens = cacheCreation5mTokens + cacheCreation1hTokens
+	if cache.write == 0 {
+		cache.write = cache.write5m + cache.write1h
 	}
-	// Decided on the provider's own figures, before the Anthropic flat-cache
-	// correction below rewrites promptTokens (Anthropic sends no total_tokens).
-	var reasoningAccounting string
-	if !anthropicFlatCacheRead && !anthropicFlatCacheCreation {
-		totalTokens := resp.Usage.TotalTokens
-		if resp.Usage.PromptTokens == 0 && resp.Usage.InputTokens == 0 && resp.Response.Usage != nil {
-			totalTokens = resp.Response.Usage.TotalTokens
-		}
-		reasoningAccounting = detectReasoningAccounting(promptTokens, completionTokens, reasoning, totalTokens)
-	}
-	providerCost := resp.Usage.providerCostUSD()
-	if providerCost == 0 && resp.Response.Usage != nil {
-		providerCost = resp.Response.Usage.providerCostUSD()
-	}
-	// Anthropic's input_tokens excludes cache tokens; add them back so promptTokens
-	// matches the inclusive-total semantics CalculateTokenCosts subtracts cache from.
-	if promptTokensFromInputTokens && anthropicFlatCacheRead {
-		promptTokens += cachedTokens
-	}
-	if promptTokensFromInputTokens && anthropicFlatCacheCreation {
-		promptTokens += cacheCreationTokens
-	}
-	cachedTokens, cachedAudioTokens = converterutil.NormalizeCachedAudioBreakdown(cachedTokens, cachedAudioTokens)
-	audioIn = converterutil.NormalizeAudioInputTokens(
-		audioIn,
-		cachedTokens,
-		cachedAudioTokens,
-		opts.AudioInputIncludesCachedAudio,
-	)
 
-	return (&TokenUsage{
-		PromptTokens:             promptTokens,
-		CompletionTokens:         completionTokens,
-		CachedInputTokens:        cachedTokens,
-		CachedAudioInputTokens:   cachedAudioTokens,
-		CacheType:                cacheType,
-		CachedOutputTokens:       cachedOutputTokens,
-		OutputTextTokens:         outputTextTokens,
-		CacheCreationTokens:      cacheCreationTokens,
-		CacheCreation5mTokens:    cacheCreation5mTokens,
-		CacheCreation1hTokens:    cacheCreation1hTokens,
-		CacheCreation12hTokens:   cacheCreation12hTokens,
-		WebFetchRequests:         webFetchRequests,
-		AudioInputTokens:         audioIn,
-		ImageTokens:              inputImageTokens,
-		VideoInputTokens:         inputVideoTokens,
-		OutputImageTokens:        outputImageTokens,
-		AcceptedPredictionTokens: resp.Usage.CompletionTokensDetails.AcceptedPredictionTokens,
-		RejectedPredictionTokens: resp.Usage.CompletionTokensDetails.RejectedPredictionTokens,
-		AudioOutputTokens:        audioOut,
-		ReasoningTokens:          reasoning,
-		WebSearchRequests:        webSearchRequests + routerWebSearchRequests,
-		ServerToolUsageReported:  toolUsageReported,
-		XSearchCalls:             toolUsage.XSearchCalls,
-		XSearchPosts:             toolUsage.XPostsFetched,
-		XSearchProfiles:          toolUsage.XUsersFetched,
-		CodeExecutionCalls:       toolUsage.CodeExecutionCalls,
-		AttachmentSearchCalls:    toolUsage.AttachmentSearchCalls,
-		CollectionsSearchCalls:   toolUsage.CollectionsSearchCalls,
-		MCPCalls:                 toolUsage.MCPCalls,
-		ImageToolGenerations:     imageToolGenerations,
-		ImageToolEdits:           imageToolEdits,
-		ReasoningAccounting:      reasoningAccounting,
-		ProviderCostUSD:          providerCost,
-		InitialPromptTokens:      initialPromptTokens,
-	}).Normalize()
+	return cache
+}
+
+func extractUsageTokenDetails(resp *tokenUsageResponseShape, nested *responsesUsageDetails) TokenUsage {
+	prompt, input := &resp.Usage.PromptTokensDetails, &resp.Usage.InputTokensDetails
+	completion, output := &resp.Usage.CompletionTokensDetails, &resp.Usage.OutputTokensDetails
+	usage := TokenUsage{
+		CachedAudioInputTokens: cmp.Or(prompt.CachedAudioTokens, input.CachedAudioTokens),
+		AudioInputTokens:       cmp.Or(prompt.AudioTokens, input.AudioTokens),
+		ImageTokens:            cmp.Or(prompt.ImageTokens, input.ImageTokens),
+		VideoInputTokens:       cmp.Or(prompt.VideoTokens, input.VideoTokens),
+		AudioOutputTokens:      cmp.Or(completion.AudioTokens, output.AudioTokens),
+		ReasoningTokens:        cmp.Or(completion.ReasoningTokens, output.ReasoningTokens, output.ThinkingTokens),
+		OutputImageTokens:      cmp.Or(completion.ImageTokens, output.ImageTokens),
+		CachedOutputTokens:     cmp.Or(completion.CachedTokens, output.CachedTokens),
+		OutputTextTokens:       cmp.Or(completion.TextTokens, output.TextTokens),
+		InitialPromptTokens:    cmp.Or(prompt.InitialPromptTokens, input.InitialPromptTokens),
+	}
+	if nested == nil {
+		return usage
+	}
+	nestedInput, nestedOutput := &nested.InputTokensDetails, &nested.OutputTokensDetails
+	usage.CachedAudioInputTokens = cmp.Or(usage.CachedAudioInputTokens, nestedInput.CachedAudioTokens)
+	usage.AudioInputTokens = cmp.Or(usage.AudioInputTokens, nestedInput.AudioTokens)
+	usage.ImageTokens = cmp.Or(usage.ImageTokens, nestedInput.ImageTokens)
+	usage.VideoInputTokens = cmp.Or(usage.VideoInputTokens, nestedInput.VideoTokens)
+	usage.InitialPromptTokens = cmp.Or(usage.InitialPromptTokens, nestedInput.InitialPromptTokens)
+	usage.AudioOutputTokens = cmp.Or(usage.AudioOutputTokens, nestedOutput.AudioTokens)
+	usage.ReasoningTokens = cmp.Or(usage.ReasoningTokens, nestedOutput.ReasoningTokens)
+	usage.OutputImageTokens = cmp.Or(usage.OutputImageTokens, nestedOutput.ImageTokens)
+	usage.CachedOutputTokens = cmp.Or(usage.CachedOutputTokens, nestedOutput.CachedTokens)
+	usage.OutputTextTokens = cmp.Or(usage.OutputTextTokens, nestedOutput.TextTokens)
+	return usage
 }
 
 // detectReasoningAccounting tells from the provider's own total_tokens

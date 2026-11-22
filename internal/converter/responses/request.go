@@ -2,6 +2,7 @@ package responses
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -738,380 +739,271 @@ func convertInputValue(input interface{}) ([]interface{}, error) {
 		return nil, fmt.Errorf("input must be string, object, or array")
 	}
 
-	var messages []interface{}
-	// lastUserIdx is the index in messages of the last user message; -1 if none.
-	lastUserIdx := -1
-
-	// Chat Completions carries a whole assistant turn — reasoning_content,
-	// content and tool_calls — in one message, while the Responses API splits
-	// it into reasoning / message / function_call items (see ChatToResponse).
-	// The pending* state folds the items of one turn back into one message.
-	var pendingAssistant map[string]interface{}
-	var pendingToolCalls []interface{}
-	var pendingReasoning []string
-	// A reasoning item belongs to the item that follows it, so its text waits
-	// in unclaimedReasoning until that item claims it for its turn.
-	var unclaimedReasoning []string
-
-	claimReasoning := func() {
-		pendingReasoning = append(pendingReasoning, unclaimedReasoning...)
-		unclaimedReasoning = nil
-	}
-
-	// flushToolCalls emits the assistant turn built so far, if any.
-	// Unclaimed reasoning stays pending for the next item.
-	flushToolCalls := func() {
-		if pendingAssistant == nil && len(pendingToolCalls) == 0 && len(pendingReasoning) == 0 {
-			return
-		}
-		msg := pendingAssistant
-		if msg == nil {
-			if len(pendingToolCalls) == 0 {
-				// Reasoning-only turn (e.g. max_output_tokens ran out mid-reasoning).
-				// Dropped: an assistant message with empty content, or two assistant
-				// messages in a row, is rejected by several Chat providers, and
-				// reasoning alone gives the model nothing to continue from.
-				pendingReasoning = nil
-				return
-			}
-			msg = map[string]interface{}{"role": "assistant", "content": nil}
-		}
-		if len(pendingToolCalls) > 0 {
-			msg["tool_calls"] = pendingToolCalls
-		}
-		if len(pendingReasoning) > 0 {
-			msg["reasoning_content"] = strings.Join(pendingReasoning, "\n\n")
-		}
-		messages = append(messages, msg)
-		pendingAssistant, pendingToolCalls, pendingReasoning = nil, nil, nil
-	}
-
-	// endAssistantTurn closes the turn before an item that is not part of it
-	// (user/system message, tool result, ...). Reasoning nothing claimed stays
-	// with the turn it ended, or is dropped with a reasoning-only turn.
-	endAssistantTurn := func() {
-		claimReasoning()
-		flushToolCalls()
-	}
-
-	addToolCall := func(toolCall map[string]interface{}) {
-		claimReasoning()
-		pendingToolCalls = append(pendingToolCalls, toolCall)
-	}
-
-	// addAssistantMessage starts a turn with an assistant message item; the
-	// function_call items that follow it join the same Chat message.
-	addAssistantMessage := func(msg map[string]interface{}) {
-		if pendingAssistant != nil || len(pendingToolCalls) > 0 {
-			flushToolCalls()
-		}
-		claimReasoning()
-		pendingAssistant = msg
-	}
-
+	converter := inputMessageConverter{lastUserIdx: -1}
 	for _, item := range inputArr {
-		itemMap, ok := item.(map[string]interface{})
-		if !ok {
-			continue
-		}
-
-		itemType, _ := itemMap["type"].(string)
-
-		switch itemType {
-		case "function_call":
-			// Accumulate tool calls; they'll be flushed as a single assistant message
-			callID, _ := itemMap["call_id"].(string)
-			name, _ := itemMap["name"].(string)
-			arguments, _ := itemMap["arguments"].(string)
-			addToolCall(map[string]interface{}{
-				"id":   callID,
-				"type": "function",
-				"function": map[string]interface{}{
-					"name":      name,
-					"arguments": arguments,
-				},
-			})
-
-		case "function_call_output":
-			// Flush any pending tool calls before the output
-			endAssistantTurn()
-			msg := convertFunctionCallOutput(itemMap)
-			messages = append(messages, msg)
-
-		case "reasoning":
-			// Carried as reasoning_content of the assistant message it precedes —
-			// the field DeepSeek-style providers require back on tool-call turns.
-			// encrypted_content is dropped — it is only meaningful to the original provider.
-			if text := ReasoningItemText(itemMap); text != "" {
-				unclaimedReasoning = append(unclaimedReasoning, text)
-			}
-
-		case "web_search_call":
-			// Serialize as a synthetic function_call + tool result pair.
-			flushToolCalls()
-			callID, _ := itemMap["call_id"].(string)
-			if callID == "" {
-				callID, _ = itemMap["id"].(string)
-			}
-			if callID != "" {
-				name, _ := itemMap["name"].(string)
-				if name == "" {
-					name = "web_search"
-				}
-				addToolCall(map[string]interface{}{
-					"id":   callID,
-					"type": "function",
-					"function": map[string]interface{}{
-						"name":      name,
-						"arguments": "{}",
-					},
-				})
-				flushToolCalls()
-				var outputStr string
-				if results := itemMap["results"]; results != nil {
-					if b, err := json.Marshal(results); err == nil {
-						outputStr = string(b)
-					}
-				}
-				messages = append(messages, map[string]interface{}{
-					"role":         "tool",
-					"tool_call_id": callID,
-					"content":      outputStr,
-				})
-			}
-
-		case "computer_call_output":
-			// Convert screenshot/output to a user message with image content.
-			endAssistantTurn()
-			var content []interface{}
-			if output, ok := itemMap["output"].(map[string]interface{}); ok {
-				outputType, _ := output["type"].(string)
-				switch outputType {
-				case "computer_screenshot":
-					// Schema format: image_url is a nested {url: "...", detail: "..."} object.
-					if imgURLMap, ok := output["image_url"].(map[string]interface{}); ok {
-						if imgURL, ok := imgURLMap["url"].(string); ok && imgURL != "" {
-							content = append(content, map[string]interface{}{
-								"type": "image_url",
-								"image_url": map[string]interface{}{
-									"url": imgURL,
-								},
-							})
-						}
-					}
-				default:
-					// Legacy/proxy format: image_url is a plain string.
-					if imgURL, ok := output["image_url"].(string); ok && imgURL != "" {
-						content = append(content, map[string]interface{}{
-							"type": "image_url",
-							"image_url": map[string]interface{}{
-								"url": imgURL,
-							},
-						})
-					}
-				}
-			}
-			if len(content) == 0 {
-				content = append(content, map[string]interface{}{
-					"type": "text",
-					"text": "[computer_call_output]",
-				})
-			}
-			messages = append(messages, map[string]interface{}{
-				"role":    "user",
-				"content": content,
-			})
-
-		case "code_interpreter_call":
-			// Serialize as a synthetic function_call + tool result pair.
-			flushToolCalls()
-			callID, _ := itemMap["call_id"].(string)
-			if callID == "" {
-				callID, _ = itemMap["id"].(string)
-			}
-			if callID != "" {
-				code, _ := itemMap["code"].(string)
-				argsJSON, _ := json.Marshal(map[string]interface{}{"code": code})
-				addToolCall(map[string]interface{}{
-					"id":   callID,
-					"type": "function",
-					"function": map[string]interface{}{
-						"name":      "code_interpreter",
-						"arguments": string(argsJSON),
-					},
-				})
-				flushToolCalls()
-				var outputStr string
-				if outputs := itemMap["outputs"]; outputs != nil {
-					if b, err := json.Marshal(outputs); err == nil {
-						outputStr = string(b)
-					}
-				}
-				messages = append(messages, map[string]interface{}{
-					"role":         "tool",
-					"tool_call_id": callID,
-					"content":      outputStr,
-				})
-			}
-
-		case "file_search_call":
-			// Serialize search results as a synthetic function_call + tool result pair.
-			flushToolCalls()
-			callID, _ := itemMap["call_id"].(string)
-			if callID == "" {
-				callID, _ = itemMap["id"].(string)
-			}
-			if callID != "" {
-				addToolCall(map[string]interface{}{
-					"id":   callID,
-					"type": "function",
-					"function": map[string]interface{}{
-						"name":      "file_search",
-						"arguments": "{}",
-					},
-				})
-				flushToolCalls()
-				var outputStr string
-				if results := itemMap["results"]; results != nil {
-					if b, err := json.Marshal(results); err == nil {
-						outputStr = string(b)
-					}
-				}
-				messages = append(messages, map[string]interface{}{
-					"role":         "tool",
-					"tool_call_id": callID,
-					"content":      outputStr,
-				})
-			}
-
-		case "image_generation_call":
-			// Emit the generated image as an assistant message with an image_url part.
-			flushToolCalls()
-			result, _ := itemMap["result"].(string)
-			if result != "" {
-				addAssistantMessage(map[string]interface{}{
-					"role": "assistant",
-					"content": []interface{}{
-						map[string]interface{}{
-							"type": "image_url",
-							"image_url": map[string]interface{}{
-								"url": result,
-							},
-						},
-					},
-				})
-				flushToolCalls()
-			}
-
-		case "mcp_tool_call":
-			// Serialize as a synthetic function_call + tool result pair.
-			flushToolCalls()
-			callID, _ := itemMap["call_id"].(string)
-			if callID == "" {
-				callID, _ = itemMap["id"].(string)
-			}
-			if callID != "" {
-				name, _ := itemMap["name"].(string)
-				serverLabel, _ := itemMap["server_label"].(string)
-				if name == "" {
-					name = "mcp_tool"
-				}
-				if serverLabel != "" {
-					name = serverLabel + "_" + name
-				}
-				var argsStr string
-				if input := itemMap["input"]; input != nil {
-					if b, err := json.Marshal(input); err == nil {
-						argsStr = string(b)
-					}
-				}
-				if argsStr == "" {
-					argsStr = "{}"
-				}
-				addToolCall(map[string]interface{}{
-					"id":   callID,
-					"type": "function",
-					"function": map[string]interface{}{
-						"name":      name,
-						"arguments": argsStr,
-					},
-				})
-				flushToolCalls()
-				var outputStr string
-				if output := itemMap["output"]; output != nil {
-					if b, err := json.Marshal(output); err == nil {
-						outputStr = string(b)
-					}
-				}
-				messages = append(messages, map[string]interface{}{
-					"role":         "tool",
-					"tool_call_id": callID,
-					"content":      outputStr,
-				})
-			}
-
-		case "compaction":
-			// A compaction item carries an encrypted_content summary of prior context.
-			// Inject it as a user message so the model has the compacted context.
-			endAssistantTurn()
-			ec, _ := itemMap["encrypted_content"].(string)
-			if ec != "" {
-				messages = append(messages, map[string]interface{}{
-					"role":    "user",
-					"content": "[Conversation context summary]: " + ec,
-				})
-			}
-
-		default:
-			// only convert items that have a "role" field (messages).
-			// Skip unrecognized input item types (e.g. item_reference) to avoid
-			// sending malformed messages to Chat Completions providers.
-			if _, hasRole := itemMap["role"]; !hasRole && itemType != "" && itemType != "message" {
-				flushToolCalls()
-				continue
-			}
-			msg, err := convertMessage(itemMap)
-			if err != nil {
+		if fields, ok := item.(map[string]interface{}); ok {
+			if err := converter.addItem(fields); err != nil {
 				return nil, err
 			}
-			if msg["role"] == "assistant" {
-				// A terminal refusal belongs to the pending turn, including its
-				// tool calls. A separate assistant message would split a call
-				// from the function_call_output supplied by the client next.
-				if text := refusalInputText(itemMap); text != "" && (pendingAssistant != nil || len(pendingToolCalls) > 0) {
-					claimReasoning()
-					if pendingAssistant == nil {
-						pendingAssistant = map[string]interface{}{"role": "assistant"}
-					}
-					appendAssistantText(pendingAssistant, text)
-					continue
-				}
-				addAssistantMessage(msg)
-				continue
-			}
-			endAssistantTurn()
-			if msg["role"] == "user" {
-				lastUserIdx = len(messages)
-			}
-			messages = append(messages, msg)
 		}
 	}
+	return converter.finish(), nil
+}
 
-	// Flush the trailing assistant turn, if any
-	endAssistantTurn()
+// inputMessageConverter folds the Responses items of one assistant turn into
+// a single Chat message. Reasoning waits for the next item to claim it.
+type inputMessageConverter struct {
+	messages           []interface{}
+	lastUserIdx        int
+	pendingAssistant   map[string]interface{}
+	pendingToolCalls   []interface{}
+	pendingReasoning   []string
+	unclaimedReasoning []string
+}
 
+func (c *inputMessageConverter) claimReasoning() {
+	c.pendingReasoning = append(c.pendingReasoning, c.unclaimedReasoning...)
+	c.unclaimedReasoning = nil
+}
+
+// flushAssistantTurn emits the assistant turn built so far, if any.
+// Unclaimed reasoning stays pending for the next item.
+func (c *inputMessageConverter) flushAssistantTurn() {
+	msg := c.pendingAssistant
+	if msg == nil {
+		if len(c.pendingToolCalls) == 0 {
+			// Reasoning-only turn (e.g. max_output_tokens ran out mid-reasoning).
+			// Dropped: an assistant message with empty content, or two assistant
+			// messages in a row, is rejected by several Chat providers, and
+			// reasoning alone gives the model nothing to continue from.
+			c.pendingReasoning = nil
+			return
+		}
+		msg = map[string]interface{}{"role": "assistant", "content": nil}
+	}
+	if len(c.pendingToolCalls) > 0 {
+		msg["tool_calls"] = c.pendingToolCalls
+	}
+	if len(c.pendingReasoning) > 0 {
+		msg["reasoning_content"] = strings.Join(c.pendingReasoning, "\n\n")
+	}
+	c.messages = append(c.messages, msg)
+	c.pendingAssistant, c.pendingToolCalls, c.pendingReasoning = nil, nil, nil
+}
+
+// endAssistantTurn closes the turn before an item that is not part of it
+// (user/system message, tool result, ...). Reasoning nothing claimed stays
+// with the turn it ended, or is dropped with a reasoning-only turn.
+func (c *inputMessageConverter) endAssistantTurn() {
+	c.claimReasoning()
+	c.flushAssistantTurn()
+}
+
+func (c *inputMessageConverter) addToolCall(toolCall map[string]interface{}) {
+	c.claimReasoning()
+	c.pendingToolCalls = append(c.pendingToolCalls, toolCall)
+}
+
+// addAssistantMessage starts a turn with an assistant message item; the
+// function_call items that follow it join the same Chat message.
+func (c *inputMessageConverter) addAssistantMessage(msg map[string]interface{}) {
+	if c.pendingAssistant != nil || len(c.pendingToolCalls) > 0 {
+		c.flushAssistantTurn()
+	}
+	c.claimReasoning()
+	c.pendingAssistant = msg
+}
+
+func (c *inputMessageConverter) addItem(itemMap map[string]interface{}) error {
+	itemType, _ := itemMap["type"].(string)
+
+	switch itemType {
+	case "function_call":
+		c.addToolCall(chatFunctionCall(
+			converterutil.GetString(itemMap, "call_id"),
+			converterutil.GetString(itemMap, "name"),
+			converterutil.GetString(itemMap, "arguments"),
+		))
+
+	case "function_call_output":
+		// Flush any pending tool calls before the output
+		c.endAssistantTurn()
+		msg := convertFunctionCallOutput(itemMap)
+		c.messages = append(c.messages, msg)
+
+	case "reasoning":
+		// Carried as reasoning_content of the assistant message it precedes —
+		// the field DeepSeek-style providers require back on tool-call turns.
+		// encrypted_content is dropped — it is only meaningful to the original provider.
+		if text := ReasoningItemText(itemMap); text != "" {
+			c.unclaimedReasoning = append(c.unclaimedReasoning, text)
+		}
+
+	case "web_search_call", "code_interpreter_call", "file_search_call", "mcp_tool_call":
+		c.addSyntheticToolTurn(itemType, itemMap)
+
+	case "computer_call_output":
+		c.endAssistantTurn()
+		content := computerScreenshotPart(itemMap)
+		c.messages = append(c.messages, map[string]interface{}{
+			"role": "user", "content": []interface{}{content},
+		})
+
+	case "image_generation_call":
+		c.flushAssistantTurn()
+		if url, _ := itemMap["result"].(string); url != "" {
+			c.addAssistantMessage(map[string]interface{}{
+				"role": "assistant", "content": []interface{}{chatImagePart(url)},
+			})
+			c.flushAssistantTurn()
+		}
+
+	case "compaction":
+		// A compaction item carries an encrypted_content summary of prior context.
+		// Inject it as a user message so the model has the compacted context.
+		c.endAssistantTurn()
+		ec, _ := itemMap["encrypted_content"].(string)
+		if ec != "" {
+			c.messages = append(c.messages, map[string]interface{}{
+				"role":    "user",
+				"content": "[Conversation context summary]: " + ec,
+			})
+		}
+
+	default:
+		return c.addMessage(itemType, itemMap)
+	}
+	return nil
+}
+
+func (c *inputMessageConverter) addMessage(itemType string, itemMap map[string]interface{}) error {
+	// Skip unknown item types without a role, such as item_reference.
+	if _, hasRole := itemMap["role"]; !hasRole && itemType != "" && itemType != "message" {
+		c.flushAssistantTurn()
+		return nil
+	}
+	msg, err := convertMessage(itemMap)
+	if err != nil {
+		return err
+	}
+	if msg["role"] == "assistant" {
+		// A terminal refusal belongs to the pending turn, including its
+		// tool calls. A separate assistant message would split a call
+		// from the function_call_output supplied by the client next.
+		if text := refusalInputText(itemMap); text != "" && (c.pendingAssistant != nil || len(c.pendingToolCalls) > 0) {
+			c.claimReasoning()
+			if c.pendingAssistant == nil {
+				c.pendingAssistant = map[string]interface{}{"role": "assistant"}
+			}
+			appendAssistantText(c.pendingAssistant, text)
+			return nil
+		}
+		c.addAssistantMessage(msg)
+		return nil
+	}
+	c.endAssistantTurn()
+	if msg["role"] == "user" {
+		c.lastUserIdx = len(c.messages)
+	}
+	c.messages = append(c.messages, msg)
+	return nil
+}
+
+func (c *inputMessageConverter) finish() []interface{} {
+	c.endAssistantTurn()
 	// reasoning_content is only sent back for the current tool loop — the
 	// assistant turns after the last user message. DeepSeek thinking mode and
 	// Kimi require it there; older turns' reasoning is useless to every
 	// provider, inflates input tokens, and some (deepseek-reasoner) reject it
 	// outright on past turns.
-	for i := 0; i < lastUserIdx; i++ {
-		if msg, ok := messages[i].(map[string]interface{}); ok && msg["role"] == "assistant" {
+	for i := 0; i < c.lastUserIdx; i++ {
+		if msg, ok := c.messages[i].(map[string]interface{}); ok && msg["role"] == "assistant" {
 			delete(msg, "reasoning_content")
 		}
 	}
 
-	return messages, nil
+	return c.messages
+}
+
+func chatFunctionCall(id, name, arguments string) map[string]interface{} {
+	return map[string]interface{}{
+		"id":       id,
+		"type":     "function",
+		"function": map[string]interface{}{"name": name, "arguments": arguments},
+	}
+}
+
+func (c *inputMessageConverter) addSyntheticToolTurn(itemType string, item map[string]interface{}) {
+	// Built-in tool calls are emitted as their own assistant/tool pair. Flush
+	// the previous assistant turn before reading the ID, while keeping any
+	// unclaimed reasoning available for the next usable item.
+	c.flushAssistantTurn()
+	callID := cmp.Or(converterutil.GetString(item, "call_id"), converterutil.GetString(item, "id"))
+	if callID == "" {
+		return
+	}
+
+	name := strings.TrimSuffix(itemType, "_call")
+	arguments := "{}"
+	output := item["results"]
+	if itemType == "web_search_call" || itemType == "mcp_tool_call" {
+		name = cmp.Or(converterutil.GetString(item, "name"), name)
+	}
+	switch itemType {
+	case "code_interpreter_call":
+		code, _ := item["code"].(string)
+		arguments = syntheticToolJSON(map[string]string{"code": code})
+		output = item["outputs"]
+	case "mcp_tool_call":
+		if label, _ := item["server_label"].(string); label != "" {
+			name = label + "_" + name
+		}
+		if input := syntheticToolJSON(item["input"]); input != "" {
+			arguments = input
+		}
+		output = item["output"]
+	}
+
+	c.addToolCall(chatFunctionCall(callID, name, arguments))
+	c.flushAssistantTurn()
+	c.messages = append(c.messages, map[string]interface{}{
+		"role":         "tool",
+		"tool_call_id": callID,
+		"content":      syntheticToolJSON(output),
+	})
+}
+
+func syntheticToolJSON(value interface{}) string {
+	if value == nil {
+		return ""
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+func computerScreenshotPart(item map[string]interface{}) map[string]interface{} {
+	output, _ := item["output"].(map[string]interface{})
+	var url string
+	if output["type"] == "computer_screenshot" {
+		image, _ := output["image_url"].(map[string]interface{})
+		url, _ = image["url"].(string)
+	} else {
+		url, _ = output["image_url"].(string)
+	}
+	if url != "" {
+		return chatImagePart(url)
+	}
+	return map[string]interface{}{"type": "text", "text": "[computer_call_output]"}
+}
+
+func chatImagePart(url string) map[string]interface{} {
+	return map[string]interface{}{
+		"type":      "image_url",
+		"image_url": map[string]interface{}{"url": url},
+	}
 }
 
 // ReasoningItemText returns the reasoning text of a Responses reasoning item.

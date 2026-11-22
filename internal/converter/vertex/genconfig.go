@@ -13,17 +13,7 @@ import (
 // its thinking levels: it always takes its default level, as on the images and
 // Responses routes.
 func buildGenerationConfig(req *openai.OpenAIRequest, model string) *VertexGenerationConfig {
-	// Check if any config params are present
-	hasParams := req.Temperature != nil || req.MaxTokens != nil || req.MaxCompletionTokens != nil ||
-		req.TopP != nil || req.ExtraBody != nil || req.N != nil || req.Seed != nil ||
-		req.FrequencyPenalty != nil || req.PresencePenalty != nil || req.Stop != nil ||
-		len(req.Modalities) > 0 || req.ReasoningEffort != "" || req.ResponseFormat != nil ||
-		req.Logprobs != nil || req.TopLogprobs != nil ||
-		req.Thinking != nil || req.ThinkingBudget != nil || req.ThinkingLevel != "" || req.ThinkingLevelCamel != "" ||
-		req.ThinkingConfig != nil || req.ThinkingConfigCamel != nil ||
-		hasTopLevelImageConfig(req)
-
-	if !hasParams && !lookupGeminiModelProfile(model).hasThinkingLevels() {
+	if !hasGenerationParams(req) && !lookupGeminiModelProfile(model).hasThinkingLevels() {
 		return nil
 	}
 
@@ -42,17 +32,39 @@ func buildGenerationConfig(req *openai.OpenAIRequest, model string) *VertexGener
 
 	cfg := &VertexGenerationConfig{GenerationConfig: &genai.GenerationConfig{}}
 
+	applyChatGenerationParams(cfg.GenerationConfig, req, model)
+	cfg.ImageConfig = resolveChatImageConfig(cfg.GenerationConfig, req, model)
+	cfg.ResponseModalities = uniqueModalities(cfg.ResponseModalities)
+	applyChatResponseFormat(cfg.GenerationConfig, req.ResponseFormat)
+	cfg.ThinkingConfig = resolveChatThinkingConfig(req, model)
+	capDynamicThinkingBudget(cfg.GenerationConfig, model)
+	if audio, ok := req.ExtraBody["audio"]; ok {
+		cfg.SpeechConfig = mapAudioParam(audio)
+	}
+	ApplyGenerationConstraints(cfg.GenerationConfig, model)
+	return cfg
+}
+
+func hasGenerationParams(req *openai.OpenAIRequest) bool {
+	return req.Temperature != nil || req.MaxTokens != nil || req.MaxCompletionTokens != nil ||
+		req.TopP != nil || req.ExtraBody != nil || req.N != nil || req.Seed != nil ||
+		req.FrequencyPenalty != nil || req.PresencePenalty != nil || req.Stop != nil ||
+		len(req.Modalities) > 0 || req.ReasoningEffort != "" || req.ResponseFormat != nil ||
+		req.Logprobs != nil || req.TopLogprobs != nil ||
+		req.Thinking != nil || req.ThinkingBudget != nil || req.ThinkingLevel != "" || req.ThinkingLevelCamel != "" ||
+		req.ThinkingConfig != nil || req.ThinkingConfigCamel != nil ||
+		hasTopLevelImageConfig(req)
+}
+
+func applyChatGenerationParams(cfg *genai.GenerationConfig, req *openai.OpenAIRequest, model string) {
 	// Direct scalar params
 	if req.Temperature != nil {
 		t := float32(*req.Temperature)
 		cfg.Temperature = &t
 	}
-	if req.MaxTokens != nil {
-		cfg.MaxOutputTokens = ClampInt32(*req.MaxTokens)
-	}
-	// max_completion_tokens takes precedence over max_tokens
-	if req.MaxCompletionTokens != nil {
-		cfg.MaxOutputTokens = ClampInt32(*req.MaxCompletionTokens)
+	// A supplied max_completion_tokens owns the limit even when it is zero.
+	if limit := cmp.Or(req.MaxCompletionTokens, req.MaxTokens); limit != nil {
+		cfg.MaxOutputTokens = ClampInt32(*limit)
 	}
 	if req.TopP != nil {
 		v := float32(*req.TopP)
@@ -87,15 +99,13 @@ func buildGenerationConfig(req *openai.OpenAIRequest, model string) *VertexGener
 	}
 
 	// Stop sequences
-	if req.Stop != nil {
-		switch stop := req.Stop.(type) {
-		case string:
-			cfg.StopSequences = []string{stop}
-		case []interface{}:
-			for _, s := range stop {
-				if str, ok := s.(string); ok {
-					cfg.StopSequences = append(cfg.StopSequences, str)
-				}
+	switch stop := req.Stop.(type) {
+	case string:
+		cfg.StopSequences = []string{stop}
+	case []interface{}:
+		for _, s := range stop {
+			if str, ok := s.(string); ok {
+				cfg.StopSequences = append(cfg.StopSequences, str)
 			}
 		}
 	}
@@ -104,136 +114,91 @@ func buildGenerationConfig(req *openai.OpenAIRequest, model string) *VertexGener
 	for _, mod := range req.Modalities {
 		cfg.ResponseModalities = append(cfg.ResponseModalities, genai.Modality(strings.ToUpper(mod)))
 	}
+}
 
-	// ExtraBody overrides
-	if req.ExtraBody != nil {
-		cfg.ImageConfig = applyExtraBodyToConfig(cfg.GenerationConfig, req.ExtraBody, model)
+func resolveChatImageConfig(cfg *genai.GenerationConfig, req *openai.OpenAIRequest, model string) *genai.ImageConfig {
+	image := applyExtraBodyToConfig(cfg, req.ExtraBody, model)
+	top := parseTopLevelImageConfig(req)
+	if image == nil {
+		return top
 	}
-	if topLevelImageConfig := parseTopLevelImageConfig(req); topLevelImageConfig != nil {
-		if cfg.ImageConfig == nil {
-			cfg.ImageConfig = topLevelImageConfig
-		} else {
-			if topLevelImageConfig.AspectRatio != "" {
-				cfg.ImageConfig.AspectRatio = topLevelImageConfig.AspectRatio
-			}
-			if topLevelImageConfig.ImageSize != "" {
-				cfg.ImageConfig.ImageSize = topLevelImageConfig.ImageSize
-			}
-		}
+	if top != nil {
+		// Merge field by field so a top-level aspect ratio can coexist with
+		// an image size specified under extra_body.generation_config.
+		image.AspectRatio = cmp.Or(top.AspectRatio, image.AspectRatio)
+		image.ImageSize = cmp.Or(top.ImageSize, image.ImageSize)
 	}
+	return image
+}
 
-	// Deduplicate ResponseModalities (modalities may be added from multiple sources:
-	// req.Modalities, extra_body.generation_config.response_modalities, extra_body.modalities)
-	if len(cfg.ResponseModalities) > 1 {
-		seen := make(map[genai.Modality]struct{})
-		unique := cfg.ResponseModalities[:0]
-		for _, m := range cfg.ResponseModalities {
-			if _, ok := seen[m]; !ok {
-				seen[m] = struct{}{}
-				unique = append(unique, m)
-			}
-		}
-		cfg.ResponseModalities = unique
+func uniqueModalities(modalities []genai.Modality) []genai.Modality {
+	if len(modalities) < 2 {
+		return modalities
 	}
+	seen := make(map[genai.Modality]struct{}, len(modalities))
+	unique := modalities[:0]
+	for _, modality := range modalities {
+		if _, ok := seen[modality]; !ok {
+			seen[modality] = struct{}{}
+			unique = append(unique, modality)
+		}
+	}
+	return unique
+}
 
-	// Response format / JSON schema
-	if req.ResponseFormat != nil {
-		if schema := convertOpenAIResponseFormatToGenaiSchema(req.ResponseFormat); schema != nil {
-			cfg.ResponseSchema = schema
-		}
-		if rfMap, ok := req.ResponseFormat.(map[string]interface{}); ok {
-			if rfType, ok := rfMap["type"].(string); ok && (rfType == "json_schema" || rfType == "json_object") {
-				cfg.ResponseMIMEType = "application/json"
-			}
+func applyChatResponseFormat(cfg *genai.GenerationConfig, format interface{}) {
+	if format == nil {
+		return
+	}
+	if schema := convertOpenAIResponseFormatToGenaiSchema(format); schema != nil {
+		cfg.ResponseSchema = schema
+	}
+	if fields, ok := format.(map[string]interface{}); ok {
+		kind, _ := fields["type"].(string)
+		switch kind {
+		case "json_schema", "json_object":
+			cfg.ResponseMIMEType = "application/json"
 		}
 	}
+}
 
-	// Phase 3: Thinking / Reasoning
-	// Priority (highest first); each source is read at the top level, where the
-	// OpenAI SDKs put extra_body keys, then inside a literal extra_body object:
-	//   1. thinking_config (Gemini-native format): see nativeThinkingConfig
-	//   2. thinking_budget / thinking_level shorthands
-	//   3. thinking (Anthropic-style)
-	//   4. reasoning_effort
-	//   5. Default: the model's own level for a profiled model, otherwise disable
-	//      autonomous thinking for predictable latency
-	// A source counts only when it sets something (see mapNativeThinkingConfig): an
-	// empty or malformed one must not skip the default.
-	var thinkingResolved bool
-	for _, tcMap := range nativeThinkingConfigs(req) {
-		if tc := mapNativeThinkingConfig(tcMap, model); tc != nil {
-			cfg.ThinkingConfig = tc
-			thinkingResolved = true
-			break
+// Resolve the first usable source: native config, Gemini shorthands,
+// Anthropic thinking / reasoning effort, then the model default.
+func resolveChatThinkingConfig(req *openai.OpenAIRequest, model string) *genai.ThinkingConfig {
+	for _, fields := range nativeThinkingConfigs(req) {
+		if tc := mapNativeThinkingConfig(fields, model); tc != nil {
+			return tc
 		}
 	}
-	thinkingLevel := cmp.Or(req.ThinkingLevel, req.ThinkingLevelCamel,
+	level := cmp.Or(req.ThinkingLevel, req.ThinkingLevelCamel,
 		extraBodyString(req.ExtraBody, "thinking_level"), extraBodyString(req.ExtraBody, "thinkingLevel"))
-	thinkingBudget := req.ThinkingBudget
-	if thinkingBudget == nil {
-		thinkingBudget = req.ExtraBody["thinking_budget"]
-	}
-	reasoningEffort := cmp.Or(req.ReasoningEffort, extraBodyString(req.ExtraBody, "reasoning_effort"))
-	if !thinkingResolved && (thinkingBudget != nil || thinkingLevel != "") {
-		// Top-level thinking_budget / thinking_level (Gemini-style)
-		tcMap := make(map[string]interface{})
-		if thinkingBudget != nil {
-			tcMap["thinking_budget"] = thinkingBudget
-		}
-		if thinkingLevel != "" {
-			tcMap["thinking_level"] = thinkingLevel
-		}
-		if tc := mapNativeThinkingConfig(tcMap, model); tc != nil {
-			cfg.ThinkingConfig = tc
-			thinkingResolved = true
+	budget := cmp.Or(req.ThinkingBudget, req.ExtraBody["thinking_budget"])
+	if budget != nil || level != "" {
+		if tc := mapNativeThinkingConfig(map[string]interface{}{
+			"thinking_budget": budget,
+			"thinking_level":  level,
+		}, model); tc != nil {
+			return tc
 		}
 	}
-	if !thinkingResolved {
-		// Use top-level thinking field first, then extra_body.thinking
-		var thinkingParam interface{}
-		if req.Thinking != nil {
-			thinkingParam = req.Thinking
-		} else if req.ExtraBody != nil {
-			thinkingParam = req.ExtraBody["thinking"]
-		}
-		if tc := mapReasoningToThinkingConfig(thinkingParam, reasoningEffort, model); tc != nil {
-			cfg.ThinkingConfig = tc
-		} else if tc := DefaultThinkingConfig(model); tc != nil {
-			// No thinking params specified: explicitly disable dynamic thinking for
-			// predictable latency. Without this, Gemini 2.5/3 models autonomously
-			// decide whether to reason, causing unpredictable latency spikes.
-			cfg.ThinkingConfig = tc
-		}
+	thinking := cmp.Or(req.Thinking, req.ExtraBody["thinking"])
+	effort := cmp.Or(req.ReasoningEffort, extraBodyString(req.ExtraBody, "reasoning_effort"))
+	if tc := mapReasoningToThinkingConfig(thinking, effort, model); tc != nil {
+		return tc
 	}
+	return DefaultThinkingConfig(model)
+}
 
-	// For gemini-2.5-pro with dynamic thinking (budget=-1) and a small MaxOutputTokens,
-	// cap the thinking budget so that actual output tokens are not starved.
-	// budget=0 is not supported for 2.5-pro, so dynamic (-1) is used by default,
-	// but dynamic can consume the entire MaxOutputTokens budget for thinking.
-	// Only apply the cap when the result is >= 128 (the model's minimum fixed budget).
-	if isGemini25ProModel(model) && cfg.MaxOutputTokens > 0 &&
-		cfg.ThinkingConfig != nil && cfg.ThinkingConfig.ThinkingBudget != nil &&
-		*cfg.ThinkingConfig.ThinkingBudget == -1 {
-		const minBudget = int32(128)
-		budget := cfg.MaxOutputTokens / 2
-		if budget >= minBudget {
-			cfg.ThinkingConfig.ThinkingBudget = &budget
-		}
-		// budget < 128: keep dynamic (-1) — fixed budgets below minimum are rejected by the API
+// Gemini 2.5 Pro's dynamic thinking can consume the entire output budget.
+// Cap it at half the budget when the result meets the minimum fixed budget.
+func capDynamicThinkingBudget(cfg *genai.GenerationConfig, model string) {
+	if !isGemini25ProModel(model) || cfg.ThinkingConfig == nil || cfg.ThinkingConfig.ThinkingBudget == nil ||
+		*cfg.ThinkingConfig.ThinkingBudget != -1 {
+		return
 	}
-
-	// Phase 4: Audio output (SpeechConfig)
-	if req.ExtraBody != nil {
-		if audioParam, ok := req.ExtraBody["audio"]; ok {
-			if sc := mapAudioParam(audioParam); sc != nil {
-				cfg.SpeechConfig = sc
-			}
-		}
+	if budget := cfg.MaxOutputTokens / 2; budget >= 128 {
+		cfg.ThinkingConfig.ThinkingBudget = &budget
 	}
-
-	ApplyGenerationConstraints(cfg.GenerationConfig, model)
-
-	return cfg
 }
 
 // nativeThinkingConfigs returns the request's thinking_config / thinkingConfig objects
@@ -342,7 +307,10 @@ func hasTopLevelImageConfig(req *openai.OpenAIRequest) bool {
 }
 
 func parseTopLevelImageConfig(req *openai.OpenAIRequest) *genai.ImageConfig {
-	params := make(map[string]interface{})
+	if !hasTopLevelImageConfig(req) {
+		return nil
+	}
+	params := make(map[string]interface{}, len(req.ImageConfig)+len(req.ImageConfigSnake))
 	for key, value := range req.ImageConfig {
 		params[key] = value
 	}
