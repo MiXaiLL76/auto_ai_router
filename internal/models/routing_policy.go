@@ -12,6 +12,7 @@ const RoutingModelsField = "air_routing_models"
 const RoutingProfilesField = "air_routing_profiles"
 
 var ErrRoutingPolicy = errors.New("routing policy is invalid or unavailable")
+
 type RoutingPolicy struct {
 	Models []string
 	Pools  []string
