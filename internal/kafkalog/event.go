@@ -12,7 +12,13 @@ import "time"
 // Request/response body capture is intentionally out of scope here (separate
 // ТЗ/PR) — the Body* fields are always zero-value placeholders.
 type SpendEvent struct {
+	// RequestID is the provider's response id when one was captured, so two
+	// different calls can share it; it is also the Kafka message key.
 	RequestID string `json:"request_id"`
+	// AirEventID is minted by AIR for every call and never taken from the
+	// client. It stays the same on every resend of the event, so consumers
+	// deduplicate on it: Kafka delivers at least once.
+	AirEventID string `json:"air_event_id"`
 	// TraceID is the OpenTelemetry trace id of the request's spans.
 	TraceID   string    `json:"trace_id,omitempty"`
 	StartTime time.Time `json:"start_time"`

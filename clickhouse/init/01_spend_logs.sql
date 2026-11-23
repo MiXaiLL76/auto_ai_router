@@ -27,6 +27,7 @@ CREATE DATABASE IF NOT EXISTS air;
 CREATE TABLE air.spend_logs_kafka
 (
     request_id String,
+    air_event_id String,
     trace_id String,
     start_time DateTime64(3),
     end_time DateTime64(3),
@@ -174,6 +175,7 @@ SETTINGS
 CREATE TABLE air.spend_logs
 (
     request_id String,
+    air_event_id String,
     trace_id String,
     start_time DateTime64(3),
     end_time DateTime64(3),
@@ -413,6 +415,7 @@ CREATE TABLE air.attempts
     start_time DateTime64(3),
     end_time DateTime64(3),
     request_id String,
+    air_event_id String,
     trace_id String,
     service_name LowCardinality(String),
     server_router_id LowCardinality(String),
@@ -449,6 +452,7 @@ TTL toDateTime(start_time) + INTERVAL 90 DAY;
 CREATE TABLE air.attempts_kafka
 (
     request_id String,
+    air_event_id String,
     trace_id String,
     start_time DateTime64(3),
     end_time DateTime64(3),
@@ -479,6 +483,7 @@ SELECT
     start_time,
     end_time,
     request_id,
+    air_event_id,
     trace_id,
     service_name,
     server_router_id,
@@ -509,6 +514,7 @@ FROM
         start_time,
         end_time,
         request_id,
+        air_event_id,
         trace_id,
         service_name,
         server_router_id,
@@ -524,3 +530,23 @@ FROM
     WHERE length(_error) = 0
 )
 ARRAY JOIN list AS a, arrayEnumerate(list) AS number;
+
+-- Rows from older producers have an empty ID. Keep every such row.
+-- Retries of the same Kafka event carry identical rows, so any copy suffices.
+CREATE VIEW IF NOT EXISTS air.spend_logs_deduplicated AS
+SELECT * FROM air.spend_logs WHERE air_event_id = ''
+UNION ALL
+SELECT * FROM
+(
+    SELECT * FROM air.spend_logs WHERE air_event_id != ''
+    LIMIT 1 BY air_event_id
+);
+
+CREATE VIEW IF NOT EXISTS air.attempts_deduplicated AS
+SELECT * FROM air.attempts WHERE air_event_id = ''
+UNION ALL
+SELECT * FROM
+(
+    SELECT * FROM air.attempts WHERE air_event_id != ''
+    LIMIT 1 BY air_event_id, attempt
+);
