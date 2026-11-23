@@ -943,16 +943,14 @@ func (p *Proxy) handleTransformedStreaming(
 			"credential", credName, "provider", providerName, "model", modelID)
 		wg.Wait()
 		// Stream aborted before the final usage chunk — log with whatever tokens we have.
-		// Fall back to local token counting when totalTokens is still 0.
-		estimated := totalTokens
-		if estimated == 0 {
-			estimated = completion.TokenCount()
-		}
+		// totalTokens is the rate limiter's request-shaped figure (prompt + completion +
+		// cache), so it cannot stand in for a missing completion count; the local text
+		// estimate can.
 		if detectProviderStreamError {
 			err = resolveCapturedProviderStreamError(logCtx, resp.StatusCode, err, rawProviderStreamError, outputStreamError)
 		}
 		markStreamFailure(logCtx, err)
-		p.finalizeStreamingLog(logCtx, estimated, lastChunk, providerName, resp.StatusCode, true)
+		p.finalizeStreamingLog(logCtx, completion.TokenCount(), lastChunk, providerName, resp.StatusCode, true)
 		return err
 	}
 	wg.Wait()
@@ -986,7 +984,7 @@ func (p *Proxy) handleTransformedStreaming(
 		p.logger.DebugContext(respCtx(resp), "Streaming token usage recorded", "credential", credName, "model", modelID, "tokens", totalTokens)
 	}
 
-	p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerName, resp.StatusCode, true)
+	p.finalizeStreamingLog(logCtx, completion.TokenCount(), lastChunk, providerName, resp.StatusCode, true)
 
 	if streamErr == nil {
 		p.logger.DebugContext(respCtx(resp), "Streaming response completed", "provider", providerName, "credential", credName)
@@ -1108,15 +1106,11 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 			p.drainUpstream(drainCtx, clientReader, onChunk, credName)
 		}
 		usageLines.Finalize(onLine)
-		estimated := totalTokens
-		if estimated == 0 {
-			estimated = completion.TokenCount()
-		}
 		if detectProviderStreamError {
 			err = resolveCapturedProviderStreamError(logCtx, resp.StatusCode, err, providerStreamError)
 		}
 		markStreamFailure(logCtx, err)
-		p.finalizeStreamingLog(logCtx, estimated, lastChunk, "openai", resp.StatusCode, false)
+		p.finalizeStreamingLog(logCtx, completion.TokenCount(), lastChunk, "openai", resp.StatusCode, false)
 		return err
 	}
 
@@ -1151,7 +1145,7 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 		p.logger.DebugContext(respCtx(resp), "Streaming token usage recorded", "credential", credName, "model", modelID, "tokens", totalTokens)
 	}
 
-	p.finalizeStreamingLog(logCtx, logTokens, lastChunk, "openai", resp.StatusCode, false)
+	p.finalizeStreamingLog(logCtx, completion.TokenCount(), lastChunk, "openai", resp.StatusCode, false)
 
 	if streamErr == nil {
 		p.logger.DebugContext(respCtx(resp), "Streaming response completed", "credential", credName)
@@ -1160,8 +1154,17 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 }
 
 // finalizeStreamingLog extracts usage info from the last streaming chunk and logs spend to LiteLLM DB.
-func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int, lastChunk []byte, providerName string, statusCode int, audioInputAlreadyExcludesCachedAudio bool) {
-	p.finalizeStreamingLogParsed(logCtx, totalTokens, lastChunk, nil, providerName, statusCode, audioInputAlreadyExcludesCachedAudio)
+//
+// fallbackCompletion is a LOCAL estimate of the answer's token count, counted from the
+// text actually streamed to the client. It is the last resort for completion_tokens when
+// the provider never reported any usage, and must never be a prompt-side figure: a
+// request-shaped count (prompt, or prompt+completion, or prompt+cache) is only ever a
+// plausible completion count when the answer was empty, which is exactly the case that
+// must bill zero. Passing the rate limiter's total_tokens here used to turn every empty
+// stream into completion_tokens == prompt_tokens — output is priced 50x cache reads, so
+// those rows dominated spend.
+func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, fallbackCompletion int, lastChunk []byte, providerName string, statusCode int, audioInputAlreadyExcludesCachedAudio bool) {
+	p.finalizeStreamingLogParsed(logCtx, fallbackCompletion, lastChunk, nil, providerName, statusCode, audioInputAlreadyExcludesCachedAudio)
 }
 
 // finalChunkParse is what finalizeStreamingLog reads from its last chunk,
@@ -1175,7 +1178,7 @@ type finalChunkParse struct {
 // finalizeStreamingLogParsed is finalizeStreamingLog with lastChunk already
 // parsed when parsed is not nil; lastChunk then only serves the error message
 // of a failed (HTTP >= 400) stream.
-func (p *Proxy) finalizeStreamingLogParsed(logCtx *RequestLogContext, totalTokens int, lastChunk []byte, parsed *finalChunkParse, providerName string, statusCode int, audioInputAlreadyExcludesCachedAudio bool) {
+func (p *Proxy) finalizeStreamingLogParsed(logCtx *RequestLogContext, fallbackCompletion int, lastChunk []byte, parsed *finalChunkParse, providerName string, statusCode int, audioInputAlreadyExcludesCachedAudio bool) {
 	if logCtx == nil || logCtx.Logged {
 		return
 	}
@@ -1186,9 +1189,19 @@ func (p *Proxy) finalizeStreamingLogParsed(logCtx *RequestLogContext, totalToken
 	if logCtx.TokenUsage == nil {
 		logCtx.TokenUsage = &converter.TokenUsage{}
 	}
-	fallbackCompletion := totalTokens
 
-	providerUsage := false
+	// Usage merged into logCtx.TokenUsage while the stream passed is the provider's own
+	// report, not an estimate: every streaming path records a usage object there as it
+	// goes (tokenCapturingWriter's onChunk, handleStreamingWithTokens' onLine). It has to
+	// be consulted here because a Messages stream ends with message_stop, which carries no
+	// usage — so the lastChunk extractor below never sees one, and providerUsage used to
+	// be false for every Messages stream, normal or empty. Seeding the flags from the
+	// already-merged values keeps the per-field semantics below intact: a field the
+	// provider did report is never overwritten by an estimate, and a field it reported as
+	// a genuine zero is left at zero instead of being replaced by a fallback.
+	providerReportedPromptTokens := logCtx.TokenUsage.PromptTokens > 0
+	providerReportedCompletionTokens := logCtx.TokenUsage.CompletionTokens > 0
+	providerUsage := providerReportedPromptTokens || providerReportedCompletionTokens
 	// Tracked separately from providerUsage: some providers (e.g. CometAPI's Anthropic-
 	// compatible streaming) send a syntactically valid usage object whose message_start
 	// carries a placeholder usage:{input_tokens:0,output_tokens:0} while output tokens
@@ -1196,8 +1209,6 @@ func (p *Proxy) finalizeStreamingLogParsed(logCtx *RequestLogContext, totalToken
 	// coarse providerUsage flag silently accepts that placeholder zero as truth and never
 	// estimates prompt tokens for the request. Gate per-field instead, so a provider that
 	// reports some fields but not others still gets a fallback for the missing one.
-	providerReportedPromptTokens := false
-	providerReportedCompletionTokens := false
 	var usageInfo *StreamUsageInfo
 	if parsed != nil {
 		usageInfo = parsed.usage
@@ -2225,15 +2236,11 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 		if len(completedEventPayload) > 0 {
 			finalChunk, finalParse = completedEventPayload, completedEventParse
 		}
-		logTokens := totalTokens
-		if logTokens == 0 {
-			logTokens = completion.TokenCount()
-		}
 		if detectStreamError {
 			err = resolveCapturedProviderStreamError(logCtx, resp.StatusCode, err, providerStreamError)
 		}
 		markStreamFailure(logCtx, err)
-		p.finalizeStreamingLogParsed(logCtx, logTokens, finalChunk, finalParse, "openai", resp.StatusCode, audioInputAlreadyExcludesCachedAudio)
+		p.finalizeStreamingLogParsed(logCtx, completion.TokenCount(), finalChunk, finalParse, "openai", resp.StatusCode, audioInputAlreadyExcludesCachedAudio)
 		return err
 	}
 
@@ -2272,6 +2279,6 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 		finalChunk, finalParse = completedEventPayload, completedEventParse
 	}
 
-	p.finalizeStreamingLogParsed(logCtx, logTokens, finalChunk, finalParse, "openai", resp.StatusCode, audioInputAlreadyExcludesCachedAudio)
+	p.finalizeStreamingLogParsed(logCtx, completion.TokenCount(), finalChunk, finalParse, "openai", resp.StatusCode, audioInputAlreadyExcludesCachedAudio)
 	return streamErr
 }

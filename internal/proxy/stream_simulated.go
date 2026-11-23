@@ -68,6 +68,11 @@ type simulatedNonStreamAttemptResult struct {
 	tokenUsageOptions converter.TokenUsageExtractionOptions
 	logTokens         int
 	lastChunk         []byte
+	// completionEstimate is the local count of the answer text actually streamed
+	// (finalizeStreamingLog's fallbackCompletion). logTokens is the rate limiter's
+	// request-shaped total and cannot stand in for it: using it as the fallback
+	// billed every empty stream as prompt-sized output.
+	completionEstimate int
 
 	streamErr        error
 	transportFailure bool
@@ -326,15 +331,16 @@ func (p *Proxy) attemptSimulatedNonStream(
 	}
 
 	return simulatedNonStreamAttemptResult{
-		finalChatBody:     reassembledBody,
-		conv:              conv,
-		providerLabel:     providerLabel,
-		tokenUsageOptions: tokenUsageOptions,
-		logTokens:         logTokens,
-		lastChunk:         lastChunk,
-		streamErr:         streamErr,
-		emptyStream:       emptyStream,
-		clientAborted:     clientAborted,
+		finalChatBody:      reassembledBody,
+		conv:               conv,
+		providerLabel:      providerLabel,
+		tokenUsageOptions:  tokenUsageOptions,
+		logTokens:          logTokens,
+		lastChunk:          lastChunk,
+		completionEstimate: completion.TokenCount(),
+		streamErr:          streamErr,
+		emptyStream:        emptyStream,
+		clientAborted:      clientAborted,
 		// A genuine transport break (readErrForResolve != nil, io.EOF excluded):
 		// the provider dropped the connection mid-stream. Overflow is the one
 		// failure that stays non-retryable (a retry would hit the same size).
@@ -725,6 +731,7 @@ func (p *Proxy) finishSimulatedNonStream(
 	providerLabel := result.providerLabel
 	logTokens := result.logTokens
 	lastChunk := result.lastChunk
+	completionEstimate := result.completionEstimate
 
 	// The credential cascade ran out because every candidate was over its rate
 	// limit, and no attempt produced a response to relay: that is a 429 with a
@@ -732,7 +739,7 @@ func (p *Proxy) finishSimulatedNonStream(
 	// provider for being broken. The same model answers normally once the
 	// limit window rolls over.
 	if rateLimitExhausted {
-		p.writeSimulatedRateLimited(w, r, logCtx, cred, modelID, providerLabel, targetURL, logTokens, lastChunk, !tokenUsageOptions.AudioInputIncludesCachedAudio)
+		p.writeSimulatedRateLimited(w, r, logCtx, cred, modelID, providerLabel, targetURL, completionEstimate, lastChunk, !tokenUsageOptions.AudioInputIncludesCachedAudio)
 		return
 	}
 
@@ -763,7 +770,7 @@ func (p *Proxy) finishSimulatedNonStream(
 		logCtx.TargetURL = targetURL
 		clientBody, _, _ := clientResponseBodyForCredential(result.httpStatus, result.httpBody, cred, modelID, logCtx.RequestID)
 		logCtx.ClientResponseBody = string(clientBody)
-		p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerLabel, result.httpStatus, !tokenUsageOptions.AudioInputIncludesCachedAudio)
+		p.finalizeStreamingLog(logCtx, completionEstimate, lastChunk, providerLabel, result.httpStatus, !tokenUsageOptions.AudioInputIncludesCachedAudio)
 		// A surfaced 429 must carry a Retry-After header, exactly as the main
 		// loop's final-error path does (ensureRetryAfterOn429): a client told to
 		// back off with no hint will otherwise hammer the pool immediately.
@@ -792,7 +799,7 @@ func (p *Proxy) finishSimulatedNonStream(
 		logCtx.ErrorMsg = "Client disconnected before a response was received"
 		logCtx.ErrorOrigin = ErrorOriginClientCanceled
 		logCtx.TargetURL = targetURL
-		p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerLabel, StatusClientClosedRequest, !tokenUsageOptions.AudioInputIncludesCachedAudio)
+		p.finalizeStreamingLog(logCtx, completionEstimate, lastChunk, providerLabel, StatusClientClosedRequest, !tokenUsageOptions.AudioInputIncludesCachedAudio)
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = StatusClientClosedRequest
 		WriteErrorClientClosed(w, logCtx.ErrorMsg)
@@ -805,7 +812,7 @@ func (p *Proxy) finishSimulatedNonStream(
 			"error", result.streamErr, "request_id", logCtx.RequestID)
 		p.setPromptTokensEstimate(logCtx, requestBody, realModelID)
 		failureStatus := simulatedFailureStatus(result.streamErr)
-		p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerLabel, failureStatus, !tokenUsageOptions.AudioInputIncludesCachedAudio)
+		p.finalizeStreamingLog(logCtx, completionEstimate, lastChunk, providerLabel, failureStatus, !tokenUsageOptions.AudioInputIncludesCachedAudio)
 		p.writeSimulatedError(w, logCtx, failureStatus, targetURL)
 		return
 	}
@@ -915,7 +922,7 @@ func (p *Proxy) finishSimulatedNonStream(
 	// request's usage, and it read the last chunk's figures -- which carry
 	// only the last step's, while the loop's steps are separate upstream
 	// requests the client was charged for).
-	p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerLabel, resp.StatusCode, audioInputAlreadyExcludesCachedAudio)
+	p.finalizeStreamingLog(logCtx, completionEstimate, lastChunk, providerLabel, resp.StatusCode, audioInputAlreadyExcludesCachedAudio)
 
 	logCtx.RequestCompleted = true
 	p.setSessionBinding(logCtx.SessionID, modelID, cred.Name)
@@ -946,6 +953,9 @@ type simulatedNativeNonStreamAttemptResult struct {
 	captured  *responses.Response
 	logTokens int
 	lastChunk []byte
+	// completionEstimate is the local answer-text count handed to
+	// finalizeStreamingLog; see simulatedNonStreamAttemptResult.completionEstimate.
+	completionEstimate int
 
 	streamErr        error
 	transportFailure bool
@@ -1117,10 +1127,11 @@ func (p *Proxy) attemptSimulatedNativeNonStream(
 	}
 
 	return simulatedNativeNonStreamAttemptResult{
-		captured:  captured,
-		logTokens: logTokens,
-		lastChunk: lastChunk,
-		streamErr: streamErr,
+		captured:           captured,
+		logTokens:          logTokens,
+		lastChunk:          lastChunk,
+		completionEstimate: completion.TokenCount(),
+		streamErr:          streamErr,
 		// The only retryable shape: a genuine transport break, same rule as
 		// attemptSimulatedNonStream (see its doc comment).
 		transportFailure: readErrForResolve != nil,
@@ -1376,11 +1387,12 @@ func (p *Proxy) finishSimulatedNativeNonStream(
 	const providerLabel = "native_responses"
 	logTokens := result.logTokens
 	lastChunk := result.lastChunk
+	completionEstimate := result.completionEstimate
 
 	// Every candidate was rate limited: 429 with a Retry-After, not a 502
 	// (see finishSimulatedNonStream).
 	if rateLimitExhausted {
-		p.writeSimulatedRateLimited(w, r, logCtx, cred, modelID, providerLabel, targetURL, logTokens, lastChunk, true)
+		p.writeSimulatedRateLimited(w, r, logCtx, cred, modelID, providerLabel, targetURL, completionEstimate, lastChunk, true)
 		return
 	}
 
@@ -1403,7 +1415,7 @@ func (p *Proxy) finishSimulatedNativeNonStream(
 		// does not hold here: nothing has reached the client yet.
 		clientBody, _, _ := clientResponseBodyForCredential(result.httpStatus, result.httpBody, cred, modelID, logCtx.RequestID)
 		logCtx.ClientResponseBody = string(clientBody)
-		p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerLabel, result.httpStatus, true)
+		p.finalizeStreamingLog(logCtx, completionEstimate, lastChunk, providerLabel, result.httpStatus, true)
 		p.ensureRetryAfterOn429(w, result.httpStatus, nil, modelID, logCtx.Scope)
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(clientBody)))
@@ -1423,7 +1435,7 @@ func (p *Proxy) finishSimulatedNativeNonStream(
 		logCtx.ErrorMsg = "Client disconnected before a response was received"
 		logCtx.ErrorOrigin = ErrorOriginClientCanceled
 		logCtx.TargetURL = targetURL
-		p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerLabel, StatusClientClosedRequest, true)
+		p.finalizeStreamingLog(logCtx, completionEstimate, lastChunk, providerLabel, StatusClientClosedRequest, true)
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = StatusClientClosedRequest
 		WriteErrorClientClosed(w, logCtx.ErrorMsg)
@@ -1436,7 +1448,7 @@ func (p *Proxy) finishSimulatedNativeNonStream(
 			"error", result.streamErr, "request_id", logCtx.RequestID)
 		p.setPromptTokensEstimate(logCtx, requestBody, realModelID)
 		failureStatus := simulatedFailureStatus(result.streamErr)
-		p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerLabel, failureStatus, true)
+		p.finalizeStreamingLog(logCtx, completionEstimate, lastChunk, providerLabel, failureStatus, true)
 		p.writeSimulatedError(w, logCtx, failureStatus, targetURL)
 		return
 	}
@@ -1469,7 +1481,7 @@ func (p *Proxy) finishSimulatedNativeNonStream(
 		markStreamFailure(logCtx, streamErr)
 		p.setPromptTokensEstimate(logCtx, requestBody, realModelID)
 		failureStatus := simulatedFailureStatus(streamErr)
-		p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerLabel, failureStatus, true)
+		p.finalizeStreamingLog(logCtx, completionEstimate, lastChunk, providerLabel, failureStatus, true)
 		p.writeSimulatedError(w, logCtx, failureStatus, targetURL)
 		return
 	}
@@ -1493,7 +1505,7 @@ func (p *Proxy) finishSimulatedNativeNonStream(
 	logCtx.captureClientResponseID(finalBody)
 
 	p.setPromptTokensEstimate(logCtx, requestBody, realModelID)
-	p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerLabel, resp.StatusCode, true)
+	p.finalizeStreamingLog(logCtx, completionEstimate, lastChunk, providerLabel, resp.StatusCode, true)
 
 	logCtx.RequestCompleted = true
 	p.setSessionBinding(logCtx.SessionID, modelID, cred.Name)
@@ -1521,6 +1533,9 @@ type simulatedPassthroughNonStreamAttemptResult struct {
 	completedEventParse *finalChunkParse
 	logTokens           int
 	lastChunk           []byte
+	// completionEstimate is the local answer-text count handed to
+	// finalizeStreamingLog; see simulatedNonStreamAttemptResult.completionEstimate.
+	completionEstimate int
 
 	streamErr        error
 	transportFailure bool
@@ -1683,6 +1698,7 @@ func (p *Proxy) attemptSimulatedPassthroughNonStream(
 		completedEventParse: completedEventParse,
 		logTokens:           logTokens,
 		lastChunk:           lastChunk,
+		completionEstimate:  completion.TokenCount(),
 		streamErr:           streamErr,
 		// The only retryable shape: a genuine transport break (lastReadErr is
 		// only ever set for a non-EOF read error above), same rule as
@@ -1933,11 +1949,12 @@ func (p *Proxy) finishSimulatedPassthroughNonStream(
 	const providerLabel = "openai"
 	logTokens := result.logTokens
 	lastChunk := result.lastChunk
+	completionEstimate := result.completionEstimate
 
 	// Every candidate was rate limited: 429 with a Retry-After, not a 502
 	// (see finishSimulatedNonStream).
 	if rateLimitExhausted {
-		p.writeSimulatedRateLimited(w, r, logCtx, cred, modelID, providerLabel, targetURL, logTokens, lastChunk, true)
+		p.writeSimulatedRateLimited(w, r, logCtx, cred, modelID, providerLabel, targetURL, completionEstimate, lastChunk, true)
 		return
 	}
 
@@ -1957,7 +1974,7 @@ func (p *Proxy) finishSimulatedPassthroughNonStream(
 		// does not hold here: nothing has reached the client yet.
 		clientBody, _, _ := clientResponseBodyForCredential(result.httpStatus, result.httpBody, cred, modelID, logCtx.RequestID)
 		logCtx.ClientResponseBody = string(clientBody)
-		p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerLabel, result.httpStatus, true)
+		p.finalizeStreamingLog(logCtx, completionEstimate, lastChunk, providerLabel, result.httpStatus, true)
 		p.ensureRetryAfterOn429(w, result.httpStatus, nil, modelID, logCtx.Scope)
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(clientBody)))
@@ -1977,7 +1994,7 @@ func (p *Proxy) finishSimulatedPassthroughNonStream(
 		logCtx.ErrorMsg = "Client disconnected before a response was received"
 		logCtx.ErrorOrigin = ErrorOriginClientCanceled
 		logCtx.TargetURL = targetURL
-		p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerLabel, StatusClientClosedRequest, true)
+		p.finalizeStreamingLog(logCtx, completionEstimate, lastChunk, providerLabel, StatusClientClosedRequest, true)
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = StatusClientClosedRequest
 		WriteErrorClientClosed(w, logCtx.ErrorMsg)
@@ -1990,7 +2007,7 @@ func (p *Proxy) finishSimulatedPassthroughNonStream(
 			"error", result.streamErr, "request_id", logCtx.RequestID)
 		p.setPromptTokensEstimate(logCtx, requestBody, realModelID)
 		failureStatus := simulatedFailureStatus(result.streamErr)
-		p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerLabel, failureStatus, true)
+		p.finalizeStreamingLog(logCtx, completionEstimate, lastChunk, providerLabel, failureStatus, true)
 		p.writeSimulatedError(w, logCtx, failureStatus, targetURL)
 		return
 	}
@@ -2042,7 +2059,7 @@ func (p *Proxy) finishSimulatedPassthroughNonStream(
 		finalChunk, finalParse = result.completedEvent, result.completedEventParse
 	}
 	p.setPromptTokensEstimate(logCtx, requestBody, realModelID)
-	p.finalizeStreamingLogParsed(logCtx, logTokens, finalChunk, finalParse, "openai", resp.StatusCode, true)
+	p.finalizeStreamingLogParsed(logCtx, completionEstimate, finalChunk, finalParse, "openai", resp.StatusCode, true)
 
 	logCtx.RequestCompleted = true
 	p.setSessionBinding(logCtx.SessionID, modelID, cred.Name)
@@ -2204,7 +2221,7 @@ func (p *Proxy) writeSimulatedRateLimited(
 	logCtx *RequestLogContext,
 	cred *config.CredentialConfig,
 	modelID, providerLabel, targetURL string,
-	logTokens int,
+	completionEstimate int,
 	lastChunk []byte,
 	audioInputAlreadyExcludesCachedAudio bool,
 ) {
@@ -2214,7 +2231,7 @@ func (p *Proxy) writeSimulatedRateLimited(
 	logCtx.ErrorMsg = "All credentials for this model are currently rate limited"
 	logCtx.ErrorOrigin = ErrorOriginAllCredentialsRateLimited
 	logCtx.TargetURL = targetURL
-	p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerLabel, http.StatusTooManyRequests, audioInputAlreadyExcludesCachedAudio)
+	p.finalizeStreamingLog(logCtx, completionEstimate, lastChunk, providerLabel, http.StatusTooManyRequests, audioInputAlreadyExcludesCachedAudio)
 	logCtx.Status = "failure"
 	logCtx.HTTPStatus = http.StatusTooManyRequests
 	// Always tell the client when to come back: without a Retry-After it has
