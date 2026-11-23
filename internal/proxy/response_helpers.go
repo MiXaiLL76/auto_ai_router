@@ -5,6 +5,8 @@ import (
 	"compress/flate"
 	"compress/gzip"
 	"encoding/json"
+	"encoding/json/jsontext"
+	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -931,61 +933,70 @@ func extractTokensFromResponse(body []byte, credType config.ProviderType) int {
 	return extractOpenAITotalTokens(body)
 }
 
-// injectStreamOptions ensures stream_options.include_usage is set in a Chat
-// Completions request body, merging into whatever the client sent rather
-// than discarding it -- see injectIncludeUsageRaw for why: this runs before
-// the destination provider is resolved, so provider-specific extension keys
-// are stripped later if needed, in converter.RequestFrom. Used after
-// Responses API conversion where ingress sanitization skipped injection.
-// injectStreamOptions ensures stream_options.include_usage is set in a Chat
-// Completions request body, merging into whatever the client sent rather
-// than discarding it. Uses UseNumber so the JSON round-trip preserves
-// large integers (e.g. seeds) byte-for-byte instead of rounding them to
-// float64 precision. Used after Responses API conversion where ingress
-// sanitization skipped injection.
+func setStreamTrue(body []byte) []byte {
+	return updateStreamRequest(body, true, false)
+}
+
+// injectStreamOptions requests usage while preserving provider-specific options.
 func injectStreamOptions(body []byte) []byte {
-	var raw map[string]interface{}
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.UseNumber()
-	if err := dec.Decode(&raw); err != nil {
+	return updateStreamRequest(body, false, true)
+}
+
+func updateStreamRequest(body []byte, forceStream, includeUsage bool) []byte {
+	var fields map[string]jsontext.Value
+	if err := jsonv2.Unmarshal(body, &fields); err != nil {
+		return updateStreamRequestLegacy(body, forceStream, includeUsage)
+	}
+	if fields == nil {
 		return body
 	}
-
-	streamOptions, exists := raw["stream_options"]
-	if !exists {
-		raw["stream_options"] = map[string]interface{}{
-			"include_usage": true,
-		}
-	} else if soMap, ok := streamOptions.(map[string]interface{}); ok {
-		soMap["include_usage"] = true
-	} else {
-		raw["stream_options"] = map[string]interface{}{
-			"include_usage": true,
-		}
+	if forceStream {
+		fields["stream"] = jsontext.Value("true")
 	}
-
-	modified, err := json.Marshal(raw)
+	if includeUsage {
+		var options map[string]jsontext.Value
+		if raw := fields["stream_options"]; raw.Kind() == '{' {
+			if err := jsonv2.Unmarshal(raw, &options); err != nil {
+				return updateStreamRequestLegacy(body, forceStream, includeUsage)
+			}
+		} else {
+			options = make(map[string]jsontext.Value, 1)
+		}
+		options["include_usage"] = jsontext.Value("true")
+		raw, err := jsonv2.Marshal(options, json.DefaultOptionsV1())
+		if err != nil {
+			return updateStreamRequestLegacy(body, forceStream, includeUsage)
+		}
+		fields["stream_options"] = raw
+	}
+	modified, err := jsonv2.Marshal(fields, json.DefaultOptionsV1())
 	if err != nil {
-		return body
+		return updateStreamRequestLegacy(body, forceStream, includeUsage)
 	}
 	return modified
 }
 
-// setStreamTrue force-sets "stream": true in a JSON request body. Used by the
-// force_stream_for_ttft toggle to make the upstream respond with SSE even when
-// the client asked for a non-stream response. Decodes with UseNumber so numbers
-// beyond float64 precision (e.g. large seeds) survive the round-trip unchanged.
-// Non-JSON bodies (or bodies the marshal round-trip would corrupt) are returned
-// unchanged, which makes the toggle a no-op for such requests.
-func setStreamTrue(body []byte) []byte {
-	var raw map[string]interface{}
+// Preserve legacy handling of duplicate keys, invalid UTF-8 and suffixes
+// accepted by the original single-value decoder.
+func updateStreamRequestLegacy(body []byte, forceStream, includeUsage bool) []byte {
+	var fields map[string]any
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()
-	if err := dec.Decode(&raw); err != nil {
+	if err := dec.Decode(&fields); err != nil || fields == nil {
 		return body
 	}
-	raw["stream"] = true
-	modified, err := json.Marshal(raw)
+	if forceStream {
+		fields["stream"] = true
+	}
+	if includeUsage {
+		options, ok := fields["stream_options"].(map[string]any)
+		if !ok {
+			options = make(map[string]any, 1)
+			fields["stream_options"] = options
+		}
+		options["include_usage"] = true
+	}
+	modified, err := json.Marshal(fields)
 	if err != nil {
 		return body
 	}

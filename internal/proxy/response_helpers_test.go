@@ -415,3 +415,25 @@ func TestExtractTokenUsageFromPayloads_NoUsageReturnsNil(t *testing.T) {
 		t.Fatalf("expected nil usage, got %+v", usage)
 	}
 }
+
+func TestUpdateStreamRequestCompatibility(t *testing.T) {
+	body := []byte(`{"messages":[{"seed":9007199254740993,"content":"<tag>"}],"stream":false,"stream_options":{"include_usage":false,"provider_extra":9007199254740993}}`)
+	got := updateStreamRequest(body, true, true)
+	require.JSONEq(t, `{"messages":[{"seed":9007199254740993,"content":"<tag>"}],"stream":true,"stream_options":{"include_usage":true,"provider_extra":9007199254740993}}`, string(got))
+	require.Equal(t, 2, bytes.Count(got, []byte("9007199254740993")))
+
+	legacy := []byte(`{"stream":false,"stream_options":{"extra":1,"extra":2}} trailing`)
+	require.Equal(t, `{"stream":true,"stream_options":{"extra":2,"include_usage":true}}`, string(updateStreamRequest(legacy, true, true)))
+	require.Equal(t, `{"messages":[{"value":2}],"stream":true}`, string(setStreamTrue([]byte(`{"messages":[{"value":1,"value":2}]}`))))
+	require.Equal(t, "null", string(updateStreamRequest([]byte("null"), true, true)))
+}
+
+func TestRewriteStreamBodiesKeepsDistinctBodies(t *testing.T) {
+	req := credentialPreparedRequest{
+		body:      []byte(`{"model":"primary"}`),
+		proxyBody: []byte(`{"model":"fallback"}`),
+	}
+	req.rewriteStreamBodies(setStreamTrue)
+	require.JSONEq(t, `{"model":"primary","stream":true}`, string(req.body))
+	require.JSONEq(t, `{"model":"fallback","stream":true}`, string(req.proxyBody))
+}

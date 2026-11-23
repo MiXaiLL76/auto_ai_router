@@ -84,6 +84,16 @@ type orchestratedRequest struct {
 	cacheControlOutcome string
 }
 
+func (req *credentialPreparedRequest) rewriteStreamBodies(rewrite func([]byte) []byte) {
+	if bytes.Equal(req.body, req.proxyBody) {
+		req.body = rewrite(req.body)
+		req.proxyBody = req.body
+		return
+	}
+	req.body = rewrite(req.body)
+	req.proxyBody = rewrite(req.proxyBody)
+}
+
 type credentialPreparedRequest struct {
 	body                       []byte
 	proxyBody                  []byte
@@ -653,8 +663,7 @@ func (p *Proxy) applyForceStream(req credentialPreparedRequest, streaming bool, 
 		// provider SSE is then folded back into a single non-stream JSON via
 		// ProviderResponses.StreamTo's onComplete callback (see
 		// handleSimulatedNativeNonStream).
-		req.body = setStreamTrue(req.body)
-		req.proxyBody = setStreamTrue(req.proxyBody)
+		req.rewriteStreamBodies(setStreamTrue)
 		req.forcedNativeNonStream = true
 		p.logger.DebugContext(r.Context(), "Forced streaming upstream for non-streaming native Responses request",
 			"credential", cred.Name, "path", req.path, "model", req.realModelID)
@@ -667,22 +676,19 @@ func (p *Proxy) applyForceStream(req credentialPreparedRequest, streaming bool, 
 		// terminal response.completed event carries the whole final Response,
 		// which handleSimulatedPassthroughNonStream writes back as non-stream
 		// JSON (no converter round-trip needed).
-		req.body = setStreamTrue(req.body)
-		req.proxyBody = setStreamTrue(req.proxyBody)
+		req.rewriteStreamBodies(setStreamTrue)
 		req.forcedPassthroughNonStream = true
 		p.logger.DebugContext(r.Context(), "Forced streaming upstream for non-streaming passthrough Responses request",
 			"credential", cred.Name, "path", req.path, "model", req.realModelID)
 		return req
 	}
-	req.body = setStreamTrue(req.body)
-	req.proxyBody = setStreamTrue(req.proxyBody)
-	// Chat-shaped upstream bodies additionally ask for usage in the stream
-	// (OpenAI-compatible providers honor stream_options.include_usage; the
-	// Anthropic-native body is never touched here because its field set is
-	// different and unknown fields must not be sent to Anthropic).
+	// Chat-shaped upstream bodies additionally ask for usage in the stream.
 	if req.path == "/v1/chat/completions" {
-		req.body = injectStreamOptions(req.body)
-		req.proxyBody = injectStreamOptions(req.proxyBody)
+		req.rewriteStreamBodies(func(body []byte) []byte {
+			return updateStreamRequest(body, true, true)
+		})
+	} else {
+		req.rewriteStreamBodies(setStreamTrue)
 	}
 	// Chat-shaped request forced to stream. Recorded so the converter mode can
 	// set IsStreaming=true: for Vertex/Gemini the streaming switch is the URL
@@ -1044,8 +1050,7 @@ func (p *Proxy) buildCredentialRequestInner(
 		req.proxyBody = chatBody
 		req.convertedResp = true
 		if streaming {
-			req.body = injectStreamOptions(req.body)
-			req.proxyBody = injectStreamOptions(req.proxyBody)
+			req.rewriteStreamBodies(injectStreamOptions)
 		}
 		req.path = strings.Replace(basePath, "/responses", "/chat/completions", 1)
 		p.logger.DebugContext(r.Context(), "Converted Responses API request to Chat Completions format",
