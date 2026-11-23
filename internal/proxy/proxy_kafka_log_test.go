@@ -70,7 +70,7 @@ func testLogCtx(t *testing.T) *RequestLogContext {
 	startTime := time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC)
 	return &RequestLogContext{
 		RequestID: "req-123",
-		EventID:   "req-123",
+		EventID:   "evt-123",
 		StartTime: startTime,
 		Request:   req,
 		Token:     "sk-test",

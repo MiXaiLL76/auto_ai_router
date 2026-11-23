@@ -195,13 +195,13 @@ func TestLogSpendToLiteLLMDB_UsesClientResponseID(t *testing.T) {
 	require.Len(t, dbStub.loggedEntries, 1)
 	entry := dbStub.loggedEntries[0]
 	assert.Equal(t, "chatcmpl-client-123", entry.RequestID)
-	assert.Equal(t, "req-123", entry.AirEventID)
+	assert.Equal(t, "evt-123", entry.AirEventID)
 	assert.False(t, entry.SkipAccounting)
 
 	var metadata map[string]interface{}
 	require.NoError(t, json.Unmarshal([]byte(entry.Metadata), &metadata))
 	spendMetadata := metadata["spend_logs_metadata"].(map[string]interface{})
-	assert.Equal(t, "req-123", spendMetadata["air_event_id"])
+	assert.Equal(t, "evt-123", spendMetadata["air_event_id"])
 	assert.Equal(t, "chatcmpl-client-123", spendMetadata["provider_response_id"])
 	assert.Equal(t, true, spendMetadata["accounting_eligible"])
 	assert.Equal(t, true, spendMetadata["reasoning_requested"])
@@ -251,13 +251,13 @@ func TestLogSpendToLiteLLMDB_PersistsInternalAIRRequestWithoutKafkaAccounting(t 
 	assert.Empty(t, kafkaStub.events)
 	require.Len(t, dbStub.loggedEntries, 1)
 	entry := dbStub.loggedEntries[0]
-	assert.Equal(t, "req-123", entry.AirEventID)
+	assert.Equal(t, "evt-123", entry.AirEventID)
 	assert.True(t, entry.SkipAccounting)
 
 	var metadata map[string]interface{}
 	require.NoError(t, json.Unmarshal([]byte(entry.Metadata), &metadata))
 	spendMetadata := metadata["spend_logs_metadata"].(map[string]interface{})
-	assert.Equal(t, "req-123", spendMetadata["air_event_id"])
+	assert.Equal(t, "evt-123", spendMetadata["air_event_id"])
 	assert.Equal(t, false, spendMetadata["accounting_eligible"])
 	assert.Equal(t, true, spendMetadata["is_proxy_request"])
 }
