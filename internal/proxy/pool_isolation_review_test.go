@@ -196,3 +196,63 @@ func TestPoolSoftSelectionReview(t *testing.T) {
 		}
 	})
 }
+
+// A profile field of the wrong shape is the operator's own metadata bug. Like an
+// unknown pool ID, it must fail closed instead of counting as "no pools" and
+// opening the general cascade. Absent, empty and null values are still "no pools".
+func TestPoolMalformedProfileFailsClosed(t *testing.T) {
+	credentials := []config.CredentialConfig{
+		{Name: "a", Type: config.ProviderTypeOpenAI, RPM: 100, BaseURL: "http://127.0.0.1:1"},
+		{Name: "b", Type: config.ProviderTypeOpenAI, RPM: 100, BaseURL: "http://127.0.0.1:1"},
+	}
+	entries := []config.ModelRPMConfig{
+		{Name: "gpt-4o", Credential: "a", Pools: []string{"pool-01"}},
+		{Name: "gpt-4o", Credential: "b"},
+	}
+	manager := models.New(testhelpers.NewTestLogger(), 100, nil)
+	manager.UpdateDBModels(entries, nil, credentials)
+	builder := NewTestProxyBuilder().WithCredentials(credentials...)
+	builder.config.ModelManager = manager
+	proxy := builder.Build()
+
+	call := func(t *testing.T, metadata map[string]interface{}) int {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o","messages":[]}`))
+		req = withTrustedClientAuth(req, "fixture-client-key", &dbmodels.TokenInfo{Metadata: metadata})
+		w := httptest.NewRecorder()
+		proxy.orchestrateRequest(w, req, &RequestLogContext{})
+		return w.Code
+	}
+
+	t.Run("no pools is not malformed", func(t *testing.T) {
+		assert.Equal(t, http.StatusOK, call(t, nil))
+		assert.Equal(t, http.StatusOK, call(t, map[string]interface{}{routingProfilesKey: []interface{}{}}))
+		assert.Equal(t, http.StatusOK, call(t, map[string]interface{}{routingProfilesKey: nil}))
+	})
+
+	for _, tc := range []struct {
+		name  string
+		value interface{}
+	}{
+		{"number", 123},
+		{"object", map[string]interface{}{"a": 1}},
+		{"array of non-strings", []interface{}{123}},
+		{"bool", true},
+		{"array with one non-string", []interface{}{"pool-01", 123}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, http.StatusServiceUnavailable, call(t, map[string]interface{}{routingProfilesKey: tc.value}))
+		})
+	}
+
+	t.Run("malformed team profile does not break the key", func(t *testing.T) {
+		// Inherited profiles tolerate a bad shape: one team's typo must not
+		// disable every member's key. The key's own field stays authoritative.
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o","messages":[]}`))
+		info := &dbmodels.TokenInfo{TeamMetadata: map[string]interface{}{routingProfilesKey: 123}}
+		req = withTrustedClientAuth(req, "fixture-client-key", info)
+		w := httptest.NewRecorder()
+		proxy.orchestrateRequest(w, req, &RequestLogContext{})
+		assert.Equal(t, http.StatusOK, w.Code)
+	})
+}

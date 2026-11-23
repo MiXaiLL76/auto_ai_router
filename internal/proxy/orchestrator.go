@@ -169,7 +169,15 @@ func (p *Proxy) orchestrateRequest(
 	routingExclusions := p.reasoningOnlyExclusions(logCtx.ReasoningRequested)
 	reasoningExcluded := maps.Clone(routingExclusions)
 	if info := logCtx.TokenInfo; info != nil && p.modelManager != nil {
-		keyProfiles := metadataScopes(info.Metadata, routingProfilesKey)
+		keyProfiles, ok := parsePoolIDs(info.Metadata, routingProfilesKey)
+		if !ok {
+			// A malformed profile field is this key's own metadata bug. Treat it
+			// like an unknown pool: fail closed instead of opening the cascade.
+			logCtx.Status, logCtx.HTTPStatus = "failure", http.StatusServiceUnavailable
+			logCtx.ErrorMsg = "Key routing profile is invalid or unavailable"
+			WriteErrorServiceUnavailable(w, logCtx.ErrorMsg)
+			return nil, false
+		}
 		if _, strict := info.Metadata["air_routing_models"]; strict {
 			// Explicit key model selection is enforced through Scope. Do not
 			// also apply its pools to unrelated models via legacy selection.

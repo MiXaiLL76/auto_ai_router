@@ -113,6 +113,36 @@ func metadataScopes(metadata map[string]interface{}, keys ...string) []string {
 	return nil
 }
 
+// parsePoolIDs reads a routing pool list from trusted metadata. Unlike
+// metadataScopes, a value of the wrong shape is an error rather than an empty
+// list: an operator's malformed profile field must not silently widen routing
+// to the general cascade. Absent, empty and null values are still "no pools".
+func parsePoolIDs(metadata map[string]interface{}, key string) ([]string, bool) {
+	value, ok := metadata[key]
+	if !ok || value == nil {
+		return nil, true
+	}
+	switch v := value.(type) {
+	case []string:
+		return v, true
+	case []interface{}:
+		ids := make([]string, 0, len(v))
+		for _, item := range v {
+			s, isString := item.(string)
+			if !isString {
+				return nil, false
+			}
+			ids = append(ids, s)
+		}
+		return ids, true
+	case string:
+		// A bare string is accepted only as one ID; commas are not a list here.
+		return []string{v}, true
+	default:
+		return nil, false
+	}
+}
+
 func scopeValues(value interface{}) []string {
 	switch v := value.(type) {
 	case string:

@@ -7,8 +7,9 @@ security boundary.
 
 A pool ID this key names that the catalog does not know is a typo in the operator's
 own metadata, so it fails closed (503) instead of quietly opening the general
-cascade. The same ID inherited from a team or organization does not fail: one
-mistyped team profile would otherwise break every member's key.
+cascade. A field of the wrong shape (a number, object, or a list with a non-string)
+fails the same way. The same mistake inherited from a team or organization does not
+fail: one bad team profile would otherwise break every member's key.
 
 For strict isolation, an operator adds both fields to the authenticated key's
 database metadata:
