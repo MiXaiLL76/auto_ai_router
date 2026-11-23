@@ -2344,27 +2344,49 @@ func (m *Manager) GetCredentialsForModel(modelID string) []string {
 	return result
 }
 
-// CredentialsInPools returns the credential assignments for a model that
-// match a routing pool. A nil result means no restriction, either because
-// no pools match or because a matching entry applies to every credential.
+// HasPool reports whether a pool ID is known to the catalog at all. A selector
+// or profile naming an unknown pool is a typo: routing it through the general
+// cascade would silently lift the restriction, so callers reject it instead.
+func (m *Manager) HasPool(pool string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.routingPools != nil && m.routingPools.pools[pool]
+}
+
+// CredentialsInPools returns the credential assignments for a model that match
+// a routing pool. Every name the catalog resolves to the same identity is
+// considered, so a separately registered alias cannot step around the pool. A
+// nil result means no restriction: no pools match, or a matching entry applies
+// to every credential.
 func (m *Manager) CredentialsInPools(modelID string, pools []string) map[string]bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
+	identity := modelID
+	if m.routingPools != nil {
+		if known := m.routingPools.identities[modelID]; known != "" {
+			identity = known
+		}
+	}
 	var matching map[string]bool
-	for _, entry := range m.modelLimits[modelID] {
-		for _, pool := range entry.Pools {
-			if pool == "" || !slices.Contains(pools, pool) {
-				continue
+	for name, entries := range m.modelLimits {
+		if identity != name && m.routingPools != nil && m.routingPools.identities[name] != identity {
+			continue
+		}
+		for _, entry := range entries {
+			for _, pool := range entry.Pools {
+				if pool == "" || !slices.Contains(pools, pool) {
+					continue
+				}
+				if entry.Credential == "" {
+					return nil
+				}
+				if matching == nil {
+					matching = make(map[string]bool)
+				}
+				matching[entry.Credential] = true
+				break
 			}
-			if entry.Credential == "" {
-				return nil
-			}
-			if matching == nil {
-				matching = make(map[string]bool)
-			}
-			matching[entry.Credential] = true
-			break
 		}
 	}
 	return matching

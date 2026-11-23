@@ -1494,10 +1494,14 @@ func TestOrchestrateRequestRoutingPools(t *testing.T) {
 		info        dbmodels.TokenInfo
 		want        []string
 		unavailable string
+		wantStatus  int
 	}{
 		{name: "absent profiles", want: []string{"a", "b", "c", "d"}},
 		{name: "empty profiles", info: dbmodels.TokenInfo{Metadata: metadata()}, want: []string{"a", "b", "c", "d"}},
-		{name: "unknown profile", info: dbmodels.TokenInfo{Metadata: metadata("unknown")}, want: []string{"a", "b", "c", "d"}},
+		// A profile ID the catalog does not know is this key's own typo: fail
+		// closed instead of routing the key through the general cascade.
+		{name: "unknown profile", info: dbmodels.TokenInfo{Metadata: metadata("unknown")}, wantStatus: http.StatusServiceUnavailable},
+		{name: "unknown profile among known ones", info: dbmodels.TokenInfo{Metadata: metadata("pool-01", "typo")}, wantStatus: http.StatusServiceUnavailable},
 		{name: "unpooled model", model: "gpt4.1", info: dbmodels.TokenInfo{Metadata: pool01}, want: []string{"a", "b", "c", "d"}},
 		{name: "one match", info: dbmodels.TokenInfo{Metadata: metadata("pool-02")}, want: []string{"b"}},
 		{name: "two matches from key", info: dbmodels.TokenInfo{Metadata: pool01}, want: []string{"a", "b"}},
@@ -1550,7 +1554,11 @@ func TestOrchestrateRequestRoutingPools(t *testing.T) {
 			prepared, ok := proxy.orchestrateRequest(w, req, logCtx)
 			if len(tt.want) == 0 {
 				require.False(t, ok)
-				require.Equal(t, http.StatusTooManyRequests, w.Code)
+				wantStatus := tt.wantStatus
+				if wantStatus == 0 {
+					wantStatus = http.StatusTooManyRequests
+				}
+				require.Equal(t, wantStatus, w.Code)
 				return
 			}
 			require.True(t, ok, w.Body.String())

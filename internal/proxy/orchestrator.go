@@ -175,6 +175,17 @@ func (p *Proxy) orchestrateRequest(
 			// also apply its pools to unrelated models via legacy selection.
 			keyProfiles = nil
 		}
+		// A pool ID the catalog does not know is a typo in this key's own
+		// metadata. Failing closed keeps the operator's mistake visible instead
+		// of quietly widening the route to the whole cascade.
+		for _, pool := range keyProfiles {
+			if !p.modelManager.HasPool(pool) {
+				logCtx.Status, logCtx.HTTPStatus = "failure", http.StatusServiceUnavailable
+				logCtx.ErrorMsg = "Key routing profile is invalid or unavailable"
+				WriteErrorServiceUnavailable(w, logCtx.ErrorMsg)
+				return nil, false
+			}
+		}
 		profiles := unionScopeLists(
 			keyProfiles,
 			metadataScopes(info.TeamMetadata, routingProfilesKey),
