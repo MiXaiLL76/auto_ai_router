@@ -356,6 +356,13 @@ func (o *openAIStreamUsageExtractor) responsesAPIUsageInfo(
 	if cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
 		cacheCreation5mTokens = usage.InputTokensDetails.CacheWriteTokensDetails.TTL30mTokens
 	}
+	// Alibaba's Qwen4 splits its explicit cache write in the Responses API's
+	// cache_write_tokens_details as ttl_5m_tokens and ttl_1h_tokens: the two
+	// tiers Anthropic calls 5m and 1h, each billed at its own rate.
+	if cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
+		cacheCreation5mTokens = usage.InputTokensDetails.CacheWriteTokensDetails.TTL5mTokens
+		cacheCreation1hTokens = usage.InputTokensDetails.CacheWriteTokensDetails.TTL1hTokens
+	}
 	if cacheCreationTokens == 0 {
 		cacheCreationTokens = cacheCreation5mTokens + cacheCreation1hTokens + cacheCreation12hTokens
 	}
@@ -436,6 +443,10 @@ type responsesAPIUsage struct {
 		CacheWriteTokensDetails struct {
 			TTL30mTokens int `json:"ttl_30m_tokens,omitempty"`
 			TTL12hTokens int `json:"ttl_12h_tokens,omitempty"`
+			// Alibaba's Qwen4 explicit cache: the split of the write into a
+			// five-minute and a one-hour part.
+			TTL5mTokens int `json:"ttl_5m_tokens,omitempty"`
+			TTL1hTokens int `json:"ttl_1h_tokens,omitempty"`
 		} `json:"cache_write_tokens_details,omitempty"`
 		CacheCreationTokenDetails struct {
 			Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
@@ -1071,16 +1082,8 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 		})
 	}
 
-	var postFinish chatPostFinishDetector
-	observeJSON := func(value any) {
-		for _, violation := range postFinish.observeJSON(value) {
-			p.logger.WarnContext(respCtx(resp), "Provider sent text after finish_reason in Chat Completions stream",
-				"credential", credName, "model", modelID, "request_id", logContextRequestID(logCtx),
-				"choice_index", violation.index, "finish_reason", violation.finishReason, "delta_field", violation.field)
-		}
-	}
 	clientReader := normalizeSuccessfulResponseModelStream(
-		promanutils.NewSanitizingSSEReaderWithObserver(providerReader, clientVisibleResponseModel(logCtx, modelID), observeJSON),
+		promanutils.NewSanitizingSSEReader(providerReader, clientVisibleResponseModel(logCtx, modelID)),
 		resp.StatusCode,
 		logCtx,
 		modelID,
@@ -1625,8 +1628,7 @@ func (p *Proxy) streamToClient(
 	buf := streamBufPool.Get().(*[]byte)
 	defer streamBufPool.Put(buf)
 
-	// TTFT detection: separate from the bytes forwarded to the client via
-	// onChunk (forwarding must stay byte-for-byte immediate for latency). A real
+	// TTFT detection and onChunk observe the stream before client filtering. A real
 	// content/tool/reasoning delta can straddle multiple Read calls, or be
 	// preceded by content-free SSE events (ping, role-only delta) that arrive in
 	// their own Read — so lines accumulate across reads via ttftScan until a
@@ -1653,6 +1655,7 @@ func (p *Proxy) streamToClient(
 	if statusCode == 0 {
 		statusCode = http.StatusOK
 	}
+	finishFilter := p.newChatPostFinishFilter(ctx, w.Header(), endpoint, statusCode, modelID, logCtx)
 	preflightEnabled := statusCode >= http.StatusOK && statusCode < http.StatusMultipleChoices
 	committed := !preflightEnabled
 	if !preflightEnabled {
@@ -1762,20 +1765,22 @@ func (p *Proxy) streamToClient(
 				}
 			}
 			if committed {
-				if writeErr := writeStreamChunk(chunk); writeErr != nil {
+				if writeErr := writeStreamChunk(finishFilter.filter(chunk, false)); writeErr != nil {
 					return writeErr
 				}
 			}
 		}
 		if err != nil {
+			var tail []byte
 			if !committed {
 				if payload := initialCommit.FinalizeTerminalError(); payload != "" {
 					return writeEarlyStreamError(payload)
 				}
 				w.WriteHeader(statusCode)
-				if writeErr := writeStreamChunk(initialCommit.Release()); writeErr != nil {
-					return writeErr
-				}
+				tail = initialCommit.Release()
+			}
+			if writeErr := writeStreamChunk(finishFilter.filter(tail, true)); writeErr != nil {
+				return writeErr
 			}
 			if flushPending {
 				// No need to clear flushPending here — every path below
@@ -2047,6 +2052,42 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 ) error {
 	p.logger.DebugContext(respCtx(resp), "Starting passthrough Responses API streaming",
 		"credential", credName, "model", modelID)
+
+	// A non-2xx response is not a stream to relay -- it's an upstream error
+	// the Codex passthrough path, by design, otherwise forwards byte-for-byte
+	// to the client ("the provider SSE stream is forwarded to the client
+	// as-is", see the doc comment above). That design is correct for a 2xx
+	// stream -- Codex-native SSE is not worth reparsing -- but silently
+	// extended to error bodies too: a production incident showed a
+	// passthrough-responses credential's raw 400 body (its own
+	// "permission_error" type and provider-specific code, e.g.
+	// "session_blocked_by_cyber_policy") reaching the client verbatim, with
+	// no masking at all, because nothing upstream of streamToClient ever
+	// special-cased the status here. Read and classify it instead, the same
+	// way the non-streaming and native-streaming paths already do.
+	if resp.StatusCode >= http.StatusBadRequest {
+		body, readErr := p.readLimitedResponseBody(resp.Body)
+		if readErr != nil {
+			body = nil
+		}
+		masked := maskedUpstreamErrorBody(resp.StatusCode, logContextRequestID(logCtx), body)
+		p.logger.WarnContext(respCtx(resp), "Passthrough Responses API request completed with error status",
+			"credential", credName, "model", modelID, "status_code", resp.StatusCode)
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(masked)))
+		dropRepresentationIntegrityHeaders(w.Header())
+		w.WriteHeader(resp.StatusCode)
+		_, writeErr := w.Write(masked)
+		if logCtx != nil {
+			logCtx.Status = "failure"
+			logCtx.HTTPStatus = resp.StatusCode
+			logCtx.ErrorMsg = classifiedErrorMessage(resp.StatusCode, body)
+			logCtx.ErrorBodyRaw = extractErrorBodyRaw(body)
+			logCtx.ClientResponseBody = extractErrorBodyRaw(masked)
+		}
+		return writeErr
+	}
+
 	tokenUsageOptions := converter.TokenUsageExtractionOptions{AudioInputIncludesCachedAudio: true}
 	if len(usageOptions) > 0 {
 		tokenUsageOptions = usageOptions[0]
@@ -2120,6 +2161,13 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 						logCtx.TokenUsage.CacheCreation12hTokens = details.TTL12hTokens
 						if logCtx.TokenUsage.CacheCreation5mTokens == 0 && logCtx.TokenUsage.CacheCreation1hTokens == 0 {
 							logCtx.TokenUsage.CacheCreation5mTokens = details.TTL30mTokens
+						}
+						// Alibaba's Qwen4 splits its explicit cache write into a
+						// five-minute and a one-hour part; the one-hour write is
+						// billed at the price above the five-minute one.
+						if logCtx.TokenUsage.CacheCreation5mTokens == 0 && logCtx.TokenUsage.CacheCreation1hTokens == 0 {
+							logCtx.TokenUsage.CacheCreation5mTokens = details.TTL5mTokens
+							logCtx.TokenUsage.CacheCreation1hTokens = details.TTL1hTokens
 						}
 					}
 					logCtx.TokenUsage.AudioInputTokens = normalizeStreamAudioInput(

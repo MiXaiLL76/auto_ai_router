@@ -113,8 +113,19 @@ func extractRouterClassification(body []byte, expectedType string) (BadRequest, 
 		return BadRequest{}, false
 	}
 	switch code {
-	case accountBlockedCode, sessionBlockedCode:
+	case accountBlockedCode:
 		expectedType = "permission_denied"
+	case sessionBlockedCode:
+		// Unlike every other code here, this one is legitimately produced at
+		// two different statuses -- ClassifyStatus's 403 case ("permission_denied")
+		// and ClassifyBadRequest's 400 case ("invalid_request_error"), classify.go
+		// -- because production carries the same provider signal
+		// (session_blocked_by_cyber_policy) at both. Either type is ours;
+		// anything else is not.
+		if typ != "permission_denied" && typ != "invalid_request_error" {
+			return BadRequest{}, false
+		}
+		expectedType = typ
 	case upstreamFetchFailedCode:
 		expectedType = "not_found_error"
 	default:

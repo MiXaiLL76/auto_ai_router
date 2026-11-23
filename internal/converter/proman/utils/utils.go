@@ -80,10 +80,6 @@ func UnsupportedRequest(body []byte, _ string) string {
 }
 
 func SanitizeUpstreamJSONBody(body []byte, displayModel string) ([]byte, bool) {
-	return sanitizeUpstreamJSONBodyObserved(body, displayModel, nil)
-}
-
-func sanitizeUpstreamJSONBodyObserved(body []byte, displayModel string, observe func(any)) ([]byte, bool) {
 	if len(bytes.TrimSpace(body)) == 0 {
 		return body, false
 	}
@@ -93,9 +89,6 @@ func sanitizeUpstreamJSONBodyObserved(body []byte, displayModel string, observe 
 	decoder.UseNumber()
 	if err := decoder.Decode(&value); err != nil {
 		return body, false
-	}
-	if observe != nil {
-		observe(value)
 	}
 
 	changed := sanitizeJSONEnvelope(&value, displayModel)
@@ -122,30 +115,23 @@ type sanitizingSSEReader struct {
 	passthrough  bool
 	displayModel string
 	terminalErr  error
-	observeJSON  func(any)
 }
 
 func NewSanitizingSSEReader(source io.Reader, displayModel string) io.Reader {
-	return NewSanitizingSSEReaderWithObserver(source, displayModel, nil)
+	return newSanitizingSSEReader(source, displayModel)
 }
 
-// NewSanitizingSSEReaderWithObserver reports each decoded JSON data payload
-// before sanitizing it, without decoding the SSE payload a second time.
-func NewSanitizingSSEReaderWithObserver(source io.Reader, displayModel string, observe func(any)) io.Reader {
+func newSanitizingSSEReader(source io.Reader, displayModel string) *sanitizingSSEReader {
 	return &sanitizingSSEReader{
 		reader:       bufio.NewReader(source),
 		displayModel: displayModel,
-		observeJSON:  observe,
 	}
 }
 
 func NewSanitizingSSEReadCloser(source io.ReadCloser, displayModel string) io.ReadCloser {
 	return &sanitizingSSEReadCloser{
 		source: source,
-		reader: &sanitizingSSEReader{
-			reader:       bufio.NewReader(source),
-			displayModel: displayModel,
-		},
+		reader: newSanitizingSSEReader(source, displayModel),
 	}
 }
 
@@ -213,7 +199,7 @@ func (r *sanitizingSSEReader) consumeSanitizingSSEFragment(fragment []byte, read
 
 	if readErr == nil || errors.Is(readErr, io.EOF) {
 		if len(line) <= MaxSanitizingSSELineBytes {
-			r.pending = sanitizeSSELine(line, r.displayModel, r.observeJSON)
+			r.pending = sanitizeSSELine(line, r.displayModel)
 			return
 		}
 	}
@@ -361,7 +347,7 @@ func isInternalModelString(value string) bool {
 	return false
 }
 
-func sanitizeSSELine(line []byte, displayModel string, observe func(any)) []byte {
+func sanitizeSSELine(line []byte, displayModel string) []byte {
 	content, ending := splitSSELineEnding(line)
 	if !bytes.HasPrefix(content, []byte("data:")) {
 		return line
@@ -373,7 +359,7 @@ func sanitizeSSELine(line []byte, displayModel string, observe func(any)) []byte
 		return line
 	}
 
-	sanitizedPayload, changed := sanitizeUpstreamJSONBodyObserved(payload, displayModel, observe)
+	sanitizedPayload, changed := SanitizeUpstreamJSONBody(payload, displayModel)
 	if !changed {
 		return line
 	}

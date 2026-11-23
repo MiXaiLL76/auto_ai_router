@@ -216,6 +216,30 @@ func TestShouldRetryWithFallback_ContentPolicyMarkers(t *testing.T) {
 	}
 }
 
+// TestShouldRetryWithFallback_CredentialScopedBlockStillRetries covers a
+// production incident: a credential's session got blocked by the provider
+// ("session_blocked_by_cyber_policy"), whose own wording says "This session
+// is blocked by content policy" -- plain English that also matches the
+// "content policy" non-retryable marker. Without the credentialScopedMarkers
+// check ahead of it, this credential-scoped failure (a different credential
+// answers the same request fine) was wrongly treated as a content-scoped one
+// (every credential would refuse identically) and never retried.
+func TestShouldRetryWithFallback_CredentialScopedBlockStillRetries(t *testing.T) {
+	body := `{"error":{"code":"session_blocked_by_cyber_policy","message":"This session is blocked by content policy","type":"permission_error"}}`
+
+	for _, status := range []int{http.StatusBadRequest, http.StatusForbidden} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			shouldRetry, _ := ShouldRetryWithFallback(status, []byte(body))
+			assert.True(t, shouldRetry, "a credential-scoped session block must stay retryable even though its wording matches a content-policy marker")
+		})
+	}
+
+	// A genuine content-policy refusal must still be non-retryable -- this
+	// fix must not have widened the marker match itself.
+	genuine, _ := ShouldRetryWithFallback(http.StatusBadRequest, []byte(`{"error":{"message":"The prompt was blocked by the provider's content policy"}}`))
+	assert.False(t, genuine, "a genuine content-policy refusal must remain non-retryable")
+}
+
 func TestShouldRetryWithFallback_ModelErrorBodies(t *testing.T) {
 	tests := []struct {
 		name     string

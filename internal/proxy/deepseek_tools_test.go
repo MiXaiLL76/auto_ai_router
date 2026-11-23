@@ -927,3 +927,281 @@ func TestDeepSeekSuccessfulToolIsBilledWhenTheModelFails(t *testing.T) {
 	searches, _ := toolCountsFromMetadata(t, entry.Metadata)
 	require.Equal(t, 1, searches, "the successful search was not billed after the model failed")
 }
+
+// TestDeepSeekStreamingWithAClientToolCallSendsOnce checks that a stream
+// whose answer is the CLIENT's own tool call is not mistaken for the model
+// asking for one of the router's tools.
+//
+// The check that decides whether to loop must count only the router's own
+// tools: a coding agent's read_file or edit is the client's business, and
+// the router must relay it as it is. Counting it made the router send the
+// very same request to the provider a second time -- the client never
+// noticed (it got the second answer's stream), but the request was billed
+// twice: the prompt was counted twice, and the difference landed entirely in
+// the uncached input, the expensive part.
+func TestDeepSeekStreamingWithAClientToolCallSendsOnce(t *testing.T) {
+	fake := &deepSeekFake{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		switch r.URL.Path {
+		case "/v1/tools/search":
+			fake.mu.Lock()
+			fake.searchCalls++
+			results := fake.searchResults
+			fake.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"results": results})
+		case "/v1/chat/completions":
+			fake.mu.Lock()
+			fake.chatCalls++
+			fake.mu.Unlock()
+			w.Header().Set("Content-Type", "text/event-stream")
+			// The model's answer is the CLIENT's own tool call -- a coding
+			// agent's read_file. The router must relay it, not run it and
+			// not ask the model again.
+			_, _ = w.Write([]byte("data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"main.go\"}"}}]}}]}` + "\n\n"))
+			_, _ = w.Write([]byte("data: " + `{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":100,"completion_tokens":10,"total_tokens":110}}` + "\n\n"))
+			_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	fake.baseURL = server.URL
+
+	prx, dbStub := deepSeekTestProxy(t, fake)
+
+	body := `{
+		"model": "deepseek-flash",
+		"messages": [{"role": "user", "content": "Read main.go"}],
+		"tools": [{"type": "function", "function": {"name": "read_file", "parameters": {"type": "object"}}}],
+		"stream": true
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	prx.ProxyRequest(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	// The provider was asked exactly once: the client's own tool call is
+	// not the router's business.
+	if fake.chatCalls != 1 {
+		t.Errorf("the provider was asked %d times, want 1 (a client tool call is not the router's tool)", fake.chatCalls)
+	}
+	if fake.searchCalls != 0 {
+		t.Errorf("the router made %d search calls, want 0", fake.searchCalls)
+	}
+	// The client's stream came through as it is.
+	if !strings.Contains(rec.Body.String(), "read_file") {
+		t.Errorf("the client did not get its own tool call: %s", rec.Body.String())
+	}
+	// And the request was billed once.
+	if len(dbStub.loggedEntries) != 1 {
+		t.Fatalf("got %d spend rows, want 1", len(dbStub.loggedEntries))
+	}
+	entry := dbStub.loggedEntries[0]
+	if entry.PromptTokens != 100 {
+		t.Errorf("PromptTokens = %d, want 100 (the one send's own)", entry.PromptTokens)
+	}
+	if entry.CompletionTokens != 10 {
+		t.Errorf("CompletionTokens = %d, want 10 (the one send's own)", entry.CompletionTokens)
+	}
+}
+
+// TestDeepSeekLoopSumsTheCachedAndReasoningTokens checks that a genuine
+// loop bills every step's cached and reasoning tokens, not only the last
+// step's.
+//
+// The loop's steps are separate upstream requests, and the client is charged
+// for all of them. The cached tokens are the cheap part of the input, and
+// the reasoning tokens are output: leaving the last step's figure alone
+// under-bills a real search loop.
+func TestDeepSeekLoopSumsTheCachedAndReasoningTokens(t *testing.T) {
+	fake := &deepSeekFake{
+		searchResults: []map[string]any{{
+			"title": "DeepSeek V4 released",
+			"url":   "https://example.com/v4",
+		}},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		switch r.URL.Path {
+		case "/v1/tools/search":
+			fake.mu.Lock()
+			fake.searchCalls++
+			results := fake.searchResults
+			fake.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"results": results})
+		case "/v1/chat/completions":
+			fake.mu.Lock()
+			fake.chatCalls++
+			call := fake.chatCalls
+			fake.mu.Unlock()
+			w.Header().Set("Content-Type", "text/event-stream")
+			if call == 1 {
+				_, _ = w.Write([]byte("data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"deepseek_web_search","arguments":"{\"query\":\"deepseek v4\"}"}}]}}]}` + "\n\n"))
+				_, _ = w.Write([]byte("data: " + `{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":100,"completion_tokens":10,"total_tokens":110,"prompt_tokens_details":{"cached_tokens":40},"completion_tokens_details":{"reasoning_tokens":7}}}` + "\n\n"))
+				_, _ = w.Write([]byte("data: [DONE]\n\n"))
+				return
+			}
+			_, _ = w.Write([]byte("data: " + `{"choices":[{"index":0,"delta":{"content":"DeepSeek V4 was released."}}]}` + "\n\n"))
+			_, _ = w.Write([]byte("data: " + `{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":200,"completion_tokens":20,"total_tokens":220,"prompt_tokens_details":{"cached_tokens":60},"completion_tokens_details":{"reasoning_tokens":9}}}` + "\n\n"))
+			_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	fake.baseURL = server.URL
+
+	prx, dbStub := deepSeekTestProxy(t, fake)
+
+	body := `{
+		"model": "deepseek-flash",
+		"messages": [{"role": "user", "content": "What is new in DeepSeek V4?"}],
+		"tools": [{"type": "web_search"}],
+		"stream": true
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	prx.ProxyRequest(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if fake.chatCalls != 2 {
+		t.Fatalf("the model was called %d times, want 2", fake.chatCalls)
+	}
+	if len(dbStub.loggedEntries) != 1 {
+		t.Fatalf("got %d spend rows, want 1", len(dbStub.loggedEntries))
+	}
+	entry := dbStub.loggedEntries[0]
+	if entry.PromptTokens != 300 {
+		t.Errorf("PromptTokens = %d, want 300 (both steps)", entry.PromptTokens)
+	}
+	if entry.CompletionTokens != 30 {
+		t.Errorf("CompletionTokens = %d, want 30 (both steps)", entry.CompletionTokens)
+	}
+	// The cached tokens of both steps: 40 + 60, and the reasoning tokens of
+	// both steps: 7 + 9. They are in the metadata (the spend row's columns
+	// carry the token totals only).
+	var envelope struct {
+		UsageObject struct {
+			PromptTokensDetails struct {
+				CachedTokens int `json:"cached_tokens"`
+			} `json:"prompt_tokens_details"`
+			CompletionTokensDetails struct {
+				ReasoningTokens int `json:"reasoning_tokens"`
+			} `json:"completion_tokens_details"`
+		} `json:"usage_object"`
+	}
+	if err := json.Unmarshal([]byte(entry.Metadata), &envelope); err != nil {
+		t.Fatalf("decoding the spend metadata: %v", err)
+	}
+	if envelope.UsageObject.PromptTokensDetails.CachedTokens != 100 {
+		t.Errorf("the cached tokens = %d, want 100 (both steps)",
+			envelope.UsageObject.PromptTokensDetails.CachedTokens)
+	}
+	if envelope.UsageObject.CompletionTokensDetails.ReasoningTokens != 16 {
+		t.Errorf("the reasoning tokens = %d, want 16 (both steps)",
+			envelope.UsageObject.CompletionTokensDetails.ReasoningTokens)
+	}
+}
+
+// TestDeepSeekStreamingMidLoopFailureDoesNotRelayAClosedBody checks what
+// the client gets when a step of the loop fails after a successful first
+// step.
+//
+// The loop read the provider's stream whole (and closed it) before it ran
+// the tool, so the fallback that relayed the original response would have
+// read from a closed body: the client would get a 200 with an empty stream
+// and the log would say "invalid Read on closed Body" instead of the real
+// failure.
+//
+// The client must get the error, not an empty stream.
+func TestDeepSeekStreamingMidLoopFailureDoesNotRelayAClosedBody(t *testing.T) {
+	fake := &deepSeekFake{
+		searchResults: []map[string]any{{
+			"title": "DeepSeek V4 released",
+			"url":   "https://example.com/v4",
+		}},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		switch r.URL.Path {
+		case "/v1/tools/search":
+			fake.mu.Lock()
+			fake.searchCalls++
+			results := fake.searchResults
+			fake.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"results": results})
+		case "/v1/chat/completions":
+			fake.mu.Lock()
+			fake.chatCalls++
+			call := fake.chatCalls
+			fake.mu.Unlock()
+			w.Header().Set("Content-Type", "text/event-stream")
+			if call == 1 {
+				// The first stream asks for the router's search.
+				_, _ = w.Write([]byte("data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"deepseek_web_search","arguments":"{\"query\":\"deepseek v4\"}"}}]}}]}` + "\n\n"))
+				_, _ = w.Write([]byte("data: " + `{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":100,"completion_tokens":10,"total_tokens":110}}` + "\n\n"))
+				_, _ = w.Write([]byte("data: [DONE]\n\n"))
+				return
+			}
+			// The continuation fails: the upstream is gone.
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte(`{"error":{"message":"upstream is down"}}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	fake.baseURL = server.URL
+
+	prx, dbStub := deepSeekTestProxy(t, fake)
+
+	body := `{
+		"model": "deepseek-flash",
+		"messages": [{"role": "user", "content": "What is new in DeepSeek V4?"}],
+		"tools": [{"type": "web_search"}],
+		"stream": true
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	prx.ProxyRequest(rec, req)
+
+	out := rec.Body.String()
+	// The client must not get an empty stream that ends without an answer:
+	// it would look like a successful request with no content.
+	if strings.Contains(out, "invalid Read on closed Body") {
+		t.Errorf("the client was served a closed body: %s", out)
+	}
+	if rec.Code == http.StatusOK && !strings.Contains(out, "finish_reason") &&
+		!strings.Contains(out, "error") {
+		t.Errorf("the client got a 200 with no answer and no error: %s", out)
+	}
+	// It gets the failure, and it is the real one.
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502 (the upstream failed after the tool ran): %s", rec.Code, out)
+	}
+	if !strings.Contains(out, "error") {
+		t.Errorf("the client got no error: %s", out)
+	}
+	// The search that already ran is still billed.
+	if len(dbStub.loggedEntries) != 1 {
+		t.Fatalf("got %d spend rows, want 1", len(dbStub.loggedEntries))
+	}
+	searches, _ := toolCountsFromMetadata(t, dbStub.loggedEntries[0].Metadata)
+	if searches != 1 {
+		t.Errorf("the web search count = %d, want 1 (the search already ran)", searches)
+	}
+}

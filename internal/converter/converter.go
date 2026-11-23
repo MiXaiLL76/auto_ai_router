@@ -383,6 +383,20 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 			body = openaiconv.StripVLLMOnlySamplingParams(body)
 		}
 
+		// A provider that speaks the OpenAI wire protocol but fronts a
+		// Claude model does not read "reasoning_effort": "none" as "no
+		// reasoning" -- measured against Requesty with
+		// anthropic/claude-haiku-5-5, a model that thinks by default, the
+		// reasoning RAN. Anthropic's own words are needed, and the effort
+		// that contradicted them has to go with it.
+		//
+		// Only for the models that think by default (Claude 5.x): for a
+		// model that reasons only when asked, "none" already means off and
+		// there is nothing to fix.
+		if anthropic.ThinksByDefault(c.mode.ModelID) {
+			body = openaiconv.SetThinkingDisabled(body)
+		}
+
 		if c.mode.IsImageGeneration || c.mode.IsImageEdit {
 			body = openaiconv.RewriteImageMiniJSON(body, c.mode.ModelID, c.mode.IsImageEdit)
 		}
@@ -656,6 +670,11 @@ type responsesUsageDetails struct {
 		CacheWriteTokensDetails struct {
 			TTL30mTokens int `json:"ttl_30m_tokens,omitempty"`
 			TTL12hTokens int `json:"ttl_12h_tokens,omitempty"`
+			// Alibaba's Qwen4 explicit cache: the split of the write into a
+			// five-minute and a one-hour part, in the same object OpenAI
+			// reports its own 30-minute and 12-hour writes in.
+			TTL5mTokens int `json:"ttl_5m_tokens,omitempty"`
+			TTL1hTokens int `json:"ttl_1h_tokens,omitempty"`
 		} `json:"cache_write_tokens_details,omitempty"`
 		ImageTokens         int    `json:"image_tokens,omitempty"`
 		VideoTokens         int    `json:"video_tokens,omitempty"`
@@ -1009,6 +1028,13 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 			}
 		}
 	}
+	// Alibaba's Qwen4 splits its explicit cache write in the Responses API's
+	// cache_write_tokens_details as ttl_5m_tokens and ttl_1h_tokens: the two
+	// tiers Anthropic calls 5m and 1h, each billed at its own rate.
+	if cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
+		cacheCreation5mTokens = resp.Usage.InputTokensDetails.CacheWriteTokensDetails.TTL5mTokens
+		cacheCreation1hTokens = resp.Usage.InputTokensDetails.CacheWriteTokensDetails.TTL1hTokens
+	}
 	if cacheCreationTokens == 0 {
 		cacheCreationTokens = resp.Usage.InputTokensDetails.CacheWriteTokens
 	}
@@ -1087,6 +1113,12 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 		}
 		if cacheCreationTokens == 0 {
 			cacheCreationTokens = u.InputTokensDetails.CacheWriteTokens
+		}
+		// Alibaba's Qwen4 splits its explicit cache write into a five-minute
+		// and a one-hour part under cache_write_tokens_details.
+		if cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
+			cacheCreation5mTokens = u.InputTokensDetails.CacheWriteTokensDetails.TTL5mTokens
+			cacheCreation1hTokens = u.InputTokensDetails.CacheWriteTokensDetails.TTL1hTokens
 		}
 		if audioIn == 0 {
 			audioIn = u.InputTokensDetails.AudioTokens

@@ -94,6 +94,16 @@ func (p *Proxy) runDeepSeekToolLoop(
 		} else {
 			next, err = cycle.NextBody(r.Context(), current)
 		}
+		if errors.Is(err, toolloop.ErrNothingToRun) {
+			// The step's calls are none of the router's own, so there is
+			// nothing to run and nothing to add to the conversation: the
+			// loop ends here and the client gets the answer as it is.
+			//
+			// Sending the request again would be sending the very same
+			// request -- the provider would answer the same way, and the
+			// client would be billed for both sends.
+			break
+		}
 		if err != nil {
 			return deepSeekRunResult(current, total, runner), err
 		}

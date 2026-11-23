@@ -63,7 +63,7 @@ func (p *Proxy) runMoonshotStreamToolLoop(
 		return result, err
 	}
 	// The final step's stream is what the client gets.
-	replayToolStream(w, resp, result.body)
+	p.replayToolStream(w, resp, r, modelID, logCtx, result.body)
 	return result, nil
 }
 
@@ -87,11 +87,11 @@ func (p *Proxy) runMoonshotStreamToolLoopBuffered(
 	attemptedCreds map[string]bool,
 ) (*moonshotStreamCycleResult, error) {
 	runner := p.newMoonshotToolRunner(cred)
-	raw, _, usage, err := toolloop.CollectStreamToolCalls(resp)
+	// The collector returns the router's OWN calls only.
+	raw, owned, usage, err := toolloop.CollectStreamToolCalls(resp, runner)
 	if err != nil {
 		return nil, err
 	}
-	owned := toolloop.CallsFromStream(raw, runner)
 	if len(owned) == 0 {
 		// No tool call: the client gets the provider's stream as it is.
 		streamUsage := toolloop.UsageFromStreamUsage(usage)
@@ -132,6 +132,16 @@ func (p *Proxy) runMoonshotStreamToolLoopBuffered(
 			next, err = cycle.FinalBodyFromToolCalls(r.Context(), owned)
 		} else {
 			next, err = cycle.NextBodyFromToolCalls(r.Context(), owned)
+		}
+		if errors.Is(err, toolloop.ErrNothingToRun) {
+			// The step's calls are none of the router's own, so there is
+			// nothing to run and nothing to add to the conversation: the
+			// loop ends here and the client gets the answer as it is.
+			//
+			// Sending the request again would be sending the very same
+			// request -- the provider would answer the same way, and the
+			// client would be billed for both sends.
+			break
 		}
 		if err != nil {
 			return moonshotStreamResult(current, total, runner), err
@@ -188,7 +198,7 @@ func (p *Proxy) runMoonshotStreamToolStep(
 		}
 		return nil, nil, &upstreamStatusError{status: outcome.resp.StatusCode, body: responseBody}
 	}
-	raw, _, usage, err := toolloop.CollectStreamToolCalls(outcome.resp)
+	raw, usage, err := toolloop.ReadStream(outcome.resp)
 	if err != nil {
 		return nil, nil, err
 	}

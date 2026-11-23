@@ -7,6 +7,7 @@ CMD_DIR=./cmd/server
 GO=go
 GOFLAGS=-v
 GOLANGCI_LINT_VERSION ?= v2.15.0
+CYCLO_TOP ?= 25
 GOLANGCI_LINT_VERSION_NO_V=$(patsubst v%,%,$(GOLANGCI_LINT_VERSION))
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
@@ -41,6 +42,7 @@ help:
 	@echo "  fmt                  - Format code"
 	@echo "  vet                  - Run go vet"
 	@echo "  lint                 - Run golangci-lint (requires installation)"
+	@echo "  cycloreport          - Show the top gocyclo findings (CYCLO_TOP=25)"
 	@echo "  install-hooks        - Enable automatic format and lint before commits"
 	@echo "  install-lint         - Install pinned golangci-lint"
 	@echo "  vuln                 - Run govulncheck (latest, same as CI)"
@@ -174,6 +176,23 @@ lint:
 	fi
 	export PATH=/usr/local/go/bin:$$(go env GOPATH)/bin:$$PATH && golangci-lint run ./...
 	@echo "Lint complete"
+
+.PHONY: cycloreport
+## cycloreport: Show the highest cyclomatic complexity findings
+cycloreport:
+	@set -e; \
+	export PATH=/usr/local/go/bin:$$PATH; \
+	export PATH="$$( $(GO) env GOPATH)/bin:$$PATH"; \
+	if ! command -v golangci-lint > /dev/null; then \
+		echo "golangci-lint not installed. Run: make install-lint" >&2; \
+		exit 1; \
+	fi; \
+	report=$$(mktemp); \
+	trap 'rm -f "$$report"' EXIT; \
+	golangci-lint run --enable-only gocyclo --timeout=5m --issues-exit-code=0 \
+		--max-issues-per-linter=0 --max-same-issues=0 --uniq-by-line=false \
+		--show-stats=false --output.text.path=/dev/null --output.json.path="$$report" ./...; \
+	$(GO) run ./cmd/cycloreport -top "$(CYCLO_TOP)" < "$$report"
 
 ## vuln: Run govulncheck. Unpinned (@latest) on purpose, like CI: the
 ## vulnerability DB and the tool move together, so a new advisory fails here
