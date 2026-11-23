@@ -3,10 +3,7 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
-	"encoding/json/jsontext"
 	"math"
-
-	goccyjson "github.com/goccy/go-json"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
 )
@@ -78,15 +75,7 @@ func parseResponsesTerminalEvent(payload []byte) (*responsesTerminalEvent, bool)
 		return nil, false
 	}
 	var event responsesTerminalEvent
-	// Validate fields skipped by the typed decoder. Keep the legacy decoder
-	// for inputs such as duplicate names or invalid UTF-8 that it tolerates.
-	if !jsontext.Value(payload).IsValid() || goccyjson.Unmarshal(payload, &event) != nil {
-		event = responsesTerminalEvent{}
-		if json.Unmarshal(payload, &event) != nil {
-			return nil, false
-		}
-	}
-	if !isTerminalResponsesEventType(event.Type) {
+	if json.Unmarshal(payload, &event) != nil || !isTerminalResponsesEventType(event.Type) {
 		return nil, false
 	}
 	return &event, true
