@@ -1368,3 +1368,53 @@ func TestStreamTransform_NegativeToolCallIndexIgnored(t *testing.T) {
 	require.Len(t, capturedResp.Output, 1)
 	assert.Equal(t, "message", capturedResp.Output[0].Type)
 }
+
+func TestStreamTransform_CacheUsageSurvivesResponsesConversion(t *testing.T) {
+	for _, tc := range []struct {
+		name, usage                           string
+		header5m, header1h                    int
+		input, read, write, short, hour, long int
+	}{
+		{"12h only", `{"prompt_tokens":1500,"prompt_tokens_details":{"cache_write_tokens_details":{"ttl_12h_tokens":1000}}}`, 0, 0, 1500, 0, 1000, 0, 0, 1000},
+		{"30m and 12h", `{"prompt_tokens":1500,"prompt_tokens_details":{"cache_write_tokens_details":{"ttl_30m_tokens":200,"ttl_12h_tokens":1000}}}`, 0, 0, 1500, 0, 1200, 200, 0, 1000},
+		{"header only", `{"prompt_tokens":1500}`, 200, 800, 1500, 0, 1000, 200, 800, 0},
+		{"flat Anthropic", `{"input_tokens":100,"output_tokens":5,"cache_read_input_tokens":300,"cache_creation_input_tokens":500,"cache_creation":{"ephemeral_1h_input_tokens":500}}`, 0, 0, 900, 300, 500, 0, 500, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := buildSSEChunk(`{"choices":[],"usage":`+tc.usage+`}`) + "data: [DONE]\n\n"
+			var output bytes.Buffer
+			var completed *Response
+			require.NoError(t, TransformChatStreamToResponsesWithMetaAndUsage(
+				strings.NewReader(input), &output, "test-model", nil, false, tc.header5m, tc.header1h,
+				func(response *Response) { completed = response },
+			))
+			require.NotNil(t, completed)
+			require.NotNil(t, completed.Usage)
+			assert.Equal(t, tc.write, completed.Usage.InputTokensDetails.CacheCreationTokens)
+			if tc.long > 0 {
+				details := completed.Usage.InputTokensDetails.CacheWriteTokensDetails
+				if assert.NotNil(t, details) {
+					assert.Equal(t, tc.long, details.TTL12hTokens)
+					assert.Equal(t, tc.short, details.TTL30mTokens)
+				}
+			}
+
+			for _, line := range strings.Split(output.String(), "\n") {
+				payload, ok := strings.CutPrefix(line, "data: ")
+				if !ok || !strings.Contains(payload, `"type":"response.completed"`) {
+					continue
+				}
+				usage := converter.ExtractTokenUsage([]byte(payload))
+				require.NotNil(t, usage)
+				assert.Equal(t, tc.input, usage.PromptTokens)
+				assert.Equal(t, tc.read, usage.CachedInputTokens)
+				assert.Equal(t, tc.write, usage.CacheCreationTokens)
+				assert.Equal(t, tc.short, usage.CacheCreation5mTokens)
+				assert.Equal(t, tc.hour, usage.CacheCreation1hTokens)
+				assert.Equal(t, tc.long, usage.CacheCreation12hTokens)
+				return
+			}
+			t.Fatal("missing response.completed event")
+		})
+	}
+}

@@ -164,14 +164,15 @@ type streamReasoningItem struct {
 
 // chatCompletionsUsage represents usage from a Chat Completions streaming chunk.
 type chatCompletionsUsage struct {
-	PromptTokens          int
-	CompletionTokens      int
-	TotalTokens           int
-	CachedTokens          int
-	CachedAudioTokens     int
-	CacheCreationTokens   int
-	CacheCreation5mTokens int
-	CacheCreation1hTokens int
+	PromptTokens            int
+	CompletionTokens        int
+	TotalTokens             int
+	CachedTokens            int
+	CachedAudioTokens       int
+	CacheCreationTokens     int
+	CacheCreation5mTokens   int
+	CacheCreation1hTokens   int
+	CacheWriteTokensDetails *CacheWriteTokensDetails
 	// CacheType is Alibaba/Qwen's explicit cache mode marker
 	// (converter.CacheTypeExplicit) from prompt_tokens_details.cache_type.
 	CacheType         string
@@ -215,26 +216,19 @@ type chatStreamChoice struct {
 }
 
 type chatStreamUsage struct {
-	PromptTokens        int `json:"prompt_tokens"`
-	CompletionTokens    int `json:"completion_tokens"`
-	TotalTokens         int `json:"total_tokens"`
-	PromptTokensDetails *struct {
-		CachedTokens              int `json:"cached_tokens,omitempty"`
-		CachedAudioTokens         int `json:"cached_audio_tokens,omitempty"`
-		CacheCreationTokens       int `json:"cache_creation_tokens,omitempty"`
-		CacheWriteTokens          int `json:"cache_write_tokens,omitempty"`
-		CacheCreationTokenDetails *struct {
-			Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
-			Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
-		} `json:"cache_creation_token_details,omitempty"`
-		// Alibaba returns the explicit cache creation TTL detail under
-		// cache_creation.ephemeral_5m_input_tokens (no _token_details suffix).
-		CacheCreation *struct {
-			Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
-			Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
-		} `json:"cache_creation,omitempty"`
-		AudioTokens int    `json:"audio_tokens,omitempty"`
-		CacheType   string `json:"cache_type,omitempty"`
+	PromptTokens             int                        `json:"prompt_tokens"`
+	CompletionTokens         int                        `json:"completion_tokens"`
+	InputTokens              int                        `json:"input_tokens"`
+	OutputTokens             int                        `json:"output_tokens"`
+	TotalTokens              int                        `json:"total_tokens"`
+	CacheReadInputTokens     int                        `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int                        `json:"cache_creation_input_tokens"`
+	CacheCreation            *CacheCreationTokenDetails `json:"cache_creation"`
+	CacheType                string                     `json:"cache_type"`
+	PromptTokensDetails      *struct {
+		InputDetails
+		// Alibaba also spells the short TTL breakdown cache_creation.
+		CacheCreation *CacheCreationTokenDetails `json:"cache_creation,omitempty"`
 	} `json:"prompt_tokens_details,omitempty"`
 	CompletionTokensDetails *struct {
 		ReasoningTokens int `json:"reasoning_tokens,omitempty"`
@@ -423,42 +417,70 @@ func (acc *streamAccumulator) captureChatChunkMetadata(chunk *chatStreamChunk) {
 
 func usageFromChatStreamChunk(raw *chatStreamUsage, audioInputIncludesCachedAudio bool, cacheWriteTTLFallback5mTokens, cacheWriteTTLFallback1hTokens int) *chatCompletionsUsage {
 	usage := &chatCompletionsUsage{
-		PromptTokens:     raw.PromptTokens,
-		CompletionTokens: raw.CompletionTokens,
+		PromptTokens:     cmp.Or(raw.PromptTokens, raw.InputTokens),
+		CompletionTokens: cmp.Or(raw.CompletionTokens, raw.OutputTokens),
 		TotalTokens:      raw.TotalTokens,
+		CacheType:        raw.CacheType,
 	}
+	var ttl30m, ttl12h, audioTokens int
 	if prompt := raw.PromptTokensDetails; prompt != nil {
-		cachedTokens, cachedAudioTokens := converterutil.NormalizeCachedAudioBreakdown(
-			prompt.CachedTokens,
-			prompt.CachedAudioTokens,
-		)
-		usage.CachedTokens = cachedTokens
-		usage.CachedAudioTokens = cachedAudioTokens
-		usage.CacheType = prompt.CacheType
+		usage.CachedTokens = prompt.CachedTokens
+		usage.CachedAudioTokens = prompt.CachedAudioTokens
+		audioTokens = prompt.AudioTokens
+		usage.CacheType = cmp.Or(prompt.CacheType, raw.CacheType)
 		usage.CacheCreationTokens = cmp.Or(prompt.CacheCreationTokens, prompt.CacheWriteTokens)
-		usage.AudioInputTokens = normalizedAudioTokens(
-			prompt.AudioTokens,
-			cachedTokens,
-			cachedAudioTokens,
-			audioInputIncludesCachedAudio,
-		)
-		// Alibaba spells this detail cache_creation; the standard object wins
-		// even when present with a zero split.
-		details := cmp.Or(prompt.CacheCreationTokenDetails, prompt.CacheCreation)
-		if details != nil {
+		if details := prompt.CacheCreationTokenDetails; details != nil {
 			usage.CacheCreation5mTokens = details.Ephemeral5mInputTokens
 			usage.CacheCreation1hTokens = details.Ephemeral1hInputTokens
-			if usage.CacheCreationTokens == 0 {
-				usage.CacheCreationTokens = details.Ephemeral5mInputTokens + details.Ephemeral1hInputTokens
+		}
+		if details := prompt.CacheWriteTokensDetails; details != nil {
+			ttl12h = details.TTL12hTokens
+			if !usage.hasShortCacheWriteTTL() {
+				ttl30m = details.TTL30mTokens
 			}
 		}
-		// Kimi/Moonshot never reports a TTL split in the body — fall back
-		// to the header-sourced split the caller supplied.
-		if usage.CacheCreation5mTokens == 0 && usage.CacheCreation1hTokens == 0 {
-			usage.CacheCreation5mTokens = cacheWriteTTLFallback5mTokens
-			usage.CacheCreation1hTokens = cacheWriteTTLFallback1hTokens
+		if !usage.hasShortCacheWriteTTL() && ttl30m == 0 && prompt.CacheCreation != nil {
+			usage.CacheCreation5mTokens = prompt.CacheCreation.Ephemeral5mInputTokens
+			usage.CacheCreation1hTokens = prompt.CacheCreation.Ephemeral1hInputTokens
 		}
 	}
+
+	flatRead := usage.CachedTokens == 0 && raw.CacheReadInputTokens > 0
+	if flatRead {
+		usage.CachedTokens = raw.CacheReadInputTokens
+	}
+	flatWrite := usage.CacheCreationTokens == 0 && raw.CacheCreationInputTokens > 0
+	if flatWrite {
+		usage.CacheCreationTokens = raw.CacheCreationInputTokens
+	}
+	if !usage.hasShortCacheWriteTTL() && ttl30m == 0 && raw.CacheCreation != nil {
+		usage.CacheCreation5mTokens = raw.CacheCreation.Ephemeral5mInputTokens
+		usage.CacheCreation1hTokens = raw.CacheCreation.Ephemeral1hInputTokens
+		flatWrite = flatWrite || usage.hasShortCacheWriteTTL()
+	}
+	// Kimi/Moonshot may report the split only in response headers.
+	if !usage.hasShortCacheWriteTTL() && ttl30m == 0 {
+		usage.CacheCreation5mTokens = cacheWriteTTLFallback5mTokens
+		usage.CacheCreation1hTokens = cacheWriteTTLFallback1hTokens
+	}
+	if ttl30m > 0 || ttl12h > 0 {
+		usage.CacheWriteTokensDetails = &CacheWriteTokensDetails{TTL30mTokens: ttl30m, TTL12hTokens: ttl12h}
+	}
+	if usage.CacheCreationTokens == 0 {
+		usage.CacheCreationTokens = usage.CacheCreation5mTokens + usage.CacheCreation1hTokens + ttl30m + ttl12h
+	}
+
+	// Anthropic's input_tokens excludes the flat cache counters.
+	if raw.PromptTokens == 0 {
+		if flatRead {
+			usage.PromptTokens += usage.CachedTokens
+		}
+		if flatWrite {
+			usage.PromptTokens += usage.CacheCreationTokens
+		}
+	}
+	usage.CachedTokens, usage.CachedAudioTokens = converterutil.NormalizeCachedAudioBreakdown(usage.CachedTokens, usage.CachedAudioTokens)
+	usage.AudioInputTokens = normalizedAudioTokens(audioTokens, usage.CachedTokens, usage.CachedAudioTokens, audioInputIncludesCachedAudio)
 	if raw.CompletionTokensDetails != nil {
 		usage.ReasoningTokens = raw.CompletionTokensDetails.ReasoningTokens
 		usage.AudioOutputTokens = raw.CompletionTokensDetails.AudioTokens
@@ -681,37 +703,48 @@ func completedOutputItems(acc *streamAccumulator) []OutputItem {
 	return output
 }
 
+func (usage *chatCompletionsUsage) hasShortCacheWriteTTL() bool {
+	return usage.CacheCreation5mTokens != 0 || usage.CacheCreation1hTokens != 0
+}
+
+func (usage *chatCompletionsUsage) toResponsesUsage() *Usage {
+	if usage == nil {
+		return nil
+	}
+	result := &Usage{
+		InputTokens:  usage.PromptTokens,
+		OutputTokens: usage.CompletionTokens,
+		TotalTokens:  usage.TotalTokens,
+		InputTokensDetails: InputDetails{
+			CachedTokens:            usage.CachedTokens,
+			CachedAudioTokens:       usage.CachedAudioTokens,
+			CacheCreationTokens:     usage.CacheCreationTokens,
+			CacheWriteTokensDetails: usage.CacheWriteTokensDetails,
+			AudioTokens:             usage.AudioInputTokens,
+			CacheType:               usage.CacheType,
+		},
+		OutputTokensDetails: OutputDetails{
+			ReasoningTokens: usage.ReasoningTokens,
+			AudioTokens:     usage.AudioOutputTokens,
+			ImageTokens:     usage.ImageOutputTokens,
+		},
+	}
+	if usage.WebSearchRequests > 0 {
+		result.ServerToolUse = &ServerToolUseDetails{WebSearchRequests: usage.WebSearchRequests}
+	}
+	if usage.CacheCreation5mTokens > 0 || usage.CacheCreation1hTokens > 0 {
+		result.InputTokensDetails.CacheCreationTokenDetails = &CacheCreationTokenDetails{
+			Ephemeral5mInputTokens: usage.CacheCreation5mTokens,
+			Ephemeral1hInputTokens: usage.CacheCreation1hTokens,
+		}
+	}
+	return result
+}
+
 // buildTypedCompletedResponse builds a typed *Response from the stream accumulator.
 func buildTypedCompletedResponse(acc *streamAccumulator) *Response {
 	output := completedOutputItems(acc)
-
-	var usage *Usage
-	if acc.usage != nil {
-		usage = &Usage{
-			InputTokens:  acc.usage.PromptTokens,
-			OutputTokens: acc.usage.CompletionTokens,
-			TotalTokens:  acc.usage.TotalTokens,
-			InputTokensDetails: InputDetails{
-				CachedTokens:        acc.usage.CachedTokens,
-				CachedAudioTokens:   acc.usage.CachedAudioTokens,
-				CacheCreationTokens: acc.usage.CacheCreationTokens,
-				AudioTokens:         acc.usage.AudioInputTokens,
-				CacheType:           acc.usage.CacheType,
-			},
-			OutputTokensDetails: OutputDetails{ReasoningTokens: acc.usage.ReasoningTokens, AudioTokens: acc.usage.AudioOutputTokens, ImageTokens: acc.usage.ImageOutputTokens},
-		}
-		if acc.usage.WebSearchRequests > 0 {
-			usage.ServerToolUse = &ServerToolUseDetails{
-				WebSearchRequests: acc.usage.WebSearchRequests,
-			}
-		}
-		if acc.usage.CacheCreation5mTokens > 0 || acc.usage.CacheCreation1hTokens > 0 {
-			usage.InputTokensDetails.CacheCreationTokenDetails = &CacheCreationTokenDetails{
-				Ephemeral5mInputTokens: acc.usage.CacheCreation5mTokens,
-				Ephemeral1hInputTokens: acc.usage.CacheCreation1hTokens,
-			}
-		}
-	}
+	usage := acc.usage.toResponsesUsage()
 
 	status := "completed"
 	var incompleteDetails *IncompleteDetails
@@ -999,37 +1032,7 @@ func buildInProgressResponse(acc *streamAccumulator) map[string]interface{} {
 func buildCompletedResponse(acc *streamAccumulator) map[string]interface{} {
 	output := completedOutputItems(acc)
 
-	var usageObj *Usage
-	if acc.usage != nil {
-		usageObj = &Usage{
-			InputTokens:  acc.usage.PromptTokens,
-			OutputTokens: acc.usage.CompletionTokens,
-			TotalTokens:  acc.usage.TotalTokens,
-			InputTokensDetails: InputDetails{
-				CachedTokens:        acc.usage.CachedTokens,
-				CachedAudioTokens:   acc.usage.CachedAudioTokens,
-				CacheCreationTokens: acc.usage.CacheCreationTokens,
-				AudioTokens:         acc.usage.AudioInputTokens,
-				CacheType:           acc.usage.CacheType,
-			},
-			OutputTokensDetails: OutputDetails{
-				ReasoningTokens: acc.usage.ReasoningTokens,
-				AudioTokens:     acc.usage.AudioOutputTokens,
-				ImageTokens:     acc.usage.ImageOutputTokens,
-			},
-		}
-		if acc.usage.WebSearchRequests > 0 {
-			usageObj.ServerToolUse = &ServerToolUseDetails{
-				WebSearchRequests: acc.usage.WebSearchRequests,
-			}
-		}
-		if acc.usage.CacheCreation5mTokens > 0 || acc.usage.CacheCreation1hTokens > 0 {
-			usageObj.InputTokensDetails.CacheCreationTokenDetails = &CacheCreationTokenDetails{
-				Ephemeral5mInputTokens: acc.usage.CacheCreation5mTokens,
-				Ephemeral1hInputTokens: acc.usage.CacheCreation1hTokens,
-			}
-		}
-	}
+	usageObj := acc.usage.toResponsesUsage()
 
 	status := "completed"
 	var incompleteDetails *IncompleteDetails

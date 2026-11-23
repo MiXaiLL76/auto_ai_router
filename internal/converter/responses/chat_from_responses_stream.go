@@ -118,7 +118,7 @@ func (s *responsesToChatStream) writeDelta(delta openai.OpenAIStreamingDelta, re
 func (s *responsesToChatStream) processEvent(event *responsesStreamEvent) error {
 	switch event.Type {
 	case "response.created", "response.in_progress":
-		if event.Response != nil && event.Response.ID != "" {
+		if !s.opened && event.Response != nil && event.Response.ID != "" {
 			s.chatID = chatCompletionIDFromResponses(event.Response.ID)
 		}
 		return s.open()
@@ -131,9 +131,10 @@ func (s *responsesToChatStream) processEvent(event *responsesStreamEvent) error 
 		if event.Delta == "" {
 			return nil
 		}
-		// Some providers omit output_item.added. Allocate a slot lazily so
-		// their argument deltas still have a stable Chat tool-call index. Relay
-		// them immediately, even when no event has opened the Chat stream yet.
+		if err := s.open(); err != nil {
+			return err
+		}
+		// Providers can omit output_item.added, so allocate the slot on first use.
 		idx := toolCallSlotFor(s.toolCallSlots, &s.nextToolCallIdx, event.OutputIndex)
 		return s.writeDelta(openai.OpenAIStreamingDelta{ToolCalls: []openai.OpenAIStreamingToolCall{{
 			Index:    idx,

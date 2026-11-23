@@ -857,10 +857,7 @@ func ExtractTokenUsageWithOptions(body []byte, opts TokenUsageExtractionOptions)
 // item G — proxy.go's proxy-credential and direct-provider branches,
 // retry.go's fallback branch):
 //
-//   - totalTokens: the provider's own literal "usage.total_tokens" (falling
-//     back to "response.usage.total_tokens" for the Responses API streaming
-//     event shape) — this is what feeds the rate limiter's RPM/TPM
-//     accounting (p.rateLimiter.ConsumeTokens/ConsumeModelTokens).
+//   - totalTokens: the provider's reported total_tokens for rate limiting.
 //   - usage: the derived *TokenUsage (PromptTokens/CompletionTokens/detail
 //     breakdowns) used for spend logging and metrics.
 //
@@ -881,30 +878,29 @@ func ExtractTotalTokensAndUsageWithOptions(body []byte, opts TokenUsageExtractio
 		return 0, nil
 	}
 
-	totalTokens := 0
-	if resp.Usage.TotalTokens > 0 {
-		totalTokens = resp.Usage.TotalTokens
-	} else if resp.Response.Usage != nil {
-		totalTokens = resp.Response.Usage.TotalTokens
-	}
-
+	_, _, totalTokens := resp.tokenCounts()
 	return totalTokens, tokenUsageFromShape(&resp, opts)
 }
 
-// tokenUsageFromShape computes the final *TokenUsage from an already-decoded
-// tokenUsageResponseShape — the shared tail end of both
-// ExtractTokenUsageWithOptions and ExtractTotalTokensAndUsageWithOptions.
+func (resp *tokenUsageResponseShape) tokenCounts() (prompt, completion, total int) {
+	prompt = cmp.Or(resp.Usage.PromptTokens, resp.Usage.InputTokens)
+	completion = cmp.Or(resp.Usage.CompletionTokens, resp.Usage.OutputTokens)
+	total = resp.Usage.TotalTokens
+	if nested := resp.Response.Usage; nested != nil {
+		// When nested usage supplies the input count, take its output and
+		// total with it so reasoning accounting uses a single provider report.
+		if prompt == 0 && (nested.InputTokens != 0 || (completion == 0 && nested.OutputTokens != 0)) {
+			return nested.InputTokens, nested.OutputTokens, nested.TotalTokens
+		}
+		total = cmp.Or(total, nested.TotalTokens)
+	}
+	return prompt, completion, total
+}
+
+// tokenUsageFromShape computes usage from an already-decoded response.
 func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractionOptions) *TokenUsage {
 	nested := resp.Response.Usage
-	// Prefer Chat Completions tokens; fall back to Responses API / image tokens
-	promptTokens := cmp.Or(resp.Usage.PromptTokens, resp.Usage.InputTokens)
-	completionTokens := cmp.Or(resp.Usage.CompletionTokens, resp.Usage.OutputTokens)
-
-	// Fall back to nested Responses API streaming event format (response.completed event)
-	if promptTokens == 0 && completionTokens == 0 && nested != nil {
-		promptTokens = nested.InputTokens
-		completionTokens = nested.OutputTokens
-	}
+	promptTokens, completionTokens, totalTokens := resp.tokenCounts()
 
 	// Each level's server-side tool usage object is decoded once; the
 	// top-level one wins for the per-tool counters, like the other fields.
@@ -944,23 +940,28 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 		webFetchRequests = cmp.Or(nested.WebFetchRequests, nested.InputTokensDetails.WebFetchRequests)
 	}
 
-	// Keep the existing usage presence check: token counts and upstream tool
-	// activity establish a usage record. Router counters and provider cost
-	// decorate that record after it exists.
+	// Nested details can fill gaps when the top level has no input count.
+	var nestedDetails *responsesUsageDetails
+	if resp.Usage.PromptTokens == 0 && resp.Usage.InputTokens == 0 {
+		nestedDetails = nested
+	}
+	cache := extractUsageCache(resp, nestedDetails)
 	if promptTokens == 0 && completionTokens == 0 && webSearchRequests == 0 &&
-		!toolUsageReported && imageToolGenerations == 0 && imageToolEdits == 0 {
+		webFetchRequests <= 0 && routerWebSearchRequests <= 0 &&
+		!toolUsageReported && imageToolGenerations == 0 && imageToolEdits == 0 &&
+		cache.read <= 0 && !cache.hasWrite() {
 		return nil
 	}
 
-	// Nested details are eligible when the top-level input counters are
-	// absent, even if a top-level output counter supplied completionTokens.
-	var nestedDetails *responsesUsageDetails
-	totalTokens := resp.Usage.TotalTokens
-	if resp.Usage.PromptTokens == 0 && resp.Usage.InputTokens == 0 && nested != nil {
-		nestedDetails = nested
-		totalTokens = nested.TotalTokens
+	// Some providers report the short TTL split only in response headers.
+	if !cache.hasShortTTL() {
+		cache.write5m = opts.CacheWriteTTLHeader5mTokens
+		cache.write1h = opts.CacheWriteTTLHeader1hTokens
 	}
-	cache := extractUsageCache(resp, nestedDetails, opts)
+	if cache.write == 0 {
+		cache.write = cache.write5m + cache.write1h + cache.write12h
+	}
+
 	usage := extractUsageTokenDetails(resp, nestedDetails)
 	// Decided on the provider's own figures, before the Anthropic flat-cache
 	// correction below rewrites promptTokens (Anthropic sends no total_tokens).
@@ -1029,7 +1030,7 @@ func (c usageCacheBreakdown) hasWrite() bool {
 	return c.write != 0 || c.write12h != 0 || c.hasShortTTL()
 }
 
-func extractUsageCache(resp *tokenUsageResponseShape, nested *responsesUsageDetails, opts TokenUsageExtractionOptions) usageCacheBreakdown {
+func extractUsageCache(resp *tokenUsageResponseShape, nested *responsesUsageDetails) usageCacheBreakdown {
 	usage := &resp.Usage
 	// Anthropic's usage object reports cache tokens as flat fields (cache_read_input_tokens,
 	// cache_creation_input_tokens) and its input_tokens is EXCLUSIVE of them, unlike the
@@ -1101,34 +1102,21 @@ func extractUsageCache(resp *tokenUsageResponseShape, nested *responsesUsageDeta
 	if nested != nil {
 		cache.read = cmp.Or(cache.read, nested.InputTokensDetails.CachedTokens)
 		cache.kind = cmp.Or(cache.kind, nested.InputTokensDetails.CacheType, nested.CacheType)
-		// A missing aggregate switches the Responses cache-write fallback
-		// to the nested detail object as a group, including its two TTL fields.
-		if cache.write == 0 {
-			cache.write = nested.InputTokensDetails.CacheCreationTokens
-			cache.write5m = nested.InputTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens
-			cache.write1h = nested.InputTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens
-		}
-		if cache.write == 0 {
-			cache.write = nested.InputTokensDetails.CacheWriteTokens
-		}
-		// Alibaba's Qwen4 splits its explicit cache write into a five-minute
-		// and a one-hour part under cache_write_tokens_details.
+		details := &nested.InputTokensDetails
+		cache.write = cmp.Or(cache.write, details.CacheCreationTokens, details.CacheWriteTokens)
+		cache.write12h = cmp.Or(cache.write12h, details.CacheWriteTokensDetails.TTL12hTokens)
 		if !cache.hasShortTTL() {
-			cache.write5m = nested.InputTokensDetails.CacheWriteTokensDetails.TTL5mTokens
-			cache.write1h = nested.InputTokensDetails.CacheWriteTokensDetails.TTL1hTokens
+			cache.write5m = details.CacheCreationTokenDetails.Ephemeral5mInputTokens
+			cache.write1h = details.CacheCreationTokenDetails.Ephemeral1hInputTokens
+		}
+		if !cache.hasShortTTL() {
+			cache.write5m = details.CacheWriteTokensDetails.TTL30mTokens
+		}
+		if !cache.hasShortTTL() {
+			cache.write5m = details.CacheWriteTokensDetails.TTL5mTokens
+			cache.write1h = details.CacheWriteTokensDetails.TTL1hTokens
 		}
 	}
-	// Body never reports the TTL split for providers like Kimi/Moonshot
-	// (cache_creation_token_details stays null) — fall back to the
-	// header-sourced split when the body gave us none.
-	if !cache.hasShortTTL() {
-		cache.write5m = opts.CacheWriteTTLHeader5mTokens
-		cache.write1h = opts.CacheWriteTTLHeader1hTokens
-	}
-	if cache.write == 0 {
-		cache.write = cache.write5m + cache.write1h
-	}
-
 	return cache
 }
 
