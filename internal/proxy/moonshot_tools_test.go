@@ -2137,3 +2137,168 @@ func TestMoonshotResponsesStreamingWithASearchIsTakenOver(t *testing.T) {
 		t.Errorf("the moonshot search count = %d, want 1", search)
 	}
 }
+
+// TestMoonshotStreamingProSearchRunsTheLoop is the Pro counterpart of
+// TestMoonshotStreamingToolLoopRunsSearch: a client that asks for the
+// built-in web_search_pro over a stream must get the model's answer, not the
+// router's own function call.
+//
+// It exists because the gate that decides whether the stream has to be
+// buffered reads the rewritten body, where the built-in tool has already
+// become a function. A gate that knows only some of the function names lets a
+// stream through unbuffered, and the client is then shown a call of a tool it
+// never declared -- and no answer.
+func TestMoonshotStreamingProSearchRunsTheLoop(t *testing.T) {
+	fake := &moonshotFake{
+		searchResults: []map[string]any{{
+			"title": "Kimi K2 released",
+			"url":   "https://example.com/k2",
+		}},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		switch r.URL.Path {
+		case "/v1/tools/search_pro":
+			fake.mu.Lock()
+			fake.searchProCalls++
+			results := fake.searchResults
+			fake.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"search_results": results})
+		case "/v1/chat/completions":
+			fake.mu.Lock()
+			fake.chatCalls++
+			call := fake.chatCalls
+			fake.mu.Unlock()
+			w.Header().Set("Content-Type", "text/event-stream")
+			if call == 1 {
+				_, _ = w.Write([]byte("data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_p1","type":"function","function":{"name":"` + moonshottools.SearchProToolName + `","arguments":"{\"text_query\":\"kimi k2\"}"}}]}}]}` + "\n\n"))
+				_, _ = w.Write([]byte("data: " + `{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":100,"completion_tokens":10,"total_tokens":110}}` + "\n\n"))
+				_, _ = w.Write([]byte("data: [DONE]\n\n"))
+				return
+			}
+			_, _ = w.Write([]byte("data: " + `{"choices":[{"index":0,"delta":{"content":"Kimi K2 was released."}}]}` + "\n\n"))
+			_, _ = w.Write([]byte("data: " + `{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":200,"completion_tokens":20,"total_tokens":220}}` + "\n\n"))
+			_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	fake.baseURL = server.URL
+
+	prx, dbStub := moonshotTestProxy(t, fake)
+
+	body := `{
+		"model": "kimi-k2",
+		"messages": [{"role": "user", "content": "Find the Kimi K2 paper."}],
+		"tools": [{"type": "web_search_pro"}],
+		"stream": true
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	prx.ProxyRequest(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if fake.searchProCalls != 1 {
+		t.Errorf("the router made %d search_pro calls, want 1 (the loop did not run)", fake.searchProCalls)
+	}
+	if fake.chatCalls != 2 {
+		t.Errorf("the model was called %d times, want 2", fake.chatCalls)
+	}
+	out := rec.Body.String()
+	if !strings.Contains(out, "Kimi K2 was released.") {
+		t.Errorf("the client did not get the answer: %s", out)
+	}
+	if strings.Contains(out, moonshottools.SearchProToolName) {
+		t.Errorf("the client saw the router's function tool: %s", out)
+	}
+	if len(dbStub.loggedEntries) != 1 {
+		t.Fatalf("got %d spend rows, want 1", len(dbStub.loggedEntries))
+	}
+	_, searchPro, _ := moonshotToolCountsFromMetadata(t, dbStub.loggedEntries[0].Metadata)
+	if searchPro != 1 {
+		t.Errorf("the moonshot search_pro count = %d, want 1", searchPro)
+	}
+}
+
+// TestMoonshotResponsesStreamingWithAProSearchIsTakenOver covers the same gate
+// on the Responses path, which has its own copy of the decision.
+func TestMoonshotResponsesStreamingWithAProSearchIsTakenOver(t *testing.T) {
+	fake := &moonshotFake{
+		searchResults: []map[string]any{{
+			"title": "Kimi K2 released",
+			"url":   "https://example.com/k2",
+		}},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		switch r.URL.Path {
+		case "/v1/tools/search_pro":
+			fake.mu.Lock()
+			fake.searchProCalls++
+			results := fake.searchResults
+			fake.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"search_results": results})
+		case "/v1/chat/completions":
+			fake.mu.Lock()
+			fake.chatCalls++
+			call := fake.chatCalls
+			fake.mu.Unlock()
+			w.Header().Set("Content-Type", "text/event-stream")
+			if call == 1 {
+				_, _ = w.Write([]byte("data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_p1","type":"function","function":{"name":"` + moonshottools.SearchProToolName + `","arguments":"{\"text_query\":\"kimi k2\"}"}}]}}]}` + "\n\n"))
+				_, _ = w.Write([]byte("data: " + `{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":100,"completion_tokens":10,"total_tokens":110}}` + "\n\n"))
+				_, _ = w.Write([]byte("data: [DONE]\n\n"))
+				return
+			}
+			_, _ = w.Write([]byte("data: " + `{"choices":[{"index":0,"delta":{"content":"Kimi K2 was released."}}]}` + "\n\n"))
+			_, _ = w.Write([]byte("data: " + `{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":200,"completion_tokens":20,"total_tokens":220}}` + "\n\n"))
+			_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	fake.baseURL = server.URL
+
+	prx, dbStub := moonshotTestProxy(t, fake)
+
+	body := `{
+		"model": "kimi-k2",
+		"input": [{"role": "user", "content": [{"type": "input_text", "text": "Find the Kimi K2 paper."}]}],
+		"tools": [{"type": "web_search_pro"}],
+		"stream": true
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	prx.ProxyRequest(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if fake.searchProCalls != 1 {
+		t.Errorf("the router made %d search_pro calls, want 1 (the loop did not run)", fake.searchProCalls)
+	}
+	out := rec.Body.String()
+	if !strings.Contains(out, "Kimi K2 was released.") {
+		t.Errorf("the client got no answer: %s", out)
+	}
+	if strings.Contains(out, moonshottools.SearchProToolName) {
+		t.Errorf("the client saw the router's own tool call: %s", out)
+	}
+	if len(dbStub.loggedEntries) != 1 {
+		t.Fatalf("got %d spend rows, want 1", len(dbStub.loggedEntries))
+	}
+	_, searchPro, _ := moonshotToolCountsFromMetadata(t, dbStub.loggedEntries[0].Metadata)
+	if searchPro != 1 {
+		t.Errorf("the moonshot search_pro count = %d, want 1", searchPro)
+	}
+}

@@ -1,6 +1,7 @@
 package deepseektools
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -370,12 +371,22 @@ func HasBuiltInTool(body []byte) bool {
 // generated, and a client that gives up on a slow first token tears down a
 // request that was answering all along.
 //
-// Both shapes count, because the two entry points of the loop see the body at
-// different moments: the non-streaming and Responses paths hand it over after
-// RewriteRequest (function tools only), while a pass-through request carries
-// the built-in ones unrewritten.
+// The body this is called with is the one the loop will run on, which is not
+// always the client's: RewriteRequest has already replaced a built-in tool
+// with the adapter's function, so on every path that reaches the loop the
+// built-in shows up as a function name. The built-in case is kept for a body
+// that has not been rewritten.
+//
+// Only the tools are decoded, and only after a cheap substring check says
+// there is something to decode: this runs on the hot path, and the messages
+// of a long conversation are the bulk of the body.
 func ExposesTool(body []byte) bool {
-	var request chatRequest
+	if !bytes.Contains(body, []byte(`"tools"`)) {
+		return false
+	}
+	var request struct {
+		Tools []chatTool `json:"tools,omitempty"`
+	}
 	if err := json.Unmarshal(body, &request); err != nil {
 		return false
 	}
@@ -384,8 +395,11 @@ func ExposesTool(body []byte) bool {
 		case BuiltinWebSearch, BuiltinWebSearchPreview, BuiltinWebFetch:
 			return true
 		}
-		if tool.Function != nil && (tool.Function.Name == SearchToolName || tool.Function.Name == FetchToolName) {
-			return true
+		if tool.Function != nil {
+			switch tool.Function.Name {
+			case SearchToolName, FetchToolName:
+				return true
+			}
 		}
 	}
 	return false
