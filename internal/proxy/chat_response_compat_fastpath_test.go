@@ -4,7 +4,6 @@ import (
 	"strings"
 	"testing"
 
-	goccyjson "github.com/goccy/go-json"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -122,8 +121,6 @@ func TestDecodeShallowJSONObjectRejectsTrailingContent(t *testing.T) {
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "multiple JSON values")
 }
-
-var _ = goccyjson.RawMessage(nil)
 
 // TestNormalizeSSEDataLineModelRewritesAnEscapedModelKey pins the case the
 // gate's backslash check exists for: a chunk whose "model" key is written

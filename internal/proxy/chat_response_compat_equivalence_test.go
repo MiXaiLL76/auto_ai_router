@@ -256,10 +256,45 @@ func previousNormalize(line []byte, publicModel string, preserveNestedResponseMo
 	return result
 }
 
-// currentGate is the gate as it is now.
+// currentGate is the gate as it is now: the field names followed by their
+// closing quote.
 func currentGate(payload []byte) bool {
-	return !bytes.Contains(payload, []byte(`"model"`)) &&
-		!bytes.Contains(payload, []byte(`"object"`)) &&
-		!bytes.Contains(payload, []byte(`"response"`)) &&
+	return !bytes.Contains(payload, []byte(`model"`)) &&
+		!bytes.Contains(payload, []byte(`object"`)) &&
+		!bytes.Contains(payload, []byte(`response"`)) &&
 		bytes.IndexByte(payload, '\\') < 0
+}
+
+// TestModelRewriteSkipsResponsesDeltaChunks pins the case that a Responses
+// API delta must be skipped: the router generates thousands of them per
+// response ("type":"response.output_text.delta"), and the word "response"
+// sits in the VALUE of "type" -- so a gate that looked for the bare word
+// would decode every one of them for nothing, at ~600 ns and 15
+// allocations each, while the rewrite still did not happen.
+func TestModelRewriteSkipsResponsesDeltaChunks(t *testing.T) {
+	deltas := []string{
+		`data: {"type":"response.output_text.delta","item_id":"msg_01Ab","output_index":0,"content_index":0,"delta":"Hello"}`,
+		`data: {"type":"response.refusal.delta","item_id":"msg_01Ab","output_index":0,"content_index":0,"delta":"No"}`,
+		`data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","output_index":1,"delta":"{}"}`,
+	}
+	for _, line := range deltas {
+		payload := bytes.TrimSpace([]byte(line)[len("data: "):])
+		require.True(t, currentGate(payload),
+			"a Responses delta must be skipped, not decoded: %s", line)
+		require.Equal(t, line+"\n\n",
+			string(normalizeSSEDataLineModelWithOptions([]byte(line+"\n\n"), "public-alias", true)),
+			"a Responses delta must be left byte-for-byte alone: %s", line)
+	}
+}
+
+// And the events that DO carry a model must still be rewritten.
+func TestModelRewriteRewritesResponsesLifecycleEvents(t *testing.T) {
+	for _, line := range []string{
+		`data: {"type":"response.created","sequence_number":1,"response":{"id":"r1","model":"upstream-model","status":"in_progress"}}`,
+		`data: {"type":"response.completed","response":{"id":"r1","model":"upstream-model","status":"completed"}}`,
+	} {
+		out := string(normalizeSSEDataLineModelWithOptions([]byte(line+"\n\n"), "public-alias", false))
+		require.Contains(t, out, `"model":"public-alias"`,
+			"the nested response model must be rewritten: %s", line)
+	}
 }
