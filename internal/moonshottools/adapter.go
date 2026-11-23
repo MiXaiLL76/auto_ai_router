@@ -392,6 +392,39 @@ func HasBuiltInTool(body []byte) bool {
 	return false
 }
 
+// ExposesTool reports whether the request offers the model any tool this
+// adapter could run: a built-in one the adapter takes over, or a function
+// tool it installed in place of one.
+//
+// The router-run stream loop buffers the whole answer before it can decide
+// whether to relay it, because it has to see the model's tool call first. On
+// a request that offers no tool of ours there is nothing to see: the model
+// cannot ask for a tool the request never declared, so buffering only costs
+// the client its stream -- the first byte arrives when the last one is already
+// generated, and a client that gives up on a slow first token tears down a
+// request that was answering all along.
+//
+// Both shapes count, because the two entry points of the loop see the body at
+// different moments: the non-streaming and Responses paths hand it over after
+// RewriteRequest (function tools only), while a pass-through request carries
+// the built-in ones unrewritten.
+func ExposesTool(body []byte) bool {
+	var request chatRequest
+	if err := json.Unmarshal(body, &request); err != nil {
+		return false
+	}
+	for _, tool := range request.Tools {
+		switch tool.Type {
+		case BuiltinWebSearch, BuiltinWebSearchPreview, BuiltinMoonshotSearchPro, BuiltinWebFetch:
+			return true
+		}
+		if tool.Function != nil && (tool.Function.Name == SearchToolName || tool.Function.Name == FetchToolName) {
+			return true
+		}
+	}
+	return false
+}
+
 // RewriteResponsesRequest replaces the built-in search tools in a Responses
 // API request body with the adapter's function tools.
 //

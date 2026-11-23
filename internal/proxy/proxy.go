@@ -3579,8 +3579,11 @@ func (p *Proxy) writeDirectStreamingResponse(
 			// call -- for the router's own function, which it cannot
 			// run -- and no answer at all.
 			responsesLoopRan := false
-			if p.deepSeekToolsEnabled && deepSeekToolsEnabledFor(modelID, cred) ||
-				p.moonshotToolsEnabled && moonshotToolsEnabledFor(modelID, cred) {
+			// As on the Chat path, only a request that offers one of the
+			// router's tools needs the buffered loop; without them the
+			// stream is relayed as it is.
+			if (p.deepSeekToolsEnabled && deepSeekToolsEnabledFor(modelID, cred) && deepseektools.ExposesTool(body)) ||
+				(p.moonshotToolsEnabled && moonshotToolsEnabledFor(modelID, cred) && moonshottools.ExposesTool(body)) {
 				var buffered []byte
 				var loopUsage *converter.TokenUsage
 				var loopErr error
@@ -3694,8 +3697,8 @@ func (p *Proxy) writeDirectStreamingResponse(
 		// client cannot be shown a tool call for a tool it never declared.
 		// The stream is buffered, the tool run, and the model asked again.
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 &&
-			((p.deepSeekToolsEnabled && deepSeekToolsEnabledFor(modelID, cred)) ||
-				(p.moonshotToolsEnabled && moonshotToolsEnabledFor(modelID, cred))) {
+			((p.deepSeekToolsEnabled && deepSeekToolsEnabledFor(modelID, cred) && deepseektools.ExposesTool(body)) ||
+				(p.moonshotToolsEnabled && moonshotToolsEnabledFor(modelID, cred) && moonshottools.ExposesTool(body))) {
 			// The two adapters never overlap: each engages only for its
 			// own provider's credential, so exactly one of them runs.
 			var streamErr error
