@@ -43,7 +43,16 @@ func clientResponseBodyForCredential(statusCode int, body []byte, _ *config.Cred
 // string, and every other key is read normally. Only a body that is not JSON
 // at all yields nothing.
 func statusCodeFromProviderBodyError(statusCode int, body []byte) (int, bool) {
-	if len(body) == 0 {
+	success := statusCode >= http.StatusOK && statusCode < http.StatusMultipleChoices
+	if !success && (statusCode < http.StatusBadRequest || statusCode == http.StatusTooManyRequests) {
+		return 0, false
+	}
+	// Escaped keys and values still need decoding. Match the status key
+	// rather than the value because "failed" is compared case-insensitively.
+	if bytes.IndexByte(body, '\\') < 0 &&
+		!bytes.Contains(body, []byte(`"error"`)) &&
+		!bytes.Contains(body, []byte(`"status"`)) &&
+		(success || (!bytes.Contains(body, []byte(`"code"`)) && !bytes.Contains(body, []byte(`"message"`)))) {
 		return 0, false
 	}
 
@@ -93,7 +102,7 @@ func statusCodeFromProviderBodyError(statusCode int, body []byte) (int, bool) {
 	hasFailedStatus := strings.EqualFold(evtStatus, "failed") || strings.EqualFold(responseStatus, "failed")
 	hasTopLevelError := strings.TrimSpace(evtCode) != "" || strings.TrimSpace(evtMessage) != ""
 
-	if statusCode >= http.StatusOK && statusCode < http.StatusMultipleChoices {
+	if success {
 		if !hasTopError && !hasResponseError && !hasFailedStatus {
 			return 0, false
 		}

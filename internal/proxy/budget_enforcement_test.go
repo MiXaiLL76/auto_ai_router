@@ -374,3 +374,72 @@ func modelPriceCompletionOnlyCost(t *testing.T, modelPrice *routermodels.ModelPr
 	require.NotNil(t, modelPrice)
 	return modelPrice.CalculateCost(&converter.TokenUsage{CompletionTokens: completionTokens})
 }
+
+func TestEstimateCompletionTokensMatchesFullDecode(t *testing.T) {
+	p := &Proxy{defaultEstimatedCompletionTokens: 321}
+	for _, tc := range []struct {
+		name string
+		body string
+		want int
+	}{
+		{"priority", `{"max_output_tokens":90,"max_tokens":70,"max_completion_tokens":42}`, 42},
+		{"fallback field", `{"max_completion_tokens":"80","max_tokens":-1,"max_output_tokens":12.5}`, 12},
+		{"duplicate and escaped key", `{"max_tokens":80,"max_\u0074okens":12}`, 12},
+		{"duplicate null", `{"max_tokens":80,"max_tokens":null,"max_output_tokens":22}`, 22},
+		{"wrong shape and nested key", `{"max_tokens":{"max_tokens":80},"messages":[{"max_output_tokens":90}]}`, 321},
+		{"trailing object", `{"max_tokens":80}{}`, 321},
+		{"invalid nested JSON", `{"max_tokens":80,"data":[1,]}`, 321},
+		{"nested overflow", `{"max_tokens":80,"data":[1e1000]}`, 321},
+		{"overwritten overflow", `{"max_tokens":1e1000,"max_tokens":80}`, 321},
+		{"unpaired surrogate", `{"max_tokens":80,"data":"\ud800"}`, 80},
+		{"invalid UTF-8", "{\"max_tokens\":80,\"data\":\"\xff\"}", 80},
+		{"no positive limit", `{"max_tokens":0}`, 321},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(tc.body)
+			raw, _ := decodeRequestBody(body)
+			require.Equal(t, tc.want, p.estimateCompletionTokensFromRaw(raw))
+			require.Equal(t, tc.want, p.estimateCompletionTokens(body))
+		})
+	}
+}
+
+func BenchmarkEstimateRequestCostWithoutTiktoken(b *testing.B) {
+	const model = "test"
+	p := NewTestProxyBuilder().WithTiktokenEnabled(false).Build()
+	p.priceRegistry = routermodels.NewModelPriceRegistry()
+	p.priceRegistry.Update(map[string]*routermodels.ModelPrice{
+		model: {OutputCostPerToken: 0.02},
+	})
+	request := func(size int) []byte {
+		return []byte(`{"messages":[{"role":"user","content":"` +
+			strings.Repeat("a", size) + `"}],"max_completion_tokens":500}`)
+	}
+	type benchCase struct {
+		name string
+		body []byte
+	}
+	cases := []benchCase{
+		{"22KiB", request(22 << 10)},
+		{"1MiB", request(1 << 20)},
+		{"5MiB", request(5 << 20)},
+	}
+	if path := os.Getenv("JSON_BENCH_STREAM_REQUEST"); path != "" {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			b.Fatal(err)
+		}
+		cases = append(cases, benchCase{"real_tool_loop", body})
+	}
+	for _, tc := range cases {
+		b.Run(tc.name, func(b *testing.B) {
+			b.SetBytes(int64(len(tc.body)))
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, ok := p.estimateRequestCost(&RequestLogContext{}, model, model, model, tc.body); !ok {
+					b.Fatal("request cost unavailable")
+				}
+			}
+		})
+	}
+}

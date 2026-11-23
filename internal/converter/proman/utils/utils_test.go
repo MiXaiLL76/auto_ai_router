@@ -263,3 +263,51 @@ func TestSanitizingSSEReadCloserPassesThroughOversizedLine(t *testing.T) {
 	assert.NotContains(t, body, "anthropic-direct-client")
 	assert.Contains(t, body, "data: [DONE]")
 }
+
+func TestSanitizeUpstreamJSONBodyFastPathCompatibility(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{"ordinary content", `{ "model":"public", "choices":[{"delta":{"content":"hello"}}] }`, ""},
+		{"case insensitive private key", `{"choices":[{"delta":{"ROUTE_id":"private"}}],"n":9007199254740993}`, `{"choices":[{"delta":{}}],"n":9007199254740993}`},
+		{"escaped private key", `{"\u0070rovider":"private","n":9007199254740993}`, `{"n":9007199254740993}`},
+		{"escaped model", `{"model":"AWS\/private"}`, `{"model":"public"}`},
+		{"provider error", `{"error":{"message":"private"}}`, `{"error":{"message":"Request failed"}}`},
+		{"refusal without details", `{"stop_reason":"refusal"}`, `{"stop_details":{"category":null,"explanation":"The model declined this request; no public reason was provided.","type":"refusal"},"stop_reason":"refusal"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, changed := SanitizeUpstreamJSONBody([]byte(tc.body), "public")
+			if tc.want == "" {
+				require.False(t, changed)
+				require.Equal(t, tc.body, string(got))
+				return
+			}
+			require.True(t, changed)
+			require.Equal(t, tc.want, string(got))
+		})
+	}
+}
+
+func BenchmarkSanitizeUpstreamJSONBody(b *testing.B) {
+	embedding := strings.Repeat("0.123456789,", 1535) + "0.123456789"
+	embeddingResponse := strings.Repeat(`{"embedding":[`+embedding+`]},`, 7) + `{"embedding":[` + embedding + ` ]}`
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"content_delta", `{"object":"chat.completion.chunk","model":"public","choices":[{"delta":{"content":"hello"}}]}`},
+		{"embeddings", `{"model":"public","data":[` + embeddingResponse + `]}`},
+		{"rewrite_large", `{"provider_id":"private","model":"aws/model","text":"` + strings.Repeat("a", 500<<10) + `"}`},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			body := []byte(tc.body)
+			b.ReportAllocs()
+			b.SetBytes(int64(len(body)))
+			for b.Loop() {
+				SanitizeUpstreamJSONBody(body, "public")
+			}
+		})
+	}
+}

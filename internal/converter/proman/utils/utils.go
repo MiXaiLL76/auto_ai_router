@@ -9,6 +9,9 @@ import (
 	"io"
 	"slices"
 	"strings"
+	"unicode/utf8"
+
+	goccyjson "github.com/goccy/go-json"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter/publicrefusal"
@@ -80,15 +83,27 @@ func UnsupportedRequest(body []byte, _ string) string {
 }
 
 func SanitizeUpstreamJSONBody(body []byte, displayModel string) ([]byte, bool) {
-	if len(bytes.TrimSpace(body)) == 0 {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 || trimmed[0] != '{' || !mayNeedSanitizing(trimmed, displayModel) {
 		return body, false
 	}
 
 	var value any
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.UseNumber()
-	if err := decoder.Decode(&value); err != nil {
-		return body, false
+	// Keep the legacy decoder for escaped strings, invalid UTF-8, and inputs
+	// that a streaming decoder may accept as an object followed by a suffix.
+	if bytes.IndexByte(body, '\\') < 0 && utf8.Valid(body) && json.Valid(body) {
+		decoder := goccyjson.NewDecoder(bytes.NewReader(body))
+		decoder.UseNumber()
+		if decoder.Decode(&value) != nil {
+			value = nil
+		}
+	}
+	if value == nil {
+		decoder := json.NewDecoder(bytes.NewReader(body))
+		decoder.UseNumber()
+		if decoder.Decode(&value) != nil {
+			return body, false
+		}
 	}
 
 	changed := sanitizeJSONEnvelope(&value, displayModel)
@@ -101,6 +116,46 @@ func SanitizeUpstreamJSONBody(body []byte, displayModel string) ([]byte, bool) {
 		return body, false
 	}
 	return sanitized, true
+}
+
+// This scan permits false positives. The envelope walker decides which
+// objects to sanitize. Escapes can hide any key or model marker.
+func mayNeedSanitizing(body []byte, displayModel string) bool {
+	if bytes.IndexByte(body, '\\') >= 0 {
+		return true
+	}
+	for {
+		start := bytes.IndexByte(body, '"')
+		if start < 0 {
+			return false
+		}
+		body = body[start+1:]
+		end := bytes.IndexByte(body, '"')
+		if end < 0 {
+			return false
+		}
+		field := body[:end]
+		body = bytes.TrimLeft(body[end+1:], " \t\r\n")
+		if len(body) == 0 || body[0] != ':' {
+			continue
+		}
+		switch string(field) {
+		case "error", "stop_reason", "stop_details":
+			return true
+		}
+		if isInternalJSONField(string(field)) {
+			return true
+		}
+		if displayModel != "" && strings.ToLower(string(field)) == "model" {
+			value := bytes.TrimLeft(body[1:], " \t\r\n")
+			if len(value) > 0 && value[0] == '"' {
+				end := bytes.IndexByte(value[1:], '"')
+				if end >= 0 && isInternalModelString(string(value[1:1+end])) {
+					return true
+				}
+			}
+		}
+	}
 }
 
 type sanitizingSSEReadCloser struct {

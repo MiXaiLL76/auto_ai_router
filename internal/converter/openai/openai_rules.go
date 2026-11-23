@@ -465,6 +465,11 @@ func NormalizeDeveloperRole(body []byte) []byte {
 //     also removed so the provider defaults to "auto" (unless it references
 //     a preserved web_search tool, see above).
 func ConvertWebSearchTools(body []byte) []byte {
+	if !bytes.Contains(body, []byte(`"tools"`)) &&
+		!bytes.Contains(body, []byte(`"tool_choice"`)) &&
+		bytes.IndexByte(body, '\\') < 0 {
+		return body
+	}
 	var data map[string]any
 	if err := json.Unmarshal(body, &data); err != nil {
 		return body

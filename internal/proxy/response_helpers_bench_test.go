@@ -2,6 +2,7 @@ package proxy
 
 import (
 	stdjson "encoding/json"
+	"os"
 	"strings"
 	"testing"
 )
@@ -157,4 +158,50 @@ func BenchmarkExtractMetadataFromBody(b *testing.B) {
 			}
 		}
 	})
+}
+
+func BenchmarkRewriteStreamBodies(b *testing.B) {
+	request := func(size int) []byte {
+		return []byte(`{"model":"test","messages":[{"role":"user","content":"` +
+			strings.Repeat("a", size) + `"}],"stream_options":{"provider_extra":9007199254740993}}`)
+	}
+	cases := []struct {
+		name string
+		body []byte
+	}{
+		{"22KiB", request(22 << 10)},
+		{"1MiB", request(1 << 20)},
+		{"5MiB", request(5 << 20)},
+	}
+	if path := os.Getenv("JSON_BENCH_STREAM_REQUEST"); path != "" {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			b.Fatal(err)
+		}
+		cases = append(cases, struct {
+			name string
+			body []byte
+		}{"real_tool_loop", body})
+	}
+	for _, tc := range cases {
+		b.Run(tc.name+"/before", func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				req := credentialPreparedRequest{body: tc.body, proxyBody: tc.body}
+				req.body = updateStreamRequestLegacy(req.body, true, false)
+				req.proxyBody = updateStreamRequestLegacy(req.proxyBody, true, false)
+				req.body = updateStreamRequestLegacy(req.body, false, true)
+				req.proxyBody = updateStreamRequestLegacy(req.proxyBody, false, true)
+			}
+		})
+		b.Run(tc.name+"/after", func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				req := credentialPreparedRequest{body: tc.body, proxyBody: tc.body}
+				req.rewriteStreamBodies(func(body []byte) []byte {
+					return updateStreamRequest(body, true, true)
+				})
+			}
+		})
+	}
 }

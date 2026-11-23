@@ -1,8 +1,12 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
+	"encoding/json/jsontext"
+	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -151,30 +155,85 @@ func budgetWindowLevels(info *dbmodels.TokenInfo) []budgetLevel {
 	return levels
 }
 
+var completionTokenLimitFields = [...]string{"max_completion_tokens", "max_tokens", "max_output_tokens"}
+
+type completionTokenLimits [len(completionTokenLimitFields)]float64
+
 func (p *Proxy) estimateCompletionTokens(body []byte) int {
-	raw, _ := decodeRequestBody(body)
-	return p.estimateCompletionTokensFromRaw(raw)
+	return p.completionTokensForLimits(scanCompletionTokenLimits(body))
 }
 
-// estimateCompletionTokensFromRaw is estimateCompletionTokens for an already decoded body; nil means undecodable.
 func (p *Proxy) estimateCompletionTokensFromRaw(raw map[string]interface{}) int {
-	fallback := p.defaultEstimatedCompletionTokens
-	if fallback <= 0 {
-		fallback = 1000
+	var limits completionTokenLimits
+	for i, key := range completionTokenLimitFields {
+		limits[i], _ = raw[key].(float64)
 	}
-	if raw == nil {
-		return fallback
-	}
-	for _, field := range []string{"max_completion_tokens", "max_tokens", "max_output_tokens"} {
-		value, exists := raw[field]
-		if !exists {
-			continue
-		}
-		if number, valid := value.(float64); valid && number > 0 {
-			return int(number)
+	return p.completionTokensForLimits(limits)
+}
+
+func (p *Proxy) completionTokensForLimits(limits completionTokenLimits) int {
+	for _, limit := range limits {
+		if limit > 0 {
+			return int(limit)
 		}
 	}
-	return fallback
+	if p.defaultEstimatedCompletionTokens > 0 {
+		return p.defaultEstimatedCompletionTokens
+	}
+	return 1000
+}
+
+// Scan the request in place. Walking numeric tokens also preserves the
+// full decoder's rejection of out-of-range floats in unrelated fields.
+func scanCompletionTokenLimits(body []byte) completionTokenLimits {
+	decoder := jsontext.NewDecoder(bytes.NewBuffer(body), jsontext.AllowDuplicateNames(true), jsontext.AllowInvalidUTF8(true))
+	if token, err := decoder.ReadToken(); err != nil || token.Kind() != '{' {
+		return completionTokenLimits{}
+	}
+	var limits completionTokenLimits
+	for decoder.PeekKind() != '}' {
+		key, err := decoder.ReadToken()
+		if err != nil {
+			return completionTokenLimits{}
+		}
+		index := slices.Index(completionTokenLimitFields[:], key.String())
+		value, err := readCompletionLimitValue(decoder)
+		if err != nil {
+			return completionTokenLimits{}
+		}
+		if index >= 0 {
+			limits[index] = value
+		}
+	}
+	if _, err := decoder.ReadToken(); err != nil {
+		return completionTokenLimits{}
+	}
+	if _, err := decoder.ReadToken(); err != io.EOF {
+		return completionTokenLimits{}
+	}
+	return limits
+}
+
+func readCompletionLimitValue(decoder *jsontext.Decoder) (float64, error) {
+	value, err := decoder.ReadToken()
+	if err != nil {
+		return 0, err
+	}
+	if value.Kind() == jsontext.KindNumber {
+		return value.Float()
+	}
+	for decoder.StackDepth() > 1 {
+		token, err := decoder.ReadToken()
+		if err != nil {
+			return 0, err
+		}
+		if token.Kind() == jsontext.KindNumber {
+			if _, err := token.Float(); err != nil {
+				return 0, err
+			}
+		}
+	}
+	return 0, nil
 }
 
 func (p *Proxy) estimateRequestCost(logCtx *RequestLogContext, publicModelID, modelID, realModelID string, body []byte) (float64, bool) {
@@ -188,23 +247,21 @@ func (p *Proxy) estimateRequestCost(logCtx *RequestLogContext, publicModelID, mo
 	if modelPrice == nil {
 		return 0, false
 	}
-	// PromptTokens is skipped (not the whole estimate) when tiktoken_enabled
-	// is off — this only undercounts the prompt-token portion of the budget
-	// reservation, which is the documented trade-off of disabling local
-	// tokenization; it must not also disable reservation entirely (costKnown
-	// stays true — see estimateCompletionTokens below, which never touches
-	// the tokenizer and so needs no such gate).
-	raw, decoded := decodeRequestBody(body)
-	var promptTokens int
-	if p.tiktokenEnabled && decoded {
-		promptTokens = estimatePromptTokensBySample(raw, realModelID)
-	}
+	// With local tokenization disabled, reserve for completion tokens only.
+	var promptTokens, completionTokens int
 	if p.tiktokenEnabled {
+		raw, decoded := decodeRequestBody(body)
+		if decoded {
+			promptTokens = estimatePromptTokensBySample(raw, realModelID)
+		}
 		promptTokens = addNativeWSHistoryTokens(logCtx.Context(), promptTokens)
+		completionTokens = p.estimateCompletionTokensFromRaw(raw)
+	} else {
+		completionTokens = p.estimateCompletionTokens(body)
 	}
 	usage := &converter.TokenUsage{
 		PromptTokens:     promptTokens,
-		CompletionTokens: p.estimateCompletionTokensFromRaw(raw),
+		CompletionTokens: completionTokens,
 	}
 	costs := modelPrice.CalculateCosts(usage)
 	if costs == nil {

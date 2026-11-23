@@ -2743,12 +2743,10 @@ dispatch:
 			}
 
 			if proxyResp.StatusCode >= http.StatusOK && proxyResp.StatusCode < http.StatusMultipleChoices {
-				modelIDs := []string{modelID, logCtx.PublicModelID, logCtx.RealModelID}
-				for _, usageModelID := range modelIDs {
-					if normalizedBody, changed := modelutils.NormalizeCompletionUsage(proxyResp.Body, usageModelID); changed {
-						proxyResp.Body = normalizedBody
-						break
-					}
+				if normalizedBody, changed := modelutils.NormalizeCompletionUsage(
+					proxyResp.Body, modelID, logCtx.PublicModelID, logCtx.RealModelID,
+				); changed {
+					proxyResp.Body = normalizedBody
 				}
 			}
 

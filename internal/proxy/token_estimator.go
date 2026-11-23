@@ -374,6 +374,13 @@ func (c *promptSampleCodec) Decode([]uint) (string, error) {
 	return "", errors.New("prompt sample does not decode")
 }
 
+// ErrorMode and SetErrorMode satisfy tokenizer.Codec. The sample codec only
+// collects raw text for later tokenization, so UTF-8 error handling does not
+// apply to it.
+func (c *promptSampleCodec) ErrorMode() tokenizer.ErrorMode { return tokenizer.ErrorModeNone }
+
+func (c *promptSampleCodec) SetErrorMode(tokenizer.ErrorMode) {}
+
 func (c *promptSampleCodec) tokens(enc tokenizer.Codec) int {
 	if c.bytes <= promptSampleWindows*promptSampleWindowBytes {
 		total := 0

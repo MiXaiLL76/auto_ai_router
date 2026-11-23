@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
 	"strconv"
 	"strings"
@@ -42,6 +43,11 @@ func requestReasoning(body []byte) (bool, string) {
 }
 
 func requestReasoningDetails(body []byte) (bool, string, string) {
+	if !bytes.Contains(body, []byte("reasoning")) &&
+		!bytes.Contains(body, []byte("thinking")) &&
+		bytes.IndexByte(body, '\\') < 0 {
+		return false, "", thinkingModeUnspecified
+	}
 	var request map[string]interface{}
 	if json.Unmarshal(body, &request) != nil {
 		return false, "", thinkingModeUnspecified
