@@ -279,3 +279,50 @@ func TestProxyRequest_ResponsesStreamStoreSavesTerminalResponse(t *testing.T) {
 	require.Len(t, dbStub.loggedEntries, 1)
 	assert.Equal(t, 12, dbStub.loggedEntries[0].PromptTokens)
 }
+
+func TestParseResponsesTerminalEventLegacyCompatibility(t *testing.T) {
+	for _, payload := range []string{
+		`{"TYPE":"response.completed","RESPONSE":{"USAGE":{"INPUT_TOKENS":7},"OUTPUT":[{"TYPE":"web_search_call","STATUS":"completed"}]}}`,
+		`{"type":"response.incomplete","TYPE":"response.completed","response":{"output":[{"type":"message"}]},"Response":{"usage":{"input_tokens":7}}}`,
+		`{"type":"response.completed","response":{"output":[{"type":"web_search_call","ſtatus":"completed"}],"usage":{"input_tokens":7}}}`,
+		`{"type":"response.completed","response":{"usage":{"input_tokens":7},"unknown":[1,]}}`,
+		`{"type":"response.completed","response":{"usage":{"input_tokens":7}}}{}`,
+		"{\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"\xff\"}]}}",
+	} {
+		var expected responsesTerminalEvent
+		payloadBytes := []byte(payload)
+		err := json.Unmarshal(payloadBytes, &expected)
+		got, ok := parseResponsesTerminalEvent(payloadBytes)
+		require.Equal(t, err == nil && isTerminalResponsesEventType(expected.Type), ok, "%q", payload)
+		if ok {
+			require.Equal(t, &expected, got, "%q", payload)
+		}
+	}
+}
+
+func BenchmarkResponsesTerminalUsage(b *testing.B) {
+	const usage = `{"input_tokens":7168,"output_tokens":717,"total_tokens":7885,"input_tokens_details":{"cached_tokens":1024},"output_tokens_details":{"reasoning_tokens":300},"server_side_tool_usage_details":{"web_search_calls":2}}`
+	for _, tc := range []struct {
+		name  string
+		event string
+		size  int
+	}{
+		{"completed_small", "response.completed", 256},
+		{"incomplete_206KiB", "response.incomplete", 206 << 10},
+		{"completed_5MiB", "response.completed", 5 << 20},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			payload := []byte(`{"type":"` + tc.event + `","response":{"output":[{"type":"web_search_call","status":"completed"},{"type":"message","content":[{"type":"output_text","text":"` +
+				strings.Repeat("a", tc.size) + `"}]}],"usage":` + usage + `}}`)
+			b.SetBytes(int64(len(payload)))
+			b.ReportAllocs()
+			extractor := &openAIStreamUsageExtractor{}
+			for b.Loop() {
+				event, ok := parseResponsesTerminalEvent(payload)
+				if !ok || event.typedUsage() == nil || event.streamUsage(extractor) == nil {
+					b.Fatal("terminal usage unavailable")
+				}
+			}
+		})
+	}
+}
