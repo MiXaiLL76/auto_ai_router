@@ -373,15 +373,23 @@ func HasBuiltInTool(body []byte) bool {
 //
 // The body this is called with is the one the loop will run on, which is not
 // always the client's: RewriteRequest has already replaced a built-in tool
-// with the adapter's function, so on every path that reaches the loop the
-// built-in shows up as a function name. The built-in case is kept for a body
-// that has not been rewritten.
+// with the adapter's function, so the usual case is a function name. The
+// built-in case is not dead, though. A proxy-like credential gets its body
+// back from sanitizeClientParams unchanged, and a rewrite that fails returns
+// the body as it came, so the built-in type can still be what the gate sees.
 //
 // Only the tools are decoded, and only after a cheap substring check says
 // there is something to decode: this runs on the hot path, and the messages
 // of a long conversation are the bulk of the body.
 func ExposesTool(body []byte) bool {
-	if !bytes.Contains(body, []byte(`"tools"`)) {
+	// Every name this adapter installs or intercepts contains "web_", and a
+	// request that offers none of them cannot contain it either. The check is
+	// free and keeps the decode -- and its allocation -- off the requests that
+	// are the whole point of the gate: the ones with no tools of ours.
+	// TestEveryExposedToolNameContainsThePrefilter pins that assumption to the
+	// name lists, so adding a tool that breaks it fails a test rather than
+	// silently reopening the buffering.
+	if !bytes.Contains(body, []byte("web_")) {
 		return false
 	}
 	var request struct {

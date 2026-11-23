@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/mixaill76/auto_ai_router/internal/deepseektools"
@@ -69,6 +70,40 @@ func TestExposesToolIgnoresAClientToolAndAnEmptyRequest(t *testing.T) {
 		}
 		if moonshottools.ExposesTool([]byte(body)) {
 			t.Errorf("moonshot ExposesTool = true for %s, want false", name)
+		}
+	}
+}
+
+// TestEveryExposedToolNameContainsThePrefilter pins the gate's cheap check to
+// the names it guards. ExposesTool returns false before decoding unless the
+// body contains "web_", so a tool whose name lacks it would be invisible to
+// the gate -- and the stream would skip the loop, which is the Pro-search bug
+// again with a different name.
+func TestEveryExposedToolNameContainsThePrefilter(t *testing.T) {
+	const prefilter = "web_"
+	names := map[string][]string{
+		"deepseek": {
+			deepseektools.SearchToolName,
+			deepseektools.FetchToolName,
+			deepseektools.BuiltinWebSearch,
+			deepseektools.BuiltinWebSearchPreview,
+			deepseektools.BuiltinWebFetch,
+		},
+		"moonshot": {
+			moonshottools.SearchToolName,
+			moonshottools.SearchProToolName,
+			moonshottools.FetchToolName,
+			moonshottools.BuiltinWebSearch,
+			moonshottools.BuiltinWebSearchPreview,
+			moonshottools.BuiltinMoonshotSearchPro,
+			moonshottools.BuiltinWebFetch,
+		},
+	}
+	for adapter, list := range names {
+		for _, name := range list {
+			if !strings.Contains(name, prefilter) {
+				t.Errorf("%s: %q does not contain %q, so the prefilter hides it from the gate", adapter, name, prefilter)
+			}
 		}
 	}
 }
