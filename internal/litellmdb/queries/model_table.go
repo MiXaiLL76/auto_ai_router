@@ -227,6 +227,9 @@ func (m ModelTable) Pools() []string {
 		for _, value := range values {
 			pool, ok := value.(string)
 			if !ok {
+				// A mixed list is a data error in the deployment row. Returning
+				// nothing silently would hide the deployment from every pool it
+				// meant to join; ReportInvalidPoolList makes that visible.
 				return nil
 			}
 			pools = append(pools, pool)
@@ -234,6 +237,28 @@ func (m ModelTable) Pools() []string {
 		return pools
 	default:
 		return nil
+	}
+}
+
+// InvalidPoolList reports whether model_info.pools is present but unusable, so a
+// sync can warn instead of letting the deployment fall out of every pool quietly.
+func (m ModelTable) InvalidPoolList() bool {
+	value, present := m.ModelInfo["pools"]
+	if !present || value == nil {
+		return false
+	}
+	switch values := value.(type) {
+	case []string:
+		return false
+	case []interface{}:
+		for _, item := range values {
+			if _, ok := item.(string); !ok {
+				return true
+			}
+		}
+		return false
+	default:
+		return true
 	}
 }
 

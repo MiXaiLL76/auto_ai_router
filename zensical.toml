@@ -47,6 +47,7 @@ nav = [
     { "Responses API" = "advanced/responses.md" },
     { "Redis / Valkey" = "advanced/redis.md" },
     { "Model Aliases" = "advanced/model_alias.md" },
+    { "Model Pools" = "advanced/model_pools.md" },
     { "Troubleshooting" = "advanced/troubleshooting.md" },
   ]},
   { "API Reference [WIP]" = [

@@ -1729,10 +1729,12 @@ func (p *Proxy) selectCredentialForModel(
 		)
 	}
 	logCtx.Logged = true
-	p.setRetryAfterFromBan(w, modelID, exclude, logCtx.Scope)
 	if errCode == http.StatusServiceUnavailable {
+		// No permitted route is not a temporary rate limit, so there is no
+		// Retry-After to advertise; the operator has to change the policy.
 		WriteErrorServiceUnavailable(w, errorMsg)
 	} else {
+		p.setRetryAfterFromBan(w, modelID, exclude, logCtx.Scope)
 		WriteErrorRateLimit(w, errorMsg)
 	}
 	return nil, false

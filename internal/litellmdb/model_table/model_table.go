@@ -407,6 +407,12 @@ func buildAIRModels(
 			SupportsVision: model.SupportsVision(),
 			Pools:          model.Pools(),
 		}
+		if model.InvalidPoolList() {
+			// The row names pools but in a shape AIR cannot read. Without this the
+			// deployment silently leaves every pool it meant to join.
+			logger.Warn("Ignoring model_info.pools that is not a list of strings",
+				"model", modelName, "credential", credName, "model_info_pools", model.ModelInfo["pools"])
+		}
 		if model.LlmParams.RPM != nil {
 			rpmCfg.RPM = *model.LlmParams.RPM
 

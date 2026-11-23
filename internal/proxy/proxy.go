@@ -2386,6 +2386,13 @@ dispatch:
 			resp, fwdErr := p.forwardToProxy(w, r, modelID, cred, proxyBody, start, logCtx)
 			lastProxyErr = fwdErr
 			if fwdErr != nil {
+				if errors.Is(fwdErr, errRoutingPool) {
+					// Not an upstream failure: the route itself is not permitted.
+					// Answer the documented 503 and stop instead of burning retries
+					// that would end in a 502.
+					rejectRoutingSend(w, logCtx)
+					return
+				}
 				if isClientCanceledTransportError(r, fwdErr) {
 					// No point trying another same-type credential against
 					// an already-dead client context; fall straight to the

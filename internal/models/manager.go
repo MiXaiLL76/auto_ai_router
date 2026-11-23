@@ -2362,18 +2362,15 @@ func (m *Manager) CredentialsInPools(modelID string, pools []string) map[string]
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	identity := modelID
+	names := []string{modelID}
 	if m.routingPools != nil {
-		if known := m.routingPools.identities[modelID]; known != "" {
-			identity = known
+		if identity := m.routingPools.identities[modelID]; identity != "" {
+			names = m.routingPools.byIdentity[identity]
 		}
 	}
 	var matching map[string]bool
-	for name, entries := range m.modelLimits {
-		if identity != name && m.routingPools != nil && m.routingPools.identities[name] != identity {
-			continue
-		}
-		for _, entry := range entries {
+	for _, name := range names {
+		for _, entry := range m.modelLimits[name] {
 			for _, pool := range entry.Pools {
 				if pool == "" || !slices.Contains(pools, pool) {
 					continue

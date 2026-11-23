@@ -83,13 +83,15 @@ column. A deployment without that entry belongs to no pool.
   account. Hidden vision-description calls are rejected for restricted requests;
   native vision is unchanged.
 
-The catalog index is rebuilt atomically when definitions or aliases change; there
-is no per-request full catalog scan. Known identity links are retained for the
-process lifetime so dropping an alias bridge on refresh cannot reopen it. Reusing
-old model IDs can conservatively preserve restrictions until restart. Keep alias
-definitions consistent across instances/restarts: AIR cannot infer a relationship
-removed from all configuration. Pool membership is current, not historical.
-In-flight requests keep their snapshot.
+The catalog index is rebuilt atomically when definitions or aliases change, and a
+per-name reverse index answers a request without scanning the whole catalog. Only
+identity links whose names no current alias mapping mentions are retained for the
+process lifetime, so dropping an alias bridge cannot reopen a restriction while a
+re-pointed alias cannot merge two live models. Reusing an old model ID can
+conservatively preserve a restriction until restart. Keep alias definitions
+consistent across instances/restarts: AIR cannot infer a relationship removed from
+all configuration. Pool membership is current, not historical. In-flight requests
+keep their snapshot.
 
 ## Activation and rollback
 

@@ -125,6 +125,10 @@ type routingPoolIndex struct {
 	identities map[string]string
 	pools      map[string]bool
 	members    map[string]map[string]map[string]bool // identity -> pool -> credentials
+	// byIdentity is the reverse of identities, so a lookup for one model name
+	// touches only the names that share its identity instead of the whole
+	// catalog on every request.
+	byIdentity map[string][]string
 }
 
 func (m *Manager) rebuildRoutingPoolsLocked() {
@@ -144,12 +148,30 @@ func (m *Manager) rebuildRoutingPoolsLocked() {
 			parent[find(a)] = find(b)
 		}
 	}
+	aliasMaps := []map[string]string{m.modelAliases, m.publicModelAliases, m.acceptedModelAliases, m.modelRealNames}
+	// A name that a current alias map still points somewhere is live: its current
+	// target is authoritative, so a re-pointed alias must not keep the old bridge
+	// alive. Only names no live mapping mentions are carried over, which is what
+	// keeps a removed bridge from reopening a restriction.
+	live := make(map[string]struct{}, len(aliasMaps))
+	for _, aliases := range aliasMaps {
+		for name, target := range aliases {
+			live[name] = struct{}{}
+			live[target] = struct{}{}
+		}
+	}
 	if m.routingPools != nil {
 		for name, identity := range m.routingPools.identities {
+			if _, isLive := live[name]; isLive {
+				continue
+			}
+			if _, isLive := live[identity]; isLive {
+				continue
+			}
 			join(name, identity)
 		}
 	}
-	for _, aliases := range []map[string]string{m.modelAliases, m.publicModelAliases, m.acceptedModelAliases, m.modelRealNames} {
+	for _, aliases := range aliasMaps {
 		for name, target := range aliases {
 			join(name, target)
 		}
@@ -177,9 +199,16 @@ func (m *Manager) rebuildRoutingPoolsLocked() {
 			}
 		}
 	}
-	index := &routingPoolIndex{identities: make(map[string]string), pools: make(map[string]bool), members: make(map[string]map[string]map[string]bool)}
+	index := &routingPoolIndex{
+		identities: make(map[string]string),
+		pools:      make(map[string]bool),
+		members:    make(map[string]map[string]map[string]bool),
+		byIdentity: make(map[string][]string),
+	}
 	for name := range parent {
-		index.identities[name] = find(name)
+		identity := find(name)
+		index.identities[name] = identity
+		index.byIdentity[identity] = append(index.byIdentity[identity], name)
 	}
 	for name, entries := range m.modelLimits {
 		identity := index.identities[name]

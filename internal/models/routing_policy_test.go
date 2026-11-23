@@ -141,3 +141,57 @@ func TestRoutingPoolOrganizationMappingCannotReuseOriginalMembership(t *testing.
 	assert.False(t, v.AllowsCredential("a"), "original model membership does not authorize the mapped model")
 	assert.False(t, v.AllowsCredential("b"), "the mapped deployment is outside the permitted pool")
 }
+
+// A re-pointed alias must not merge two live models: otherwise membership of the
+// new target authorises the old one, which widens the restriction this feature
+// exists to enforce. Removing a bridge, by contrast, must stay closed.
+func TestRoutingPoolAliasRepointDoesNotWiden(t *testing.T) {
+	m := New(testhelpers.NewTestLogger(), 100, []config.ModelRPMConfig{
+		{Name: "model-a", Credential: "a", Pools: []string{"one"}},
+		{Name: "model-a", Credential: "b", Pools: []string{"one"}},
+		{Name: "model-b", Credential: "b", Pools: []string{"two"}},
+	})
+	m.SetModelAliases(map[string]string{"foo": "model-a"})
+	m.SetModelAliases(map[string]string{"foo": "model-b"})
+
+	policy := &RoutingPolicy{Models: []string{"model-a"}, Pools: []string{"two"}}
+	vis, err := m.RestrictToModelPools(scope.PublicContext(), policy, "model-a", "model-a")
+	require.NoError(t, err)
+	assert.False(t, vis.AllowsCredential("a"), "model-a is not in pool two")
+	assert.False(t, vis.AllowsCredential("b"), "model-b's pool must not authorise model-a")
+}
+
+func TestRoutingPoolDroppedBridgeStaysClosed(t *testing.T) {
+	m := New(testhelpers.NewTestLogger(), 100, []config.ModelRPMConfig{
+		{Name: "model-a", Credential: "a", Pools: []string{"one"}},
+		{Name: "alias", Credential: "a", Pools: []string{"one"}},
+		{Name: "model-b", Credential: "b"},
+	})
+	m.SetModelAliases(map[string]string{"alias": "model-a"})
+	m.SetModelAliases(nil)
+
+	policy := &RoutingPolicy{Models: []string{"alias"}, Pools: []string{"one"}}
+	vis, err := m.RestrictToModelPools(scope.PublicContext(), policy, "alias", "alias")
+	require.NoError(t, err)
+	assert.True(t, vis.AllowsCredential("a"), "the alias still resolves to its pooled deployment")
+	assert.False(t, vis.AllowsCredential("b"), "dropping the bridge must not reopen routing")
+}
+
+// The soft lookup must not scan the whole catalog: a large catalog is the point
+// of the reverse index. Kept as a benchmark so a future change that reintroduces
+// a full scan shows up as a thousandfold jump, not a subtle slowdown.
+func BenchmarkCredentialsInPoolsLargeCatalog(b *testing.B) {
+	m := New(testhelpers.NewTestLogger(), 100, nil)
+	credentials := make([]config.CredentialConfig, 0, 10000)
+	entries := make([]config.ModelRPMConfig, 0, 10000)
+	for i := 0; i < 10000; i++ {
+		name := fmt.Sprintf("c%d", i)
+		credentials = append(credentials, config.CredentialConfig{Name: name})
+		entries = append(entries, config.ModelRPMConfig{Name: fmt.Sprintf("model-%d", i), Credential: name, Pools: []string{"pool-01"}})
+	}
+	m.UpdateDBModels(entries, nil, credentials)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = m.CredentialsInPools("model-5000", []string{"pool-01"})
+	}
+}

@@ -18,6 +18,15 @@ func (p *Proxy) applyRoutingPolicy(w http.ResponseWriter, logCtx *RequestLogCont
 		return true
 	}
 	policy, err := models.ParseKeyRoutingPolicy(info.Metadata, info.TeamMetadata, info.OrganizationMetadata)
+	if err == nil && policy == nil && info.Metadata[models.RoutingModelsField] != nil {
+		// The selector is present but names no pool, so nothing is restricted.
+		// Silence here would hide an operator mistake that drops a real isolation
+		// to ordinary routing.
+		p.logger.WarnContext(logCtx.Context(), "Model selector ignored: no routing profile list",
+			"field", models.RoutingModelsField, "model", logCtx.PublicModelID,
+			"request_id", logCtx.RequestID,
+		)
+	}
 	if err == nil {
 		logCtx.Scope, err = p.modelManager.RestrictToModelPools(logCtx.Scope, policy, logCtx.PublicModelID, modelID)
 	}
