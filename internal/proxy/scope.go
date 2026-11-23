@@ -136,8 +136,10 @@ func parsePoolIDs(metadata map[string]interface{}, key string) ([]string, bool) 
 		}
 		return ids, true
 	case string:
-		// A bare string is accepted only as one ID; commas are not a list here.
-		return []string{v}, true
+		// A string is one ID, or a comma-separated list, matching how the same
+		// field is read on team and organization metadata: an operator copying a
+		// profile between scopes must not hit a 503 for the same value.
+		return splitScopeString(v), true
 	default:
 		return nil, false
 	}

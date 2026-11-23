@@ -1,8 +1,8 @@
 # Model pools and strict key isolation
 
-Deployment `pools` tags and `air_routing_profiles` retain their existing soft
-selection behavior. Without an explicit model selector, a model outside the
-selected pools continues through ordinary routing. This is a preference, not a
+Deployment `pools` tags and `air_routing_profiles` are introduced by this change;
+before it neither field existed. Profiles alone are soft selection: a model outside
+the selected pools continues through ordinary routing. This is a preference, not a
 security boundary.
 
 A pool ID this key names that the catalog does not know is a typo in the operator's
@@ -10,6 +10,10 @@ own metadata, so it fails closed (503) instead of quietly opening the general
 cascade. A field of the wrong shape (a number, object, or a list with a non-string)
 fails the same way. The same mistake inherited from a team or organization does not
 fail: one bad team profile would otherwise break every member's key.
+
+An unknown pool in soft selection fails the whole key, because there is no way to
+tell which models the operator meant. Strict selection scopes the same failure to
+the models its selector names; other models of the key keep routing.
 
 For strict isolation, an operator adds both fields to the authenticated key's
 database metadata:
@@ -42,6 +46,10 @@ Strict requests require explicit direct credentials: global model tags do not
 authorize all accounts. AIR/proxy credentials cannot carry this restriction to
 another router and are excluded; ordinary network `proxy_url` is supported.
 Pool tags alone neither reserve deployments for a key nor add RPM/TPM capacity.
+
+Models synced from LiteLLM (`litellm_db.load_db_models`) carry their tags in
+`model_info.pools` of the deployment's row, since the table has no dedicated
+column. A deployment without that entry belongs to no pool.
 
 ## Behavior
 

@@ -214,6 +214,29 @@ func (m ModelTable) SupportsVision() *bool {
 	return nil
 }
 
+// Pools returns model_info.pools (a deployment's pool tags) or nil when the
+// field is absent or not a list of strings. LiteLLM_ProxyModelTable has no
+// dedicated column, so the tags ride along in model_info, the same place
+// mode and supports_vision live.
+func (m ModelTable) Pools() []string {
+	switch values := m.ModelInfo["pools"].(type) {
+	case []string:
+		return values
+	case []interface{}:
+		pools := make([]string, 0, len(values))
+		for _, value := range values {
+			pool, ok := value.(string)
+			if !ok {
+				return nil
+			}
+			pools = append(pools, pool)
+		}
+		return pools
+	default:
+		return nil
+	}
+}
+
 // RouterSettings is the subset of LiteLLM_Config.router_settings AIR imports.
 type RouterSettings struct {
 	// ModelGroupAlias maps a client-facing name to the model group it resolves to.

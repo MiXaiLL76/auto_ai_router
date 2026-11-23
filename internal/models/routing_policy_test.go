@@ -26,7 +26,15 @@ func TestKeyRoutingPolicySchemaAndLegacyCompatibility(t *testing.T) {
 			require.ErrorIs(t, err, ErrRoutingPolicy)
 		})
 	}
-	for _, pools := range []interface{}{nil, "pool-a", []string{}, []interface{}{"pool-a", 1}, []string{" invalid"}, make([]string, 17)} {
+	// A selector without a profile list names no pool. Failing the key here would
+	// take down models it never mentioned, so it degrades to ordinary routing.
+	for _, absent := range []interface{}{nil, []string{}} {
+		policy, err := ParseKeyRoutingPolicy(map[string]interface{}{RoutingModelsField: []string{"model-a"}, RoutingProfilesField: absent}, nil, nil)
+		require.NoError(t, err)
+		assert.Nil(t, policy, "a selector without profiles selects nothing")
+	}
+	// A present profile list of the wrong shape is still an operator error.
+	for _, pools := range []interface{}{"pool-a", []interface{}{"pool-a", 1}, []string{" invalid"}, make([]string, 17)} {
 		_, err := ParseKeyRoutingPolicy(map[string]interface{}{RoutingModelsField: []string{"model-a"}, RoutingProfilesField: pools}, nil, nil)
 		require.Error(t, err)
 	}

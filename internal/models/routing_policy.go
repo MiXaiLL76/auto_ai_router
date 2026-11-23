@@ -2,6 +2,7 @@ package models
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
@@ -22,9 +23,21 @@ type RoutingPolicy struct {
 // model selector opts a key into strict isolation; profiles alone retain their
 // existing soft-selection semantics. Strict selectors are key-specific.
 func ParseKeyRoutingPolicy(key, team, organization map[string]interface{}) (*RoutingPolicy, error) {
-	for _, metadata := range []map[string]interface{}{team, organization} {
-		if _, exists := metadata[RoutingModelsField]; exists {
-			return nil, ErrRoutingPolicy
+	// The common case is a key with no routing metadata at all; bail out before
+	// allocating anything.
+	if _, hasSelector := key[RoutingModelsField]; !hasSelector &&
+		team[RoutingModelsField] == nil && organization[RoutingModelsField] == nil {
+		return nil, nil
+	}
+	for _, scoped := range []struct {
+		name     string
+		metadata map[string]interface{}
+	}{{"team", team}, {"organization", organization}} {
+		if scoped.metadata == nil {
+			continue
+		}
+		if _, exists := scoped.metadata[RoutingModelsField]; exists {
+			return nil, fmt.Errorf("%w: reason=selector_on_%s field=%s", ErrRoutingPolicy, scoped.name, RoutingModelsField)
 		}
 	}
 	value, exists := key[RoutingModelsField]
@@ -33,23 +46,46 @@ func ParseKeyRoutingPolicy(key, team, organization map[string]interface{}) (*Rou
 	}
 	modelNames, ok := strictRoutingList(value, 64)
 	if !ok {
-		return nil, ErrRoutingPolicy
+		return nil, fmt.Errorf("%w: reason=bad_shape field=%s", ErrRoutingPolicy, RoutingModelsField)
+	}
+	// A model selector without a usable profile list selects nothing: it cannot
+	// name a pool, and treating it as "restrict to an empty allowlist" would take
+	// the whole key down, models the selector never mentioned included. Fall back
+	// to ordinary routing rather than failing a key that used the wrong field.
+	if emptyRoutingList(key[RoutingProfilesField]) {
+		return nil, nil
 	}
 	pools, ok := strictRoutingList(key[RoutingProfilesField], 16)
 	if !ok {
-		return nil, ErrRoutingPolicy
+		return nil, fmt.Errorf("%w: reason=bad_shape field=%s", ErrRoutingPolicy, RoutingProfilesField)
 	}
 	for _, model := range modelNames {
 		if len(model) > 256 || strings.ContainsAny(model, " \t\r\n*?\x00") {
-			return nil, ErrRoutingPolicy
+			return nil, fmt.Errorf("%w: reason=bad_shape field=%s", ErrRoutingPolicy, RoutingModelsField)
 		}
 	}
 	for _, pool := range pools {
 		if !config.PoolIDPattern.MatchString(pool) {
-			return nil, ErrRoutingPolicy
+			return nil, fmt.Errorf("%w: reason=bad_shape field=%s", ErrRoutingPolicy, RoutingProfilesField)
 		}
 	}
 	return &RoutingPolicy{Models: modelNames, Pools: pools}, nil
+}
+
+// emptyRoutingList reports whether a profile value names no pool at all: absent,
+// null or an empty list. Anything else must go through strictRoutingList, which
+// rejects the wrong shape.
+func emptyRoutingList(value interface{}) bool {
+	switch values := value.(type) {
+	case nil:
+		return true
+	case []string:
+		return len(values) == 0
+	case []interface{}:
+		return len(values) == 0
+	default:
+		return false
+	}
 }
 
 func strictRoutingList(value interface{}, maximum int) ([]string, bool) {
@@ -150,6 +186,11 @@ func (m *Manager) rebuildRoutingPoolsLocked() {
 		for _, entry := range entries {
 			for _, pool := range entry.Pools {
 				if !config.PoolIDPattern.MatchString(pool) {
+					// Silently dropping the tag leaves the deployment looking
+					// unpooled and a strict key answering a bare 503 with nothing
+					// to trace the typo back to.
+					m.logger.Warn("Ignoring a pool tag that is not a valid ID",
+						"model", name, "credential", entry.Credential, "pool", pool)
 					continue
 				}
 				index.pools[pool] = true
@@ -179,19 +220,19 @@ func (m *Manager) RestrictToModelPools(visibility scope.Context, policy *Routing
 		return visibility, nil
 	}
 	if m == nil {
-		return visibility.RestrictCredentials(nil), ErrRoutingPolicy
+		return visibility.RestrictCredentials(nil), fmt.Errorf("%w: reason=no_model_manager", ErrRoutingPolicy)
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	index := m.routingPools
 	if index == nil {
-		return visibility.RestrictCredentials(nil), ErrRoutingPolicy
+		return visibility.RestrictCredentials(nil), fmt.Errorf("%w: reason=no_catalog_index", ErrRoutingPolicy)
 	}
 	matches := false
 	for _, model := range policy.Models {
 		identity, known := index.identities[model]
 		if !known {
-			return visibility.RestrictCredentials(nil), ErrRoutingPolicy
+			return visibility.RestrictCredentials(nil), fmt.Errorf("%w: reason=unknown_selected_model field=%s", ErrRoutingPolicy, RoutingModelsField)
 		}
 		matches = matches || identity == index.identities[publicModel] || identity == index.identities[routeModel]
 	}
@@ -201,7 +242,7 @@ func (m *Manager) RestrictToModelPools(visibility scope.Context, policy *Routing
 	var allowed []string
 	for _, pool := range policy.Pools {
 		if !index.pools[pool] {
-			return visibility.RestrictCredentials(nil), ErrRoutingPolicy
+			return visibility.RestrictCredentials(nil), fmt.Errorf("%w: reason=unknown_pool field=%s", ErrRoutingPolicy, RoutingProfilesField)
 		}
 		for credential := range index.members[index.identities[routeModel]][pool] {
 			allowed = append(allowed, credential)

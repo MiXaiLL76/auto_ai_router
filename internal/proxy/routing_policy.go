@@ -23,7 +23,13 @@ func (p *Proxy) applyRoutingPolicy(w http.ResponseWriter, logCtx *RequestLogCont
 	}
 	if err != nil {
 		logCtx.Scope = logCtx.Scope.RestrictCredentials(nil)
-		p.logger.WarnContext(logCtx.Context(), "Routing policy is invalid or unavailable")
+		// The client gets one generic 503; the operator needs to know which
+		// field and why, without echoing pool or model values.
+		p.logger.WarnContext(logCtx.Context(), "Routing policy is invalid or unavailable",
+			"reason", err.Error(),
+			"model", logCtx.PublicModelID,
+			"request_id", logCtx.RequestID,
+		)
 		rejectRoutingSend(w, logCtx)
 		return false
 	}

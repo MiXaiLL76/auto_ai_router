@@ -256,3 +256,84 @@ func TestPoolMalformedProfileFailsClosed(t *testing.T) {
 		assert.Equal(t, http.StatusOK, w.Code)
 	})
 }
+
+// Two review findings that both used to fail a whole key for an unrelated reason:
+// a selector without a profile list, and a comma-separated profile string that
+// the key path read differently from the team path.
+func TestPoolSelectorAndProfileShapeReview(t *testing.T) {
+	credentials := []config.CredentialConfig{
+		{Name: "a", Type: config.ProviderTypeOpenAI, RPM: 100, BaseURL: "http://127.0.0.1:1"},
+		{Name: "b", Type: config.ProviderTypeOpenAI, RPM: 100, BaseURL: "http://127.0.0.1:1"},
+	}
+	entries := []config.ModelRPMConfig{
+		{Name: "model-a", Credential: "a", Pools: []string{"pool-01"}},
+		{Name: "model-a", Credential: "b", Pools: []string{"pool-02"}},
+		{Name: "model-b", Credential: "a"},
+	}
+	manager := models.New(testhelpers.NewTestLogger(), 100, nil)
+	manager.UpdateDBModels(entries, nil, credentials)
+	builder := NewTestProxyBuilder().WithCredentials(credentials...)
+	builder.config.ModelManager = manager
+	proxy := builder.Build()
+
+	call := func(t *testing.T, model string, metadata, teamMetadata map[string]interface{}) ([]string, int) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"`+model+`","messages":[]}`))
+		req = withTrustedClientAuth(req, "fixture-client-key", &dbmodels.TokenInfo{Metadata: metadata, TeamMetadata: teamMetadata})
+		w := httptest.NewRecorder()
+		prepared, ok := proxy.orchestrateRequest(w, req, &RequestLogContext{})
+		if !ok {
+			return nil, w.Code
+		}
+		cred := prepared.cred
+		got := []string{cred.Name}
+		tried := GetTried(prepared.request.Context())
+		attempted := map[string]bool{cred.Name: true}
+		for attempt := 1; attempt <= 3; attempt++ {
+			next, _, ready, _ := proxy.nextCrossTypeRetryCredential(prepared.request, prepared, &RequestLogContext{}, cred, tried, attempted, attempt, true)
+			if !ready {
+				break
+			}
+			attempted[next.Name] = true
+			got = append(got, next.Name)
+			cred = next
+		}
+		return got, w.Code
+	}
+
+	t.Run("selector without profiles degrades to ordinary routing", func(t *testing.T) {
+		metadata := map[string]interface{}{models.RoutingModelsField: []interface{}{"model-a"}}
+		// model-a: both deployments, model-b: its own single deployment. Neither
+		// is narrowed, and the key answers 200 for both.
+		for model, want := range map[string][]string{"model-a": {"a", "b"}, "model-b": {"a"}} {
+			got, status := call(t, model, metadata, nil)
+			assert.Equal(t, http.StatusOK, status)
+			assert.ElementsMatch(t, want, got, "%s keeps its own deployments", model)
+		}
+	})
+
+	t.Run("a comma string is read the same on key and team", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			md   map[string]interface{}
+			team map[string]interface{}
+		}{
+			{"key", map[string]interface{}{models.RoutingProfilesField: "pool-01,pool-02"}, nil},
+			{"team", nil, map[string]interface{}{models.RoutingProfilesField: "pool-01,pool-02"}},
+			{"key list", map[string]interface{}{models.RoutingProfilesField: []interface{}{"pool-01", "pool-02"}}, nil},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				got, status := call(t, "model-a", tc.md, tc.team)
+				assert.Equal(t, http.StatusOK, status)
+				assert.ElementsMatch(t, []string{"a", "b"}, got)
+			})
+		}
+	})
+
+	t.Run("a listed pool is still honoured", func(t *testing.T) {
+		metadata := map[string]interface{}{models.RoutingProfilesField: "pool-01"}
+		got, status := call(t, "model-a", metadata, nil)
+		assert.Equal(t, http.StatusOK, status)
+		assert.ElementsMatch(t, []string{"a"}, got)
+	})
+}

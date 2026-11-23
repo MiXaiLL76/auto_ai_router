@@ -173,6 +173,8 @@ func (p *Proxy) orchestrateRequest(
 		if !ok {
 			// A malformed profile field is this key's own metadata bug. Treat it
 			// like an unknown pool: fail closed instead of opening the cascade.
+			p.logger.WarnContext(logCtx.Context(), "Key routing profile is invalid or unavailable",
+				"reason", "bad_shape", "field", routingProfilesKey, "request_id", logCtx.RequestID)
 			logCtx.Status, logCtx.HTTPStatus = "failure", http.StatusServiceUnavailable
 			logCtx.ErrorMsg = "Key routing profile is invalid or unavailable"
 			WriteErrorServiceUnavailable(w, logCtx.ErrorMsg)
@@ -185,9 +187,14 @@ func (p *Proxy) orchestrateRequest(
 		}
 		// A pool ID the catalog does not know is a typo in this key's own
 		// metadata. Failing closed keeps the operator's mistake visible instead
-		// of quietly widening the route to the whole cascade.
+		// of quietly widening the route to the whole cascade. Unlike strict
+		// selection, this cannot spare unrelated models: with an unknown pool
+		// there is no way to tell which models the operator meant.
 		for _, pool := range keyProfiles {
 			if !p.modelManager.HasPool(pool) {
+				p.logger.WarnContext(logCtx.Context(), "Key routing profile is invalid or unavailable",
+					"reason", "unknown_pool", "field", routingProfilesKey,
+					"model", modelID, "request_id", logCtx.RequestID)
 				logCtx.Status, logCtx.HTTPStatus = "failure", http.StatusServiceUnavailable
 				logCtx.ErrorMsg = "Key routing profile is invalid or unavailable"
 				WriteErrorServiceUnavailable(w, logCtx.ErrorMsg)
