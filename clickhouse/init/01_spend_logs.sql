@@ -15,10 +15,8 @@
 --
 -- Column list below matches internal/kafkalog.SpendEvent (internal/kafkalog/event.go)
 -- field-for-field, but for `attempts`, which air.attempts_kafka reads (at the
--- end of this file), and `air_event_id`, which this schema does not store (see
--- "Deduplication" in docs/litellm-integration/kafka_spend_log.md). Columns
--- backed by a Go field with `,omitempty` are Nullable, since JSONEachRow will
--- see the key entirely absent (not `null`) for a zero value.
+-- end of this file). Columns backed by a Go field with `,omitempty` are Nullable,
+-- since JSONEachRow will see the key entirely absent (not `null`) for a zero value.
 -- ClickHouse's `CREATE TABLE ... (LIKE other_table)` used as a parenthesized column
 -- list is not valid DDL (that's MySQL/Postgres syntax) and fails with
 -- SYNTAX_ERROR (code 62) -- both tables below spell out the same column list
@@ -29,6 +27,7 @@ CREATE DATABASE IF NOT EXISTS air;
 CREATE TABLE air.spend_logs_kafka
 (
     request_id String,
+    air_event_id String,
     trace_id String,
     start_time DateTime64(3),
     end_time DateTime64(3),
@@ -176,6 +175,7 @@ SETTINGS
 CREATE TABLE air.spend_logs
 (
     request_id String,
+    air_event_id String,
     trace_id String,
     start_time DateTime64(3),
     end_time DateTime64(3),
@@ -415,6 +415,7 @@ CREATE TABLE air.attempts
     start_time DateTime64(3),
     end_time DateTime64(3),
     request_id String,
+    air_event_id String,
     trace_id String,
     service_name LowCardinality(String),
     server_router_id LowCardinality(String),
@@ -451,6 +452,7 @@ TTL toDateTime(start_time) + INTERVAL 90 DAY;
 CREATE TABLE air.attempts_kafka
 (
     request_id String,
+    air_event_id String,
     trace_id String,
     start_time DateTime64(3),
     end_time DateTime64(3),
@@ -481,6 +483,7 @@ SELECT
     start_time,
     end_time,
     request_id,
+    air_event_id,
     trace_id,
     service_name,
     server_router_id,
@@ -511,6 +514,7 @@ FROM
         start_time,
         end_time,
         request_id,
+        air_event_id,
         trace_id,
         service_name,
         server_router_id,
@@ -526,3 +530,23 @@ FROM
     WHERE length(_error) = 0
 )
 ARRAY JOIN list AS a, arrayEnumerate(list) AS number;
+
+-- Rows from older producers have an empty ID. Keep every such row.
+-- Retries of the same Kafka event carry identical rows, so any copy suffices.
+CREATE VIEW IF NOT EXISTS air.spend_logs_deduplicated AS
+SELECT * FROM air.spend_logs WHERE air_event_id = ''
+UNION ALL
+SELECT * FROM
+(
+    SELECT * FROM air.spend_logs WHERE air_event_id != ''
+    LIMIT 1 BY air_event_id
+);
+
+CREATE VIEW IF NOT EXISTS air.attempts_deduplicated AS
+SELECT * FROM air.attempts WHERE air_event_id = ''
+UNION ALL
+SELECT * FROM
+(
+    SELECT * FROM air.attempts WHERE air_event_id != ''
+    LIMIT 1 BY air_event_id, attempt
+);
