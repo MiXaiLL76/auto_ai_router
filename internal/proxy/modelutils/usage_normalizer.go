@@ -5,6 +5,8 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"encoding/json/jsontext"
+	jsonv2 "encoding/json/v2"
 	"errors"
 	"io"
 	"math"
@@ -18,12 +20,15 @@ import (
 
 const maxSSEUsageLineBytes = 1 << 20
 
-func NormalizeCompletionUsage(body []byte, modelID string) ([]byte, bool) {
-	var response map[string]json.RawMessage
-	if json.Unmarshal(body, &response) != nil {
+func NormalizeCompletionUsage(body []byte, modelIDs ...string) ([]byte, bool) {
+	if !bytes.Contains(body, []byte(`"completion_tokens_details"`)) && bytes.IndexByte(body, '\\') < 0 {
 		return body, false
 	}
-	if !isQwenModel(modelID) {
+	var response map[string]jsontext.Value
+	if jsonv2.Unmarshal(body, &response, jsontext.AllowDuplicateNames(true), jsontext.AllowInvalidUTF8(true)) != nil {
+		return body, false
+	}
+	if !slices.ContainsFunc(modelIDs, isQwenModel) {
 		var responseModel string
 		if json.Unmarshal(response["model"], &responseModel) != nil || !isQwenModel(responseModel) {
 			return body, false
@@ -81,7 +86,7 @@ func NormalizeCompletionUsage(body []byte, modelID string) ([]byte, bool) {
 	}
 	response["usage"] = normalizedUsage
 
-	normalizedResponse, err := json.Marshal(response)
+	normalizedResponse, err := jsonv2.Marshal(response, json.DefaultOptionsV1())
 	if err != nil {
 		return body, false
 	}
@@ -138,8 +143,12 @@ func NormalizeCacheCreationUsage(body []byte) ([]byte, bool) {
 	if !ok {
 		return body, false
 	}
+	var details map[string]json.RawMessage
+	if err := json.Unmarshal(detailsRaw, &details); err != nil {
+		return body, false
+	}
 	// Already carries a positive standard count — leave it untouched.
-	if existing, ok := nonNegativeJSONInteger(detailsRawKey(detailsRaw, "cache_creation_tokens")); ok && existing > 0 {
+	if existing, ok := nonNegativeJSONInteger(details["cache_creation_tokens"]); ok && existing > 0 {
 		return body, false
 	}
 	// Read ONLY Requesty's naming (caching_tokens / caching_token_details).
@@ -154,10 +163,6 @@ func NormalizeCacheCreationUsage(body []byte) ([]byte, bool) {
 		return body, false
 	}
 
-	var details map[string]json.RawMessage
-	if err := json.Unmarshal(detailsRaw, &details); err != nil {
-		return body, false
-	}
 	if total > 0 {
 		details["cache_creation_tokens"] = json.RawMessage(strconv.FormatInt(int64(total), 10))
 		// Mirror into cache_write_tokens too, but only when the response does
@@ -214,15 +219,6 @@ func NormalizeCacheCreationUsage(body []byte) ([]byte, bool) {
 		return body, false
 	}
 	return encTop, true
-}
-
-// detailsRawKey digs a named key out of a raw prompt_tokens_details object.
-func detailsRawKey(detailsRaw json.RawMessage, key string) json.RawMessage {
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(detailsRaw, &m); err != nil {
-		return nil
-	}
-	return m[key]
 }
 
 func nonNegativeJSONInteger(raw json.RawMessage) (int64, bool) {
@@ -345,18 +341,7 @@ func normalizeSSEUsageLine(line []byte, modelID string) []byte {
 		return line
 	}
 
-	// Cheap substring gates before the normalizers' full JSON parse: a streamed
-	// content delta carries neither key, so the common case costs a byte scan
-	// instead of an unmarshal. Each gate matches the key its normalizer can
-	// actually rewrite, so nothing eligible is skipped.
-	normalizedPayload := payload
-	changed := false
-	if bytes.Contains(payload, []byte("completion_tokens_details")) {
-		if p, didChange := NormalizeCompletionUsage(payload, modelID); didChange {
-			normalizedPayload = p
-			changed = true
-		}
-	}
+	normalizedPayload, changed := NormalizeCompletionUsage(payload, modelID)
 	// NormalizeCacheCreationUsage self-gates on the "caching" substring, so a
 	// content-delta line costs only that scan before it returns unchanged.
 	if p, didChange := NormalizeCacheCreationUsage(normalizedPayload); didChange {

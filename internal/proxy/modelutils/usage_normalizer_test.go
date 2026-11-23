@@ -283,3 +283,15 @@ func TestNormalizeCacheCreationUsageLeavesAlibabaNamingUnchanged(t *testing.T) {
 	assert.False(t, changed)
 	assert.Equal(t, body, normalized)
 }
+
+func TestNormalizeCompletionUsagePreservesRawResponse(t *testing.T) {
+	body := []byte(`{"z":{"x":"<tag>","x":9007199254740993},"usage":{"completion_tokens":10,"\u0063ompletion_tokens_details":{"reasoning_tokens":3}}}`)
+	got, changed := NormalizeCompletionUsage(body, "public-alias", "vendor/qwen3")
+	if !changed {
+		t.Fatal("expected completion usage to be normalized")
+	}
+	want := `{"usage":{"completion_tokens":10,"completion_tokens_details":{"reasoning_tokens":3,"text_tokens":7}},"z":{"x":"\u003ctag\u003e","x":9007199254740993}}`
+	if string(got) != want {
+		t.Fatalf("got %s, want %s", got, want)
+	}
+}

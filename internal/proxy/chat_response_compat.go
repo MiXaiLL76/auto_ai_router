@@ -214,7 +214,14 @@ func normalizeSSEDataLineModelWithOptions(line []byte, publicModel string, prese
 
 	rest := body[len("data:"):]
 	payload := bytes.TrimSpace(rest)
-	if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+	if len(payload) == 0 || payload[0] != '{' {
+		return line
+	}
+	if !bytes.Contains(payload, []byte(`"model"`)) &&
+		!bytes.Contains(payload, []byte(`"response"`)) &&
+		!bytes.Contains(payload, []byte("chat.completion.chunk")) &&
+		!bytes.Contains(payload, []byte("text_completion")) &&
+		bytes.IndexByte(payload, '\\') < 0 {
 		return line
 	}
 	// Shallow decode: every field but "model" (and, on /v1/responses, the

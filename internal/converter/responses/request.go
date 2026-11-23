@@ -1,6 +1,7 @@
 package responses
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -639,7 +640,7 @@ func PrepareCodexPassthrough(body []byte, prevEntryHandled bool) []byte {
 // IsResponsesAPI checks if the body is a Responses API request.
 // Returns true if body has "input" field and does NOT have "messages" field.
 func IsResponsesAPI(body []byte) bool {
-	if len(body) == 0 {
+	if !bytes.Contains(body, []byte(`"input"`)) && bytes.IndexByte(body, '\\') < 0 {
 		return false
 	}
 	var raw map[string]interface{}
