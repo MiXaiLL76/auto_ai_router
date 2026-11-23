@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash"
+
+	goccyjson "github.com/goccy/go-json"
 )
 
 const (
@@ -34,29 +36,34 @@ func promptStickyKey(body []byte, token, modelID string, hasBlockMarkers bool) s
 	if !hasBlockMarkers && !bytes.Contains(body, []byte(`"cache_control"`)) {
 		return ""
 	}
-	var req map[string]any
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.UseNumber()
-	if err := dec.Decode(&req); err != nil {
+	var req struct {
+		CacheControl goccyjson.RawMessage `json:"cache_control"`
+		Tools        goccyjson.RawMessage `json:"tools"`
+		System       goccyjson.RawMessage `json:"system"`
+		Instructions goccyjson.RawMessage `json:"instructions"`
+		Messages     goccyjson.RawMessage `json:"messages"`
+		Input        goccyjson.RawMessage `json:"input"`
+	}
+	if err := goccyjson.Unmarshal(body, &req); err != nil {
 		return ""
 	}
-	if !hasBlockMarkers && !isEphemeralCacheControl(req["cache_control"]) {
+	if !hasBlockMarkers && !isEphemeralCacheControl(decodeJSON(req.CacheControl)) {
 		return ""
 	}
 
-	system := req["system"]
+	system := decodeJSON(req.System)
 	if system == nil {
-		system = req["instructions"]
+		system = decodeJSON(req.Instructions)
 	}
-	conversation := req["messages"]
-	if conversation == nil {
-		conversation = req["input"]
+	conversation := bytes.TrimSpace(req.Messages)
+	if len(conversation) == 0 || bytes.Equal(conversation, []byte("null")) {
+		conversation = bytes.TrimSpace(req.Input)
 	}
 
 	h := sha256.New()
 	writePromptStickyPart(h, token)
 	writePromptStickyPart(h, modelID)
-	for _, part := range []any{req["tools"], canonicalContent(system), firstUserTurn(conversation)} {
+	for _, part := range []any{decodeJSON(req.Tools), canonicalContent(system), firstUserTurn(conversation)} {
 		encoded, err := json.Marshal(stripCacheControl(part))
 		if err != nil {
 			return ""
@@ -70,20 +77,44 @@ func writePromptStickyPart(h hash.Hash, part string) {
 	_, _ = fmt.Fprintf(h, "%d:%s", len(part), part)
 }
 
-// firstUserTurn returns the conversation items up to and including the first user message,
-// with string input and string content in their block form.
-func firstUserTurn(conversation any) any {
-	if text, ok := conversation.(string); ok {
-		conversation = []any{map[string]any{"role": "user", "content": text}}
+func decodeJSON(raw []byte) any {
+	if len(raw) == 0 {
+		return nil
 	}
-	items, ok := conversation.([]any)
-	if !ok {
-		return conversation
+	var v any
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&v); err != nil {
+		return nil
 	}
-	for i, item := range items {
-		if m, ok := item.(map[string]any); ok && m["role"] == "user" {
-			items = items[:i+1]
-			break
+	return v
+}
+
+// firstUserTurn decodes the conversation items up to and including the first user message,
+// with string input and string content in their block form; the rest is not decoded.
+func firstUserTurn(raw []byte) any {
+	var items []any
+	var text string
+	if len(raw) > 0 && raw[0] == '"' {
+		if err := json.Unmarshal(raw, &text); err != nil {
+			return nil
+		}
+		items = []any{map[string]any{"role": "user", "content": text}}
+	} else {
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.UseNumber()
+		if tok, err := dec.Token(); err != nil || tok != json.Delim('[') {
+			return nil
+		}
+		for dec.More() {
+			var item any
+			if err := dec.Decode(&item); err != nil {
+				return nil
+			}
+			items = append(items, item)
+			if m, ok := item.(map[string]any); ok && m["role"] == "user" {
+				break
+			}
 		}
 	}
 	for _, item := range items {
