@@ -452,6 +452,7 @@ const (
 
 // Manager handles model discovery and mapping
 type Manager struct {
+	routingPools                    *routingPoolIndex
 	mu                              sync.RWMutex
 	credentialModels                map[string][]string          // credential name -> list of model IDs
 	allModels                       []Model                      // deduplicated list of all models
@@ -648,6 +649,7 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 		m.staticModelResponsesOnlyPerCred[cred] = snapshot
 	}
 
+	m.rebuildRoutingPoolsLocked()
 	return m
 }
 
@@ -1021,6 +1023,7 @@ func (m *Manager) SetModelAliases(aliases map[string]string) {
 	// Public model discovery includes aliases, so a changed alias set invalidates
 	// both the rendered response and the accumulated discovery snapshot.
 	m.allModels = nil
+	m.rebuildRoutingPoolsLocked()
 	m.invalidateAllModelsCachesLocked()
 }
 
@@ -1112,6 +1115,7 @@ func (m *Manager) rebuildPublicModelAliasesLocked() {
 	maps.Copy(effective, m.staticPublicModelAliases)
 	m.publicModelAliases = effective
 	m.allModels = nil
+	m.rebuildRoutingPoolsLocked()
 	m.invalidateAllModelsCachesLocked()
 }
 
@@ -1128,6 +1132,7 @@ func (m *Manager) SetAcceptedModelAliases(aliases map[string]string) {
 		m.logger.Info("Registered accepted model alias", "alias", alias, "target", target)
 	}
 	m.allModels = nil
+	m.rebuildRoutingPoolsLocked()
 	m.invalidateAllModelsCachesLocked()
 }
 
@@ -1447,6 +1452,7 @@ func (m *Manager) LoadModelsFromConfig(credentials []config.CredentialConfig) {
 
 	if len(m.modelLimits) == 0 {
 		m.allModels = nil
+		m.rebuildRoutingPoolsLocked()
 		m.invalidateAllModelsCachesLocked()
 		m.logger.Debug("No models in config to load")
 		return
@@ -1538,6 +1544,7 @@ func (m *Manager) LoadModelsFromConfig(credentials []config.CredentialConfig) {
 		"global_models", globalModelsCount,
 	)
 	m.allModels = nil
+	m.rebuildRoutingPoolsLocked()
 	m.invalidateAllModelsCachesLocked()
 }
 
@@ -1751,6 +1758,7 @@ func (m *Manager) UpdateDBModels(dbModels []config.ModelRPMConfig, staticCreds [
 
 	// 5. Invalidate caches so next GetAllModels rebuilds from the updated modelLimits.
 	m.allModels = nil
+	m.rebuildRoutingPoolsLocked()
 	m.invalidateAllModelsCachesLocked()
 
 	m.logger.Info("DB model data updated",

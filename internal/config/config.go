@@ -1275,6 +1275,9 @@ type CredentialConfig struct {
 }
 
 func (c CredentialConfig) VisibleTo(visibility scope.Context) bool {
+	if !visibility.AllowsCredential(c.Name) || (visibility.HasCredentialRestriction() && c.IsProxyLike()) {
+		return false
+	}
 	return visibility.AllowsExpression(c.ScopeExpression())
 }
 
