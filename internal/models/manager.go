@@ -2005,7 +2005,9 @@ func (m *Manager) scopedAllModelsCacheKeyLocked(visibility scope.Context) string
 		}
 	}
 	slices.Sort(credentialNames)
-	return visibility.Key() + "|c:" + strings.Join(credentialNames, "\x00")
+	// visibility.Key() already encodes a credential restriction; this suffix is
+	// the scope-expanded set, which can be wider than the restriction alone.
+	return visibility.Key() + "|v:" + strings.Join(credentialNames, "\x00")
 }
 
 func copyModelsResponse(response ModelsResponse) ModelsResponse {
@@ -2350,7 +2352,7 @@ func (m *Manager) GetCredentialsForModel(modelID string) []string {
 func (m *Manager) HasPool(pool string) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.routingPools != nil && m.routingPools.pools[pool]
+	return m.routingPools != nil && m.routingPools.pools[strings.ToLower(strings.TrimSpace(pool))]
 }
 
 // CredentialsInPools returns the credential assignments for a model that match
@@ -2368,11 +2370,20 @@ func (m *Manager) CredentialsInPools(modelID string, pools []string) map[string]
 			names = m.routingPools.byIdentity[identity]
 		}
 	}
+	// Pool IDs are matched case-insensitively: an operator typing Pool-01 for a
+	// deployment tagged pool-01 means the same pool, and rejecting it would be a
+	// needless fail-closed.
+	wanted := make(map[string]struct{}, len(pools))
+	for _, pool := range pools {
+		if trimmed := strings.ToLower(strings.TrimSpace(pool)); trimmed != "" {
+			wanted[trimmed] = struct{}{}
+		}
+	}
 	var matching map[string]bool
 	for _, name := range names {
 		for _, entry := range m.modelLimits[name] {
 			for _, pool := range entry.Pools {
-				if pool == "" || !slices.Contains(pools, pool) {
+				if _, ok := wanted[strings.ToLower(strings.TrimSpace(pool))]; !ok {
 					continue
 				}
 				if entry.Credential == "" {

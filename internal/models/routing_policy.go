@@ -129,6 +129,11 @@ type routingPoolIndex struct {
 	// touches only the names that share its identity instead of the whole
 	// catalog on every request.
 	byIdentity map[string][]string
+	// invalidTags are the pool tags this build dropped as malformed. The index
+	// is rebuilt on every catalog change, so warning for the same persistent
+	// typo each time would flood the log; the set is carried across rebuilds
+	// and only new tags are reported.
+	invalidTags map[string]struct{}
 }
 
 func (m *Manager) rebuildRoutingPoolsLocked() {
@@ -171,10 +176,30 @@ func (m *Manager) rebuildRoutingPoolsLocked() {
 			join(name, identity)
 		}
 	}
+	// One name may not point at two different targets at once. When config-level
+	// and DB-level mappings disagree, joining both would merge the two target
+	// models and let one model's pool membership authorise the other. The DB
+	// mapping wins (it is what the sync loop refreshes); the losing mapping is
+	// dropped from the identity graph rather than merged.
+	resolved := make(map[string]string)
+	conflicting := make(map[string]struct{})
 	for _, aliases := range aliasMaps {
 		for name, target := range aliases {
-			join(name, target)
+			if existing, seen := resolved[name]; seen && existing != target {
+				conflicting[name] = struct{}{}
+				continue
+			}
+			resolved[name] = target
 		}
+	}
+	for name := range conflicting {
+		// Dropping the name, rather than picking a winner, keeps two live models
+		// out of one identity: either target would otherwise inherit the other's
+		// pool membership.
+		delete(resolved, name)
+	}
+	for name, target := range resolved {
+		join(name, target)
 	}
 	// Wire names identify equivalent aliases only within the SAME credential.
 	type wireIdentity struct{ credential, wire string }
@@ -200,10 +225,16 @@ func (m *Manager) rebuildRoutingPoolsLocked() {
 		}
 	}
 	index := &routingPoolIndex{
-		identities: make(map[string]string),
-		pools:      make(map[string]bool),
-		members:    make(map[string]map[string]map[string]bool),
-		byIdentity: make(map[string][]string),
+		identities:  make(map[string]string),
+		pools:       make(map[string]bool),
+		members:     make(map[string]map[string]map[string]bool),
+		byIdentity:  make(map[string][]string),
+		invalidTags: make(map[string]struct{}),
+	}
+	if m.routingPools != nil {
+		for tag := range m.routingPools.invalidTags {
+			index.invalidTags[tag] = struct{}{}
+		}
 	}
 	for name := range parent {
 		identity := find(name)
@@ -214,12 +245,17 @@ func (m *Manager) rebuildRoutingPoolsLocked() {
 		identity := index.identities[name]
 		for _, entry := range entries {
 			for _, pool := range entry.Pools {
+				pool = strings.ToLower(strings.TrimSpace(pool))
 				if !config.PoolIDPattern.MatchString(pool) {
 					// Silently dropping the tag leaves the deployment looking
 					// unpooled and a strict key answering a bare 503 with nothing
-					// to trace the typo back to.
-					m.logger.Warn("Ignoring a pool tag that is not a valid ID",
-						"model", name, "credential", entry.Credential, "pool", pool)
+					// to trace the typo back to. Warn once per tag, not per rebuild.
+					tag := name + "\x00" + entry.Credential + "\x00" + pool
+					if _, reported := index.invalidTags[tag]; !reported {
+						index.invalidTags[tag] = struct{}{}
+						m.logger.Warn("Ignoring a pool tag that is not a valid ID",
+							"model", name, "credential", entry.Credential, "pool", pool)
+					}
 					continue
 				}
 				index.pools[pool] = true
@@ -270,6 +306,7 @@ func (m *Manager) RestrictToModelPools(visibility scope.Context, policy *Routing
 	}
 	var allowed []string
 	for _, pool := range policy.Pools {
+		pool = strings.ToLower(pool)
 		if !index.pools[pool] {
 			return visibility.RestrictCredentials(nil), fmt.Errorf("%w: reason=unknown_pool field=%s", ErrRoutingPolicy, RoutingProfilesField)
 		}

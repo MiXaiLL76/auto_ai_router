@@ -195,3 +195,73 @@ func BenchmarkCredentialsInPoolsLargeCatalog(b *testing.B) {
 		_ = m.CredentialsInPools("model-5000", []string{"pool-01"})
 	}
 }
+
+// Two live mappings disagreeing on what one alias means must not merge their
+// targets: that would let the new target's pool membership authorise the old
+// model, which is exactly the boundary this feature exists to enforce.
+func TestRoutingPoolAliasCollisionDoesNotMerge(t *testing.T) {
+	m := New(testhelpers.NewTestLogger(), 100, []config.ModelRPMConfig{
+		{Name: "model-a", Credential: "a", Pools: []string{"one"}},
+		{Name: "model-b", Credential: "b", Pools: []string{"two"}},
+		{Name: "model-c", Credential: "c", Pools: []string{"two"}},
+	})
+	m.SetModelAliases(map[string]string{"foo": "model-a"})
+	m.SetDBPublicModelAliases(map[string]string{"foo": "model-b"})
+
+	policy := &RoutingPolicy{Models: []string{"model-a"}, Pools: []string{"two"}}
+	vis, err := m.RestrictToModelPools(scope.PublicContext(), policy, "model-a", "model-a")
+	require.NoError(t, err)
+	assert.False(t, vis.AllowsCredential("a"), "model-a is not in pool two")
+	assert.False(t, vis.AllowsCredential("b"), "a colliding alias must not authorise model-a")
+	assert.False(t, vis.AllowsCredential("c"))
+}
+
+// The reverse setter order must give the same answer.
+func TestRoutingPoolAliasCollisionOrderIndependent(t *testing.T) {
+	m := New(testhelpers.NewTestLogger(), 100, []config.ModelRPMConfig{
+		{Name: "model-a", Credential: "a", Pools: []string{"one"}},
+		{Name: "model-b", Credential: "b", Pools: []string{"two"}},
+	})
+	m.SetDBPublicModelAliases(map[string]string{"foo": "model-b"})
+	m.SetModelAliases(map[string]string{"foo": "model-a"})
+
+	policy := &RoutingPolicy{Models: []string{"model-a"}, Pools: []string{"two"}}
+	vis, err := m.RestrictToModelPools(scope.PublicContext(), policy, "model-a", "model-a")
+	require.NoError(t, err)
+	assert.False(t, vis.AllowsCredential("b"))
+}
+
+// A non-colliding alias in each mapping keeps working normally.
+func TestRoutingPoolDistinctAliasesStillResolve(t *testing.T) {
+	m := New(testhelpers.NewTestLogger(), 100, []config.ModelRPMConfig{
+		{Name: "model-a", Credential: "a", Pools: []string{"one"}},
+		{Name: "model-b", Credential: "b"},
+	})
+	m.SetModelAliases(map[string]string{"foo": "model-a"})
+	m.SetDBPublicModelAliases(map[string]string{"bar": "model-b"})
+
+	policy := &RoutingPolicy{Models: []string{"foo"}, Pools: []string{"one"}}
+	vis, err := m.RestrictToModelPools(scope.PublicContext(), policy, "foo", "foo")
+	require.NoError(t, err)
+	assert.True(t, vis.AllowsCredential("a"))
+	assert.False(t, vis.AllowsCredential("b"))
+}
+
+// Pool IDs are matched without regard to case or surrounding space.
+func TestRoutingPoolCaseInsensitive(t *testing.T) {
+	m := New(testhelpers.NewTestLogger(), 100, []config.ModelRPMConfig{
+		{Name: "model-a", Credential: "a", Pools: []string{"pool-01"}},
+		{Name: "model-a", Credential: "b", Pools: []string{"POOL-02"}},
+	})
+	assert.True(t, m.HasPool("Pool-01"))
+	assert.True(t, m.HasPool(" POP-02 ") == false, "a different name is still unknown")
+
+	policy := &RoutingPolicy{Models: []string{"model-a"}, Pools: []string{"Pool-01"}}
+	vis, err := m.RestrictToModelPools(scope.PublicContext(), policy, "model-a", "model-a")
+	require.NoError(t, err)
+	assert.True(t, vis.AllowsCredential("a"))
+	assert.False(t, vis.AllowsCredential("b"))
+
+	soft := m.CredentialsInPools("model-a", []string{"pool-02"})
+	assert.Equal(t, map[string]bool{"b": true}, soft)
+}

@@ -53,6 +53,9 @@ column. A deployment without that entry belongs to no pool.
 
 ## Behavior
 
+- A selector on a team or organization is rejected, not ignored: it is never
+  inherited, and silently ignoring it would leave an operator believing a whole
+  team is isolated when it is not. The rejection is logged with its scope.
 - The selector is key-specific, taken only from trusted authentication metadata.
   Client request metadata/headers cannot set or remove it. Model selectors on
   teams/organizations are unsupported and rejected.
@@ -68,10 +71,14 @@ column. A deployment without that entry belongs to no pool.
   availability. No permitted deployment means no route, including after a catalog
   refresh or restart removes the model's pool tags.
 - Missing/unknown pools fail closed for selected models; a key's own unknown profile
-  fails closed even in soft selection. Unrelated models remain usable. Malformed
-  selectors/profile lists or unknown selector model names fail closed for the key
-  because their intended scope cannot be interpreted safely. Missing
-  `air_routing_models` preserves legacy behavior.
+  fails closed even in soft selection. Unrelated models remain usable. A malformed
+  selector list or profile list of the wrong shape, and an unknown selected model
+  name, fail closed for the key because their intended scope cannot be interpreted
+  safely. Missing `air_routing_models` preserves legacy behavior.
+- A selector with no profile list at all is the one exception: it names no pool,
+  so there is nothing to restrict to. It degrades to ordinary routing and logs a
+  warning rather than failing the key. An operator who means to isolate must set
+  both fields; a selector alone is treated as a mistake, not as a lockout.
 - Initial choice, sticky/exact selection, retries/fallback and native Responses
   WebSocket turns enforce the restriction, with an additional guard before send.
   Shared quotas, bans, weights and billing identities retain their behavior.
