@@ -886,6 +886,7 @@ type ServerConfig struct {
 	SessionStickyEnabled       bool                  `yaml:"session_sticky_enabled"`            // Enable session-sticky credential routing (default: true)
 	SessionStickyTTL           int                   `yaml:"session_sticky_ttl_minutes"`        // Session binding TTL in minutes (0 = default 6)
 	SessionStickyAutoCacheCtrl bool                  `yaml:"session_sticky_auto_cache_control"` // Auto-inject Anthropic cache_control when session is active (default: true)
+	SessionStickyPromptHash    bool                  `yaml:"session_sticky_prompt_hash"`        // Bind requests with explicit cache_control and no session marker by a hash of the prompt prefix (default: false)
 	ModelPricesLink            string                `yaml:"model_prices_link,omitempty"`       // URL or file path to model prices JSON - supports os.environ/VAR_NAME
 	ModelPricesSyncInterval    time.Duration         `yaml:"model_prices_sync_interval"`        // How often model prices are re-fetched from model_prices_link (default: 5m)
 	ToolPricesPath             string                `yaml:"tool_prices_path,omitempty"`        // Path to the tool price document: the price of the tools the ROUTER runs on the model's behalf (the provider's own Search/Fetch APIs), as opposed to the model's token prices. Supports os.environ/VAR_NAME
@@ -1005,6 +1006,7 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		SessionStickyEnabled       string                `yaml:"session_sticky_enabled"`
 		SessionStickyTTL           string                `yaml:"session_sticky_ttl_minutes"`
 		SessionStickyAutoCacheCtrl string                `yaml:"session_sticky_auto_cache_control"`
+		SessionStickyPromptHash    string                `yaml:"session_sticky_prompt_hash"`
 		ModelPricesLink            string                `yaml:"model_prices_link,omitempty"`
 		ToolPricesPath             string                `yaml:"tool_prices_path,omitempty"`
 		ModelPricesSyncInterval    string                `yaml:"model_prices_sync_interval"`
@@ -1113,6 +1115,9 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if s.SessionStickyAutoCacheCtrl, err = parseField(temp.SessionStickyAutoCacheCtrl, true, strconv.ParseBool, "session_sticky_auto_cache_control"); err != nil {
+		return err
+	}
+	if s.SessionStickyPromptHash, err = parseField(temp.SessionStickyPromptHash, false, strconv.ParseBool, "session_sticky_prompt_hash"); err != nil {
 		return err
 	}
 	if s.MirrorCacheWriteTokens, err = parseField(temp.MirrorCacheWriteTokens, true, strconv.ParseBool, "mirror_cache_write_tokens"); err != nil {

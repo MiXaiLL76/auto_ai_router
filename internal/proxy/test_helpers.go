@@ -107,6 +107,7 @@ type TestProxyConfig struct {
 	ServiceName            string
 	SessionStickyEnabled   bool
 	SessionStoreTTL        time.Duration
+	SessionStickyPrompt    bool
 	MaxProviderRetries     int
 	MaxFallbackAttempts    int
 	Retry                  config.RetryConfig
@@ -247,6 +248,12 @@ func (b *TestProxyBuilder) WithSessionSticky(ttl time.Duration) *TestProxyBuilde
 	return b
 }
 
+// WithPromptHashSticky enables prompt-hash binding on top of session-sticky routing.
+func (b *TestProxyBuilder) WithPromptHashSticky() *TestProxyBuilder {
+	b.config.SessionStickyPrompt = true
+	return b
+}
+
 // WithMaxBodySizeMB sets the max response body size (in MB, before the
 // ResponseBodyMultiplier is applied). Use together with WithResponseBodyMultiplier
 // to get a small, test-friendly size limit for exercising ErrResponseBodyTooLarge.
@@ -361,6 +368,7 @@ func (b *TestProxyBuilder) Build() *Proxy {
 		RouterResponseLog:      b.config.RouterResponseLog,
 		RouterResponseRedact:   b.config.RouterResponseRedact,
 	})
+	prx.stickyPromptHash = b.config.SessionStickyPrompt
 	// No streamingClient collapse needed here (unlike before streamingClients
 	// became a lazily-built per-timeout map): attemptClient already returns
 	// prx.client itself whenever the effective ResponseHeaderTimeout is <= 0,

@@ -279,6 +279,28 @@ organization_policies:
 
 This field works with or without a tariff profile on the same entry, and does not require `price_profile_id` / `model_prices_link`. A request from an organization with no matching policy entry, or whose policy omits the field, keeps the global default.
 
+### Prompt-Hash Binding
+
+A client that sets `cache_control` but sends no session ID gets a cold prompt cache on every credential the balancer rotates through. With prompt-hash binding on, such a request is bound by a hash of its stable prefix instead.
+
+**Disabled by default.** To enable:
+
+```yaml
+server:
+  session_sticky_prompt_hash: true
+```
+
+Applies when both hold:
+
+- the request has no session ID from any [source](#sources-of-session-id), `user` included;
+- it carries `cache_control` (`{"type":"ephemeral"}`) on a content block, a tool, or at the top level.
+
+The key is a hash of the client API key, the model, `tools`, `system` / `instructions`, and `messages` / `input` up to and including the first user message. `cache_control` fields are left out of the hash, so moving a breakpoint keeps the key.
+
+Later turns of the same conversation keep the key, so they land on the credential that served the first turn and its warm cache. The binding uses the same store, TTL and failover rules as a session.
+
+The key becomes the request's session ID: it is routed, forwarded to a `type: air` hop as `Session-Id`, and logged like any session, so the request is also eligible for [automatic cache_control injection](#automatic-anthropic-prompt-caching).
+
 ### Full Example
 
 ```yaml
