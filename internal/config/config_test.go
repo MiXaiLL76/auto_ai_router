@@ -535,6 +535,24 @@ func TestConfig_Validate_InvalidBaseURL(t *testing.T) {
 	}
 }
 
+func TestConfig_Validate_Pools(t *testing.T) {
+	cfg := func(pools ...string) *Config {
+		return &Config{
+			Server:      ServerConfig{Port: 8080, MaxBodySizeMB: 10, MasterKey: "test-key", RequestTimeout: 30 * time.Second},
+			Credentials: []CredentialConfig{{Name: "test", Type: "openai", APIKey: "key", BaseURL: "http://test.com", RPM: 100}},
+			Models:      []ModelRPMConfig{{Name: "model", Credential: "test", Pools: pools}},
+			Fail2Ban:    Fail2BanConfig{MaxAttempts: 3},
+		}
+	}
+
+	assert.NoError(t, cfg().Validate())
+	assert.NoError(t, cfg("pool-01", "Pool_2.x-y").Validate())
+	// A leading separator, a space or an empty tag must not silently drop membership.
+	for _, bad := range []string{"", " ", "-pool", "pool 01", "pool/01", "pool*"} {
+		assert.Error(t, cfg(bad).Validate(), "pool %q must be rejected", bad)
+	}
+}
+
 func TestConfig_Validate_InvalidRPM(t *testing.T) {
 	tests := []struct {
 		name    string

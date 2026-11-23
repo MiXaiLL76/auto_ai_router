@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -143,6 +144,11 @@ func TrimVLLMProviderPrefix(model string) string {
 	}
 	return model
 }
+
+// PoolIDPattern bounds a deployment pool tag. It is the single rule for both the
+// tags in config.yaml and the pool IDs a key selects, so a typo fails at startup
+// instead of a runtime lookup silently dropping the membership.
+var PoolIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
 
 // ModelRPMConfig represents RPM and TPM limits for a specific model
 type ModelRPMConfig struct {
@@ -2965,6 +2971,11 @@ func (c *Config) Validate() error {
 	for _, model := range c.Models {
 		if model.Weight < 0 {
 			return fmt.Errorf("model %s: invalid weight: %d (must be 0 for default or positive number)", model.Name, model.Weight)
+		}
+		for _, pool := range model.Pools {
+			if !PoolIDPattern.MatchString(pool) {
+				return fmt.Errorf("model %s: invalid pool %q: must match %s", model.Name, pool, PoolIDPattern)
+			}
 		}
 	}
 

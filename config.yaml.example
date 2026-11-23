@@ -179,6 +179,11 @@ models:
     rpm: 100
     tpm: 50000
     weight: 200  # Optional: per-model weight override (falls back to credential weight, then 1)
+    # Optional: pools this deployment belongs to (see docs/advanced/model_pools.md).
+    # A key's metadata.air_routing_profiles narrows routing to deployments whose
+    # same-model entries share a pool; air_routing_models makes it strict.
+    # Tags alone are a preference. IDs: [A-Za-z0-9][A-Za-z0-9_.-]{0,63}, validated at startup.
+    pools: [pool-01]
   - name: "gemini-2.5-pro"
     credential: vertex_ai
     rpm: 100
