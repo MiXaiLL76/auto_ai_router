@@ -12,11 +12,28 @@ import (
 // says Google answers with 400. Such a 400 is replayed on every credential of the
 // rotation (see capabilities.go), so it is cheaper and clearer to answer it here.
 
+// UsesPrefixBoundSignatures reports whether the model's signatures bind the history prefix.
+func UsesPrefixBoundSignatures(model string) bool {
+	profile := lookupGeminiModelProfile(model)
+	return profile != nil && profile.prefixBoundSignatures
+}
+
+// ResponsesThinkingConfig checks Gemini extensions using the same rules as Chat.
+func ResponsesThinkingConfig(opts *openai.OpenAIRequest, model string) (*genai.ThinkingConfig, error) {
+	if err := validateChatRequest(opts, model); err != nil {
+		return nil, err
+	}
+	return resolveChatThinkingConfig(opts, model), nil
+}
+
 // validateChatRequest checks an OpenAI chat request against model's profile.
 func validateChatRequest(req *openai.OpenAIRequest, model string) error {
 	profile := lookupGeminiModelProfile(model)
 	if profile == nil {
 		return nil
+	}
+	if profile.prefixBoundSignatures && req.ThinkingBudgetCamel != nil {
+		return thinkingBudgetError()
 	}
 	if profile.thinkingLevelsOnly {
 		if err := validateNativeThinking(req); err != nil {

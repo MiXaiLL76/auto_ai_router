@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	converterutil "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
+	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
 	"github.com/mixaill76/auto_ai_router/internal/converter/vertex"
 	"google.golang.org/genai"
@@ -13,17 +14,40 @@ import (
 // ResponsesRequestToVertex converts a Responses API request body to the Vertex AI
 // GenerateContent request format (as JSON).
 func ResponsesRequestToVertex(body []byte, model string) ([]byte, error) {
-	var req responses.Request
-	if err := json.Unmarshal(body, &req); err != nil {
+	var req struct {
+		responses.Request
+		*openai.GeminiThinkingOptions
+		ExtraBody map[string]interface{} `json:"extra_body"`
+		N         *int                   `json:"n"`
+	}
+	nativeOptions := vertex.UsesPrefixBoundSignatures(model)
+	var target any = &req.Request
+	if nativeOptions {
+		target = &req
+	}
+	if err := json.Unmarshal(body, target); err != nil {
 		return nil, converterutil.RequestJSONValidationError(err)
 	}
 
-	vertexReq, err := buildVertexRequest(&req, model)
+	vertexReq, err := buildVertexRequest(&req.Request, model)
 	if err != nil {
 		return nil, fmt.Errorf("ResponsesRequestToVertex: build request: %w", err)
 	}
 
-	result, err := json.Marshal(vertexReq)
+	if req.GeminiThinkingOptions != nil || req.ExtraBody != nil || req.N != nil {
+		opts := openai.OpenAIRequest{ExtraBody: req.ExtraBody, N: req.N}
+		if req.GeminiThinkingOptions != nil {
+			opts.GeminiThinkingOptions = *req.GeminiThinkingOptions
+		}
+		if req.Reasoning != nil {
+			opts.ReasoningEffort = req.Reasoning.Effort
+		}
+		vertexReq.GenerationConfig.ThinkingConfig, err = vertex.ResponsesThinkingConfig(&opts, model)
+		if err != nil {
+			return nil, err
+		}
+	}
+	result, err := vertexReq.MarshalForModel(model)
 	if err != nil {
 		return nil, fmt.Errorf("ResponsesRequestToVertex: marshal: %w", err)
 	}

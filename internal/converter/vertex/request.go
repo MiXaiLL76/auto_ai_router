@@ -219,7 +219,7 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, isImageEdit bool,
 		vertexReq.ToolConfig = mapToolChoice(req.ToolChoice)
 	}
 
-	return json.Marshal(vertexReq)
+	return vertexReq.MarshalForModel(model)
 }
 
 // partsHaveText reports whether any Part in the slice contains a non-empty Text field.

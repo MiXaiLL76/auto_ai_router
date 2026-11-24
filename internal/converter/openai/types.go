@@ -37,13 +37,8 @@ type OpenAIRequest struct {
 	Modalities           []string               `json:"modalities,omitempty"`
 	PromptCacheRetention string                 `json:"prompt_cache_retention,omitempty"`
 	ReasoningEffort      string                 `json:"reasoning_effort,omitempty"`
-	Reasoning            interface{}            `json:"reasoning,omitempty"`       // {"effort":"high","generate_summary":"auto"}
-	Thinking             interface{}            `json:"thinking,omitempty"`        // Anthropic-style thinking param: {"type":"enabled","budget_tokens":N}
-	ThinkingBudget       interface{}            `json:"thinking_budget,omitempty"` // Gemini-style thinking budget: int (tokens) or -1 (dynamic)
-	ThinkingLevel        string                 `json:"thinking_level,omitempty"`  // Gemini-style thinking level: "low"/"medium"/"high"
-	ThinkingLevelCamel   string                 `json:"thinkingLevel,omitempty"`   // Gemini's camelCase spelling of thinking_level
-	ThinkingConfig       map[string]interface{} `json:"thinking_config,omitempty"` // Gemini-native thinking config
-	ThinkingConfigCamel  map[string]interface{} `json:"thinkingConfig,omitempty"`  // Gemini's camelCase spelling of thinking_config
+	Reasoning            interface{}            `json:"reasoning,omitempty"` // {"effort":"high","generate_summary":"auto"}
+	Thinking             interface{}            `json:"thinking,omitempty"`  // Anthropic-style thinking param: {"type":"enabled","budget_tokens":N}
 	StreamOptions        interface{}            `json:"stream_options,omitempty"`
 	Verbosity            string                 `json:"verbosity,omitempty"`
 	Prediction           interface{}            `json:"prediction,omitempty"`
@@ -55,6 +50,7 @@ type OpenAIRequest struct {
 	ImageSize            string                 `json:"imageSize,omitempty"`
 	ImageSizeSnake       string                 `json:"image_size,omitempty"`
 	ExtraBody            map[string]interface{} `json:"extra_body,omitempty"`
+	GeminiThinkingOptions
 }
 
 type OpenAIMessage struct {
@@ -408,4 +404,14 @@ type OpenAIEmbeddingPromptDetails struct {
 	ImageTokens int `json:"image_tokens,omitempty"`
 	AudioTokens int `json:"audio_tokens,omitempty"`
 	VideoTokens int `json:"video_tokens,omitempty"`
+}
+
+// GeminiThinkingOptions are the native Gemini controls accepted through the OpenAI SDKs.
+type GeminiThinkingOptions struct {
+	ThinkingBudget      interface{}            `json:"thinking_budget,omitempty"` // Gemini-style thinking budget: int (tokens) or -1 (dynamic)
+	ThinkingLevel       string                 `json:"thinking_level,omitempty"`  // Gemini-style thinking level: "low"/"medium"/"high"
+	ThinkingLevelCamel  string                 `json:"thinkingLevel,omitempty"`   // Gemini's camelCase spelling of thinking_level
+	ThinkingConfig      map[string]interface{} `json:"thinking_config,omitempty"` // Gemini-native thinking config
+	ThinkingConfigCamel map[string]interface{} `json:"thinkingConfig,omitempty"`  // Gemini's camelCase spelling of thinking_config
+	ThinkingBudgetCamel interface{}            `json:"thinkingBudget,omitempty"`
 }

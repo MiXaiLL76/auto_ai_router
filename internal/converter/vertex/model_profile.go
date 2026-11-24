@@ -53,6 +53,9 @@ type geminiModelProfile struct {
 	// second run with the same text too; without it a response's queries count once
 	// per text.
 	billsRepeatedSearches bool
+	// prefixBoundSignatures: sign the first call only and discard a mismatched
+	// signature upstream when the client edits the prefix.
+	prefixBoundSignatures bool
 }
 
 var geminiModelProfiles = []geminiModelProfile{
@@ -108,6 +111,24 @@ var geminiModelProfiles = []geminiModelProfile{
 		longDecode:            true,
 		functionCallIDs:       true,
 		billsRepeatedSearches: true,
+	},
+	{
+		id: "gemini-4-hydrogen",
+		thinkingLevels: []genai.ThinkingLevel{
+			genai.ThinkingLevelLow, genai.ThinkingLevelMedium, genai.ThinkingLevelHigh,
+			genai.ThinkingLevelXhigh,
+		},
+		defaultThinkingLevel:  genai.ThinkingLevelHigh,
+		thinkingLevelsOnly:    true,
+		ignoresSamplingParams: true,
+		singleCandidate:       true,
+		noModelPrefill:        true,
+		tokenLimit:            1048576,
+		longDecode:            true,
+		functionCallIDs:       true,
+		billsRepeatedSearches: true,
+		unbilledSearchContext: true,
+		prefixBoundSignatures: true,
 	},
 }
 

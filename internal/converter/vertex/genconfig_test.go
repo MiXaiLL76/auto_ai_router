@@ -120,10 +120,10 @@ func TestBuildGenerationConfig_DefaultThinkingDisable(t *testing.T) {
 // OpenAI SDKs put extra_body keys) wins over a literal extra_body object.
 func TestBuildGenerationConfig_ThinkingSourcePrecedence(t *testing.T) {
 	for _, req := range []*openai.OpenAIRequest{
-		{ThinkingLevel: "high", ExtraBody: map[string]interface{}{"thinking_level": "minimal"}},
+		{GeminiThinkingOptions: openai.GeminiThinkingOptions{ThinkingLevel: "high"}, ExtraBody: map[string]interface{}{"thinking_level": "minimal"}},
 		{
-			ThinkingConfig: map[string]interface{}{"thinking_level": "high"},
-			ExtraBody:      map[string]interface{}{"thinking_config": map[string]interface{}{"thinking_level": "minimal"}},
+			GeminiThinkingOptions: openai.GeminiThinkingOptions{ThinkingConfig: map[string]interface{}{"thinking_level": "high"}},
+			ExtraBody:             map[string]interface{}{"thinking_config": map[string]interface{}{"thinking_level": "minimal"}},
 		},
 	} {
 		cfg := buildGenerationConfig(req, "gemini-3-flash-preview")
