@@ -944,15 +944,7 @@ func TestPrepareCodexPassthrough_DropsUnrecoverableReasoning(t *testing.T) {
 	}
 }
 
-// TestPrepareCodexPassthrough_KeepsEncryptedContentOnlyReasoning verifies that
-// a reasoning item with no "summary" key at all but a non-empty
-// "encrypted_content" is left untouched rather than dropped. This is exactly
-// the shape this router's own outputToInputItems produces when round-tripping
-// encrypted reasoning with an empty summary (see the "reasoning" case there:
-// the "summary" key is omitted entirely when there's no summary text, but
-// encrypted_content is preserved) — that shape already passes through fine
-// today, so normalization must not start discarding it.
-func TestPrepareCodexPassthrough_KeepsEncryptedContentOnlyReasoning(t *testing.T) {
+func TestPrepareCodexPassthrough_AddsSummaryToEncryptedOnlyReasoning(t *testing.T) {
 	body := []byte(`{
 		"model": "gpt-5",
 		"input": [
@@ -973,7 +965,7 @@ func TestPrepareCodexPassthrough_KeepsEncryptedContentOnlyReasoning(t *testing.T
 	reasoningItem := input[1].(map[string]interface{})
 	assert.Equal(t, "reasoning", reasoningItem["type"])
 	assert.Equal(t, "opaque-blob", reasoningItem["encrypted_content"])
-	assert.NotContains(t, reasoningItem, "summary", "must not fabricate a summary key that wasn't there")
+	assert.Equal(t, []interface{}{}, reasoningItem["summary"])
 }
 
 // TestPrepareCodexPassthrough_KeepsEmptyValidSummary verifies that a
@@ -1645,6 +1637,48 @@ func TestPrependHistoryToInput_ReasoningEncryptedContent(t *testing.T) {
 	rs := input[0].(map[string]interface{})
 	assert.Equal(t, "reasoning", rs["type"])
 	assert.Equal(t, "sigma:encrypted_thinking_token", rs["encrypted_content"])
+}
+
+func TestPrepareCodexPassthrough_RestoredEncryptedReasoningSummary(t *testing.T) {
+	body := []byte(`{"model":"gpt-6.1-terra","previous_response_id":"resp_previous","input":"continue"}`)
+	history := json.RawMessage(`[
+		{"role":"user","content":"first turn"},
+		{"type":"reasoning","id":"rs_first","encrypted_content":"legacy-encrypted-reasoning"},
+		{"role":"assistant","content":"first answer"},
+		{"role":"user","content":"second turn"}
+	]`)
+	previousOutput := []OutputItem{{
+		Type:             "reasoning",
+		ID:               "rs_previous",
+		EncryptedContent: "encrypted-reasoning",
+	}}
+
+	restored, err := PrependHistoryToInput(body, history, previousOutput)
+	require.NoError(t, err)
+
+	latestReasoning := map[string]interface{}{
+		"type":              "reasoning",
+		"id":                "rs_previous",
+		"summary":           []interface{}{},
+		"encrypted_content": "encrypted-reasoning",
+	}
+	var assembled map[string]interface{}
+	require.NoError(t, json.Unmarshal(restored, &assembled))
+	require.Len(t, assembled["input"], 6)
+	assert.Equal(t, latestReasoning, assembled["input"].([]interface{})[4])
+
+	var upstream map[string]interface{}
+	require.NoError(t, json.Unmarshal(PrepareCodexPassthrough(restored, true), &upstream))
+	assert.NotContains(t, upstream, "previous_response_id")
+	input := upstream["input"].([]interface{})
+	require.Len(t, input, 6)
+	assert.Equal(t, latestReasoning, input[4])
+	assert.Equal(t, map[string]interface{}{
+		"type":              "reasoning",
+		"id":                "rs_first",
+		"summary":           []interface{}{},
+		"encrypted_content": "legacy-encrypted-reasoning",
+	}, input[1])
 }
 
 func TestOutputToInputItems_ComputerCall(t *testing.T) {
