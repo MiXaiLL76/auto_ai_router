@@ -410,7 +410,7 @@ data: {"candidates":[{"content":{"role":"model","parts":[{"text":" is 42."}]},"f
 `
 
 func TestArgonContinuedStreamIsOneGeneration(t *testing.T) {
-	chunks := transformStream(t, continuedStream+finalSegment)
+	chunks := transformStream(t, continuedStream+ContinuationStreamBoundary+"\n\n"+finalSegment)
 
 	assert.Equal(t, []string{"stop"}, finishReasons(chunks), "the CONTINUATION finish is not passed on")
 	var content, reasoning string
@@ -563,7 +563,7 @@ func TestMergedContinuationCountsSearchesRequestByRequest(t *testing.T) {
 		require.NotNil(t, resp.Usage.ServerToolUse, model)
 		assert.Equal(t, want, resp.Usage.ServerToolUse.WebSearchRequests, model)
 
-		usage := lastUsage(transformStreamFor(t, sseChunk(t, first)+sseChunk(t, second), model))
+		usage := lastUsage(transformStreamFor(t, sseChunk(t, first)+ContinuationStreamBoundary+"\n\n"+sseChunk(t, second), model))
 		require.NotNil(t, usage, model)
 		require.NotNil(t, usage.ServerToolUse, model)
 		assert.Equal(t, want, usage.ServerToolUse.WebSearchRequests, model+", streamed")

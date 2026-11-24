@@ -209,10 +209,11 @@ func outputToInputItems(output []OutputItem) []interface{} {
 					// Keep output_text type: valid for assistant-role messages in both
 					// the native Responses API (codex passthrough) and is handled by
 					// convertContentParts for the Chat Completions conversion path.
-					content = append(content, map[string]interface{}{
-						"type": "output_text",
-						"text": c.Text,
-					})
+					part := map[string]interface{}{"type": "output_text", "text": c.Text}
+					if c.ThoughtSignature != "" {
+						part["thought_signature"] = c.ThoughtSignature
+					}
+					content = append(content, part)
 				case "output_refusal", "refusal":
 					content = append(content, map[string]interface{}{
 						"type":    "refusal",

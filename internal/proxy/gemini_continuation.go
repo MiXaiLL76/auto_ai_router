@@ -204,7 +204,9 @@ func (s *continuationStream) Read(p []byte) (int, error) {
 		line, err := s.reader.ReadBytes('\n')
 		if len(line) > 0 {
 			s.observe(line)
-			s.pending = line
+			if !vertex.IsContinuation(s.finishReason) || !bytes.Equal(bytes.TrimSpace(line), []byte("data: [DONE]")) {
+				s.pending = line
+			}
 		}
 		if err == nil {
 			continue
@@ -213,11 +215,8 @@ func (s *continuationStream) Read(p []byte) (int, error) {
 			s.err = err
 			continue
 		}
-		// End the request's last event before the next request's first one.
-		if len(line) > 0 && line[len(line)-1] != '\n' {
-			s.pending = append(s.pending, '\n')
-		}
-		s.pending = append(s.pending, '\n')
+		// End the last event and mark the boundary before the next response.
+		s.pending = append(s.pending, "\n\n"+vertex.ContinuationStreamBoundary+"\n\n"...)
 	}
 	n := copy(p, s.pending)
 	s.pending = s.pending[n:]

@@ -167,10 +167,11 @@ response = client.chat.completions.create(
 
 Every search query Google ran — web and image alike, from the grounding metadata — is reported in
 `usage.server_tool_use.web_search_requests` and billed per query (`web_search_billing_unit: per_query`).
-The context Google Search retrieved (`toolUsePromptTokenCount`) is billed as input, except on
-`gemini-nano-banana-2.1`, whose pricing does not charge it: there it is left out of `prompt_tokens` when Google
-Search is the only tool that produced it. With `url_context`, code execution, Maps or retrieval grounding in the
-same response it stays in, as their context is billed. The model is recognized by Gemini's `modelVersion`, so
+The context Google Search retrieved (`toolUsePromptTokenCount`) is billed as input by default. On
+`gemini-nano-banana-2.1` and `gemini-4-hydrogen`, the router excludes it from input usage when Google Search is
+the only tool that produced it. The router keeps the tool-context tokens when the same upstream response also
+uses `url_context`, code execution, Maps or retrieval grounding. For a continued generation it applies the rule
+to each upstream response separately. The model is recognized by Gemini's `modelVersion`, so
 this holds under an alias too, and the other way round: a response whose `modelVersion` names another model is billed
 as that model (the routed model name counts only when Google sends no `modelVersion`).
 
@@ -220,7 +221,10 @@ Gemini 2.5 and Gemini 3+ models support configurable reasoning. The router suppo
 3. `extra_body.thinking` — Anthropic-style format
 4. `extra_body.reasoning_effort` — OpenAI format (lowest priority)
 
-If none are specified, the router explicitly suppresses autonomous thinking for **predictable latency**. Exceptions: `gemini-2.5-pro` cannot disable thinking and uses dynamic budget (`-1`) by default; [`gemini-nano-banana-2.1`](#gemini-nano-banana-21), [`gemini-4-argon` and `gemini-4-carbon`](#gemini-4-argon-and-carbon) keep their own default level (`MEDIUM`).
+If none are specified, the router explicitly suppresses autonomous thinking for **predictable latency**.
+`gemini-2.5-pro` defaults to dynamic budget (`-1`). [`gemini-nano-banana-2.1`](#gemini-nano-banana-21),
+[`gemini-4-argon` and `gemini-4-carbon`](#gemini-4-argon-and-carbon) default to `MEDIUM`.
+[`gemini-4-hydrogen`](#gemini-4-hydrogen) defaults to `HIGH`.
 
 Each source is read at the top level (where the OpenAI SDKs put `extra_body` keys) first, then inside a literal
 `extra_body` object; `thinking_config` is also read from `extra_body.generation_config`, as in Gemini's REST
@@ -228,7 +232,8 @@ shape. Gemini's camelCase spellings are accepted as well: `thinkingLevel`, and `
 `thinkingLevel` / `thinkingBudget` / `includeThoughts`.
 
 Every source resolves by the same rules on every model: level and effort names are case-insensitive and may use
-Gemini's enum spelling (`THINKING_LEVEL_HIGH`); `xhigh` and `max` mean `high`; `disable` means `none`. A model
+Gemini's enum spelling (`THINKING_LEVEL_HIGH`). `xhigh` and `max` map to `XHIGH` on Hydrogen and to the same
+setting as `high` on other models. `disable` means `none`. A model
 that takes a level (Gemini 3) reads a budget-only config as the level of the same depth (`0` → its floor, `-1` →
 the model's own default, ≥5,000 → `medium`, ≥15,000 → `high`), and a Gemini 2.5 model reads a level-only config as
 that level's budget (see the tables below). An effort the router does not know leaves the depth to the model: no
@@ -564,6 +569,28 @@ routes alike:
 - **Every Google Search query run is billed.** A query text the model ran twice counts twice in
   `web_search_requests`; grounding metadata a stream repeats is not counted again.
 
+### Gemini 4 Hydrogen
+
+`gemini-4-hydrogen` uses the same candidate, sampling, prefill, token limit, function call ID and search query
+rules as [Argon and Carbon](#gemini-4-argon-and-carbon). It uses `HIGH` by default and accepts `LOW`, `MEDIUM`,
+`HIGH` and `XHIGH`. Set `reasoning_effort: "xhigh"` on Chat Completions or
+`reasoning: {"effort": "xhigh"}` on Responses. Both routes also accept `max` and Gemini-native `thinking_level`
+or `thinking_config`. Both reject a native thinking budget or the native `MINIMAL` level with HTTP 400.
+
+When the provider returns a continuation token, the router resumes the generation on the same credential and
+combines the output and usage from all upstream responses.
+
+The router sends `generationConfig.thinkingConfig.prefixMismatchBehavior: "DROP"`, which tells Vertex to
+discard signatures whose prefix no longer matches after a history edit. When replaying parallel function calls,
+the router sends a thought signature on the first call only.
+
+- **Chat Completions** exposes signed assistant text in `provider_specific_fields.thought_signatures`.
+  Each entry carries `start` and `end` UTF-8 byte offsets into the full assistant text and a base64 `signature`.
+  Streaming offsets also refer to the full text. Echo the signatures on the assistant message when replaying it.
+- **Responses** exposes a signature as `thought_signature` on its `output_text` part. Preserve the field and
+  part boundaries when replaying output manually. The router preserves them when it restores stored output
+  through `previous_response_id`.
+
 ### Streaming
 
 SSE streaming works transparently:
@@ -606,4 +633,6 @@ The router provides accurate token counting with modality breakdown:
 - **Image and video tokens**: Reported separately (`prompt_tokens_details.image_tokens` / `video_tokens`), each at its own price; PDF pages (`DOCUMENT`) count as image tokens, as in embeddings
 - **Thinking tokens**: Included in completion count, tracked in `completion_tokens_details.reasoning_tokens`
 - **Generated image tokens**: Tracked in `completion_tokens_details.image_tokens` and billed at the image output rate, apart from text and thinking
-- **Google Search**: Queries in `server_tool_use.web_search_requests`, a query text repeated in a response once (except on [`gemini-4-argon` and `gemini-4-carbon`](#gemini-4-argon-and-carbon)); search-retrieved context counts as prompt tokens except on `gemini-nano-banana-2.1` (see [Google Search types](#google-search-types))
+- **Google Search**: Query counts appear in `server_tool_use.web_search_requests`. See
+  [Google Search types](#google-search-types) for input token accounting and the
+  [Gemini 4 model rules](#gemini-4-argon-and-carbon) for repeated queries.

@@ -295,14 +295,14 @@ func thinkingLevelForBudget(budget float64) string {
 }
 
 // thinkingName normalizes a level or effort name: case-insensitive, THINKING_LEVEL_
-// prefix dropped, "disable" → "none", xhigh/max → "high".
+// prefix dropped, "disable" → "none", "max" → "xhigh".
 func thinkingName(name string) string {
 	name = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(name)), "thinking_level_")
 	switch name {
 	case "disable", "disabled":
 		return "none"
-	case "xhigh", "max":
-		return "high"
+	case "max":
+		return "xhigh"
 	}
 	return name
 }
@@ -313,6 +313,7 @@ var thinkingLevelRank = map[string]int{
 	"low":     1,
 	"medium":  2,
 	"high":    3,
+	"xhigh":   4,
 }
 
 // gemini3ThinkingLevel maps a normalized level name to one the Gemini 3 model accepts:
@@ -328,7 +329,7 @@ func gemini3ThinkingLevel(name, model string) (genai.ThinkingLevel, bool) {
 			return genai.ThinkingLevelMedium, true
 		}
 		return genai.ThinkingLevelHigh, true
-	case "high":
+	case "high", "xhigh":
 		return genai.ThinkingLevelHigh, true
 	}
 	return "", false
@@ -343,7 +344,7 @@ func gemini25ThinkingBudget(name string) int32 {
 		return 1024
 	case "medium":
 		return 8192
-	case "high":
+	case "high", "xhigh":
 		return 24576
 	}
 	return -1

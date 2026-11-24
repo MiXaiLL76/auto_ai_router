@@ -23,6 +23,10 @@ import (
 // 1,048,576-token budget at 32,768 tokens a request takes 32 of them.
 const MaxContinuations = 40
 
+// ContinuationStreamBoundary separates two upstream SSE responses. The proxy
+// writes it after draining the first response, including any trailing usage.
+const ContinuationStreamBoundary = ": air-gemini-continuation"
+
 // SupportsLongDecode reports whether model continues a long generation with
 // continuation tokens.
 func SupportsLongDecode(model string) bool {
@@ -88,10 +92,17 @@ func MergeContinuationResponses(bodies [][]byte) ([]byte, error) {
 	var merged *genai.GenerateContentResponse
 	var initialPromptTokens int32
 	var searches WebSearchQueries
+	var billableTools toolTokenUsage
 	for i, body := range bodies {
 		var resp genai.GenerateContentResponse
 		if err := json.Unmarshal(body, &resp); err != nil {
 			return nil, fmt.Errorf("continuation response %d: %w", i, err)
+		}
+		var sources ToolUseSources
+		sources.Add(resp.Candidates, resp.ModelVersion)
+		if meta := resp.UsageMetadata; meta != nil && !sources.searchOnly() {
+			billableTools.Count += meta.ToolUsePromptTokenCount
+			billableTools.Details = addModalityTokenCounts(billableTools.Details, meta.ToolUsePromptTokensDetails)
 		}
 		searches.Add(resp.Candidates)
 		searches.CloseResponse()
@@ -108,7 +119,8 @@ func MergeContinuationResponses(bodies [][]byte) ([]byte, error) {
 		return nil, fmt.Errorf("no continuation responses")
 	}
 	body, err := json.Marshal(merged)
-	if err != nil || (initialPromptTokens <= 0 && searches.closedRuns == 0) {
+	hasToolTokens := merged.UsageMetadata != nil && merged.UsageMetadata.ToolUsePromptTokenCount > 0
+	if err != nil || (initialPromptTokens <= 0 && searches.closedRuns == 0 && !hasToolTokens) {
 		return body, err
 	}
 	// What the merged response no longer tells rides along under fields of our
@@ -117,6 +129,13 @@ func MergeContinuationResponses(bodies [][]byte) ([]byte, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(body, &fields); err != nil {
 		return nil, err
+	}
+	if hasToolTokens {
+		encoded, err := json.Marshal(billableTools)
+		if err != nil {
+			return nil, err
+		}
+		fields["continuationBillableToolTokens"] = encoded
 	}
 	if initialPromptTokens > 0 {
 		fields[initialPromptTokensField] = json.RawMessage(fmt.Sprint(initialPromptTokens))
@@ -352,26 +371,26 @@ type ContinuationUsage struct {
 	InitialPromptTokens int32
 }
 
-// Observe records one chunk's usage and returns the generation's usage so far.
-func (u *ContinuationUsage) Observe(meta *genai.GenerateContentResponseUsageMetadata) *genai.GenerateContentResponseUsageMetadata {
+// Observe records the latest cumulative counters for the current upstream request.
+func (u *ContinuationUsage) Observe(meta *genai.GenerateContentResponseUsageMetadata) {
 	if meta != nil {
 		u.current = meta
 		if u.closed == nil && meta.PromptTokenCount > 0 {
 			u.InitialPromptTokens = meta.PromptTokenCount
 		}
 	}
-	return u.Total()
 }
 
 // CloseRequest ends the running request after its CONTINUATION finish.
-func (u *ContinuationUsage) CloseRequest() {
-	u.closed = AddUsageMetadata(u.closed, u.current)
+func (u *ContinuationUsage) CloseRequest(sources *ToolUseSources, model string) {
+	u.closed = u.BillableTotal(*sources, model, true)
+	*sources = ToolUseSources{modelVersion: sources.modelVersion}
 	u.current = nil
 }
 
-// Total returns the usage of the finished requests plus the running one's latest.
-func (u *ContinuationUsage) Total() *genai.GenerateContentResponseUsageMetadata {
-	return AddUsageMetadata(u.closed, u.current)
+// BillableTotal classifies the current upstream request before adding closed requests.
+func (u *ContinuationUsage) BillableTotal(sources ToolUseSources, model string, finished bool) *genai.GenerateContentResponseUsageMetadata {
+	return AddUsageMetadata(u.closed, streamUsageMetadata(u.current, sources, model, finished))
 }
 
 // Continued reports whether the generation has gone past its first request.

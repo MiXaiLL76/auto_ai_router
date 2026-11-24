@@ -327,14 +327,14 @@ func TestResponsesMergedContinuationCountsSearchesRequestByRequest(t *testing.T)
 		require.NotNil(t, resp.Usage.ServerToolUse, model)
 		assert.Equal(t, want, resp.Usage.ServerToolUse.WebSearchRequests, model)
 
-		completed, _ := streamToResponsesFor(t, "data: "+first+"\n\ndata: "+second+"\n\n", model)
+		completed, _ := streamToResponsesFor(t, "data: "+first+"\n\n"+vertex.ContinuationStreamBoundary+"\n\ndata: "+second+"\n\n", model)
 		require.NotNil(t, completed.Usage.ServerToolUse, model)
 		assert.Equal(t, want, completed.Usage.ServerToolUse.WebSearchRequests, model+", streamed")
 	}
 }
 
 func TestArgonResponsesContinuedStream(t *testing.T) {
-	resp, sse := streamToResponses(t, continuedResponsesStream+finalResponsesSegment)
+	resp, sse := streamToResponses(t, continuedResponsesStream+vertex.ContinuationStreamBoundary+"\n\n"+finalResponsesSegment)
 	assert.Equal(t, "completed", resp.Status)
 	assert.Equal(t, 1, strings.Count(sse, "event: response.completed"))
 	require.NotNil(t, resp.Usage)
