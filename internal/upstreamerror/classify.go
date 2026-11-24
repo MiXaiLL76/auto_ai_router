@@ -1012,11 +1012,28 @@ func leadingParameterName(s string) string {
 func extractQuotedInvalidField(signals []string) *string {
 	const marker = "invalid '"
 	for _, s := range signals {
-		idx := strings.Index(strings.ToLower(s), marker)
+		// The marker is located in a LOWERCASED copy, but the field is cut
+		// out of the ORIGINAL. The two are reconciled by RUNE count, not by
+		// byte offset: Unicode lowering can change a string's byte length
+		// (U+212A "K" lowercases to one byte, U+0130 "İ" is two bytes that
+		// lowercase to one), so a byte offset found in the lowered copy
+		// would point at the wrong place in the original and the field
+		// would be cut mid-name or missed entirely.
+		//
+		// This is the same fix extractUnrecognizedArgumentName applies, for
+		// the same reason.
+		lower := strings.ToLower(s)
+		idx := strings.Index(lower, marker)
 		if idx == -1 {
 			continue
 		}
-		rest := s[idx+len(marker):]
+		markerRunes := utf8.RuneCountInString(marker)
+		startRunes := utf8.RuneCountInString(lower[:idx])
+		original := []rune(s)
+		if startRunes+markerRunes > len(original) {
+			continue
+		}
+		rest := string(original[startRunes+markerRunes:])
 		end := strings.IndexByte(rest, '\'')
 		if end <= 0 {
 			continue
