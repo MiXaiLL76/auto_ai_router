@@ -24,10 +24,14 @@ func applyDeepSeekToolUsageTo(usage *converter.TokenUsage, loop *converter.Token
 	// The loop's counts already include the last step's (they are the sum of
 	// every step), so the last step's own figures must not be counted twice.
 	//
-	// A count the loop has none of does not replace what the request
-	// already knows: a stream that broke before its usage frame leaves the
-	// loop with no counts at all, and zeroing the request's own figures
-	// would bill the answer for nothing.
+	// Only a positive loop count replaces what the spend path already resolved.
+	// A zero loop count means no step reported that figure, not that the whole
+	// loop produced nothing: the streamed answer may still have been estimated
+	// locally (the loop's read only sees provider usage objects, and a provider
+	// that sends none leaves the sum at zero). Overwriting with that zero billed
+	// a real answer as no output. A stream that broke before its usage frame
+	// leaves the loop with no counts at all, and zeroing the request's own
+	// figures would bill the answer for nothing.
 	if loop.PromptTokens > 0 {
 		usage.PromptTokens = loop.PromptTokens
 	}

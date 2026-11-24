@@ -561,27 +561,25 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	var lastUsage *converter.TokenUsage
 	// Field presence cannot be read from lastUsage: values alone cannot tell
 	// "the provider reported completion_tokens:0" from "the provider never
-	// reported it", and MergeNonZero drops zeros. finalizeStreamingLog reads it
-	// from two sources, mirrored here because this path writes the spend row
-	// itself instead of going through it: the stream's final data payload (its
-	// usageInfo) and the last usage frame the merge kept, which a later
-	// usage-less frame can hide (its presenceInfo). Both are per-call state, so
-	// a retry that reaches this function starts from an empty picture by
-	// construction.
-	usageExtractor := &openAIStreamUsageExtractor{}
+	// reported it", and MergeNonZero drops zeros. Two sources are tracked, the
+	// same ones finalizeStreamingLog reads: the stream's final data payload
+	// (lastDataPayload) and the last usage frame the extractor saw
+	// (lastUsageInfo) — parsed here, not read second-hand from lastUsage, so an
+	// all-zero frame the shared converter drops is still visible. Both are
+	// per-call state, so a retry that reaches this function starts from an empty
+	// picture by construction.
+	usageExtractor := streamUsageExtractorFor("openai", !tokenUsageOptions.AudioInputIncludesCachedAudio)
+	lastUsage = &converter.TokenUsage{}
 	var lastUsageInfo *StreamUsageInfo
-	var lastUsageAnswerTokens int
+	var lastUsageAnswerProgress int
 	var lastDataPayload []byte
-	recordUsage := func(usage *converter.TokenUsage, info *StreamUsageInfo, answerTokens int) {
-		if lastUsage == nil {
-			lastUsage = &converter.TokenUsage{}
-		}
+	recordUsage := func(usage *converter.TokenUsage, info *StreamUsageInfo, answerProgress int) {
 		lastUsage.MergeNonZero(usage)
 		if info != nil {
 			lastUsageInfo = info
-			lastUsageAnswerTokens = answerTokens
+			lastUsageAnswerProgress = answerProgress
 		}
-		if logCtx != nil && usage.Total() > 0 {
+		if logCtx != nil && usage != nil && usage.Total() > 0 {
 			logCtx.UsageSource = "provider"
 		}
 	}
@@ -597,8 +595,13 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 			if logCtx != nil && logCtx.IsImageGeneration {
 				logCtx.observeImageStreamPayloads(payloadBuf)
 			}
-			if usage := extractTokenUsageFromPayloads(payloadBuf, tokenUsageOptions); usage != nil {
-				recordUsage(usage, usageExtractor.ExtractUsage(chunk), completion.TokenCount())
+			usage := extractTokenUsageFromPayloads(payloadBuf, tokenUsageOptions)
+			// The extractor sees field presence even when the converter returns
+			// nil for an all-zero usage object — which is the provider explicitly
+			// saying "nothing was generated" and can correct an earlier non-zero.
+			info := usageExtractor.ExtractUsage(chunk)
+			if usage != nil || info != nil {
+				recordUsage(usage, info, completion.AnswerProgress())
 			}
 		}
 		// The final data payload, read the way the finalizer reads lastChunk: a
@@ -615,88 +618,43 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 		usageLines.Observe(chunk, onLine)
 	}
 
-	// buildFallbackUsage applies the same provider-report rules as
-	// finalizeStreamingLogParsed: a field the provider reported is never
-	// replaced by an estimate (a completion zero included — it overrides an
-	// intermediate non-zero the merge kept), a missing field falls back to the
-	// local estimate, and an all-zero usage object is trusted as the provider's
-	// coherent "nothing happened" report (explicitZeroUsage there). A zero that
-	// arrives before the answer it describes (a placeholder) is not the
-	// provider's final word and is treated as missing, mirroring
-	// staleUsageFrame.
+	// buildFallbackUsage applies the provider-report rules shared with
+	// finalizeStreamingLogParsed (resolveStreamUsage): a field the provider
+	// reported is never replaced by an estimate (a completion zero included — it
+	// overrides an intermediate non-zero the merge kept), a missing field falls
+	// back to the local estimate, and an all-zero usage object is trusted as the
+	// provider's coherent "nothing happened" report. A frame that arrives before
+	// the answer it describes (a placeholder zero, or a running count) is not the
+	// provider's final word and its completion count is treated as missing.
 	buildFallbackUsage := func() *converter.TokenUsage {
-		answerTokens := completion.TokenCount()
-		usage := lastUsage
 		var finalPayloadInfo *StreamUsageInfo
 		if len(lastDataPayload) > 0 {
 			finalPayloadInfo = usageExtractor.ExtractUsage(lastDataPayload)
 		}
-		providerPromptPresent := finalPayloadInfo != nil && finalPayloadInfo.PromptTokensPresent
-		if lastUsageInfo != nil && lastUsageInfo.PromptTokensPresent {
-			providerPromptPresent = true
+		var promptEstimate func() int
+		if logCtx != nil {
+			promptEstimate = logCtx.promptTokensEstimate
 		}
-
-		// Completion presence: the final payload is the provider's last word, so
-		// never stale; the tracked frame may predate the answer it counts.
-		completionReported := false
-		switch {
-		case finalPayloadInfo != nil && finalPayloadInfo.CompletionTokensPresent:
-			completionReported = true
-			if usage != nil {
-				usage.CompletionTokens = finalPayloadInfo.CompletionTokens
-			}
-		case lastUsageInfo != nil && lastUsageInfo.CompletionTokensPresent &&
-			(lastUsageInfo.CompletionTokens != 0 || lastUsageAnswerTokens >= answerTokens):
-			completionReported = true
-			if lastUsageInfo.CompletionTokens == 0 && usage != nil {
-				// An explicit final completion_tokens:0 wins over whatever an
-				// intermediate chunk reported (MergeNonZero skipped that zero
-				// while the stream passed).
-				usage.CompletionTokens = 0
-			}
-		case usage != nil && usage.CompletionTokens > 0:
-			// A positive count survived the merge, so the provider reported it.
-			completionReported = true
-		}
-
-		explicitZeroUsage := providerPromptPresent && completionReported &&
-			(usage == nil || (usage.PromptTokens == 0 && usage.CompletionTokens == 0))
-		if explicitZeroUsage {
-			// The provider's own all-zero report: still a spend row, sourced from
-			// the provider, not from an estimate (the finalizer does the same).
-			if usage == nil {
-				usage = &converter.TokenUsage{}
-			}
-			if logCtx != nil {
+		hadUsage := lastUsage != nil && lastUsage.Total() > 0
+		usage, outcome := resolveStreamUsage(streamUsageResolution{
+			usage:           lastUsage,
+			tracked:         lastUsageInfo,
+			trackedProgress: lastUsageAnswerProgress,
+			finalInfo:       finalPayloadInfo,
+			answerProgress:  completion.AnswerProgress(),
+			answerTokens:    completion.TokenCount(),
+			promptEstimate:  promptEstimate,
+		})
+		if logCtx != nil {
+			if outcome.providerUsage {
 				logCtx.UsageSource = "provider"
-			}
-		}
-		if !completionReported && !explicitZeroUsage && answerTokens > 0 &&
-			(usage == nil || usage.CompletionTokens == 0) {
-			if usage == nil {
-				usage = &converter.TokenUsage{}
-			}
-			usage.CompletionTokens = answerTokens
-			if logCtx != nil && logCtx.UsageSource == "" {
+			} else if logCtx.UsageSource == "" && usage.Total() > 0 {
 				logCtx.UsageSource = "estimated"
 			}
 		}
-		// Prompt side mirrors the finalizer's branch: a reported count is never
-		// replaced, a zero that was not part of an all-zero report is a missing
-		// count (the request certainly had tokens), and the caller used to do
-		// this backfill by hand — two implementations of the same rule, one of
-		// which silently did nothing when the provider sent a zero-only usage
-		// object this path could not see.
-		if !explicitZeroUsage && (usage == nil || usage.PromptTokens == 0) && logCtx != nil {
-			if estimate := logCtx.promptTokensEstimate(); estimate > 0 {
-				if usage == nil {
-					usage = &converter.TokenUsage{}
-				}
-				usage.PromptTokens = estimate
-				if logCtx.UsageSource == "" {
-					logCtx.UsageSource = "estimated"
-				}
-			}
+		if !hadUsage && !outcome.providerUsage &&
+			usage.PromptTokens == 0 && usage.CompletionTokens == 0 {
+			return nil
 		}
 		return usage
 	}
@@ -716,12 +674,14 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	)
 	if logCtx != nil && logCtx.HideWebSearchResults {
 		clientReader = newWebSearchResultsStripReader(clientReader, func(payload []byte) {
-			if usage := converter.ExtractTokenUsageWithOptions(payload, tokenUsageOptions); usage != nil {
+			usage := converter.ExtractTokenUsageWithOptions(payload, tokenUsageOptions)
+			info := usageExtractor.ExtractUsage(payload)
+			if usage != nil || info != nil {
 				// This reader is upstream of the accumulator, so the payload's own
-				// text is not in the count yet; that only makes a zero look earlier
-				// than it is, i.e. falls back to the estimate instead of billing
-				// nothing (see buildFallbackUsage).
-				recordUsage(usage, usageExtractor.ExtractUsage(payload), completion.TokenCount())
+				// text is not in the progress yet; that only makes a frame look
+				// earlier than it is, i.e. falls back to the estimate instead of
+				// billing nothing (see buildFallbackUsage).
+				recordUsage(usage, info, completion.AnswerProgress())
 			}
 		})
 	}

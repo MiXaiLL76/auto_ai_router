@@ -2191,8 +2191,9 @@ func resetSimulatedAttemptState(logCtx *RequestLogContext) (outcome string) {
 	// The tracked usage frame describes the attempt that reported it too: keeping
 	// it would let a dead attempt's field presence decide whether the successful
 	// attempt's zero is final.
-	logCtx.lastUsageChunk = nil
-	logCtx.lastUsageAnswerTokens = 0
+	logCtx.lastUsageInfo = nil
+	logCtx.lastUsageAnswerProgress = 0
+	logCtx.answerProgress = 0
 	return outcome
 }
 

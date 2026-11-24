@@ -348,6 +348,80 @@ func TestProxyRequest_FinalZeroCompletionOverridesIntermediate(t *testing.T) {
 	}
 }
 
+// TestProxyRequest_StalePositiveCompletionBillsStreamedAnswer is the regression guard
+// for a running completion count: the provider reports completion_tokens:1 mid-stream
+// and then streams the rest of the answer without repeating the count. The tracked
+// count was taken before that text, so it is not the provider's final word; billing it
+// would undercount the same way the empty-stream bug overcounted.
+func TestProxyRequest_StalePositiveCompletionBillsStreamedAnswer(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/v1/chat/completions", r.URL.Path)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(
+			"data: {\"id\":\"chat-running\",\"model\":\"test-running\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}],\"usage\":{\"prompt_tokens\":900,\"completion_tokens\":1,\"total_tokens\":901}}\n\n" +
+				"data: {\"id\":\"chat-running\",\"model\":\"test-running\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" this answer continues well past the early running count and therefore bills far more than one token\"}}]}\n\n" +
+				"data: {\"id\":\"chat-running\",\"model\":\"test-running\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+				"data: [DONE]\n\n"))
+	}))
+	defer upstream.Close()
+
+	completions := make(map[config.ProviderType]int, len(chatStreamCreditTypes))
+	for _, credType := range chatStreamCreditTypes {
+		prx, dbStub := newChatStreamTestProxy(t, upstream.URL, credType, "test-running")
+
+		w := postChatStream(t, prx, "test-running")
+
+		require.Equal(t, http.StatusOK, w.Code)
+		require.Len(t, dbStub.loggedEntries, 1)
+		entry := dbStub.loggedEntries[0]
+		assert.Greater(t, entry.CompletionTokens, 1,
+			"a running count the streamed answer outgrew must not veto the local estimate")
+		assert.Equal(t, 900, entry.PromptTokens)
+		completions[credType] = entry.CompletionTokens
+	}
+
+	want := completions[chatStreamCreditTypes[0]]
+	for _, credType := range chatStreamCreditTypes {
+		assert.Equal(t, want, completions[credType],
+			"%s must bill the same completion count as %s", credType, chatStreamCreditTypes[0])
+	}
+}
+
+// TestProxyRequest_AllZeroCorrectionBeforeFinishFrame covers an explicit zero that is
+// not the stream's last data payload: the provider corrected an intermediate
+// completion_tokens:1 with an all-zero usage object, then closed with a usage-less
+// finish frame. The zero must win over the earlier non-zero even though nothing
+// followed it; only the prompt zero is not trusted (a trailing frame means it was
+// not the provider's final word about the request).
+func TestProxyRequest_AllZeroCorrectionBeforeFinishFrame(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/v1/chat/completions", r.URL.Path)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(
+			"data: {\"id\":\"chat-correct\",\"model\":\"test-correct\",\"choices\":[],\"usage\":{\"prompt_tokens\":900,\"completion_tokens\":1,\"total_tokens\":901}}\n\n" +
+				"data: {\"id\":\"chat-correct\",\"model\":\"test-correct\",\"choices\":[],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0,\"total_tokens\":0}}\n\n" +
+				"data: {\"id\":\"chat-correct\",\"model\":\"test-correct\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+				"data: [DONE]\n\n"))
+	}))
+	defer upstream.Close()
+
+	for _, credType := range chatStreamCreditTypes {
+		t.Run(string(credType), func(t *testing.T) {
+			prx, dbStub := newChatStreamTestProxy(t, upstream.URL, credType, "test-correct")
+
+			w := postChatStream(t, prx, "test-correct")
+
+			require.Equal(t, http.StatusOK, w.Code)
+			require.Len(t, dbStub.loggedEntries, 1)
+			entry := dbStub.loggedEntries[0]
+			assert.Zero(t, entry.CompletionTokens,
+				"the provider's explicit zero correction must override the earlier non-zero")
+			assert.Equal(t, 900, entry.PromptTokens,
+				"the prompt count the provider did report is kept")
+		})
+	}
+}
+
 // TestProxyRequest_FinalZeroNotInLastChunk_Messages covers the same [P2] rule on the
 // Messages wire, where the provider's final usage is not the stream's final data frame:
 // usage rides in message_delta, and message_stop closes the stream with no usage at all.
