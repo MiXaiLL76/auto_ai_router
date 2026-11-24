@@ -519,6 +519,22 @@ func TestExtractQuotedInvalidField(t *testing.T) {
 			signals: []string{"Invalid '': something"},
 			want:    nil,
 		},
+		{
+			// U+212A KELVIN SIGN lowercases to one-byte 'k': a byte offset
+			// into the lowered copy lands two bytes early in the original,
+			// and the field is cut wrong.
+			name:    "marker after a rune whose lowercase is narrower",
+			signals: []string{"K Invalid 'output[1].type': bad"},
+			want:    stringPtr("output[1].type"),
+		},
+		{
+			// U+0130 lowercases to 'i': the lowered copy is a byte shorter,
+			// so a byte offset into it lands inside the quote itself and
+			// the field is lost.
+			name:    "marker after a rune whose lowercase is shorter",
+			signals: []string{"İnvalid request body. Invalid 'output[1].type': bad"},
+			want:    stringPtr("output[1].type"),
+		},
 	}
 
 	for _, tt := range tests {
