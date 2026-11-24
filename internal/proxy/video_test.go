@@ -65,6 +65,29 @@ func TestVideoPrincipalResolverUsesOrganizationPolicyPrice(t *testing.T) {
 	require.Equal(t, "0.07", principal.RatePerSecond)
 	require.Equal(t, "USD", principal.Currency)
 
+	t.Run("credential restriction blocks creation and keeps existing jobs accessible", func(t *testing.T) {
+		db.tokens["video-key"].TeamMetadata = map[string]interface{}{"allowed_cred": []string{"route-01"}}
+		t.Cleanup(func() { db.tokens["video-key"].TeamMetadata = nil })
+		resolver := NewVideoPrincipalResolver(prx)
+		request := httptest.NewRequest(http.MethodPost, "/v1/videos", nil)
+		request.Header.Set("Authorization", "Bearer video-key")
+		response := httptest.NewRecorder()
+		_, err := resolver.ResolvePrincipal(response, request, "runway/gen4_turbo")
+		require.ErrorIs(t, err, errNoPermittedCredential)
+		require.Equal(t, http.StatusServiceUnavailable, response.Code)
+		require.NotContains(t, response.Body.String(), "route-01")
+
+		expected := principal
+		expected.RatePerSecond = ""
+		for _, method := range []string{http.MethodGet, http.MethodDelete} {
+			request := httptest.NewRequest(method, "/v1/videos/vid-existing", nil)
+			request.Header.Set("Authorization", "Bearer video-key")
+			existing, err := resolver.ResolvePrincipal(httptest.NewRecorder(), request, "")
+			require.NoError(t, err)
+			require.Equal(t, expected, existing)
+		}
+	})
+
 	limit := 10.0
 	db.tokens["video-key"].MaxBudget = &limit
 	limitedRequest := httptest.NewRequest(http.MethodPost, "/v1/videos", nil)

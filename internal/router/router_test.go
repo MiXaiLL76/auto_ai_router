@@ -295,6 +295,38 @@ func TestServeHTTP_HealthCheck_ScopedViewDoesNotDriveStatusCode(t *testing.T) {
 	assert.Equal(t, float64(0), response["total_credentials"])
 }
 
+func TestDiagnosticVisibilityIsIndependentOfCredentialAllowlist(t *testing.T) {
+	credentials := []config.CredentialConfig{
+		{Name: "account-a", Type: config.ProviderTypeOpenAI, BaseURL: "http://a.example", RoutingID: "route-01"},
+		{Name: "account-b", Type: config.ProviderTypeOpenAI, BaseURL: "http://b.example"},
+		{Name: "private-account", Type: config.ProviderTypeOpenAI, BaseURL: "http://private.example", Scopes: []string{"private"}},
+	}
+	prx := createProxyWithConfig(credentials, nil)
+	prx.LiteLLMDB = &routerAuthTestDB{tokens: map[string]*dbmodels.TokenInfo{
+		"customer-key": {
+			Token: "test-hash", UserID: "test-user",
+			Metadata: map[string]any{"allowed_cred": []string{"route-01"}},
+		},
+	}}
+	router := New(prx, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+	for _, endpoint := range []string{"/health", "/trace?depth=0"} {
+		t.Run(endpoint, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, endpoint, nil)
+			req.Header.Set("Authorization", "Bearer customer-key")
+			visibility, err := prx.ScopeContextForRequest(req)
+			require.NoError(t, err)
+			require.True(t, visibility.HasCredentialRestriction())
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, req)
+			assert.Equal(t, http.StatusOK, w.Code)
+			assert.Contains(t, w.Body.String(), "account-a")
+			assert.Contains(t, w.Body.String(), "account-b")
+			assert.NotContains(t, w.Body.String(), "private-account")
+			assert.NotContains(t, w.Body.String(), "route-01")
+		})
+	}
+}
+
 func TestServeHTTP_HealthCheck_UnverifiableTokenFallsBackToPublic(t *testing.T) {
 	credentials := []config.CredentialConfig{
 		{Name: "team-a", APIKey: "key1", BaseURL: "http://team-a.example", RPM: 100, Scopes: []string{"team-a"}},

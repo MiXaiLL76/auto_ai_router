@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/mixaill76/auto_ai_router/internal/scope"
 )
 
 // Validate checks configuration and applies defaults in order, returning the first error.
@@ -242,10 +244,17 @@ func duplicateErrorCode(rules []ErrorCodeRuleConfig) (int, bool) {
 }
 
 func (c *Config) validateCredentials() error {
+	routingIDs := make(map[string]string)
 	for i := range c.Credentials {
 		cred := &c.Credentials[i]
 		if err := cred.validate(i); err != nil {
 			return err
+		}
+		if cred.RoutingID != "" {
+			if previous, ok := routingIDs[cred.RoutingID]; ok {
+				return fmt.Errorf("credential %s: routing_id is already assigned to credential %s", cred.Name, previous)
+			}
+			routingIDs[cred.RoutingID] = cred.Name
 		}
 		// Share fallback priority normalization with DB credentials.
 		cred.NormalizeFallbackPriority()
@@ -265,6 +274,14 @@ func (cred *CredentialConfig) validate(i int) error {
 	// Validate provider type
 	if !cred.Type.IsValid() {
 		return fmt.Errorf("credential %s: invalid type: %s (must be 'openai', 'vertex-ai', 'gemini', 'anthropic', 'cometapi', 'proman', 'bedrock', 'proxy', 'air', or 'vllm')", cred.Name, cred.Type)
+	}
+	if cred.RoutingID != "" {
+		if !scope.ValidCredentialRoutingID(cred.RoutingID) {
+			return fmt.Errorf("credential %s: routing_id must be route- followed by 1 to 12 digits", cred.Name)
+		}
+		if cred.IsProxyLike() {
+			return fmt.Errorf("credential %s: routing_id requires a direct credential", cred.Name)
+		}
 	}
 	if cred.AuthType != "" && cred.AuthType != "bearer" && cred.AuthType != "x-api-key" {
 		return fmt.Errorf("credential %s: invalid auth_type: %s (must be 'bearer' or 'x-api-key')", cred.Name, cred.AuthType)

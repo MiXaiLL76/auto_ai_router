@@ -44,6 +44,7 @@ nav = [
     { "Fail2Ban" = "advanced/f2b.md" },
     { "Retries and Request Cleanup" = "advanced/retry.md" },
     { "Session-Sticky Routing" = "advanced/session_sticky.md" },
+    { "Credential Allowlists" = "advanced/credential_allowlists.md" },
     { "Responses API" = "advanced/responses.md" },
     { "Redis / Valkey" = "advanced/redis.md" },
     { "Model Aliases" = "advanced/model_alias.md" },

@@ -1631,6 +1631,9 @@ func (p *Proxy) selectCredentialForModel(
 	var errorMsg string
 	if errors.Is(err, balancer.ErrRateLimitExceeded) || errors.Is(fallbackErr, balancer.ErrRateLimitExceeded) {
 		errorMsg = "Rate limit exceeded"
+	} else if logCtx.Scope.HasCredentialRestriction() {
+		errCode = http.StatusServiceUnavailable
+		errorMsg = errNoPermittedCredential.Error()
 	} else {
 		errorMsg = fmt.Sprintf("No credentials available for model %s", modelID)
 	}
@@ -1658,6 +1661,10 @@ func (p *Proxy) selectCredentialForModel(
 		)
 	}
 	logCtx.Logged = true
+	if errCode == http.StatusServiceUnavailable {
+		WriteErrorServiceUnavailable(w, errorMsg)
+		return nil, false
+	}
 	p.setRetryAfterFromBan(w, modelID, exclude, logCtx.Scope)
 	WriteErrorRateLimit(w, errorMsg)
 	return nil, false

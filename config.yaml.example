@@ -117,6 +117,7 @@ otel:
 credentials:
   # Direct provider credentials
   - name: "openai_main"
+    # routing_id: route-01  # Optional neutral ID for LiteLLM allowed_cred metadata.
     type: "openai"
     api_key: "sk-proj-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
     base_url: "https://api.openai.com"

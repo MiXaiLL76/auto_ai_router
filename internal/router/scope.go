@@ -14,5 +14,7 @@ func (r *Router) visibilityScopeOrPublic(req *http.Request) scope.Context {
 	if err != nil {
 		return scope.PublicContext()
 	}
-	return visibility
+	// Health and trace report account names. Keep their existing scope
+	// filter independent of the caller's credential routing IDs.
+	return visibility.WithoutCredentialRestriction()
 }

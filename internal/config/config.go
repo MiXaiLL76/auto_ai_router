@@ -1168,6 +1168,8 @@ type CredentialConfig struct {
 	BaseURL  string       `yaml:"base_url"`
 	ProxyURL string       `yaml:"proxy_url,omitempty"`
 	AuthType string       `yaml:"auth_type,omitempty"`
+	// RoutingID is the provider-neutral reference used in LiteLLM metadata.
+	RoutingID string `yaml:"routing_id,omitempty" json:"-"`
 	// OpenAIProtocol switches a cometapi credential from CometAPI's
 	// Anthropic-compatible wire protocol (/v1/messages) to its
 	// OpenAI-compatible one (/v1/chat/completions). Only valid when
@@ -1263,6 +1265,10 @@ type CredentialConfig struct {
 }
 
 func (c CredentialConfig) VisibleTo(visibility scope.Context) bool {
+	if visibility.HasCredentialRestriction() &&
+		(c.IsProxyLike() || c.RoutingID == "" || !visibility.AllowsCredentialID(c.RoutingID)) {
+		return false
+	}
 	return visibility.AllowsExpression(c.ScopeExpression())
 }
 
@@ -1363,6 +1369,7 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 	// Create a temporary struct with all string fields
 	type tempConfig struct {
 		Name                  string           `yaml:"name"`
+		RoutingID             string           `yaml:"routing_id,omitempty"`
 		Type                  string           `yaml:"type"`
 		APIKey                string           `yaml:"api_key"`
 		BaseURL               string           `yaml:"base_url"`
@@ -1408,6 +1415,7 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 
 	// Resolve string fields
 	c.Name = resolveEnvString(temp.Name)
+	c.RoutingID = temp.RoutingID
 	c.Type = normalizeProviderType(resolveEnvString(temp.Type))
 	c.APIKey = resolveEnvString(temp.APIKey)
 	c.BaseURL = resolveEnvString(temp.BaseURL)

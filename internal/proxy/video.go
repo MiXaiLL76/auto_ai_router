@@ -53,6 +53,12 @@ func (r *VideoPrincipalResolver) ResolvePrincipal(w http.ResponseWriter, req *ht
 	if model == "" {
 		return principal, nil
 	}
+	// The video worker uses its own provider client. It cannot enforce
+	// credential visibility for a new job.
+	if visibility.HasCredentialRestriction() {
+		WriteErrorServiceUnavailable(w, errNoPermittedCredential.Error())
+		return video.Principal{}, errNoPermittedCredential
+	}
 	if videoAdmissionHasUnsupportedLimits(tokenInfo) {
 		WriteErrorServiceUnavailable(w, "Video generation is unavailable for budgeted or rate-limited keys")
 		return video.Principal{}, errors.New("video admission limits require durable reservation support")
