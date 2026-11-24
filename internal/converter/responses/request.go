@@ -277,6 +277,9 @@ func outputToInputItems(output []OutputItem) []interface{} {
 				}
 				if len(content) > 0 {
 					reasoningItem["content"] = content
+				} else if item.EncryptedContent != "" {
+					// The Responses input schema requires an array even for encrypted-only reasoning.
+					reasoningItem["summary"] = []interface{}{}
 				}
 			}
 			// Preserve encrypted_content for same-provider round-trips (Anthropic).
@@ -572,14 +575,11 @@ func PrepareCodexPassthrough(body []byte, prevEntryHandled bool) []byte {
 	// rejected — recover a valid summary from "content" when possible.
 	//
 	// A "summary" key that is already a list — even an empty one — already
-	// satisfies "must be a list" and is left untouched. If it's absent (or
-	// unrecoverable) but the item still carries encrypted_content, keep the
-	// item as-is rather than drop it: this router's own outputToInputItems
-	// produces exactly that shape (no "summary" key at all) for round-tripped
-	// encrypted reasoning, and it already passes through fine without one —
-	// dropping it here would just be a self-inflicted regression. Only an item
-	// with neither a usable summary nor encrypted_content carries nothing
-	// useful for the next turn and gets dropped.
+	// satisfies "must be a list" and is left untouched. History restored by
+	// outputToInputItems includes an empty array for encrypted-only items.
+	// Preserve externally supplied encrypted reasoning even if its summary
+	// cannot be recovered. Drop items with neither a usable summary nor
+	// encrypted_content.
 	if inputVal, ok := raw["input"]; ok {
 		if inputArr, ok := inputVal.([]interface{}); ok {
 			out := make([]interface{}, 0, len(inputArr))
@@ -617,8 +617,7 @@ func PrepareCodexPassthrough(body []byte, prevEntryHandled bool) []byte {
 					continue
 				}
 				if ec, ok := itemMap["encrypted_content"].(string); ok && ec != "" {
-					// No summary to recover, but encrypted_content alone is
-					// known-good today — leave the item exactly as-is.
+					// Keep the opaque reasoning data supplied by the caller.
 					out = append(out, item)
 					continue
 				}

@@ -1647,6 +1647,32 @@ func TestPrependHistoryToInput_ReasoningEncryptedContent(t *testing.T) {
 	assert.Equal(t, "sigma:encrypted_thinking_token", rs["encrypted_content"])
 }
 
+func TestPrepareCodexPassthrough_RestoredEncryptedReasoningSummary(t *testing.T) {
+	body := []byte(`{"model":"gpt-6.1-terra","previous_response_id":"resp_previous","input":"continue"}`)
+	history := json.RawMessage(`[{"role":"user","content":"first turn"}]`)
+	previousOutput := []OutputItem{{
+		Type:             "reasoning",
+		ID:               "rs_previous",
+		Summary:          []OutputContent{},
+		EncryptedContent: "encrypted-reasoning",
+	}}
+
+	restored, err := PrependHistoryToInput(body, history, previousOutput)
+	require.NoError(t, err)
+
+	var upstream map[string]interface{}
+	require.NoError(t, json.Unmarshal(PrepareCodexPassthrough(restored, true), &upstream))
+	assert.NotContains(t, upstream, "previous_response_id")
+	input := upstream["input"].([]interface{})
+	require.Len(t, input, 3)
+	assert.Equal(t, map[string]interface{}{
+		"type":              "reasoning",
+		"id":                "rs_previous",
+		"summary":           []interface{}{},
+		"encrypted_content": "encrypted-reasoning",
+	}, input[1])
+}
+
 func TestOutputToInputItems_ComputerCall(t *testing.T) {
 	output := []OutputItem{
 		{
