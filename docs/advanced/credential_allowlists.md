@@ -23,7 +23,7 @@ In the server-managed LiteLLM metadata for the identity, place the IDs in `allow
 
 The metadata contains neutral IDs. The association with provider account names lives in server configuration. The routing policy is derived from the authenticated identity. The request body's metadata and headers are independent of that policy.
 
-- Omitting the field at a level leaves that level unrestricted. Present lists intersect across key, team and organization. Empty, null or malformed values allow zero routes.
+- An absent, empty or null list leaves that level unrestricted. Nonempty lists intersect across key, team and organization. Malformed values allow zero routes.
 - An ID with no matching credential contributes no candidate. An empty effective set or a set with no candidate for a model fails without sending to another account. The policy covers existing and future models subject to existing model permissions.
 - Priorities, weights, quotas, bans and organization credential deny rules apply to the permitted set. Sticky bindings, retries and WebSocket selections use the same restriction.
 - Direct credentials can use a network `proxy_url`. A restricted request cannot use an AIR or generic proxy credential because the positive restriction is local to this router.

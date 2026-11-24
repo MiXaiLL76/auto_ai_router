@@ -47,19 +47,29 @@ func TestAllowedCredentialRoutingIDs(t *testing.T) {
 			restricted: true,
 		},
 		{
-			name: "explicit empty list blocks a key despite org authorization",
+			name: "empty and null values leave normal routing",
+			info: &TokenInfo{
+				OrganizationMetadata: metadata(nil),
+				TeamMetadata:         metadata([]string{}),
+				Metadata:             metadata([]interface{}{}),
+			},
+		},
+		{
+			name: "empty key list inherits organization restriction",
 			info: &TokenInfo{
 				OrganizationMetadata: metadata([]string{"route-7001"}),
 				Metadata:             metadata([]interface{}{}),
 			},
+			wantIDs:    []string{"route-7001"},
 			restricted: true,
 		},
 		{
-			name: "organization null blocks descendants",
+			name: "null organization value preserves key restriction",
 			info: &TokenInfo{
 				OrganizationMetadata: metadata(nil),
 				Metadata:             metadata([]string{"route-7001"}),
 			},
+			wantIDs:    []string{"route-7001"},
 			restricted: true,
 		},
 		{
