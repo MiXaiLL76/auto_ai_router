@@ -31,7 +31,7 @@ type vertexStreamAccumulator struct {
 	meta       *responses.ResponsesMetadata
 
 	// Accumulated content
-	fullText       string
+	textParts      []responses.OutputContent
 	fullReasoning  string
 	toolCalls      []accumulatedCall
 	images         []accumulatedImage
@@ -125,11 +125,11 @@ func TransformVertexStreamToResponses(
 			acc.usage.Observe(chunk.UsageMetadata)
 		}
 
+		acc.toolUse.Add(chunk.Candidates, chunk.ModelVersion)
 		if len(chunk.Candidates) == 0 {
 			continue
 		}
 		acc.webSearch.Add(chunk.Candidates)
-		acc.toolUse.Add(chunk.Candidates, chunk.ModelVersion)
 
 		candidate := chunk.Candidates[0]
 		switch {
@@ -152,7 +152,7 @@ func TransformVertexStreamToResponses(
 		// on in the next one (see vertex/continuation.go): its usage and searches
 		// add up with the next request's.
 		if vertex.IsContinuation(string(candidate.FinishReason)) {
-			acc.usage.CloseRequest()
+			acc.usage.CloseRequest(&acc.toolUse, acc.model)
 			acc.webSearch.CloseResponse()
 		}
 	}
@@ -196,8 +196,12 @@ func processPart(w io.Writer, acc *vertexStreamAccumulator, part *genai.Part) er
 	case part.InlineData != nil:
 		return processImagePart(w, acc, part.InlineData)
 
-	case part.Text != "":
-		return processTextDelta(w, acc, part.Text)
+	case part.Text != "" || (vertex.UsesPrefixBoundSignatures(acc.toolUse.AnsweringModel(acc.model)) && vertex.SignedText(part)):
+		var signature string
+		if vertex.UsesPrefixBoundSignatures(acc.toolUse.AnsweringModel(acc.model)) {
+			signature = base64.StdEncoding.EncodeToString(part.ThoughtSignature)
+		}
+		return processTextDelta(w, acc, part.Text, signature)
 	}
 	return nil
 }
@@ -232,7 +236,7 @@ func processImagePart(w io.Writer, acc *vertexStreamAccumulator, blob *genai.Blo
 	}, acc)
 }
 
-func processTextDelta(w io.Writer, acc *vertexStreamAccumulator, delta string) error {
+func processTextDelta(w io.Writer, acc *vertexStreamAccumulator, delta, signature string) error {
 	if !acc.headerEmitted {
 		if err := emitVertexHeaderEvents(w, acc); err != nil {
 			return err
@@ -243,9 +247,32 @@ func processTextDelta(w io.Writer, acc *vertexStreamAccumulator, delta string) e
 			return err
 		}
 	}
-	acc.fullText += delta
+	idx := len(acc.textParts) - 1
+	if idx < 0 || signature != "" || acc.textParts[idx].ThoughtSignature != "" {
+		if idx >= 0 {
+			if err := finishTextPart(w, acc, idx); err != nil {
+				return err
+			}
+		}
+		idx++
+		acc.textParts = append(acc.textParts, responses.OutputContent{Type: "output_text", ThoughtSignature: signature})
+		if err := writeVertexSSE(w, "response.content_part.added", responses.BuildContentPartAddedEvent(acc.messageItemID, acc.messageOutputIndex, idx), acc); err != nil {
+			return err
+		}
+	}
+	acc.textParts[idx].Text += delta
 	return writeVertexSSE(w, "response.output_text.delta",
-		responses.BuildOutputTextDeltaEvent(acc.messageItemID, acc.messageOutputIndex, 0, delta), acc)
+		responses.BuildOutputTextDeltaEvent(acc.messageItemID, acc.messageOutputIndex, idx, delta), acc)
+}
+
+func finishTextPart(w io.Writer, acc *vertexStreamAccumulator, idx int) error {
+	part := acc.textParts[idx]
+	if err := writeVertexSSE(w, "response.output_text.done", responses.BuildOutputTextDoneEvent(acc.messageItemID, acc.messageOutputIndex, idx, part.Text), acc); err != nil {
+		return err
+	}
+	event := responses.BuildContentPartDoneEvent(acc.messageItemID, acc.messageOutputIndex, idx, part.Text)
+	event["part"] = part
+	return writeVertexSSE(w, "response.content_part.done", event, acc)
 }
 
 func processThoughtDelta(w io.Writer, acc *vertexStreamAccumulator, delta string) error {
@@ -388,13 +415,8 @@ func emitVertexMessageStart(w io.Writer, acc *vertexStreamAccumulator) error {
 	outputIdx := currentOutputIndex(acc) - 1 // -1 because messageStarted was just set
 	acc.messageOutputIndex = outputIdx       // save for text delta events
 
-	if err := writeVertexSSE(w, "response.output_item.added",
-		responses.BuildMessageItemAddedEvent(outputIdx, acc.messageItemID), acc); err != nil {
-		return err
-	}
-
-	return writeVertexSSE(w, "response.content_part.added",
-		responses.BuildContentPartAddedEvent(acc.messageItemID, outputIdx, 0), acc)
+	return writeVertexSSE(w, "response.output_item.added",
+		responses.BuildMessageItemAddedEvent(outputIdx, acc.messageItemID), acc)
 }
 
 func emitVertexCompletionEvents(w io.Writer, acc *vertexStreamAccumulator) error {
@@ -427,17 +449,12 @@ func emitVertexCompletionEvents(w io.Writer, acc *vertexStreamAccumulator) error
 		})
 	}
 
-	if acc.messageStarted && acc.fullText != "" {
+	if len(acc.textParts) > 0 {
 		idx := acc.messageOutputIndex
 		closures = append(closures, closureItem{
 			outputIndex: idx,
 			fn: func() error {
-				if err := writeVertexSSE(w, "response.output_text.done",
-					responses.BuildOutputTextDoneEvent(acc.messageItemID, idx, 0, acc.fullText), acc); err != nil {
-					return err
-				}
-				if err := writeVertexSSE(w, "response.content_part.done",
-					responses.BuildContentPartDoneEvent(acc.messageItemID, idx, 0, acc.fullText), acc); err != nil {
+				if err := finishTextPart(w, acc, len(acc.textParts)-1); err != nil {
 					return err
 				}
 				return writeVertexSSE(w, "response.output_item.done", map[string]interface{}{
@@ -448,7 +465,7 @@ func emitVertexCompletionEvents(w io.Writer, acc *vertexStreamAccumulator) error
 						"id":      acc.messageItemID,
 						"status":  "completed",
 						"role":    "assistant",
-						"content": []interface{}{map[string]interface{}{"type": "output_text", "text": acc.fullText, "annotations": []interface{}{}}},
+						"content": acc.textParts,
 					},
 				}, acc)
 			},
@@ -573,7 +590,7 @@ func buildVertexCompletedResponse(acc *vertexStreamAccumulator) *responses.Respo
 				ID:      acc.messageItemID,
 				Status:  "completed",
 				Role:    "assistant",
-				Content: []responses.OutputContent{{Type: "output_text", Text: acc.fullText, Annotations: []responses.Annotation{}}},
+				Content: acc.textParts,
 			},
 		})
 	}
@@ -632,8 +649,8 @@ func buildVertexCompletedResponse(acc *vertexStreamAccumulator) *responses.Respo
 	}
 
 	var usage *responses.Usage
-	if total := acc.usage.Total(); total != nil {
-		usage = usageMetadataToUsage(vertex.BillableUsageMetadata(total, acc.toolUse, acc.model))
+	if total := acc.usage.BillableTotal(acc.toolUse, acc.model, true); total != nil {
+		usage = usageMetadataToUsage(total)
 		if acc.usage.Continued() {
 			usage.InputTokensDetails.InitialPromptTokens = int(acc.usage.InitialPromptTokens)
 		}

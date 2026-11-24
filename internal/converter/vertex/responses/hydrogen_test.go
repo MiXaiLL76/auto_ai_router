@@ -1,8 +1,13 @@
 package vertexresponses
 
 import (
+	"bytes"
 	"encoding/json"
+	"strings"
+
 	"fmt"
+	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
+	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
 	"testing"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter/vertex"
@@ -164,6 +169,91 @@ func TestHydrogenParallelCallsAfterHistoryEdit(t *testing.T) {
 					}
 				}
 			}
+		})
+	}
+}
+
+func TestHydrogenSignedTextReplay(t *testing.T) {
+	const first = `{"text":"abc"}`
+	const signed = `{"text":"\u0434\u0430","thoughtSignature":"YQ=="}`
+	const empty = `{"text":"","thoughtSignature":"Yg=="}`
+	const last = `{"text":"!"}`
+	upstream := func(parts string) string {
+		return `{"modelVersion":"gemini-4-hydrogen","candidates":[{"content":{"role":"model","parts":[` + parts + `]}}]}`
+	}
+	raw := []byte(upstream(strings.Join([]string{first, signed, empty, last}, ",")))
+	stream := "data: " + upstream(first) + "\n\ndata: " + upstream(signed+","+empty) + "\n\ndata: " + upstream(last) + "\n\n"
+	user := map[string]string{"role": "user", "content": "start"}
+	checkWire := func(t *testing.T, raw []byte) {
+		t.Helper()
+		var wire struct {
+			Contents []struct {
+				Role  string
+				Parts []json.RawMessage
+			}
+		}
+		require.NoError(t, json.Unmarshal(raw, &wire))
+		require.Len(t, wire.Contents, 3)
+		require.Equal(t, "model", wire.Contents[1].Role)
+		require.Len(t, wire.Contents[1].Parts, 4)
+		for i, want := range []string{first, signed, empty, last} {
+			require.JSONEq(t, want, string(wire.Contents[1].Parts[i]))
+		}
+	}
+	for _, streaming := range []bool{false, true} {
+		t.Run(fmt.Sprintf("chat/stream=%t", streaming), func(t *testing.T) {
+			var message openai.OpenAIResponseMessage
+			if streaming {
+				var out bytes.Buffer
+				require.NoError(t, vertex.TransformVertexStreamToOpenAI(strings.NewReader(stream), hydrogen, &out))
+				for _, line := range strings.Split(out.String(), "\n") {
+					data, ok := strings.CutPrefix(line, "data: ")
+					if !ok || data == "[DONE]" {
+						continue
+					}
+					var chunk openai.OpenAIStreamingChunk
+					require.NoError(t, json.Unmarshal([]byte(data), &chunk))
+					delta := chunk.Choices[0].Delta
+					message.Role = "assistant"
+					message.Content += delta.Content
+					if fields := delta.ProviderSpecificFields; fields != nil {
+						if message.ProviderSpecificFields == nil {
+							message.ProviderSpecificFields = &openai.MessageProviderFields{}
+						}
+						message.ProviderSpecificFields.ThoughtSignatures = append(message.ProviderSpecificFields.ThoughtSignatures, fields.ThoughtSignatures...)
+					}
+				}
+			} else {
+				data, err := vertex.VertexToOpenAI(raw, hydrogen)
+				require.NoError(t, err)
+				var chat openai.OpenAIResponse
+				require.NoError(t, json.Unmarshal(data, &chat))
+				message = chat.Choices[0].Message
+			}
+			request, err := hydrogenWire(t, "chat", hydrogen, map[string]any{"messages": []any{user, message, map[string]string{"role": "user", "content": "continue"}}})
+			require.NoError(t, err)
+			checkWire(t, request)
+		})
+		t.Run(fmt.Sprintf("responses/stream=%t", streaming), func(t *testing.T) {
+			var resp *responses.Response
+			if streaming {
+				var out bytes.Buffer
+				require.NoError(t, TransformVertexStreamToResponses(strings.NewReader(stream), &out, hydrogen, "", nil, func(r *responses.Response) { resp = r }))
+				require.Contains(t, out.String(), `"thought_signature":"Yg=="`)
+			} else {
+				var err error
+				resp, err = VertexToResponsesResponse(raw, hydrogen, "", 0)
+				require.NoError(t, err)
+			}
+			// Exercise previous_response_id reconstruction and explicit item replay.
+			stored, err := responses.PrependHistoryToInput([]byte(`{"input":"continue"}`), json.RawMessage(`[{"role":"user","content":"start"}]`), resp.Output)
+			require.NoError(t, err)
+			request, err := ResponsesRequestToVertex(stored, hydrogen)
+			require.NoError(t, err)
+			checkWire(t, request)
+			request, err = hydrogenWire(t, "responses", hydrogen, map[string]any{"input": []any{user, resp.Output[0], map[string]string{"role": "user", "content": "continue"}}})
+			require.NoError(t, err)
+			checkWire(t, request)
 		})
 	}
 }

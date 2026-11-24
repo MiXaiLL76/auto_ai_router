@@ -186,7 +186,7 @@ func inputToContents(input interface{}, model string) ([]*genai.Content, error) 
 		switch itemType {
 		case "message", "":
 			flushToolParts()
-			content, err := messageItemToContent(itemMap, role)
+			content, err := messageItemToContent(itemMap, role, model)
 			if err != nil {
 				return nil, err
 			}
@@ -272,7 +272,7 @@ func inputToContents(input interface{}, model string) ([]*genai.Content, error) 
 }
 
 // messageItemToContent converts an input message item to a genai.Content.
-func messageItemToContent(itemMap map[string]interface{}, role string) (*genai.Content, error) {
+func messageItemToContent(itemMap map[string]interface{}, role, model string) (*genai.Content, error) {
 	vertexRole := "user"
 	switch role {
 	case "assistant", "model":
@@ -295,6 +295,11 @@ func messageItemToContent(itemMap map[string]interface{}, role string) (*genai.C
 			converted, err := contentPartToVertexParts(pm)
 			if err != nil {
 				return nil, err
+			}
+			if vertexRole == "model" && vertex.UsesPrefixBoundSignatures(model) && pm["type"] == "output_text" && len(converted) == 1 {
+				if signature, ok := pm["thought_signature"].(string); ok {
+					converted[0].ThoughtSignature = converterutil.DecodeBase64(signature)
+				}
 			}
 			parts = append(parts, converted...)
 		}

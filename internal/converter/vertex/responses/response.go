@@ -44,7 +44,7 @@ func buildResponsesResponse(
 	var toolUse vertex.ToolUseSources
 	toolUse.Add(vertexResp.Candidates, vertexResp.ModelVersion)
 	output := candidatesToOutputItems(vertexResp, toolUse.AnsweringModel(model))
-	usage := usageMetadataToUsage(vertex.BillableUsageMetadata(vertexResp.UsageMetadata, toolUse, model))
+	usage := usageMetadataToUsage(vertex.BillableResponseUsage(body, vertexResp.UsageMetadata, toolUse, model))
 	webSearchRequests := vertex.CountResponseWebSearchRequests(body, vertexResp.Candidates, toolUse.AnsweringModel(model))
 	if usage == nil && webSearchRequests > 0 {
 		usage = &responses.Usage{}
@@ -74,6 +74,7 @@ func setWebSearchUsage(usage *responses.Usage, requests int) {
 // model is the model that answered (see encodeCallID).
 func candidatesToOutputItems(vertexResp *genai.GenerateContentResponse, model string) []responses.OutputItem {
 	var output []responses.OutputItem
+	keepTextSignatures := vertex.UsesPrefixBoundSignatures(model)
 
 	for _, candidate := range vertexResp.Candidates {
 		if candidate.Content == nil {
@@ -176,12 +177,17 @@ func candidatesToOutputItems(vertexResp *genai.GenerateContentResponse, model st
 					})
 				}
 
-			case part.Text != "":
+			case part.Text != "" || (keepTextSignatures && vertex.SignedText(part)):
+				var signature string
+				if keepTextSignatures {
+					signature = base64.StdEncoding.EncodeToString(part.ThoughtSignature)
+				}
 				// Regular text → accumulate as output_text content part.
 				msgContent = append(msgContent, responses.OutputContent{
-					Type:        "output_text",
-					Text:        part.Text,
-					Annotations: []responses.Annotation{},
+					Type:             "output_text",
+					Text:             part.Text,
+					ThoughtSignature: signature,
+					Annotations:      []responses.Annotation{},
 				})
 				currentMessagePartIndices = append(currentMessagePartIndices, partIdx)
 			}

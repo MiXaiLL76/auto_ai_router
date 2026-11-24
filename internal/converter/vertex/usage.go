@@ -1,7 +1,9 @@
 package vertex
 
 import (
+	"bytes"
 	"cmp"
+	"encoding/json"
 	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
@@ -167,6 +169,26 @@ func (s ToolUseSources) unbilledSearchContext(model string) bool {
 	return profile != nil && profile.unbilledSearchContext
 }
 
+// The merger records the tool tokens that remain billable for a model with
+// free Search context while each upstream request's sources are still known.
+type toolTokenUsage struct {
+	Count   int32                       `json:"count"`
+	Details []*genai.ModalityTokenCount `json:"details,omitempty"`
+}
+
+// BillableResponseUsage applies per-request tool accounting to a completed response.
+func BillableResponseUsage(body []byte, meta *genai.GenerateContentResponseUsageMetadata, sources ToolUseSources, model string) *genai.GenerateContentResponseUsageMetadata {
+	if meta != nil && meta.ToolUsePromptTokenCount > 0 && sources.unbilledSearchContext(model) && bytes.Contains(body, []byte(`"continuationBillableToolTokens"`)) {
+		var merged struct {
+			Tools *toolTokenUsage `json:"continuationBillableToolTokens"`
+		}
+		if json.Unmarshal(body, &merged) == nil && merged.Tools != nil && merged.Tools.Count >= 0 && merged.Tools.Count <= meta.ToolUsePromptTokenCount {
+			return withBillableTools(meta, *merged.Tools)
+		}
+	}
+	return BillableUsageMetadata(meta, sources, model)
+}
+
 // BillableUsageMetadata drops the tool-use prompt tokens from meta when the model does
 // not charge Google Search context and only Google Search produced it. With any other
 // tool (url_context is billed as input) the split is unknown, so all of it is billed.
@@ -175,12 +197,17 @@ func BillableUsageMetadata(meta *genai.GenerateContentResponseUsageMetadata, sou
 		!sources.unbilledSearchContext(model) {
 		return meta
 	}
+	return withBillableTools(meta, toolTokenUsage{})
+}
+
+func withBillableTools(meta *genai.GenerateContentResponseUsageMetadata, tools toolTokenUsage) *genai.GenerateContentResponseUsageMetadata {
 	billable := *meta
-	if billable.TotalTokenCount >= billable.ToolUsePromptTokenCount {
-		billable.TotalTokenCount -= billable.ToolUsePromptTokenCount
+	free := meta.ToolUsePromptTokenCount - tools.Count
+	if billable.TotalTokenCount >= free {
+		billable.TotalTokenCount -= free
 	}
-	billable.ToolUsePromptTokenCount = 0
-	billable.ToolUsePromptTokensDetails = nil
+	billable.ToolUsePromptTokenCount = tools.Count
+	billable.ToolUsePromptTokensDetails = tools.Details
 	return &billable
 }
 

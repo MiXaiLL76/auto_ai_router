@@ -81,3 +81,54 @@ func TestHydrogenContinuesAndBills(t *testing.T) {
 		}
 	}
 }
+
+func TestHydrogenContinuationMixedToolBilling(t *testing.T) {
+	const model = "gemini-4-hydrogen"
+	const search = `"groundingMetadata":{"webSearchQueries":["q"]}`
+	const url = `"urlContextMetadata":{"urlMetadata":[{"retrievedUrl":"https://example.org"}]}`
+	for _, endpoint := range []string{"/v1/chat/completions", "/v1/responses"} {
+		for _, stream := range []bool{false, true} {
+			for _, searchFirst := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/stream=%t/searchFirst=%t", endpoint, stream, searchFirst), func(t *testing.T) {
+					u := newLongDecodeUpstream(t, func(n int, req map[string]any, w http.ResponseWriter) {
+						grounding, tokens := url, 20
+						if (n == 0) == searchFirst {
+							grounding, tokens = search, 100
+						}
+						finish := `"finishReason":"STOP"`
+						if n == 0 {
+							finish = `"finishReason":"CONTINUATION","continuationToken":"dG9r"`
+						}
+						usage := fmt.Sprintf(`{"promptTokenCount":10,"toolUsePromptTokenCount":%d,"candidatesTokenCount":1,"totalTokenCount":%d}`, tokens, 11+tokens)
+						candidate := fmt.Sprintf(`{"content":{"role":"model","parts":[{"text":"answer"}]},%s,%s}`, grounding, finish)
+						body := fmt.Sprintf(`{"modelVersion":%q,"candidates":[%s],"usageMetadata":%s}`, model, candidate, usage)
+						if stream {
+							// Counters can arrive before the chunk that identifies the tool.
+							w.Header().Set("Content-Type", "text/event-stream")
+							body = sseFrames(fmt.Sprintf(`{"usageMetadata":%s}`, usage), fmt.Sprintf(`{"modelVersion":%q,"candidates":[%s]}`, model, candidate))
+						}
+						_, _ = w.Write([]byte(body))
+					})
+					prx, db := u.proxy()
+					setTestModelPrice(prx, model, &pricing.ModelPrice{InputCostPerToken: 2e-6, OutputCostPerToken: 8e-6})
+					req := map[string]any{"model": model, "stream": stream, "tools": []any{map[string]string{"type": "web_search"}, map[string]string{"type": "url_context"}}}
+					if endpoint == "/v1/responses" {
+						req["input"] = "compare sources"
+					} else {
+						req["messages"] = []map[string]string{{"role": "user", "content": "compare sources"}}
+					}
+					body, err := json.Marshal(req)
+					require.NoError(t, err)
+					res := postJSON(prx, endpoint, string(body))
+					require.Equal(t, http.StatusOK, res.Code, res.Body.String())
+					require.Len(t, u.requests, 2)
+					require.Len(t, db.loggedEntries, 1)
+					entry := db.loggedEntries[0]
+					assert.Equal(t, 40, entry.PromptTokens)
+					assert.Equal(t, 2, entry.CompletionTokens)
+					assert.InDelta(t, 40*2e-6+2*8e-6, entry.Spend, 1e-10)
+				})
+			}
+		}
+	}
+}

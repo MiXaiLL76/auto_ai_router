@@ -62,6 +62,20 @@ type OpenAIMessage struct {
 	ThinkingBlocks   []OpenAIThinkingBlock `json:"thinking_blocks,omitempty"`
 	Refusal          string                `json:"refusal,omitempty"`
 	ReasoningContent string                `json:"reasoning_content,omitempty"`
+
+	ProviderSpecificFields *MessageProviderFields `json:"provider_specific_fields,omitempty"`
+}
+
+// MessageProviderFields carries the signed text parts of a Gemini answer for replay.
+// Offsets are UTF-8 byte indexes in the complete assistant content, including in SSE deltas.
+type MessageProviderFields struct {
+	ThoughtSignatures []TextSignature `json:"thought_signatures,omitempty"`
+}
+
+type TextSignature struct {
+	Start     int    `json:"start"`
+	End       int    `json:"end"`
+	Signature string `json:"signature"`
 }
 
 type OpenAIThinkingBlock struct {
@@ -124,6 +138,8 @@ type OpenAIResponseMessage struct {
 	// signature/data and list index, for the client to echo back as
 	// OpenAIMessage.ThinkingBlocks.
 	ThinkingBlocks interface{} `json:"thinking_blocks,omitempty"`
+
+	ProviderSpecificFields *MessageProviderFields `json:"provider_specific_fields,omitempty"`
 }
 
 type OpenAIToolCall struct {
@@ -292,6 +308,8 @@ type OpenAIStreamingDelta struct {
 	// OpenAI-compatible upstream streams on the delta, one or more per chunk,
 	// in the same shape the non-stream message.annotations uses.
 	Annotations []json.RawMessage `json:"annotations,omitempty"`
+
+	ProviderSpecificFields *MessageProviderFields `json:"provider_specific_fields,omitempty"`
 }
 
 type OpenAIStreamingToolCall struct {

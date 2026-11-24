@@ -28,11 +28,14 @@ func VertexToOpenAI(vertexBody []byte, model string) ([]byte, error) {
 	}
 	var toolUse ToolUseSources
 	toolUse.Add(vertexResp.Candidates, vertexResp.ModelVersion)
-	keepCallIDs := UsesFunctionCallIDs(toolUse.AnsweringModel(model))
+	answeringModel := toolUse.AnsweringModel(model)
+	keepCallIDs := UsesFunctionCallIDs(answeringModel)
+	keepTextSignatures := UsesPrefixBoundSignatures(answeringModel)
 
 	// Convert candidates to choices
 	for _, candidate := range vertexResp.Candidates {
 		var content string
+		var fields *openai.MessageProviderFields
 		var reasoningContent string
 		var images []openai.ImageData
 		var toolCalls []openai.OpenAIToolCall
@@ -43,6 +46,9 @@ func VertexToOpenAI(vertexBody []byte, model string) ([]byte, error) {
 				if part.Thought {
 					reasoningContent += part.Text
 					continue
+				}
+				if keepTextSignatures && SignedText(part) {
+					recordTextSignature(&fields, part, len(content))
 				}
 				if part.Text != "" {
 					content += part.Text
@@ -88,9 +94,10 @@ func VertexToOpenAI(vertexBody []byte, model string) ([]byte, error) {
 		// hardcoding an exact string.
 
 		message := openai.OpenAIResponseMessage{
-			Role:    "assistant",
-			Content: content,
-			Images:  images,
+			Role:                   "assistant",
+			Content:                content,
+			Images:                 images,
+			ProviderSpecificFields: fields,
 		}
 
 		// Set reasoning content if present (thinking/reasoning tokens)
@@ -127,7 +134,7 @@ func VertexToOpenAI(vertexBody []byte, model string) ([]byte, error) {
 
 	// Convert usage metadata
 	if vertexResp.UsageMetadata != nil {
-		openAIResp.Usage = convertVertexUsageMetadata(BillableUsageMetadata(vertexResp.UsageMetadata, toolUse, model))
+		openAIResp.Usage = convertVertexUsageMetadata(BillableResponseUsage(vertexBody, vertexResp.UsageMetadata, toolUse, model))
 		if initial := InitialPromptTokens(vertexBody); initial > 0 {
 			if openAIResp.Usage.PromptTokensDetails == nil {
 				openAIResp.Usage.PromptTokensDetails = &openai.TokenDetails{}

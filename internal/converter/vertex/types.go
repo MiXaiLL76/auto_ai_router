@@ -39,22 +39,6 @@ func (r *VertexRequest) MarshalForModel(model string) ([]byte, error) {
 	if !UsesPrefixBoundSignatures(model) {
 		return json.Marshal(r)
 	}
-	for _, turn := range r.Contents {
-		if turn.Role != "model" {
-			continue
-		}
-		firstCall := true
-		for _, part := range turn.Parts {
-			if part.FunctionCall == nil {
-				continue
-			}
-			if !firstCall {
-				part.ThoughtSignature = nil
-			}
-			firstCall = false
-		}
-	}
-
 	// Overlay the missing SDK field without re-encoding large media parts
 	// or discarding the other generation and thinking settings.
 	type thinking struct {
@@ -71,6 +55,43 @@ func (r *VertexRequest) MarshalForModel(model string) ([]byte, error) {
 	}
 	return json.Marshal(struct {
 		*VertexRequest
+		Contents   []any      `json:"contents"`
 		Generation generation `json:"generationConfig"`
-	}{r, config})
+	}{r, hydrogenContents(r.Contents), config})
+}
+
+func hydrogenContents(turns []*genai.Content) []any {
+	wire := make([]any, len(turns))
+	for i, turn := range turns {
+		wire[i] = turn
+		if turn.Role != "model" {
+			continue
+		}
+		parts := make([]any, len(turn.Parts))
+		firstCall := true
+		for j, part := range turn.Parts {
+			parts[j] = part
+			switch {
+			case part.FunctionCall != nil:
+				if !firstCall && len(part.ThoughtSignature) > 0 {
+					unsigned := *part
+					unsigned.ThoughtSignature = nil
+					parts[j] = &unsigned
+				}
+				firstCall = false
+			case part.Text == "" && SignedText(part):
+				// The SDK uses omitempty for Text, but this signed part must
+				// retain its text discriminator even when it is empty.
+				parts[j] = struct {
+					*genai.Part
+					Text string `json:"text"`
+				}{part, ""}
+			}
+		}
+		wire[i] = struct {
+			*genai.Content
+			Parts []any `json:"parts,omitempty"`
+		}{turn, parts}
+	}
+	return wire
 }

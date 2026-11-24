@@ -90,7 +90,8 @@ type ContentPart struct {
 // OutputContent represents a content item within an output message item.
 // Type determines which fields are populated.
 type OutputContent struct {
-	Type string `json:"type"` // "output_text", "output_refusal", "refusal", "reasoning_text", "summary_text", "text"
+	ThoughtSignature string `json:"thought_signature,omitempty"`
+	Type             string `json:"type"` // "output_text", "output_refusal", "refusal", "reasoning_text", "summary_text", "text"
 
 	// output_text, reasoning_text, summary_text, text
 	Text string `json:"text,omitempty"`
@@ -116,6 +117,9 @@ func (o OutputContent) MarshalJSON() ([]byte, error) {
 		// Always include "text" for output_text — omitting it causes Python SDK to
 		// parse the attribute as None instead of "", triggering TypeError in .join().
 		raw["text"] = o.Text
+		if o.ThoughtSignature != "" {
+			raw["thought_signature"] = o.ThoughtSignature
+		}
 		if o.Annotations == nil {
 			raw["annotations"] = []Annotation{}
 		} else {

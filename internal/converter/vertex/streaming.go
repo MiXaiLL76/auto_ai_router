@@ -36,6 +36,7 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 	isFirstChunk := true
 	sawDone := false // the upstream sent [DONE] itself
 	var webSearch WebSearchQueries
+	textOffsets := make(map[int32]int)
 	var usage ContinuationUsage
 	var toolUse ToolUseSources
 	finished := false // a candidate has reported its final finish reason
@@ -107,6 +108,7 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 		toolUse.Add(vertexChunk.Candidates, vertexChunk.ModelVersion)
 		answeringModel := toolUse.AnsweringModel(model)
 		keepCallIDs := UsesFunctionCallIDs(answeringModel)
+		keepTextSignatures := UsesPrefixBoundSignatures(answeringModel)
 		webSearch.Add(vertexChunk.Candidates)
 		webSearchRequests := webSearch.Count(answeringModel)
 		requestContinues := false // this chunk ends an upstream request that goes on
@@ -119,13 +121,16 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 			}
 		}
 		var chunkUsage *openai.OpenAIUsage
-		if vertexChunk.UsageMetadata != nil {
-			chunkUsage = convertVertexUsageMetadata(usage.Observe(streamUsageMetadata(vertexChunk.UsageMetadata, toolUse, model, finished)))
-			setVertexWebSearchUsage(chunkUsage, webSearchRequests)
-			setInitialPromptTokens(chunkUsage, usage)
+		usage.Observe(vertexChunk.UsageMetadata)
+		if vertexChunk.UsageMetadata != nil || finished || requestContinues {
+			if meta := usage.BillableTotal(toolUse, model, finished || requestContinues); meta != nil {
+				chunkUsage = convertVertexUsageMetadata(meta)
+				setVertexWebSearchUsage(chunkUsage, webSearchRequests)
+				setInitialPromptTokens(chunkUsage, usage)
+			}
 		}
 		if requestContinues {
-			usage.CloseRequest()
+			usage.CloseRequest(&toolUse, model)
 			webSearch.CloseResponse()
 		}
 
@@ -193,6 +198,9 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 						reasoningContent += part.Text
 						continue
 					}
+					if keepTextSignatures && SignedText(part) {
+						recordTextSignature(&choice.Delta.ProviderSpecificFields, part, textOffsets[candidate.Index]+len(content))
+					}
 					if part.Text != "" {
 						content += part.Text
 					}
@@ -210,6 +218,9 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 				}
 			}
 
+			if keepTextSignatures {
+				textOffsets[candidate.Index] += len(content)
+			}
 			choice.Delta.Content = content
 			if reasoningContent != "" {
 				choice.Delta.ReasoningContent = reasoningContent

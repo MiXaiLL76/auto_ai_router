@@ -152,7 +152,9 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, isImageEdit bool,
 			// Only add text parts if content is non-nil and non-empty.
 			// Assistant messages with tool_calls often have content: null or content: ""
 			// which would produce a "<nil>" text part via fmt.Sprintf.
-			if msg.Content != nil {
+			if text, ok := msg.Content.(string); ok && role == "model" && UsesPrefixBoundSignatures(model) && msg.ProviderSpecificFields != nil && len(msg.ProviderSpecificFields.ThoughtSignatures) > 0 {
+				parts = append(parts, signedChatParts(text, msg.ProviderSpecificFields.ThoughtSignatures)...)
+			} else if msg.Content != nil {
 				if s, ok := msg.Content.(string); !ok || s != "" {
 					contentParts, err := convertContentToParts(msg.Content)
 					if err != nil {
