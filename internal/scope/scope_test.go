@@ -48,3 +48,26 @@ func TestContextKey_DistinguishesDelimitedScopeValues(t *testing.T) {
 		t.Fatal("different scope sets must not share a cache key")
 	}
 }
+
+func TestCredentialIDRestriction(t *testing.T) {
+	public := PublicContext()
+	empty := public.RestrictCredentialIDs(nil)
+	restricted := public.RestrictCredentialIDs([]string{"route-02", "route-01"})
+	narrowed := restricted.RestrictCredentialIDs([]string{"route-02", "route-03"})
+	if !public.AllowsCredentialID("") || public.HasCredentialRestriction() {
+		t.Fatal("ordinary visibility must remain unrestricted")
+	}
+	if empty.AllowsCredentialID("route-01") || !empty.HasCredentialRestriction() || !empty.HasScopes() {
+		t.Fatal("an empty restriction must deny all credentials")
+	}
+	if !narrowed.AllowsCredentialID("route-02") || narrowed.AllowsCredentialID("route-01") ||
+		narrowed.AllowsCredentialID("route-03") || !restricted.AllowsCredentialID("route-01") {
+		t.Fatal("narrowing must intersect the restrictions without mutating the original context")
+	}
+	if public.Key() == empty.Key() || restricted.Key() == narrowed.Key() {
+		t.Fatal("contexts with different restrictions must have distinct cache keys")
+	}
+	if restricted.Key() != public.RestrictCredentialIDs([]string{"route-01", "route-02"}).Key() {
+		t.Fatal("equivalent restrictions must have the same cache key")
+	}
+}

@@ -12,6 +12,8 @@ type Context struct {
 	Allowed map[string]struct{}
 	Denied  map[string]struct{}
 	Admin   bool
+
+	credentialIDs map[string]struct{} // nil means unrestricted, empty means no credentials
 }
 
 func AdminContext() Context {
@@ -83,19 +85,23 @@ func hasLegacyNoMatchScope(values []string) bool {
 }
 
 func (c Context) HasScopes() bool {
-	return c.Admin || len(c.Allowed) > 0 || len(c.Denied) > 0
+	return c.Admin || len(c.Allowed) > 0 || len(c.Denied) > 0 || c.HasCredentialRestriction()
 }
 
 func (c Context) Key() string {
+	prefix := ""
+	if c.HasCredentialRestriction() {
+		prefix = "r:" + encodeKeyValues(setToList(c.credentialIDs)) + "|"
+	}
 	if c.Admin {
-		return "admin"
+		return prefix + "admin"
 	}
 	allowed := c.AllowedList()
 	denied := c.DeniedList()
 	if len(allowed) == 0 && len(denied) == 0 {
-		return "public"
+		return prefix + "public"
 	}
-	return "a:" + encodeKeyValues(allowed) + "|d:" + encodeKeyValues(denied)
+	return prefix + "a:" + encodeKeyValues(allowed) + "|d:" + encodeKeyValues(denied)
 }
 
 func encodeKeyValues(values []string) string {

@@ -429,6 +429,9 @@ func nativeWebSocketURL(baseURL string) (string, error) {
 
 func (s *nativeWSSession) connect(logCtx *RequestLogContext) error {
 	cred := logCtx.Credential
+	if err := checkAllowedCredential(logCtx, cred); err != nil {
+		return err
+	}
 	target, err := nativeWebSocketURL(cred.BaseURL)
 	if err != nil {
 		return err

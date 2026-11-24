@@ -68,7 +68,11 @@ func scopeContextFromTokenInfo(info *dbmodels.TokenInfo) scope.Context {
 		metadataScopes(info.OrganizationMetadata, deniedKeys...),
 	)
 
-	return scope.NewContext(allowed, denied)
+	visibility := scope.NewContext(allowed, denied)
+	if ids, restricted := info.AllowedCredentialRoutingIDs(); restricted {
+		return visibility.RestrictCredentialIDs(ids)
+	}
+	return visibility
 }
 
 // unionScopeLists merges scope lists, preserving first-seen order and
