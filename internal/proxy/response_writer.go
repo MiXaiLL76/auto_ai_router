@@ -596,10 +596,12 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 				logCtx.observeImageStreamPayloads(payloadBuf)
 			}
 			usage := extractTokenUsageFromPayloads(payloadBuf, tokenUsageOptions)
-			// The extractor sees field presence even when the converter returns
-			// nil for an all-zero usage object — which is the provider explicitly
-			// saying "nothing was generated" and can correct an earlier non-zero.
-			info := usageExtractor.ExtractUsage(chunk)
+			// The frame's field presence, which the converter's merged values
+			// cannot express (an all-zero usage yields no TokenUsage at all) and
+			// which can correct an earlier non-zero. A single payload's positive
+			// counts already imply both fields, so the extractor is skipped there
+			// and the frame is decoded once (see streamUsageFrameInfo).
+			info := streamUsageFrameInfo(usageExtractor, usage, len(payloadBuf) == 1, chunk)
 			if usage != nil || info != nil {
 				recordUsage(usage, info, completion.AnswerProgress())
 			}
@@ -675,7 +677,7 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	if logCtx != nil && logCtx.HideWebSearchResults {
 		clientReader = newWebSearchResultsStripReader(clientReader, func(payload []byte) {
 			usage := converter.ExtractTokenUsageWithOptions(payload, tokenUsageOptions)
-			info := usageExtractor.ExtractUsage(payload)
+			info := streamUsageFrameInfo(usageExtractor, usage, true, payload)
 			if usage != nil || info != nil {
 				// This reader is upstream of the accumulator, so the payload's own
 				// text is not in the progress yet; that only makes a frame look

@@ -686,6 +686,31 @@ func streamUsageExtractorFor(providerName string, audioInputAlreadyExcludesCache
 	return extractor
 }
 
+// streamUsageFrameInfo returns the usage frame's field presence for a chunk
+// whose usage the caller is merging, or nil when the chunk carries no usage
+// object.
+//
+// The extractor is the only decoder that knows which fields the provider sent,
+// but it re-parses the JSON the converter already decoded for the same bytes.
+// When the chunk is a single payload and the converter read a positive prompt
+// and completion count, both fields are present by definition and the
+// extractor's result would only repeat those values, so it is synthesized from
+// the converter's result and the second decode is skipped. Every other shape — a
+// zero or missing field, or several payloads whose values the merge combines —
+// still goes through the extractor: only it can say whether a zero was reported,
+// and which payload's frame is the provider's last word.
+func streamUsageFrameInfo(extractor StreamUsageExtractor, usage *converter.TokenUsage, singlePayload bool, chunk []byte) *StreamUsageInfo {
+	if usage != nil && singlePayload && usage.PromptTokens > 0 && usage.CompletionTokens > 0 {
+		return &StreamUsageInfo{
+			PromptTokens:            usage.PromptTokens,
+			PromptTokensPresent:     true,
+			CompletionTokens:        usage.CompletionTokens,
+			CompletionTokensPresent: true,
+		}
+	}
+	return extractor.ExtractUsage(chunk)
+}
+
 func normalizeStreamAudioInput(audioTokens, cachedTokens, cachedAudioTokens int, alreadyExcludesCachedAudio bool) int {
 	return converterutil.NormalizeAudioInputTokens(audioTokens, cachedTokens, cachedAudioTokens, !alreadyExcludesCachedAudio)
 }
@@ -940,10 +965,8 @@ func (p *Proxy) handleTransformedStreaming(
 					if logCtx.IsImageGeneration {
 						logCtx.observeImageStreamPayloads(payloads)
 					}
-					if info := usageExtractor.ExtractUsage(chunk); info != nil {
-						logCtx.rememberLastUsageFrame(info, completion.AnswerProgress())
-					}
-					if usage := extractTokenUsageFromPayloads(payloads, billingTokenUsageOpts); usage != nil {
+					usage := extractTokenUsageFromPayloads(payloads, billingTokenUsageOpts)
+					if usage != nil {
 						if logCtx.TokenUsage == nil {
 							logCtx.TokenUsage = &converter.TokenUsage{}
 						}
@@ -952,6 +975,9 @@ func (p *Proxy) handleTransformedStreaming(
 						// must not be clobbered back to zero by a later
 						// chunk's usage read that doesn't carry it.
 						logCtx.TokenUsage.MergeNonZero(usage)
+					}
+					if info := streamUsageFrameInfo(usageExtractor, usage, len(payloads) == 1, chunk); info != nil {
+						logCtx.rememberLastUsageFrame(info, completion.AnswerProgress())
 					}
 				}
 
@@ -1081,10 +1107,8 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 				if logCtx.IsImageGeneration {
 					logCtx.observeImageStreamPayloads(payloadBuf)
 				}
-				if info := usageExtractor.ExtractUsage(chunk); info != nil {
-					logCtx.rememberLastUsageFrame(info, completion.AnswerProgress())
-				}
-				if usage := extractTokenUsageFromPayloads(payloadBuf, tokenUsageOpts); usage != nil {
+				usage := extractTokenUsageFromPayloads(payloadBuf, tokenUsageOpts)
+				if usage != nil {
 					if logCtx.TokenUsage == nil {
 						logCtx.TokenUsage = &converter.TokenUsage{}
 					}
@@ -1093,6 +1117,9 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 					// must not be clobbered back to zero by a later chunk's
 					// usage read that doesn't carry it.
 					logCtx.TokenUsage.MergeNonZero(usage)
+				}
+				if info := streamUsageFrameInfo(usageExtractor, usage, len(payloadBuf) == 1, chunk); info != nil {
+					logCtx.rememberLastUsageFrame(info, completion.AnswerProgress())
 				}
 			}
 
@@ -1112,13 +1139,14 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 
 	if logCtx != nil && logCtx.HideWebSearchResults {
 		providerReader = newWebSearchResultsStripReader(providerReader, func(payload []byte) {
-			if usage := converter.ExtractTokenUsageWithOptions(payload, tokenUsageOpts); usage != nil {
+			usage := converter.ExtractTokenUsageWithOptions(payload, tokenUsageOpts)
+			if usage != nil {
 				if logCtx.TokenUsage == nil {
 					logCtx.TokenUsage = &converter.TokenUsage{}
 				}
 				logCtx.TokenUsage.MergeNonZero(usage)
 			}
-			if info := usageExtractor.ExtractUsage(payload); info != nil {
+			if info := streamUsageFrameInfo(usageExtractor, usage, true, payload); info != nil {
 				// This reader is upstream of the accumulator, so the payload's own
 				// text (if any) is not in the count yet; that only makes a frame
 				// look earlier than it is, i.e. falls back to the estimate instead
