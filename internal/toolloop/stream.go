@@ -60,6 +60,24 @@ func CollectStreamToolCalls(resp *http.Response, runner Runner) ([]byte, []ToolC
 	return raw, OwnedCalls(calls, runner), usage, nil
 }
 
+// HasUnnamedToolCall reports whether the stream carries a tool call whose
+// name never arrived.
+//
+// A streamed tool call carries its name on the first piece and its
+// arguments over the next ones, so a stream that breaks in between leaves
+// the call nameless. An unnamed call cannot be told apart from one of the
+// router's own -- and one of the router's own must never reach the client,
+// which never declared it. So a nameless call counts as the router's.
+func HasUnnamedToolCall(raw []byte) bool {
+	calls, _ := callsFromStream(raw)
+	for _, call := range calls {
+		if call.Name == "" {
+			return true
+		}
+	}
+	return false
+}
+
 // CallsFromStream reads the router's own tool calls out of a buffered stream.
 func CallsFromStream(raw []byte, runner Runner) []ToolCall {
 	calls, _ := callsFromStream(raw)

@@ -3467,6 +3467,33 @@ dispatch:
 	}
 }
 
+// toolLoopOutcome is what the router-run tool loop left behind on the
+// streaming path: the usage it summed, the last chunk the streaming log
+// reads its figures from, the answer's own bytes, and whether those bytes
+// are the fragment of a broken first answer.
+//
+// The fields belong together: they all come from one run of the loop, and
+// a caller that picks up one of them has to pick up the others.
+type toolLoopOutcome struct {
+	// usage is the loop's summed usage.
+	usage *converter.TokenUsage
+	// totalTokens is the steps' token count, the rate limiter's figure.
+	totalTokens int
+	// lastChunk is the last chunk of the final stream, which the streaming
+	// log reads its figures from.
+	lastChunk []byte
+	// body is the answer's own bytes: the final stream, or -- when
+	// partial is set -- the fragment of a broken first answer.
+	body []byte
+	// partial marks a body that is the fragment of the provider's FIRST
+	// answer, cut short by a broken connection: it carries no tool call
+	// of the router's, so it can be relayed to the client as the answer
+	// it is. A step of the loop that broke is not partial in this sense
+	// -- it may carry the tool call the client never declared -- and is
+	// never relayed.
+	partial bool
+}
+
 func (p *Proxy) writeDirectStreamingResponse(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -3701,27 +3728,27 @@ func (p *Proxy) writeDirectStreamingResponse(
 				(p.moonshotToolsEnabled && moonshotToolsEnabledFor(modelID, cred) && moonshottools.ExposesTool(body))) {
 			// The two adapters never overlap: each engages only for its
 			// own provider's credential, so exactly one of them runs.
+			//
+			// The outcome is one struct rather than a handful of
+			// variables: the fields belong together, and a field added
+			// to one adapter's result but forgotten here would otherwise
+			// stay at its zero value without the compiler noticing.
 			var streamErr error
-			var loopUsage *converter.TokenUsage
-			var loopTotalTokens int
-			var loopLastChunk []byte
+			var loop toolLoopOutcome
 			streamLoopRan := false
-			// loopPartial: the provider's FIRST answer broke part-way, and
-			// the loop relayed the fragment of it to the client as the
-			// answer it is. A step of the loop that broke is not this: it
-			// may carry the tool call the client never declared, and the
-			// client still has to be told about the failure.
-			loopPartial := false
 			if moonshotToolsEnabledFor(modelID, cred) {
 				moonshotRun, moonshotErr := p.runMoonshotStreamToolLoop(r, w, logCtx, prepared, cred,
 					modelID, realModelID, body, resp, start, attemptedCreds)
 				streamErr = moonshotErr
 				if moonshotRun != nil {
 					streamLoopRan = true
-					loopUsage = moonshotRun.usage
-					loopTotalTokens = moonshotRun.totalTokens
-					loopLastChunk = moonshotRun.lastChunk
-					loopPartial = moonshotRun.partial
+					loop = toolLoopOutcome{
+						usage:       moonshotRun.usage,
+						totalTokens: moonshotRun.totalTokens,
+						lastChunk:   moonshotRun.lastChunk,
+						body:        moonshotRun.body,
+						partial:     moonshotRun.partial,
+					}
 				}
 			} else {
 				deepSeekRun, deepSeekErr := p.runDeepSeekStreamToolLoop(r, w, logCtx, prepared, cred,
@@ -3729,10 +3756,13 @@ func (p *Proxy) writeDirectStreamingResponse(
 				streamErr = deepSeekErr
 				if deepSeekRun != nil {
 					streamLoopRan = true
-					loopUsage = deepSeekRun.usage
-					loopTotalTokens = deepSeekRun.totalTokens
-					loopLastChunk = deepSeekRun.lastChunk
-					loopPartial = deepSeekRun.partial
+					loop = toolLoopOutcome{
+						usage:       deepSeekRun.usage,
+						totalTokens: deepSeekRun.totalTokens,
+						lastChunk:   deepSeekRun.lastChunk,
+						body:        deepSeekRun.body,
+						partial:     deepSeekRun.partial,
+					}
 				}
 			}
 			switch {
@@ -3740,6 +3770,12 @@ func (p *Proxy) writeDirectStreamingResponse(
 				// The client went away (or the provider's response was
 				// already handled): the loop stops here, and the router
 				// must not write anything else to the dead connection.
+				//
+				// The request is still logged: a client that went
+				// away is an outcome of its own, and the spend row
+				// says so.
+				markStreamFailure(logCtx, context.Canceled)
+				p.finalizeStreamingLog(logCtx, 0, nil, "openai", resp.StatusCode, false)
 				return
 			case streamErr != nil:
 				p.logger.WarnContext(r.Context(), "The router-run search/fetch loop failed",
@@ -3748,12 +3784,12 @@ func (p *Proxy) writeDirectStreamingResponse(
 				// A tool that already ran and returned results is billed
 				// even though the model that followed it failed, so the
 				// loop's usage rides along here too.
-				if streamLoopRan && loopUsage != nil {
+				if streamLoopRan && loop.usage != nil {
 					if logCtx.TokenUsage == nil {
 						logCtx.TokenUsage = &converter.TokenUsage{}
 					}
-					applyDeepSeekToolUsageTo(logCtx.TokenUsage, loopUsage)
-					logCtx.DeepSeekToolUsage = loopUsage
+					applyDeepSeekToolUsageTo(logCtx.TokenUsage, loop.usage)
+					logCtx.DeepSeekToolUsage = loop.usage
 				}
 				// A provider whose stream broke part-way leaves the loop
 				// with the bytes that arrived: the answer the model had
@@ -3761,7 +3797,7 @@ func (p *Proxy) writeDirectStreamingResponse(
 				// the stream they are (see the loop's own replay), so
 				// there is nothing left to write -- a 502 on top of them
 				// would corrupt the stream the client is reading.
-				if loopPartial {
+				if loop.partial {
 					// The client has the provider's bytes; the log gets
 					// the failure and the tokens counted so far.
 					//
@@ -3773,11 +3809,15 @@ func (p *Proxy) writeDirectStreamingResponse(
 					// its own -- passing it as the fallback for a
 					// missing completion count would bill the
 					// answer as output for the whole prompt.
+					//
+					// The whole answer is counted, not just its last
+					// chunk: the fragment is the provider's answer
+					// from the first byte on.
 					logCtx.Status = "failure"
 					logCtx.StreamOutcome = "stream_error"
 					logCtx.ErrorMsg = "the upstream stream broke before it ended"
-					p.finalizeStreamingLog(logCtx, p.countStreamedTextTokens(modelID, loopLastChunk),
-						withDeepSeekToolUsage(loopLastChunk, loopUsage),
+					p.finalizeStreamingLog(logCtx, p.countStreamedTextTokens(modelID, loop.body),
+						withDeepSeekToolUsage(loop.lastChunk, loop.usage),
 						"openai", resp.StatusCode, false)
 					streamCompleted = true
 					break
@@ -3810,9 +3850,9 @@ func (p *Proxy) writeDirectStreamingResponse(
 					// the sum of every step's -- replace it. Applied
 					// before, the log's own reading would overwrite the
 					// cached and reasoning tokens with the last step's.
-					logCtx.DeepSeekToolUsage = loopUsage
-					p.finalizeStreamingLog(logCtx, loopTotalTokens,
-						withDeepSeekToolUsage(loopLastChunk, loopUsage),
+					logCtx.DeepSeekToolUsage = loop.usage
+					p.finalizeStreamingLog(logCtx, loop.totalTokens,
+						withDeepSeekToolUsage(loop.lastChunk, loop.usage),
 						"openai", resp.StatusCode, false)
 				}
 				streamCompleted = true

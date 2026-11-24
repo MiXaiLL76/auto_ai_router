@@ -23,10 +23,23 @@ func applyDeepSeekToolUsageTo(usage *converter.TokenUsage, loop *converter.Token
 	}
 	// The loop's counts already include the last step's (they are the sum of
 	// every step), so the last step's own figures must not be counted twice.
-	usage.PromptTokens = loop.PromptTokens
-	usage.CompletionTokens = loop.CompletionTokens
-	usage.CachedInputTokens = loop.CachedInputTokens
-	usage.ReasoningTokens = loop.ReasoningTokens
+	//
+	// A count the loop has none of does not replace what the request
+	// already knows: a stream that broke before its usage frame leaves the
+	// loop with no counts at all, and zeroing the request's own figures
+	// would bill the answer for nothing.
+	if loop.PromptTokens > 0 {
+		usage.PromptTokens = loop.PromptTokens
+	}
+	if loop.CompletionTokens > 0 {
+		usage.CompletionTokens = loop.CompletionTokens
+	}
+	if loop.CachedInputTokens > 0 {
+		usage.CachedInputTokens = loop.CachedInputTokens
+	}
+	if loop.ReasoningTokens > 0 {
+		usage.ReasoningTokens = loop.ReasoningTokens
+	}
 	usage.WebSearchRequests += loop.WebSearchRequests
 	usage.WebFetchRequests += loop.WebFetchRequests
 	// The router's own Moonshot calls ride along the same way: they are

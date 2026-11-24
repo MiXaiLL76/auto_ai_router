@@ -115,13 +115,33 @@ func (p *Proxy) runMoonshotStreamToolLoopBuffered(
 		// declared it, so relaying it would show the client a function
 		// it does not know and no answer. That case is the failure the
 		// client is told about.
-		if len(raw) == 0 || len(owned) > 0 {
+		//
+		// A call whose name never arrived counts as one of ours: the
+		// stream broke between the piece with the name and the pieces
+		// with its arguments, and an unnamed call cannot be told apart
+		// from the router's own.
+		if len(raw) == 0 || len(owned) > 0 || toolloop.HasUnnamedToolCall(raw) {
 			return nil, err
 		}
+		// The client went away: the upstream request rode the client's
+		// context, so its read fails with the cancellation when the
+		// client disconnects. That is not a broken provider -- there is
+		// nobody left to answer -- and the loop must stop without
+		// writing to the dead connection.
+		if isClientDisconnectError(err) {
+			return nil, errMoonshotToolCycleAborted
+		}
+		// The provider reported no usage (its stream broke before the
+		// usage frame), so the loop's own counts are empty. The answer's
+		// size is counted locally instead, from the text that was
+		// streamed: an empty usage would make the spend row zero, and
+		// the client got a real answer.
 		streamUsage := toolloop.UsageFromStreamUsage(usage)
+		loopUsage := moonshotUsageOf(streamUsage, nil)
+		loopUsage.CompletionTokens = p.countStreamedTextTokens(modelID, raw)
 		return &moonshotStreamCycleResult{
 			body:        raw,
-			usage:       moonshotUsageOf(streamUsage, nil),
+			usage:       loopUsage,
 			totalTokens: streamUsage.TotalTokens,
 			lastChunk:   sse.LastPayload(raw),
 			partial:     true,
