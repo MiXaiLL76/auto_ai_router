@@ -217,10 +217,53 @@ func normalizeSSEDataLineModelWithOptions(line []byte, publicModel string, prese
 	if len(payload) == 0 || payload[0] != '{' {
 		return line
 	}
-	if !bytes.Contains(payload, []byte(`"model"`)) &&
-		!bytes.Contains(payload, []byte(`"response"`)) &&
-		!bytes.Contains(payload, []byte("chat.completion.chunk")) &&
-		!bytes.Contains(payload, []byte("text_completion")) &&
+	// A chunk can only carry a model to rewrite if it has a "model" field of its
+	// own, or an "object" naming a shape the alias is ADDED to (a chunk
+	// without a model), or a nested "response" object (the /v1/responses
+	// shape). Nothing else in the payload matters here.
+	//
+	// The needles are the field names followed by their closing quote --
+	// model", object", response" -- and not the bare names. A Responses API
+	// delta carries the word "response" in the VALUE of "type"
+	// ("response.output_text.delta"), so a bare "response" matched every
+	// delta of every /v1/responses stream and made the gate decode them all
+	// for nothing: the thousands of delta events of one response each paid
+	// a decode and 15 allocations, and the rewrite still did not happen.
+	// A delta event carries no "model", no "object" and no nested
+	// "response" object, so the closing-quote needles skip it.
+	//
+	// The closing quote is also what keeps the needle off the slow path:
+	// bytes.Contains scans with a first-byte filter, and a needle starting
+	// with a quote has to compare the quote at every key of the payload,
+	// while one starting with a letter does not. Measured on a
+	// chat.completion.chunk: `"model"` costs ~73 ns, `model"` ~21 ns. The
+	// length of the needle is not what matters -- `"modelxxxxx"` costs the
+	// same ~73 ns as `"model"`.
+	//
+	// The gate deliberately does NOT look for "chat.completion.chunk" or
+	// "text_completion": by the OpenAI spec every such event carries
+	// "object":"chat.completion.chunk", so those needles were present in
+	// every chat chunk and the gate never skipped anything — it only added
+	// four scans per chunk to a path that then decoded the chunk anyway.
+	// The object name is checked below, on the decoded event, where it is
+	// needed to decide whether the alias is added.
+	//
+	// Short-circuited: a chunk with a "model" (the common case) costs one
+	// scan.
+	//
+	// A needle may still match a VALUE rather than a key -- {"note":"model"}
+	// matches model" -- which only means such a chunk is decoded when it
+	// could have been skipped: a decode that finds no "model" field changes
+	// nothing, so the client sees the same bytes either way.
+	//
+	// A backslash means something in the payload is escaped, and an escaped
+	// KEY can spell "model" without those bytes being there
+	// ("model" is "model"). Such a chunk must be decoded, so the
+	// backslash check short-circuits the gate to "decode it" — the same
+	// guard the previous gate had.
+	if !bytes.Contains(payload, []byte(`model"`)) &&
+		!bytes.Contains(payload, []byte(`object"`)) &&
+		!bytes.Contains(payload, []byte(`response"`)) &&
 		bytes.IndexByte(payload, '\\') < 0 {
 		return line
 	}
@@ -273,17 +316,21 @@ func normalizeSSEDataLineModelWithOptions(line []byte, publicModel string, prese
 
 // decodeShallowJSONObject decodes exactly one JSON object, keeping each value as
 // raw bytes, and rejects trailing content after it.
+//
+// The decode is a plain Unmarshal rather than a streaming Decoder: Unmarshal
+// rejects trailing content the same way ("invalid character after
+// top-level value"), so the outcome is unchanged, but it does not build a
+// per-call RuntimeContext the way NewDecoder does — measured on a single
+// chat.completion.chunk, ~630 ns and 18 allocations for the decoder against
+// ~410 ns and 13 allocations for Unmarshal, on the path every streamed chunk
+// of every response goes through. normalizeSuccessfulResponseModel already
+// decodes this way.
+//
+// A JSON null decodes to no map and no error, exactly as the decoder left it;
+// the caller treats a nil map as "nothing here" either way.
 func decodeShallowJSONObject(data []byte) (map[string]goccyjson.RawMessage, error) {
-	decoder := goccyjson.NewDecoder(bytes.NewReader(data))
 	var object map[string]goccyjson.RawMessage
-	if err := decoder.Decode(&object); err != nil {
-		return nil, err
-	}
-	var trailing interface{}
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return nil, errors.New("multiple JSON values")
-		}
+	if err := goccyjson.Unmarshal(data, &object); err != nil {
 		return nil, err
 	}
 	return object, nil
