@@ -596,6 +596,29 @@ func (a *completionTokenAccumulator) TokenCount() int {
 	return countTextTokensForModel(a.model, text)
 }
 
+// countStreamedTextTokens counts the tokens of the answer text a buffered
+// stream carried, without a live accumulator to fill.
+//
+// It is for the paths that read a provider's stream whole instead of chunk
+// by chunk: the router-run tool loop's own read. There the fallback for a
+// missing completion count has to be the answer's own size -- the request's
+// total is prompt-shaped (prompt + completion + cache), and using it would
+// bill an answer as output for the whole prompt.
+//
+// Zero when tiktoken is off: the count is an estimate, and a wrong one is
+// worse than none.
+func (p *Proxy) countStreamedTextTokens(model string, raw []byte) int {
+	if !p.tiktokenEnabled || len(raw) == 0 {
+		return 0
+	}
+	acc := p.newCompletionTokenAccumulator(model, nil)
+	if acc == nil {
+		return 0
+	}
+	acc.AddChunk(raw)
+	return acc.TokenCount()
+}
+
 func extractCompletionDeltaText(chunk []byte) string {
 	payloads := splitSSEPayloads(chunk, nil)
 	if len(payloads) == 0 {

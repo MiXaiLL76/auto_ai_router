@@ -26,6 +26,13 @@ type deepSeekStreamCycleResult struct {
 	// lastChunk is the last chunk of the final stream, which the streaming
 	// log reads its figures from.
 	lastChunk []byte
+	// partial marks a body that is the fragment of the provider's FIRST
+	// answer, cut short by a broken connection: it carries no tool call of
+	// the router's, so it can be relayed to the client as the answer it
+	// is. A step of the loop that broke is not partial in this sense --
+	// it may carry the tool call the client never declared -- and is
+	// never relayed.
+	partial bool
 }
 
 // runDeepSeekStreamToolLoop drives the router-run tool loop for a streaming
@@ -55,6 +62,15 @@ func (p *Proxy) runDeepSeekStreamToolLoop(
 	}
 	result, err := p.runDeepSeekStreamToolLoopBuffered(r, w, logCtx, prepared, cred, modelID, realModelID, body, resp, start, attemptedCreds)
 	if err != nil {
+		// The provider's stream broke part-way. The buffered loop hands the
+		// bytes that arrived back with the error, and those bytes are the
+		// answer so far: the model had already produced them. They are
+		// relayed to the client here, as the stream they are -- a stream
+		// that ends without a finish_reason is what a broken provider's
+		// answer looks like, and the client can use the text it got.
+		if result != nil && result.partial {
+			p.replayToolStream(w, resp, r, modelID, logCtx, result.body)
+		}
 		return result, err
 	}
 	// The final step's stream is what the client gets.
@@ -90,7 +106,26 @@ func (p *Proxy) runDeepSeekStreamToolLoopBuffered(
 	// request was billed twice.
 	raw, calls, usage, err := toolloop.CollectStreamToolCalls(resp, runner)
 	if err != nil {
-		return nil, err
+		// The provider's stream broke part-way. The bytes that arrived
+		// are the answer so far -- the model had already produced them,
+		// and the client is waiting for exactly that -- so the partial
+		// stream is handed over with the error instead of being dropped.
+		//
+		// Unless it carries a call of the ROUTER'S OWN: the client never
+		// declared it, so relaying it would show the client a function
+		// it does not know and no answer. That case is the failure the
+		// client is told about.
+		if len(raw) == 0 || len(calls) > 0 {
+			return nil, err
+		}
+		streamUsage := toolloop.UsageFromStreamUsage(usage)
+		return &deepSeekStreamCycleResult{
+			body:        raw,
+			usage:       deepSeekUsageOf(streamUsage, nil),
+			totalTokens: streamUsage.TotalTokens,
+			lastChunk:   sse.LastPayload(raw),
+			partial:     true,
+		}, err
 	}
 	if len(calls) == 0 {
 		// No tool call of ours: the client gets the provider's stream as it is.

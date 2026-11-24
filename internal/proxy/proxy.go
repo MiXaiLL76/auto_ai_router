@@ -3706,6 +3706,12 @@ func (p *Proxy) writeDirectStreamingResponse(
 			var loopTotalTokens int
 			var loopLastChunk []byte
 			streamLoopRan := false
+			// loopPartial: the provider's FIRST answer broke part-way, and
+			// the loop relayed the fragment of it to the client as the
+			// answer it is. A step of the loop that broke is not this: it
+			// may carry the tool call the client never declared, and the
+			// client still has to be told about the failure.
+			loopPartial := false
 			if moonshotToolsEnabledFor(modelID, cred) {
 				moonshotRun, moonshotErr := p.runMoonshotStreamToolLoop(r, w, logCtx, prepared, cred,
 					modelID, realModelID, body, resp, start, attemptedCreds)
@@ -3715,6 +3721,7 @@ func (p *Proxy) writeDirectStreamingResponse(
 					loopUsage = moonshotRun.usage
 					loopTotalTokens = moonshotRun.totalTokens
 					loopLastChunk = moonshotRun.lastChunk
+					loopPartial = moonshotRun.partial
 				}
 			} else {
 				deepSeekRun, deepSeekErr := p.runDeepSeekStreamToolLoop(r, w, logCtx, prepared, cred,
@@ -3725,6 +3732,7 @@ func (p *Proxy) writeDirectStreamingResponse(
 					loopUsage = deepSeekRun.usage
 					loopTotalTokens = deepSeekRun.totalTokens
 					loopLastChunk = deepSeekRun.lastChunk
+					loopPartial = deepSeekRun.partial
 				}
 			}
 			switch {
@@ -3746,6 +3754,33 @@ func (p *Proxy) writeDirectStreamingResponse(
 					}
 					applyDeepSeekToolUsageTo(logCtx.TokenUsage, loopUsage)
 					logCtx.DeepSeekToolUsage = loopUsage
+				}
+				// A provider whose stream broke part-way leaves the loop
+				// with the bytes that arrived: the answer the model had
+				// already produced. They were relayed to the client as
+				// the stream they are (see the loop's own replay), so
+				// there is nothing left to write -- a 502 on top of them
+				// would corrupt the stream the client is reading.
+				if loopPartial {
+					// The client has the provider's bytes; the log gets
+					// the failure and the tokens counted so far.
+					//
+					// The count is the LOCAL one, taken from the text
+					// the model actually streamed. The loop's own
+					// totalTokens is the request-shaped figure (prompt +
+					// completion + cache) that the rate limiter
+					// wants, and a broken stream carries no usage of
+					// its own -- passing it as the fallback for a
+					// missing completion count would bill the
+					// answer as output for the whole prompt.
+					logCtx.Status = "failure"
+					logCtx.StreamOutcome = "stream_error"
+					logCtx.ErrorMsg = "the upstream stream broke before it ended"
+					p.finalizeStreamingLog(logCtx, p.countStreamedTextTokens(modelID, loopLastChunk),
+						withDeepSeekToolUsage(loopLastChunk, loopUsage),
+						"openai", resp.StatusCode, false)
+					streamCompleted = true
+					break
 				}
 				// The loop read the provider's stream whole (and closed it)
 				// before it ran the tool, so the original response cannot
