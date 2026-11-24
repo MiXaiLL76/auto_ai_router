@@ -1374,11 +1374,13 @@ func TestStreamTransform_CacheUsageSurvivesResponsesConversion(t *testing.T) {
 		name, usage                           string
 		header5m, header1h                    int
 		input, read, write, short, hour, long int
+		total                                 int
 	}{
-		{"12h only", `{"prompt_tokens":1500,"prompt_tokens_details":{"cache_write_tokens_details":{"ttl_12h_tokens":1000}}}`, 0, 0, 1500, 0, 1000, 0, 0, 1000},
-		{"30m and 12h", `{"prompt_tokens":1500,"prompt_tokens_details":{"cache_write_tokens_details":{"ttl_30m_tokens":200,"ttl_12h_tokens":1000}}}`, 0, 0, 1500, 0, 1200, 200, 0, 1000},
-		{"header only", `{"prompt_tokens":1500}`, 200, 800, 1500, 0, 1000, 200, 800, 0},
-		{"flat Anthropic", `{"input_tokens":100,"output_tokens":5,"cache_read_input_tokens":300,"cache_creation_input_tokens":500,"cache_creation":{"ephemeral_1h_input_tokens":500}}`, 0, 0, 900, 300, 500, 0, 500, 0},
+		{"12h only", `{"prompt_tokens":1500,"prompt_tokens_details":{"cache_write_tokens_details":{"ttl_12h_tokens":1000}}}`, 0, 0, 1500, 0, 1000, 0, 0, 1000, 1500},
+		{"30m and 12h", `{"prompt_tokens":1500,"prompt_tokens_details":{"cache_write_tokens_details":{"ttl_30m_tokens":200,"ttl_12h_tokens":1000}}}`, 0, 0, 1500, 0, 1200, 200, 0, 1000, 1500},
+		{"header only", `{"prompt_tokens":1500}`, 200, 800, 1500, 0, 1000, 200, 800, 0, 1500},
+		{"header before aliases", `{"prompt_tokens":100,"completion_tokens":20,"total_tokens":123,"prompt_tokens_details":{"cache_creation_token_details":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0},"cache_creation":{"ephemeral_5m_input_tokens":7,"ephemeral_1h_input_tokens":8}},"cache_creation":{"ephemeral_5m_input_tokens":9}}`, 200, 800, 100, 0, 1000, 200, 800, 0, 123},
+		{"flat Anthropic", `{"input_tokens":100,"output_tokens":5,"cache_read_input_tokens":300,"cache_creation_input_tokens":500,"cache_creation":{"ephemeral_1h_input_tokens":500}}`, 0, 0, 900, 300, 500, 0, 500, 0, 905},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			input := buildSSEChunk(`{"choices":[],"usage":`+tc.usage+`}`) + "data: [DONE]\n\n"
@@ -1390,6 +1392,7 @@ func TestStreamTransform_CacheUsageSurvivesResponsesConversion(t *testing.T) {
 			))
 			require.NotNil(t, completed)
 			require.NotNil(t, completed.Usage)
+			assert.Equal(t, tc.total, completed.Usage.TotalTokens)
 			assert.Equal(t, tc.write, completed.Usage.InputTokensDetails.CacheCreationTokens)
 			if tc.long > 0 {
 				details := completed.Usage.InputTokensDetails.CacheWriteTokensDetails
@@ -1404,6 +1407,12 @@ func TestStreamTransform_CacheUsageSurvivesResponsesConversion(t *testing.T) {
 				if !ok || !strings.Contains(payload, `"type":"response.completed"`) {
 					continue
 				}
+				var event struct {
+					Response Response `json:"response"`
+				}
+				require.NoError(t, json.Unmarshal([]byte(payload), &event))
+				require.NotNil(t, event.Response.Usage)
+				assert.Equal(t, tc.total, event.Response.Usage.TotalTokens)
 				usage := converter.ExtractTokenUsage([]byte(payload))
 				require.NotNil(t, usage)
 				assert.Equal(t, tc.input, usage.PromptTokens)

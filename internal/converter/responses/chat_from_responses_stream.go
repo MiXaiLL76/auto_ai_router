@@ -131,9 +131,6 @@ func (s *responsesToChatStream) processEvent(event *responsesStreamEvent) error 
 		if event.Delta == "" {
 			return nil
 		}
-		if err := s.open(); err != nil {
-			return err
-		}
 		// Providers can omit output_item.added, so allocate the slot on first use.
 		idx := toolCallSlotFor(s.toolCallSlots, &s.nextToolCallIdx, event.OutputIndex)
 		return s.writeDelta(openai.OpenAIStreamingDelta{ToolCalls: []openai.OpenAIStreamingToolCall{{

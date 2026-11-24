@@ -220,7 +220,7 @@ type chatStreamUsage struct {
 	CompletionTokens         int                        `json:"completion_tokens"`
 	InputTokens              int                        `json:"input_tokens"`
 	OutputTokens             int                        `json:"output_tokens"`
-	TotalTokens              int                        `json:"total_tokens"`
+	TotalTokens              *int                       `json:"total_tokens"`
 	CacheReadInputTokens     int                        `json:"cache_read_input_tokens"`
 	CacheCreationInputTokens int                        `json:"cache_creation_input_tokens"`
 	CacheCreation            *CacheCreationTokenDetails `json:"cache_creation"`
@@ -419,7 +419,6 @@ func usageFromChatStreamChunk(raw *chatStreamUsage, audioInputIncludesCachedAudi
 	usage := &chatCompletionsUsage{
 		PromptTokens:     cmp.Or(raw.PromptTokens, raw.InputTokens),
 		CompletionTokens: cmp.Or(raw.CompletionTokens, raw.OutputTokens),
-		TotalTokens:      raw.TotalTokens,
 		CacheType:        raw.CacheType,
 	}
 	var ttl30m, ttl12h, audioTokens int
@@ -439,10 +438,16 @@ func usageFromChatStreamChunk(raw *chatStreamUsage, audioInputIncludesCachedAudi
 				ttl30m = details.TTL30mTokens
 			}
 		}
-		if !usage.hasShortCacheWriteTTL() && ttl30m == 0 && prompt.CacheCreation != nil {
-			usage.CacheCreation5mTokens = prompt.CacheCreation.Ephemeral5mInputTokens
-			usage.CacheCreation1hTokens = prompt.CacheCreation.Ephemeral1hInputTokens
-		}
+	}
+
+	// Kimi/Moonshot headers take precedence over the cache_creation aliases.
+	if !usage.hasShortCacheWriteTTL() && ttl30m == 0 {
+		usage.CacheCreation5mTokens = cacheWriteTTLFallback5mTokens
+		usage.CacheCreation1hTokens = cacheWriteTTLFallback1hTokens
+	}
+	if prompt := raw.PromptTokensDetails; !usage.hasShortCacheWriteTTL() && ttl30m == 0 && prompt != nil && prompt.CacheCreation != nil {
+		usage.CacheCreation5mTokens = prompt.CacheCreation.Ephemeral5mInputTokens
+		usage.CacheCreation1hTokens = prompt.CacheCreation.Ephemeral1hInputTokens
 	}
 
 	flatRead := usage.CachedTokens == 0 && raw.CacheReadInputTokens > 0
@@ -457,11 +462,6 @@ func usageFromChatStreamChunk(raw *chatStreamUsage, audioInputIncludesCachedAudi
 		usage.CacheCreation5mTokens = raw.CacheCreation.Ephemeral5mInputTokens
 		usage.CacheCreation1hTokens = raw.CacheCreation.Ephemeral1hInputTokens
 		flatWrite = flatWrite || usage.hasShortCacheWriteTTL()
-	}
-	// Kimi/Moonshot may report the split only in response headers.
-	if !usage.hasShortCacheWriteTTL() && ttl30m == 0 {
-		usage.CacheCreation5mTokens = cacheWriteTTLFallback5mTokens
-		usage.CacheCreation1hTokens = cacheWriteTTLFallback1hTokens
 	}
 	if ttl30m > 0 || ttl12h > 0 {
 		usage.CacheWriteTokensDetails = &CacheWriteTokensDetails{TTL30mTokens: ttl30m, TTL12hTokens: ttl12h}
@@ -478,6 +478,10 @@ func usageFromChatStreamChunk(raw *chatStreamUsage, audioInputIncludesCachedAudi
 		if flatWrite {
 			usage.PromptTokens += usage.CacheCreationTokens
 		}
+	}
+	usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+	if raw.TotalTokens != nil {
+		usage.TotalTokens = *raw.TotalTokens
 	}
 	usage.CachedTokens, usage.CachedAudioTokens = converterutil.NormalizeCachedAudioBreakdown(usage.CachedTokens, usage.CachedAudioTokens)
 	usage.AudioInputTokens = normalizedAudioTokens(audioTokens, usage.CachedTokens, usage.CachedAudioTokens, audioInputIncludesCachedAudio)
