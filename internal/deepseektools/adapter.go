@@ -1,6 +1,7 @@
 package deepseektools
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -353,6 +354,60 @@ func HasBuiltInTool(body []byte) bool {
 		switch tool.Type {
 		case BuiltinWebSearch, BuiltinWebSearchPreview, BuiltinWebFetch:
 			return true
+		}
+	}
+	return false
+}
+
+// ExposesTool reports whether the request offers the model any tool this
+// adapter could run: a built-in one the adapter takes over, or a function
+// tool it installed in place of one.
+//
+// The router-run stream loop buffers the whole answer before it can decide
+// whether to relay it, because it has to see the model's tool call first. On
+// a request that offers no tool of ours there is nothing to see: the model
+// cannot ask for a tool the request never declared, so buffering only costs
+// the client its stream -- the first byte arrives when the last one is already
+// generated, and a client that gives up on a slow first token tears down a
+// request that was answering all along.
+//
+// The body this is called with is the one the loop will run on, which is not
+// always the client's: RewriteRequest has already replaced a built-in tool
+// with the adapter's function, so the usual case is a function name. The
+// built-in case is not dead, though. A proxy-like credential gets its body
+// back from sanitizeClientParams unchanged, and a rewrite that fails returns
+// the body as it came, so the built-in type can still be what the gate sees.
+//
+// Only the tools are decoded, and only after a cheap substring check says
+// there is something to decode: this runs on the hot path, and the messages
+// of a long conversation are the bulk of the body.
+func ExposesTool(body []byte) bool {
+	// Every name this adapter installs or intercepts contains "web_", and a
+	// request that offers none of them cannot contain it either. The check is
+	// free and keeps the decode -- and its allocation -- off the requests that
+	// are the whole point of the gate: the ones with no tools of ours.
+	// TestEveryExposedToolNameContainsThePrefilter pins that assumption to the
+	// name lists, so adding a tool that breaks it fails a test rather than
+	// silently reopening the buffering.
+	if !bytes.Contains(body, []byte("web_")) {
+		return false
+	}
+	var request struct {
+		Tools []chatTool `json:"tools,omitempty"`
+	}
+	if err := json.Unmarshal(body, &request); err != nil {
+		return false
+	}
+	for _, tool := range request.Tools {
+		switch tool.Type {
+		case BuiltinWebSearch, BuiltinWebSearchPreview, BuiltinWebFetch:
+			return true
+		}
+		if tool.Function != nil {
+			switch tool.Function.Name {
+			case SearchToolName, FetchToolName:
+				return true
+			}
 		}
 	}
 	return false

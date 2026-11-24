@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/deepseektools"
@@ -1205,3 +1207,165 @@ func TestDeepSeekStreamingMidLoopFailureDoesNotRelayAClosedBody(t *testing.T) {
 		t.Errorf("the web search count = %d, want 1 (the search already ran)", searches)
 	}
 }
+
+// TestDeepSeekStreamWithoutOurToolIsRelayedAsItArrives checks that a streaming
+// request which offers none of the router's tools is relayed to the client as
+// it arrives, not buffered.
+//
+// The router-run loop exists to catch a mid-stream call of one of the router's
+// tools, and it reads the whole answer to see one. On a request that offers no
+// such tool the model cannot make that call, so the buffering bought nothing
+// and cost the client its stream: the first byte arrived only once the last was
+// generated. A client that gives up on a slow first token then tore down a
+// request that had been answering all along.
+//
+// The fake provider writes one chunk and then waits for the client to see it.
+// If the router relays, the write has already reached the client and the
+// provider is released at once; if it buffers, the wait times out, which is
+// the bug.
+func TestDeepSeekStreamWithoutOurToolIsRelayedAsItArrives(t *testing.T) {
+	fake := &deepSeekFake{}
+	clientSawFirstChunk := make(chan struct{})
+	var relayed bool
+	var relayedMu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		if r.URL.Path != "/v1/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		fake.mu.Lock()
+		fake.chatCalls++
+		fake.mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		// The first fragment of the answer.
+		_, _ = w.Write([]byte("data: " + `{"choices":[{"index":0,"delta":{"content":"hello"}}]}` + "\n\n"))
+		if flusher != nil {
+			flusher.Flush()
+		}
+		// Did the client see it before the answer is finished?
+		select {
+		case <-clientSawFirstChunk:
+			relayedMu.Lock()
+			relayed = true
+			relayedMu.Unlock()
+		case <-time.After(1500 * time.Millisecond):
+		}
+		_, _ = w.Write([]byte("data: " + `{"choices":[{"index":0,"delta":{"content":"world"}}]}` + "\n\n"))
+		_, _ = w.Write([]byte("data: " + `{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":2,"total_tokens":22}}` + "\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+	fake.baseURL = server.URL
+
+	prx, _ := deepSeekTestProxy(t, fake)
+
+	// A request with a plain user message and no tools at all: the router has
+	// nothing of its own to run, so it must not buffer.
+	body := `{
+		"model": "deepseek-flash",
+		"messages": [{"role": "user", "content": "hi"}],
+		"stream": true
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+
+	rec := &firstByteRecorder{onFirst: func() {
+		select {
+		case <-clientSawFirstChunk:
+		default:
+			close(clientSawFirstChunk)
+		}
+	}}
+	prx.ProxyRequest(rec, req)
+
+	relayedMu.Lock()
+	got := relayed
+	relayedMu.Unlock()
+	if !got {
+		t.Fatalf("the client did not get the first fragment before the answer was generated: the stream was buffered")
+	}
+	if !strings.Contains(rec.body.String(), "hello") || !strings.Contains(rec.body.String(), "world") {
+		t.Fatalf("the answer did not come through: %s", rec.body.String())
+	}
+	if fake.chatCalls != 1 {
+		t.Errorf("the provider was asked %d times, want 1", fake.chatCalls)
+	}
+}
+
+// TestDeepSeekStreamWithOurToolStillRunsTheLoop is the other side of the gate:
+// a request that does declare one of the router's tools still needs the
+// buffered loop, because the model may ask for it mid-stream.
+func TestDeepSeekStreamWithOurToolStillRunsTheLoop(t *testing.T) {
+	fake := &deepSeekFake{
+		searchResults: []map[string]any{{
+			"title": "DeepSeek V4 released",
+			"url":   "https://example.com/v4",
+		}},
+	}
+	server := httptest.NewServer(fake.handler())
+	defer server.Close()
+	fake.baseURL = server.URL
+
+	prx, _ := deepSeekTestProxy(t, fake)
+
+	body := `{
+		"model": "deepseek-flash",
+		"messages": [{"role": "user", "content": "What is new in DeepSeek V4?"}],
+		"tools": [{"type": "web_search"}],
+		"stream": true
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	prx.ProxyRequest(rec, req)
+
+	out := rec.Body.String()
+	if fake.searchCalls != 1 {
+		t.Errorf("the router made %d search calls, want 1", fake.searchCalls)
+	}
+	if fake.chatCalls != 2 {
+		t.Errorf("the model was called %d times, want 2", fake.chatCalls)
+	}
+	if !strings.Contains(out, "DeepSeek V4 was released.") {
+		t.Errorf("the client did not get the answer: %s", out)
+	}
+	if strings.Contains(out, deepseektools.SearchToolName) {
+		t.Errorf("the client saw the router's function tool: %s", out)
+	}
+}
+
+// firstByteRecorder is an http.ResponseWriter that reports the first Write, so
+// a test can tell whether a relayed stream reached the client before the
+// provider finished.
+type firstByteRecorder struct {
+	header  http.Header
+	status  int
+	body    bytes.Buffer
+	onFirst func()
+	fired   bool
+}
+
+func (r *firstByteRecorder) Header() http.Header {
+	if r.header == nil {
+		r.header = http.Header{}
+	}
+	return r.header
+}
+
+func (r *firstByteRecorder) WriteHeader(status int) { r.status = status }
+
+func (r *firstByteRecorder) Write(p []byte) (int, error) {
+	if !r.fired {
+		r.fired = true
+		if r.onFirst != nil {
+			r.onFirst()
+		}
+	}
+	return r.body.Write(p)
+}
+
+func (r *firstByteRecorder) Flush() {}
