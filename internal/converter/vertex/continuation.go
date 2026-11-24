@@ -23,6 +23,10 @@ import (
 // 1,048,576-token budget at 32,768 tokens a request takes 32 of them.
 const MaxContinuations = 40
 
+// ContinuationStreamBoundary separates two upstream SSE responses. The proxy
+// writes it after draining the first response, including any trailing usage.
+const ContinuationStreamBoundary = ": air-gemini-continuation"
+
 // SupportsLongDecode reports whether model continues a long generation with
 // continuation tokens.
 func SupportsLongDecode(model string) bool {
@@ -96,7 +100,7 @@ func MergeContinuationResponses(bodies [][]byte) ([]byte, error) {
 		}
 		var sources ToolUseSources
 		sources.Add(resp.Candidates, resp.ModelVersion)
-		if meta := resp.UsageMetadata; meta != nil && (!sources.search || sources.other) {
+		if meta := resp.UsageMetadata; meta != nil && !sources.searchOnly() {
 			billableTools.Count += meta.ToolUsePromptTokenCount
 			billableTools.Details = addModalityTokenCounts(billableTools.Details, meta.ToolUsePromptTokensDetails)
 		}

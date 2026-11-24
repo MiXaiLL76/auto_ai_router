@@ -106,6 +106,13 @@ func TransformVertexStreamToResponses(
 		line := scanner.Text()
 		lineCount++
 
+		if line == vertex.ContinuationStreamBoundary {
+			acc.usage.CloseRequest(&acc.toolUse, acc.model)
+			acc.webSearch.CloseResponse()
+			acc.finishReason = ""
+			continue
+		}
+
 		if !strings.HasPrefix(line, "data: ") {
 			continue
 		}
@@ -132,28 +139,15 @@ func TransformVertexStreamToResponses(
 		acc.webSearch.Add(chunk.Candidates)
 
 		candidate := chunk.Candidates[0]
-		switch {
-		case vertex.HasFinishReason(candidate):
+		if vertex.HasFinishReason(candidate) {
 			acc.finishReason = string(candidate.FinishReason)
-		case vertex.IsContinuation(acc.finishReason):
-			// The next upstream request of a continued generation is answering.
-			acc.finishReason = ""
 		}
-
 		if candidate.Content != nil {
 			for _, part := range candidate.Content.Parts {
 				if err := processPart(writer, acc, part); err != nil {
 					return err
 				}
 			}
-		}
-
-		// The upstream request stopped at its output cap and the generation goes
-		// on in the next one (see vertex/continuation.go): its usage and searches
-		// add up with the next request's.
-		if vertex.IsContinuation(string(candidate.FinishReason)) {
-			acc.usage.CloseRequest(&acc.toolUse, acc.model)
-			acc.webSearch.CloseResponse()
 		}
 	}
 

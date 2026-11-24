@@ -269,7 +269,7 @@ func TestResponsesRepeatedSearchQueriesBilledOnlyOnCarbon(t *testing.T) {
 }
 
 func TestCarbonResponsesContinuedStream(t *testing.T) {
-	resp, sse := carbonStreamToResponses(t, continuedResponsesStream+finalResponsesSegment)
+	resp, sse := carbonStreamToResponses(t, continuedResponsesStream+vertex.ContinuationStreamBoundary+"\n\n"+finalResponsesSegment)
 	assert.Equal(t, "completed", resp.Status)
 	assert.Equal(t, 1, strings.Count(sse, "event: response.completed"))
 	require.NotNil(t, resp.Usage)

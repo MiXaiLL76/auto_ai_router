@@ -169,6 +169,10 @@ func (s ToolUseSources) unbilledSearchContext(model string) bool {
 	return profile != nil && profile.unbilledSearchContext
 }
 
+func (s ToolUseSources) searchOnly() bool {
+	return s.search && !s.other
+}
+
 // The merger records the tool tokens that remain billable for a model with
 // free Search context while each upstream request's sources are still known.
 type toolTokenUsage struct {
@@ -193,7 +197,7 @@ func BillableResponseUsage(body []byte, meta *genai.GenerateContentResponseUsage
 // not charge Google Search context and only Google Search produced it. With any other
 // tool (url_context is billed as input) the split is unknown, so all of it is billed.
 func BillableUsageMetadata(meta *genai.GenerateContentResponseUsageMetadata, sources ToolUseSources, model string) *genai.GenerateContentResponseUsageMetadata {
-	if meta == nil || meta.ToolUsePromptTokenCount <= 0 || !sources.search || sources.other ||
+	if meta == nil || meta.ToolUsePromptTokenCount <= 0 || !sources.searchOnly() ||
 		!sources.unbilledSearchContext(model) {
 		return meta
 	}

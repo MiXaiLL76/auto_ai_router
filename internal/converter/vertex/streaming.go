@@ -39,7 +39,7 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 	textOffsets := make(map[int32]int)
 	var usage ContinuationUsage
 	var toolUse ToolUseSources
-	finished := false // a candidate has reported its final finish reason
+	finished := false // the current upstream response has reported a finish reason
 	// Candidates (by index) that have streamed a function call. Gemini may send the
 	// call and its finish reason in different chunks, and that finish reason is STOP.
 	calledTools := make(map[int32]bool)
@@ -55,6 +55,13 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 	for scanner.Scan() {
 		line := scanner.Text()
 		vertexLineCount++
+
+		if line == ContinuationStreamBoundary {
+			usage.CloseRequest(&toolUse, model)
+			webSearch.CloseResponse()
+			finished = false
+			continue
+		}
 
 		// Skip empty lines and non-data lines
 		if !strings.HasPrefix(line, "data: ") {
@@ -111,27 +118,19 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 		keepTextSignatures := UsesPrefixBoundSignatures(answeringModel)
 		webSearch.Add(vertexChunk.Candidates)
 		webSearchRequests := webSearch.Count(answeringModel)
-		requestContinues := false // this chunk ends an upstream request that goes on
 		for _, candidate := range vertexChunk.Candidates {
-			switch {
-			case candidate != nil && IsContinuation(string(candidate.FinishReason)):
-				requestContinues = true
-			case HasFinishReason(candidate):
+			if HasFinishReason(candidate) {
 				finished = true
 			}
 		}
 		var chunkUsage *openai.OpenAIUsage
 		usage.Observe(vertexChunk.UsageMetadata)
-		if vertexChunk.UsageMetadata != nil || finished || requestContinues {
-			if meta := usage.BillableTotal(toolUse, model, finished || requestContinues); meta != nil {
+		if vertexChunk.UsageMetadata != nil || (len(vertexChunk.Candidates) > 0 && finished) {
+			if meta := usage.BillableTotal(toolUse, model, finished); meta != nil {
 				chunkUsage = convertVertexUsageMetadata(meta)
 				setVertexWebSearchUsage(chunkUsage, webSearchRequests)
 				setInitialPromptTokens(chunkUsage, usage)
 			}
-		}
-		if requestContinues {
-			usage.CloseRequest(&toolUse, model)
-			webSearch.CloseResponse()
 		}
 
 		// Skip chunks with no candidates
@@ -151,9 +150,9 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 				chunkJSON, err := json.Marshal(openAIChunk)
 				if err == nil {
 					slog.Debug("[vertex/streaming] emitting usage-only chunk",
-						"prompt_tokens", vertexChunk.UsageMetadata.PromptTokenCount,
-						"candidates_tokens", vertexChunk.UsageMetadata.CandidatesTokenCount,
-						"total_tokens", vertexChunk.UsageMetadata.TotalTokenCount)
+						"prompt_tokens", chunkUsage.PromptTokens,
+						"completion_tokens", chunkUsage.CompletionTokens,
+						"total_tokens", chunkUsage.TotalTokens)
 					if _, werr := fmt.Fprintf(output, "data: %s\n\n", chunkJSON); werr != nil {
 						return fmt.Errorf("write usage chunk: %w", werr)
 					}

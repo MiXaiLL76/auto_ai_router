@@ -16,7 +16,9 @@ import (
 // input on the continuation; all four entry points must log the same charge.
 func TestHydrogenContinuesAndBills(t *testing.T) {
 	const model = "gemini-4-hydrogen"
-	const first = `{"modelVersion":"gemini-4-hydrogen","candidates":[{"content":{"role":"model","parts":[{"text":"plan","thought":true}]},"finishReason":"CONTINUATION","continuationToken":"dG9r","groundingMetadata":{"webSearchQueries":["one"]}}],"usageMetadata":{"promptTokenCount":100,"thoughtsTokenCount":65536,"toolUsePromptTokenCount":11,"totalTokenCount":65647}}`
+	const firstCandidate = `"modelVersion":"gemini-4-hydrogen","candidates":[{"content":{"role":"model","parts":[{"text":"plan","thought":true}]},"finishReason":"CONTINUATION","continuationToken":"dG9r","groundingMetadata":{"webSearchQueries":["one"]}}]`
+	const firstUsage = `"usageMetadata":{"promptTokenCount":100,"thoughtsTokenCount":65536,"toolUsePromptTokenCount":11,"totalTokenCount":65647}`
+	const first = "{" + firstCandidate + "," + firstUsage + "}"
 	const last = `{"modelVersion":"gemini-4-hydrogen","candidates":[{"content":{"role":"model","parts":[{"text":"done"}]},"finishReason":"STOP","groundingMetadata":{"webSearchQueries":["one"]}}],"usageMetadata":{"promptTokenCount":65636,"cachedContentTokenCount":65000,"candidatesTokenCount":8,"toolUsePromptTokenCount":15,"totalTokenCount":65659}}`
 	for _, endpoint := range []string{"/v1/chat/completions", "/v1/responses"} {
 		for _, stream := range []bool{false, true} {
@@ -34,7 +36,11 @@ func TestHydrogenContinuesAndBills(t *testing.T) {
 					}
 					if stream {
 						w.Header().Set("Content-Type", "text/event-stream")
-						body = sseFrames(body)
+						if n == 0 {
+							body = sseFrames("{"+firstCandidate+"}", "{"+firstUsage+"}", "[DONE]")
+						} else {
+							body = sseFrames(body, `{}`)
+						}
 					} else {
 						w.Header().Set("Content-Type", "application/json")
 					}

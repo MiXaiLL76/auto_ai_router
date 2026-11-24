@@ -328,7 +328,7 @@ func carbonTransformStream(t *testing.T, stream string) []openai.OpenAIStreaming
 }
 
 func TestCarbonContinuedStreamIsOneGeneration(t *testing.T) {
-	chunks := carbonTransformStream(t, continuedStream+finalSegment)
+	chunks := carbonTransformStream(t, continuedStream+ContinuationStreamBoundary+"\n\n"+finalSegment)
 
 	assert.Equal(t, []string{"stop"}, finishReasons(chunks), "the CONTINUATION finish is not passed on")
 	var content, reasoning string
