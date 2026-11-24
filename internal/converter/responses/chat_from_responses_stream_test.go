@@ -478,3 +478,25 @@ func TestTransformResponsesStreamToChat_LargeImageEvent(t *testing.T) {
 	assert.Equal(t, "stop", finish)
 	assert.True(t, sawUsage)
 }
+
+func TestTransformResponsesStreamToChat_ArgumentsDeltaWithoutItemAdded(t *testing.T) {
+	input := strings.NewReader(
+		sseLine(`{"type":"response.function_call_arguments.delta","output_index":4,"delta":"{"}`) +
+			sseLine(`{"type":"response.function_call_arguments.delta","output_index":4,"delta":"}"}`) +
+			sseLine(`{"type":"response.completed","response":{"status":"completed"}}`),
+	)
+	var out bytes.Buffer
+	require.NoError(t, TransformResponsesStreamToChat(input, "test-model", &out))
+
+	chunks := collectSSEChunks(t, out.Bytes())
+	require.Len(t, chunks, 3)
+	for i, fragment := range []string{"{", "}"} {
+		delta := chunks[i]["choices"].([]interface{})[0].(map[string]interface{})["delta"].(map[string]interface{})
+		calls, ok := delta["tool_calls"].([]interface{})
+		require.True(t, ok, "chunk %d must carry a tool call", i)
+		require.Len(t, calls, 1)
+		call := calls[0].(map[string]interface{})
+		assert.Equal(t, float64(0), call["index"])
+		assert.Equal(t, fragment, call["function"].(map[string]interface{})["arguments"])
+	}
+}

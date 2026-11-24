@@ -20,6 +20,33 @@ func TestOpenAIToVertex_MaxTokensWrongTypeReportsParam(t *testing.T) {
 	testhelpers.RequireValidationError(t, err, "max_tokens", "invalid_type")
 }
 
+func TestBuildGenerationConfig_MixedSourcePrecedence(t *testing.T) {
+	var req openai.OpenAIRequest
+	require.NoError(t, json.Unmarshal([]byte(`{
+		"max_tokens": 400,
+		"max_completion_tokens": 0,
+		"temperature": 0.25,
+		"aspect_ratio": "1:1",
+		"thinking_config": {},
+		"thinking_budget": 512,
+		"extra_body": {"generation_config": {
+			"temperature": 0.5,
+			"image_config": {"aspect_ratio": "3:2", "image_size": "2K"}
+		}}
+	}`), &req))
+	cfg := buildGenerationConfig(&req, "gemini-2.5-flash")
+	require.NotNil(t, cfg)
+	require.Zero(t, cfg.MaxOutputTokens)
+	require.NotNil(t, cfg.Temperature)
+	require.Equal(t, float32(0.5), *cfg.Temperature)
+	require.NotNil(t, cfg.ImageConfig)
+	require.Equal(t, "1:1", cfg.ImageConfig.AspectRatio)
+	require.Equal(t, "2K", cfg.ImageConfig.ImageSize)
+	require.NotNil(t, cfg.ThinkingConfig)
+	require.NotNil(t, cfg.ThinkingConfig.ThinkingBudget)
+	require.Equal(t, int32(512), *cfg.ThinkingConfig.ThinkingBudget)
+}
+
 // TestOpenAIToVertex_ToolRoleMessage_UsesNameField verifies that when a tool-role
 // message has Name set (e.g. "get_weather"), the resulting FunctionResponse.Name
 // uses that Name, NOT the ToolCallID.

@@ -1021,6 +1021,34 @@ func TestStreamTransform_ContentAndFinishReasonSameChunk(t *testing.T) {
 	assert.Contains(t, result, "\"status\":\"completed\"")
 }
 
+func TestStreamTransform_MixedDeltasBeforeFinishAndTrailingUsage(t *testing.T) {
+	input := buildSSEChunk(`{"choices":[{"delta":{"reasoning_content":"Think first","content":"Checking","tool_calls":[{"index":0,"id":"call_1","function":{"name":"lookup","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}`) +
+		buildSSEChunk(buildUsageChunk(10, 20, 30)) + "data: [DONE]\n\n"
+	var output bytes.Buffer
+	var completed []*Response
+	require.NoError(t, TransformChatStreamToResponses(strings.NewReader(input), &output, "test-model", func(response *Response) {
+		completed = append(completed, response)
+	}))
+	var sequence []string
+	for _, event := range parseSSEEvents(t, output.String()) {
+		name := event["_event"].(string)
+		switch name {
+		case "response.reasoning_summary_text.done", "response.output_text.delta",
+			"response.function_call_arguments.delta", "response.completed":
+			sequence = append(sequence, name)
+		}
+	}
+	require.Equal(t, []string{
+		"response.reasoning_summary_text.done",
+		"response.output_text.delta",
+		"response.function_call_arguments.delta",
+		"response.completed",
+	}, sequence)
+	require.Len(t, completed, 1)
+	require.NotNil(t, completed[0].Usage)
+	require.Equal(t, 30, completed[0].Usage.TotalTokens)
+}
+
 // TestStreamTransform_ContentAndFinishReasonNoDone verifies the same scenario
 // but without [DONE] (Gemini API doesn't send [DONE], stream just closes).
 func TestStreamTransform_ContentAndFinishReasonNoDone(t *testing.T) {
@@ -1339,4 +1367,69 @@ func TestStreamTransform_NegativeToolCallIndexIgnored(t *testing.T) {
 	require.NotNil(t, capturedResp)
 	require.Len(t, capturedResp.Output, 1)
 	assert.Equal(t, "message", capturedResp.Output[0].Type)
+}
+
+func TestStreamTransform_CacheUsageSurvivesResponsesConversion(t *testing.T) {
+	for _, tc := range []struct {
+		name, usage                           string
+		header5m, header1h                    int
+		input, read, write, short, hour, long int
+		total                                 int
+	}{
+		{"12h only", `{"prompt_tokens":1500,"prompt_tokens_details":{"cache_write_tokens_details":{"ttl_12h_tokens":1000}}}`, 0, 0, 1500, 0, 1000, 0, 0, 1000, 1500},
+		{"30m and 12h", `{"prompt_tokens":1500,"prompt_tokens_details":{"cache_write_tokens_details":{"ttl_30m_tokens":200,"ttl_12h_tokens":1000}}}`, 0, 0, 1500, 0, 1200, 200, 0, 1000, 1500},
+		{"header only", `{"prompt_tokens":1500}`, 200, 800, 1500, 0, 1000, 200, 800, 0, 1500},
+		{"header before aliases", `{"prompt_tokens":100,"completion_tokens":20,"total_tokens":123,"prompt_tokens_details":{"cache_creation_token_details":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0},"cache_creation":{"ephemeral_5m_input_tokens":7,"ephemeral_1h_input_tokens":8}},"cache_creation":{"ephemeral_5m_input_tokens":9}}`, 200, 800, 100, 0, 1000, 200, 800, 0, 123},
+		{"flat Anthropic", `{"input_tokens":100,"output_tokens":5,"cache_read_input_tokens":300,"cache_creation_input_tokens":500,"cache_creation":{"ephemeral_1h_input_tokens":500}}`, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+		{"missing total", `{"prompt_tokens":100,"completion_tokens":5}`, 0, 0, 100, 0, 0, 0, 0, 0, 105},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := buildSSEChunk(`{"choices":[],"usage":`+tc.usage+`}`) + "data: [DONE]\n\n"
+			var output bytes.Buffer
+			var completed *Response
+			require.NoError(t, TransformChatStreamToResponsesWithMetaAndUsage(
+				strings.NewReader(input), &output, "test-model", nil, false, tc.header5m, tc.header1h,
+				func(response *Response) { completed = response },
+			))
+			require.NotNil(t, completed)
+			require.NotNil(t, completed.Usage)
+			assert.Equal(t, tc.total, completed.Usage.TotalTokens)
+			assert.Equal(t, tc.write, completed.Usage.InputTokensDetails.CacheCreationTokens)
+			if tc.long > 0 {
+				details := completed.Usage.InputTokensDetails.CacheWriteTokensDetails
+				if assert.NotNil(t, details) {
+					assert.Equal(t, tc.long, details.TTL12hTokens)
+					assert.Equal(t, tc.short, details.TTL30mTokens)
+				}
+			}
+
+			for _, line := range strings.Split(output.String(), "\n") {
+				payload, ok := strings.CutPrefix(line, "data: ")
+				if !ok || !strings.Contains(payload, `"type":"response.completed"`) {
+					continue
+				}
+				var event struct {
+					Response Response `json:"response"`
+				}
+				require.NoError(t, json.Unmarshal([]byte(payload), &event))
+				require.NotNil(t, event.Response.Usage)
+				assert.Equal(t, tc.total, event.Response.Usage.TotalTokens)
+				assert.Equal(t, tc.input, event.Response.Usage.InputTokens)
+				usage := converter.ExtractTokenUsage([]byte(payload))
+				if tc.input == 0 {
+					assert.Nil(t, usage)
+					return
+				}
+				require.NotNil(t, usage)
+				assert.Equal(t, tc.input, usage.PromptTokens)
+				assert.Equal(t, tc.read, usage.CachedInputTokens)
+				assert.Equal(t, tc.write, usage.CacheCreationTokens)
+				assert.Equal(t, tc.short, usage.CacheCreation5mTokens)
+				assert.Equal(t, tc.hour, usage.CacheCreation1hTokens)
+				assert.Equal(t, tc.long, usage.CacheCreation12hTokens)
+				return
+			}
+			t.Fatal("missing response.completed event")
+		})
+	}
 }

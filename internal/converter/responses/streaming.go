@@ -164,14 +164,15 @@ type streamReasoningItem struct {
 
 // chatCompletionsUsage represents usage from a Chat Completions streaming chunk.
 type chatCompletionsUsage struct {
-	PromptTokens          int
-	CompletionTokens      int
-	TotalTokens           int
-	CachedTokens          int
-	CachedAudioTokens     int
-	CacheCreationTokens   int
-	CacheCreation5mTokens int
-	CacheCreation1hTokens int
+	PromptTokens            int
+	CompletionTokens        int
+	TotalTokens             int
+	CachedTokens            int
+	CachedAudioTokens       int
+	CacheCreationTokens     int
+	CacheCreation5mTokens   int
+	CacheCreation1hTokens   int
+	CacheWriteTokensDetails *CacheWriteTokensDetails
 	// CacheType is Alibaba/Qwen's explicit cache mode marker
 	// (converter.CacheTypeExplicit) from prompt_tokens_details.cache_type.
 	CacheType         string
@@ -184,62 +185,54 @@ type chatCompletionsUsage struct {
 
 // chatStreamChunk represents a parsed Chat Completions streaming chunk.
 type chatStreamChunk struct {
-	ID      string `json:"id"`
-	Object  string `json:"object"`
-	Created int64  `json:"created"`
-	Model   string `json:"model"`
-	Choices []struct {
-		Index int `json:"index"`
-		Delta struct {
-			Role    string `json:"role,omitempty"`
-			Content string `json:"content,omitempty"`
-			Refusal string `json:"refusal,omitempty"`
-			// See converterutil.PickReasoningField for the two spellings and why interface{}.
-			ReasoningContent interface{} `json:"reasoning_content,omitempty"`
-			Reasoning        interface{} `json:"reasoning,omitempty"`
-			ToolCalls        []struct {
-				Index    int    `json:"index"`
-				ID       string `json:"id,omitempty"`
-				Type     string `json:"type,omitempty"`
-				Function *struct {
-					Name      string `json:"name,omitempty"`
-					Arguments string `json:"arguments,omitempty"`
-				} `json:"function,omitempty"`
-			} `json:"tool_calls,omitempty"`
-		} `json:"delta"`
-		FinishReason *string `json:"finish_reason"`
-	} `json:"choices"`
-	Usage *struct {
-		PromptTokens        int `json:"prompt_tokens"`
-		CompletionTokens    int `json:"completion_tokens"`
-		TotalTokens         int `json:"total_tokens"`
-		PromptTokensDetails *struct {
-			CachedTokens              int `json:"cached_tokens,omitempty"`
-			CachedAudioTokens         int `json:"cached_audio_tokens,omitempty"`
-			CacheCreationTokens       int `json:"cache_creation_tokens,omitempty"`
-			CacheWriteTokens          int `json:"cache_write_tokens,omitempty"`
-			CacheCreationTokenDetails *struct {
-				Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
-				Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
-			} `json:"cache_creation_token_details,omitempty"`
-			// Alibaba returns the explicit cache creation TTL detail under
-			// cache_creation.ephemeral_5m_input_tokens (no _token_details suffix).
-			CacheCreation *struct {
-				Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
-				Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
-			} `json:"cache_creation,omitempty"`
-			AudioTokens int    `json:"audio_tokens,omitempty"`
-			CacheType   string `json:"cache_type,omitempty"`
-		} `json:"prompt_tokens_details,omitempty"`
-		CompletionTokensDetails *struct {
-			ReasoningTokens int `json:"reasoning_tokens,omitempty"`
-			AudioTokens     int `json:"audio_tokens,omitempty"`
-			ImageTokens     int `json:"image_tokens,omitempty"`
-		} `json:"completion_tokens_details,omitempty"`
-		ServerToolUse *struct {
-			WebSearchRequests int `json:"web_search_requests,omitempty"`
-		} `json:"server_tool_use,omitempty"`
-	} `json:"usage,omitempty"`
+	ID      string             `json:"id"`
+	Object  string             `json:"object"`
+	Created int64              `json:"created"`
+	Model   string             `json:"model"`
+	Choices []chatStreamChoice `json:"choices"`
+	Usage   *chatStreamUsage   `json:"usage,omitempty"`
+}
+
+type chatStreamChoice struct {
+	Index int `json:"index"`
+	Delta struct {
+		Role    string `json:"role,omitempty"`
+		Content string `json:"content,omitempty"`
+		Refusal string `json:"refusal,omitempty"`
+		// See converterutil.PickReasoningField for the two spellings and why interface{}.
+		ReasoningContent interface{} `json:"reasoning_content,omitempty"`
+		Reasoning        interface{} `json:"reasoning,omitempty"`
+		ToolCalls        []struct {
+			Index    int    `json:"index"`
+			ID       string `json:"id,omitempty"`
+			Type     string `json:"type,omitempty"`
+			Function *struct {
+				Name      string `json:"name,omitempty"`
+				Arguments string `json:"arguments,omitempty"`
+			} `json:"function,omitempty"`
+		} `json:"tool_calls,omitempty"`
+	} `json:"delta"`
+	FinishReason *string `json:"finish_reason"`
+}
+
+type chatStreamUsage struct {
+	PromptTokens        int    `json:"prompt_tokens"`
+	CompletionTokens    int    `json:"completion_tokens"`
+	TotalTokens         *int   `json:"total_tokens"`
+	CacheType           string `json:"cache_type"`
+	PromptTokensDetails *struct {
+		InputDetails
+		// Alibaba also spells the short TTL breakdown cache_creation.
+		CacheCreation *CacheCreationTokenDetails `json:"cache_creation,omitempty"`
+	} `json:"prompt_tokens_details,omitempty"`
+	CompletionTokensDetails *struct {
+		ReasoningTokens int `json:"reasoning_tokens,omitempty"`
+		AudioTokens     int `json:"audio_tokens,omitempty"`
+		ImageTokens     int `json:"image_tokens,omitempty"`
+	} `json:"completion_tokens_details,omitempty"`
+	ServerToolUse *struct {
+		WebSearchRequests int `json:"web_search_requests,omitempty"`
+	} `json:"server_tool_use,omitempty"`
 }
 
 // TransformChatStreamToResponses reads Chat Completions SSE from reader,
@@ -354,214 +347,15 @@ func transformChatStreamToResponsesInner(
 			"choices", len(chunk.Choices), "has_usage", chunk.Usage != nil,
 			"model", chunk.Model, "id", chunk.ID)
 
-		// Capture metadata from first chunk
-		if acc.createdAt == 0 {
-			acc.createdAt = chunk.Created
-			if chunk.Model != "" {
-				acc.model = chunk.Model
-			}
-			if chunk.ID != "" {
-				acc.originalChatCompletionID = chunk.ID
-			}
-		}
-
-		// Capture usage if present
+		acc.captureChatChunkMetadata(&chunk)
 		if chunk.Usage != nil {
-			acc.usage = &chatCompletionsUsage{
-				PromptTokens:     chunk.Usage.PromptTokens,
-				CompletionTokens: chunk.Usage.CompletionTokens,
-				TotalTokens:      chunk.Usage.TotalTokens,
-			}
-			if chunk.Usage.PromptTokensDetails != nil {
-				cachedTokens, cachedAudioTokens := converterutil.NormalizeCachedAudioBreakdown(
-					chunk.Usage.PromptTokensDetails.CachedTokens,
-					chunk.Usage.PromptTokensDetails.CachedAudioTokens,
-				)
-				acc.usage.CachedTokens = cachedTokens
-				acc.usage.CachedAudioTokens = cachedAudioTokens
-				acc.usage.CacheType = chunk.Usage.PromptTokensDetails.CacheType
-				acc.usage.CacheCreationTokens = chunk.Usage.PromptTokensDetails.CacheCreationTokens
-				if acc.usage.CacheCreationTokens == 0 {
-					acc.usage.CacheCreationTokens = chunk.Usage.PromptTokensDetails.CacheWriteTokens
-				}
-				acc.usage.AudioInputTokens = normalizedAudioTokens(
-					chunk.Usage.PromptTokensDetails.AudioTokens,
-					cachedTokens,
-					cachedAudioTokens,
-					audioInputIncludesCachedAudio,
-				)
-				details := chunk.Usage.PromptTokensDetails.CacheCreationTokenDetails
-				if details == nil {
-					// Alibaba spells the TTL detail cache_creation.ephemeral_5m_input_tokens
-					// (nested in prompt_tokens_details, no _token_details suffix).
-					details = chunk.Usage.PromptTokensDetails.CacheCreation
-				}
-				if details != nil {
-					acc.usage.CacheCreation5mTokens = details.Ephemeral5mInputTokens
-					acc.usage.CacheCreation1hTokens = details.Ephemeral1hInputTokens
-					if acc.usage.CacheCreationTokens == 0 {
-						acc.usage.CacheCreationTokens = details.Ephemeral5mInputTokens + details.Ephemeral1hInputTokens
-					}
-				}
-				// Kimi/Moonshot never reports a TTL split in the body — fall back
-				// to the header-sourced split the caller supplied.
-				if acc.usage.CacheCreation5mTokens == 0 && acc.usage.CacheCreation1hTokens == 0 {
-					acc.usage.CacheCreation5mTokens = cacheWriteTTLFallback5mTokens
-					acc.usage.CacheCreation1hTokens = cacheWriteTTLFallback1hTokens
-				}
-			}
-			if chunk.Usage.CompletionTokensDetails != nil {
-				acc.usage.ReasoningTokens = chunk.Usage.CompletionTokensDetails.ReasoningTokens
-				acc.usage.AudioOutputTokens = chunk.Usage.CompletionTokensDetails.AudioTokens
-				acc.usage.ImageOutputTokens = chunk.Usage.CompletionTokensDetails.ImageTokens
-			}
-			if chunk.Usage.ServerToolUse != nil && chunk.Usage.ServerToolUse.WebSearchRequests > 0 {
-				acc.usage.WebSearchRequests = chunk.Usage.ServerToolUse.WebSearchRequests
-			}
+			acc.usage = usageFromChatStreamChunk(chunk.Usage, audioInputIncludesCachedAudio,
+				cacheWriteTTLFallback5mTokens, cacheWriteTTLFallback1hTokens)
 		}
-
-		if len(chunk.Choices) == 0 {
-			continue
-		}
-
-		choice := chunk.Choices[0]
-
-		// Handle reasoning delta BEFORE text/tool_calls: DeepSeek-style
-		// providers stream reasoning ahead of the visible content, and the
-		// reasoning output item must be announced (and later closed) before
-		// the message/tool_call item that follows it.
-		if reasoningDelta := converterutil.ReasoningText(choice.Delta.ReasoningContent, choice.Delta.Reasoning); reasoningDelta != "" {
-			if !acc.headerEmitted {
-				if err := emitHeaderEvents(writer, acc); err != nil {
-					return err
-				}
-			}
-			if err := emitReasoningDelta(writer, acc, reasoningDelta); err != nil {
+		if len(chunk.Choices) > 0 {
+			if err := processChatStreamChoice(writer, acc, &chunk.Choices[0]); err != nil {
 				return err
 			}
-		}
-
-		// Handle text content delta BEFORE finish_reason.
-		// Some providers (Vertex with GoogleSearch, short responses) send both
-		// content and finish_reason in the same chunk. Processing finish_reason
-		// first with `continue` would skip the content entirely.
-		if choice.Delta.Content != "" {
-			slog.Debug("[responses/streaming] text delta",
-				"content_len", len(choice.Delta.Content),
-				"header_emitted", acc.headerEmitted,
-				"message_started", acc.messageStarted)
-			if !acc.headerEmitted {
-				if err := emitHeaderEvents(writer, acc); err != nil {
-					return err
-				}
-			}
-			if err := closeReasoningItem(writer, acc); err != nil {
-				return err
-			}
-			if !acc.messageStarted {
-				if err := emitMessageStartEvents(writer, acc); err != nil {
-					return err
-				}
-			}
-
-			acc.fullText += choice.Delta.Content
-			acc.state = stateStreamingText
-
-			// Emit text delta
-			deltaEvent := map[string]interface{}{
-				"type":          "response.output_text.delta",
-				"item_id":       acc.messageItemID,
-				"output_index":  acc.messageOutputIndex,
-				"content_index": 0,
-				"delta":         choice.Delta.Content,
-			}
-			if err := writeSSEWithSeq(writer, "response.output_text.delta", deltaEvent, acc); err != nil {
-				return err
-			}
-		}
-
-		// handle refusal deltas
-		if choice.Delta.Refusal != "" {
-			if !acc.headerEmitted {
-				if err := emitHeaderEvents(writer, acc); err != nil {
-					return err
-				}
-			}
-			if err := closeReasoningItem(writer, acc); err != nil {
-				return err
-			}
-			if acc.refusalItemID == "" {
-				if err := emitRefusalStartEvents(writer, acc); err != nil {
-					return err
-				}
-			}
-			acc.fullRefusal += choice.Delta.Refusal
-			refusalEvent := map[string]interface{}{
-				"type":          "response.refusal.delta",
-				"item_id":       acc.refusalItemID,
-				"output_index":  acc.refusalOutputIndex,
-				"content_index": 0,
-				"delta":         choice.Delta.Refusal,
-			}
-			if err := writeSSEWithSeq(writer, "response.refusal.delta", refusalEvent, acc); err != nil {
-				return err
-			}
-		}
-
-		// Handle tool call deltas
-		for _, tc := range choice.Delta.ToolCalls {
-			var name, args string
-			if tc.Function != nil {
-				name, args = tc.Function.Name, tc.Function.Arguments
-			}
-			slot, isNew := acc.toolCallSlot(tc.Index, tc.ID, name != "" || args != "")
-			if slot < 0 {
-				continue
-			}
-			if !acc.headerEmitted {
-				if err := emitHeaderEvents(writer, acc); err != nil {
-					return err
-				}
-			}
-			if err := closeReasoningItem(writer, acc); err != nil {
-				return err
-			}
-
-			call := &acc.toolCalls[slot]
-			if isNew {
-				call.name = name
-				acc.state = stateStreamingToolCall
-				if err := writeSSEWithSeq(writer, "response.output_item.added",
-					BuildFunctionCallItemAddedEvent(call.outputIndex, call.itemID, call.id, call.name), acc); err != nil {
-					return err
-				}
-			} else if name != "" && call.name == "" {
-				// The call's name arrived after the chunk that opened it.
-				call.name = name
-			}
-
-			if args != "" {
-				call.arguments += args
-				argDeltaEvent := map[string]interface{}{
-					"type":         "response.function_call_arguments.delta",
-					"item_id":      call.itemID,
-					"output_index": call.outputIndex,
-					"delta":        args,
-				}
-				if err := writeSSEWithSeq(writer, "response.function_call_arguments.delta", argDeltaEvent, acc); err != nil {
-					return err
-				}
-			}
-		}
-
-		// Handle finish_reason AFTER content and tool_calls so that chunks
-		// carrying both content and finish_reason are fully processed.
-		if choice.FinishReason != nil {
-			slog.Debug("[responses/streaming] finish_reason received",
-				"reason", *choice.FinishReason,
-				"accumulated_text_len", len(acc.fullText),
-				"tool_calls", len(acc.toolCalls))
-			acc.finishReason = choice.FinishReason
 		}
 	}
 
@@ -600,6 +394,226 @@ func transformChatStreamToResponsesInner(
 		callOnComplete()
 	}
 
+	return nil
+}
+
+func (acc *streamAccumulator) captureChatChunkMetadata(chunk *chatStreamChunk) {
+	// Capture metadata until the first nonzero timestamp
+	if acc.createdAt == 0 {
+		acc.createdAt = chunk.Created
+		if chunk.Model != "" {
+			acc.model = chunk.Model
+		}
+		if chunk.ID != "" {
+			acc.originalChatCompletionID = chunk.ID
+		}
+	}
+}
+
+func usageFromChatStreamChunk(raw *chatStreamUsage, audioInputIncludesCachedAudio bool, cacheWriteTTLFallback5mTokens, cacheWriteTTLFallback1hTokens int) *chatCompletionsUsage {
+	usage := &chatCompletionsUsage{
+		PromptTokens:     raw.PromptTokens,
+		CompletionTokens: raw.CompletionTokens,
+		CacheType:        raw.CacheType,
+	}
+	var ttl30m, ttl12h, audioTokens int
+	if prompt := raw.PromptTokensDetails; prompt != nil {
+		usage.CachedTokens = prompt.CachedTokens
+		usage.CachedAudioTokens = prompt.CachedAudioTokens
+		audioTokens = prompt.AudioTokens
+		usage.CacheType = cmp.Or(prompt.CacheType, raw.CacheType)
+		usage.CacheCreationTokens = cmp.Or(prompt.CacheCreationTokens, prompt.CacheWriteTokens)
+		if details := prompt.CacheCreationTokenDetails; details != nil {
+			usage.CacheCreation5mTokens = details.Ephemeral5mInputTokens
+			usage.CacheCreation1hTokens = details.Ephemeral1hInputTokens
+		}
+		if details := prompt.CacheWriteTokensDetails; details != nil {
+			ttl12h = details.TTL12hTokens
+			if !usage.hasShortCacheWriteTTL() {
+				ttl30m = details.TTL30mTokens
+			}
+		}
+	}
+
+	// Kimi/Moonshot headers take precedence over the cache_creation aliases.
+	if !usage.hasShortCacheWriteTTL() && ttl30m == 0 {
+		usage.CacheCreation5mTokens = cacheWriteTTLFallback5mTokens
+		usage.CacheCreation1hTokens = cacheWriteTTLFallback1hTokens
+	}
+	if prompt := raw.PromptTokensDetails; !usage.hasShortCacheWriteTTL() && ttl30m == 0 && prompt != nil && prompt.CacheCreation != nil {
+		usage.CacheCreation5mTokens = prompt.CacheCreation.Ephemeral5mInputTokens
+		usage.CacheCreation1hTokens = prompt.CacheCreation.Ephemeral1hInputTokens
+	}
+
+	if ttl30m > 0 || ttl12h > 0 {
+		usage.CacheWriteTokensDetails = &CacheWriteTokensDetails{TTL30mTokens: ttl30m, TTL12hTokens: ttl12h}
+	}
+	if usage.CacheCreationTokens == 0 {
+		usage.CacheCreationTokens = usage.CacheCreation5mTokens + usage.CacheCreation1hTokens + ttl30m + ttl12h
+	}
+
+	usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+	if raw.TotalTokens != nil {
+		usage.TotalTokens = *raw.TotalTokens
+	}
+	usage.CachedTokens, usage.CachedAudioTokens = converterutil.NormalizeCachedAudioBreakdown(usage.CachedTokens, usage.CachedAudioTokens)
+	usage.AudioInputTokens = normalizedAudioTokens(audioTokens, usage.CachedTokens, usage.CachedAudioTokens, audioInputIncludesCachedAudio)
+	if raw.CompletionTokensDetails != nil {
+		usage.ReasoningTokens = raw.CompletionTokensDetails.ReasoningTokens
+		usage.AudioOutputTokens = raw.CompletionTokensDetails.AudioTokens
+		usage.ImageOutputTokens = raw.CompletionTokensDetails.ImageTokens
+	}
+	if raw.ServerToolUse != nil && raw.ServerToolUse.WebSearchRequests > 0 {
+		usage.WebSearchRequests = raw.ServerToolUse.WebSearchRequests
+	}
+	return usage
+}
+
+func processChatStreamChoice(writer io.Writer, acc *streamAccumulator, choice *chatStreamChoice) error {
+	// Handle reasoning delta BEFORE text/tool_calls: DeepSeek-style
+	// providers stream reasoning ahead of the visible content, and the
+	// reasoning output item must be announced (and later closed) before
+	// the message/tool_call item that follows it.
+	if reasoningDelta := converterutil.ReasoningText(choice.Delta.ReasoningContent, choice.Delta.Reasoning); reasoningDelta != "" {
+		if err := ensureChatResponseHeader(writer, acc); err != nil {
+			return err
+		}
+		if err := emitReasoningDelta(writer, acc, reasoningDelta); err != nil {
+			return err
+		}
+	}
+
+	if choice.Delta.Content != "" {
+		if err := emitChatTextDelta(writer, acc, choice.Delta.Content); err != nil {
+			return err
+		}
+	}
+	if choice.Delta.Refusal != "" {
+		if err := emitChatRefusalDelta(writer, acc, choice.Delta.Refusal); err != nil {
+			return err
+		}
+	}
+
+	// Handle tool call deltas
+	for _, tc := range choice.Delta.ToolCalls {
+		var name, args string
+		if tc.Function != nil {
+			name, args = tc.Function.Name, tc.Function.Arguments
+		}
+		slot, isNew := acc.toolCallSlot(tc.Index, tc.ID, name != "" || args != "")
+		if slot < 0 {
+			continue
+		}
+		if err := startVisibleChatOutput(writer, acc); err != nil {
+			return err
+		}
+
+		call := &acc.toolCalls[slot]
+		if isNew {
+			call.name = name
+			acc.state = stateStreamingToolCall
+			if err := writeSSEWithSeq(writer, "response.output_item.added",
+				BuildFunctionCallItemAddedEvent(call.outputIndex, call.itemID, call.id, call.name), acc); err != nil {
+				return err
+			}
+		} else if name != "" && call.name == "" {
+			// The call's name arrived after the chunk that opened it.
+			call.name = name
+		}
+
+		if args != "" {
+			call.arguments += args
+			argDeltaEvent := map[string]interface{}{
+				"type":         "response.function_call_arguments.delta",
+				"item_id":      call.itemID,
+				"output_index": call.outputIndex,
+				"delta":        args,
+			}
+			if err := writeSSEWithSeq(writer, "response.function_call_arguments.delta", argDeltaEvent, acc); err != nil {
+				return err
+			}
+		}
+	}
+
+	// Handle finish_reason AFTER content and tool_calls so that chunks
+	// carrying both content and finish_reason are fully processed.
+	if choice.FinishReason != nil {
+		slog.Debug("[responses/streaming] finish_reason received",
+			"reason", *choice.FinishReason,
+			"accumulated_text_len", len(acc.fullText),
+			"tool_calls", len(acc.toolCalls))
+		acc.finishReason = choice.FinishReason
+	}
+	return nil
+}
+
+func ensureChatResponseHeader(writer io.Writer, acc *streamAccumulator) error {
+	if acc.headerEmitted {
+		return nil
+	}
+	return emitHeaderEvents(writer, acc)
+}
+
+// Close the reasoning item before opening a text, refusal, or tool-call item.
+// Responses clients use this order to associate the reasoning with its output.
+func startVisibleChatOutput(writer io.Writer, acc *streamAccumulator) error {
+	if err := ensureChatResponseHeader(writer, acc); err != nil {
+		return err
+	}
+	return closeReasoningItem(writer, acc)
+}
+
+func emitChatTextDelta(writer io.Writer, acc *streamAccumulator, delta string) error {
+	slog.Debug("[responses/streaming] text delta",
+		"content_len", len(delta),
+		"header_emitted", acc.headerEmitted,
+		"message_started", acc.messageStarted)
+	if err := startVisibleChatOutput(writer, acc); err != nil {
+		return err
+	}
+	if !acc.messageStarted {
+		if err := emitMessageStartEvents(writer, acc); err != nil {
+			return err
+		}
+	}
+
+	acc.fullText += delta
+	acc.state = stateStreamingText
+
+	// Emit text delta
+	deltaEvent := map[string]interface{}{
+		"type":          "response.output_text.delta",
+		"item_id":       acc.messageItemID,
+		"output_index":  acc.messageOutputIndex,
+		"content_index": 0,
+		"delta":         delta,
+	}
+	if err := writeSSEWithSeq(writer, "response.output_text.delta", deltaEvent, acc); err != nil {
+		return err
+	}
+	return nil
+}
+
+func emitChatRefusalDelta(writer io.Writer, acc *streamAccumulator, delta string) error {
+	if err := startVisibleChatOutput(writer, acc); err != nil {
+		return err
+	}
+	if acc.refusalItemID == "" {
+		if err := emitRefusalStartEvents(writer, acc); err != nil {
+			return err
+		}
+	}
+	acc.fullRefusal += delta
+	refusalEvent := map[string]interface{}{
+		"type":          "response.refusal.delta",
+		"item_id":       acc.refusalItemID,
+		"output_index":  acc.refusalOutputIndex,
+		"content_index": 0,
+		"delta":         delta,
+	}
+	if err := writeSSEWithSeq(writer, "response.refusal.delta", refusalEvent, acc); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -666,37 +680,48 @@ func completedOutputItems(acc *streamAccumulator) []OutputItem {
 	return output
 }
 
+func (usage *chatCompletionsUsage) hasShortCacheWriteTTL() bool {
+	return usage.CacheCreation5mTokens != 0 || usage.CacheCreation1hTokens != 0
+}
+
+func (usage *chatCompletionsUsage) toResponsesUsage() *Usage {
+	if usage == nil {
+		return nil
+	}
+	result := &Usage{
+		InputTokens:  usage.PromptTokens,
+		OutputTokens: usage.CompletionTokens,
+		TotalTokens:  usage.TotalTokens,
+		InputTokensDetails: InputDetails{
+			CachedTokens:            usage.CachedTokens,
+			CachedAudioTokens:       usage.CachedAudioTokens,
+			CacheCreationTokens:     usage.CacheCreationTokens,
+			CacheWriteTokensDetails: usage.CacheWriteTokensDetails,
+			AudioTokens:             usage.AudioInputTokens,
+			CacheType:               usage.CacheType,
+		},
+		OutputTokensDetails: OutputDetails{
+			ReasoningTokens: usage.ReasoningTokens,
+			AudioTokens:     usage.AudioOutputTokens,
+			ImageTokens:     usage.ImageOutputTokens,
+		},
+	}
+	if usage.WebSearchRequests > 0 {
+		result.ServerToolUse = &ServerToolUseDetails{WebSearchRequests: usage.WebSearchRequests}
+	}
+	if usage.CacheCreation5mTokens > 0 || usage.CacheCreation1hTokens > 0 {
+		result.InputTokensDetails.CacheCreationTokenDetails = &CacheCreationTokenDetails{
+			Ephemeral5mInputTokens: usage.CacheCreation5mTokens,
+			Ephemeral1hInputTokens: usage.CacheCreation1hTokens,
+		}
+	}
+	return result
+}
+
 // buildTypedCompletedResponse builds a typed *Response from the stream accumulator.
 func buildTypedCompletedResponse(acc *streamAccumulator) *Response {
 	output := completedOutputItems(acc)
-
-	var usage *Usage
-	if acc.usage != nil {
-		usage = &Usage{
-			InputTokens:  acc.usage.PromptTokens,
-			OutputTokens: acc.usage.CompletionTokens,
-			TotalTokens:  acc.usage.TotalTokens,
-			InputTokensDetails: InputDetails{
-				CachedTokens:        acc.usage.CachedTokens,
-				CachedAudioTokens:   acc.usage.CachedAudioTokens,
-				CacheCreationTokens: acc.usage.CacheCreationTokens,
-				AudioTokens:         acc.usage.AudioInputTokens,
-				CacheType:           acc.usage.CacheType,
-			},
-			OutputTokensDetails: OutputDetails{ReasoningTokens: acc.usage.ReasoningTokens, AudioTokens: acc.usage.AudioOutputTokens, ImageTokens: acc.usage.ImageOutputTokens},
-		}
-		if acc.usage.WebSearchRequests > 0 {
-			usage.ServerToolUse = &ServerToolUseDetails{
-				WebSearchRequests: acc.usage.WebSearchRequests,
-			}
-		}
-		if acc.usage.CacheCreation5mTokens > 0 || acc.usage.CacheCreation1hTokens > 0 {
-			usage.InputTokensDetails.CacheCreationTokenDetails = &CacheCreationTokenDetails{
-				Ephemeral5mInputTokens: acc.usage.CacheCreation5mTokens,
-				Ephemeral1hInputTokens: acc.usage.CacheCreation1hTokens,
-			}
-		}
-	}
+	usage := acc.usage.toResponsesUsage()
 
 	status := "completed"
 	var incompleteDetails *IncompleteDetails
@@ -984,37 +1009,7 @@ func buildInProgressResponse(acc *streamAccumulator) map[string]interface{} {
 func buildCompletedResponse(acc *streamAccumulator) map[string]interface{} {
 	output := completedOutputItems(acc)
 
-	var usageObj *Usage
-	if acc.usage != nil {
-		usageObj = &Usage{
-			InputTokens:  acc.usage.PromptTokens,
-			OutputTokens: acc.usage.CompletionTokens,
-			TotalTokens:  acc.usage.TotalTokens,
-			InputTokensDetails: InputDetails{
-				CachedTokens:        acc.usage.CachedTokens,
-				CachedAudioTokens:   acc.usage.CachedAudioTokens,
-				CacheCreationTokens: acc.usage.CacheCreationTokens,
-				AudioTokens:         acc.usage.AudioInputTokens,
-				CacheType:           acc.usage.CacheType,
-			},
-			OutputTokensDetails: OutputDetails{
-				ReasoningTokens: acc.usage.ReasoningTokens,
-				AudioTokens:     acc.usage.AudioOutputTokens,
-				ImageTokens:     acc.usage.ImageOutputTokens,
-			},
-		}
-		if acc.usage.WebSearchRequests > 0 {
-			usageObj.ServerToolUse = &ServerToolUseDetails{
-				WebSearchRequests: acc.usage.WebSearchRequests,
-			}
-		}
-		if acc.usage.CacheCreation5mTokens > 0 || acc.usage.CacheCreation1hTokens > 0 {
-			usageObj.InputTokensDetails.CacheCreationTokenDetails = &CacheCreationTokenDetails{
-				Ephemeral5mInputTokens: acc.usage.CacheCreation5mTokens,
-				Ephemeral1hInputTokens: acc.usage.CacheCreation1hTokens,
-			}
-		}
-	}
+	usageObj := acc.usage.toResponsesUsage()
 
 	status := "completed"
 	var incompleteDetails *IncompleteDetails

@@ -133,212 +133,23 @@ func TransformAnthropicStreamToResponses(
 func processAnthropicEvent(w io.Writer, acc *anthropicStreamAccumulator, event *anthropic.AnthropicStreamEvent) error {
 	switch event.Type {
 	case "message_start":
-		if event.Message != nil {
-			if event.Message.Usage != nil {
-				acc.inputTokens = event.Message.Usage.InputTokens
-				acc.reasoningTokens = event.Message.Usage.ReasoningTokens()
-				acc.cachedTokens = event.Message.Usage.CacheReadInputTokens
-				acc.cacheCreationTokens, acc.cacheCreation5mTokens, acc.cacheCreation1hTokens = anthropic.NormalizeCacheCreationUsage(
-					event.Message.Usage.CacheCreationInputTokens, event.Message.Usage.CacheCreation,
-				)
-				acc.cacheType = event.Message.Usage.CacheType
-				if event.Message.Usage.ServerToolUse != nil && event.Message.Usage.ServerToolUse.WebSearchRequests > 0 {
-					acc.webSearchRequests = event.Message.Usage.ServerToolUse.WebSearchRequests
-				}
-			}
+		if event.Message != nil && event.Message.Usage != nil {
+			acc.applyStartUsage(event.Message.Usage)
 		}
-
 	case "content_block_start":
-		if event.ContentBlock == nil {
-			return nil
-		}
-		acc.currentBlockType = event.ContentBlock.Type
-		acc.currentBlockID = event.ContentBlock.ID
-		acc.currentBlockName = event.ContentBlock.Name
-		acc.currentText = ""
-		acc.currentThinking = ""
-		acc.currentEncrypted = thinkingEncryptedContent(*event.ContentBlock)
-		acc.currentToolArgs = ""
-
-		switch event.ContentBlock.Type {
-		case "thinking", "redacted_thinking":
-			if !acc.headerEmitted {
-				if err := emitAnthropicHeaderEvents(w, acc); err != nil {
-					return err
-				}
-			}
-			// Announce the reasoning item immediately so the client knows its output_index.
-			acc.currentReasoningID = generateItemID("rs_")
-			acc.currentReasoningIdx = len(acc.outputItems)
-			if acc.messageStarted {
-				acc.currentReasoningIdx++ // same slot accounting as tool_use below
-			}
-			for _, ev := range responses.BuildReasoningItemOpenEvents(acc.currentReasoningIdx, acc.currentReasoningID) {
-				if err := writeAnthropicSSE(w, ev["type"].(string), ev, acc); err != nil {
-					return err
-				}
-			}
-
-		case "tool_use":
-			if !acc.headerEmitted {
-				if err := emitAnthropicHeaderEvents(w, acc); err != nil {
-					return err
-				}
-			}
-			// Calculate output_index: finalized outputItems + 1 for message (not in slice).
-			outputIdx := len(acc.outputItems)
-			if acc.messageStarted {
-				outputIdx++
-			}
-			acc.currentToolItemID = generateItemID("fc_")
-			acc.currentToolOutputIndex = outputIdx
-			if err := writeAnthropicSSE(w, "response.output_item.added", map[string]interface{}{
-				"type":         "response.output_item.added",
-				"output_index": outputIdx,
-				"item": map[string]interface{}{
-					"type":      "function_call",
-					"id":        acc.currentToolItemID,
-					"status":    "in_progress",
-					"call_id":   event.ContentBlock.ID,
-					"name":      event.ContentBlock.Name,
-					"arguments": "",
-				},
-			}, acc); err != nil {
-				return err
-			}
-
-		case "server_tool_use":
-			// Anthropic's hosted web_search tool call (the only server tool
-			// type Anthropic exposes today) — mirrors "tool_use" bookkeeping
-			// but surfaces as a web_search_call item instead of function_call.
-			if !acc.headerEmitted {
-				if err := emitAnthropicHeaderEvents(w, acc); err != nil {
-					return err
-				}
-			}
-			outputIdx := len(acc.outputItems)
-			if acc.messageStarted {
-				outputIdx++
-			}
-			acc.currentToolItemID = generateItemID("ws_")
-			acc.currentToolOutputIndex = outputIdx
-			if err := writeAnthropicSSE(w, "response.output_item.added", map[string]interface{}{
-				"type":         "response.output_item.added",
-				"output_index": outputIdx,
-				"item": map[string]interface{}{
-					"type":   "web_search_call",
-					"id":     acc.currentToolItemID,
-					"status": "in_progress",
-				},
-			}, acc); err != nil {
-				return err
-			}
-		}
-
+		return startAnthropicContentBlock(w, acc, event.ContentBlock)
 	case "content_block_delta":
-		if event.Delta == nil {
-			return nil
-		}
-		switch event.Delta.Type {
-		case "text_delta":
-			if event.Delta.Text != "" {
-				if err := handleAnthropicTextDelta(w, acc, event.Delta.Text); err != nil {
-					return err
-				}
-			}
-		case "thinking_delta":
-			acc.currentThinking += event.Delta.Thinking
-			if event.Delta.Thinking != "" && acc.currentReasoningID != "" {
-				if err := writeAnthropicSSE(w, "response.reasoning_summary_text.delta",
-					responses.BuildReasoningSummaryTextDeltaEvent(acc.currentReasoningID, acc.currentReasoningIdx, 0, event.Delta.Thinking), acc); err != nil {
-					return err
-				}
-			}
-		case "signature_delta":
-			acc.currentEncrypted += event.Delta.Signature
-		case "citations_delta":
-			if event.Delta.Citation != nil {
-				acc.currentCitations = append(acc.currentCitations, *event.Delta.Citation)
-			}
-		case "input_json_delta":
-			acc.currentToolArgs += event.Delta.PartialJSON
-			// Only function_call blocks stream argument deltas to the client
-			// this way; server_tool_use (web_search) accumulates silently
-			// into currentToolArgs and is parsed once at block_stop instead —
-			// OpenAI's own web_search_call doesn't stream partial queries.
-			if acc.currentBlockType == "tool_use" && event.Delta.PartialJSON != "" && acc.currentToolItemID != "" {
-				if err := writeAnthropicSSE(w, "response.function_call_arguments.delta", map[string]interface{}{
-					"type":         "response.function_call_arguments.delta",
-					"item_id":      acc.currentToolItemID,
-					"output_index": acc.currentToolOutputIndex,
-					"delta":        event.Delta.PartialJSON,
-				}, acc); err != nil {
-					return err
-				}
-			}
-		}
-
+		return processAnthropicContentDelta(w, acc, event.Delta)
 	case "content_block_stop":
-		if err := finalizeCurrentBlock(w, acc); err != nil {
-			return err
-		}
-
+		return finalizeCurrentBlock(w, acc)
 	case "message_delta":
 		if event.Delta != nil && event.Delta.StopReason != "" {
 			acc.stopReason = event.Delta.StopReason
 			acc.refusalItem = anthropicRefusalItem(event.Delta.StopReason, event.Delta.StopDetails)
 		}
 		if event.Usage != nil {
-			// Anthropic reports the real input_tokens in message_start and normally omits
-			// the field here. Some Anthropic-compatible providers invert that: their
-			// message_start carries a placeholder usage:{input_tokens:0,output_tokens:0}
-			// and the true input count only arrives in message_delta.
-			// Without this the accumulator keeps the placeholder and the final usage
-			// reports input_tokens as just the cached count — or zero — under-billing the
-			// request. Only a positive value overwrites what message_start reported, so a
-			// provider that legitimately ends at zero (and providers that omit the field
-			// altogether) keep their existing behaviour.
-			if event.Usage.InputTokens != nil {
-				if inputTokens := nonNegativeAnthropicStreamTokenCount(*event.Usage.InputTokens); inputTokens > 0 {
-					acc.inputTokens = inputTokens
-				}
-			}
-			if event.Usage.OutputTokens != nil {
-				acc.outputTokens = *event.Usage.OutputTokens
-			}
-			if event.Usage.OutputTokensDetails != nil {
-				acc.reasoningTokens = nonNegativeAnthropicStreamTokenCount(event.Usage.OutputTokensDetails.ThinkingTokens)
-			}
-			if event.Usage.CacheReadInputTokens != nil {
-				acc.cachedTokens = nonNegativeAnthropicStreamTokenCount(*event.Usage.CacheReadInputTokens)
-			}
-			if event.Usage.CacheCreationInputTokens != nil {
-				cacheCreationInputTokens := nonNegativeAnthropicStreamTokenCount(*event.Usage.CacheCreationInputTokens)
-				acc.cacheCreationTokens = cacheCreationInputTokens
-				if event.Usage.CacheCreation != nil {
-					acc.cacheCreationTokens, acc.cacheCreation5mTokens, acc.cacheCreation1hTokens = anthropic.NormalizeCacheCreationUsage(
-						cacheCreationInputTokens, event.Usage.CacheCreation,
-					)
-				} else if cacheCreationInputTokens == 0 {
-					acc.cacheCreation5mTokens = 0
-					acc.cacheCreation1hTokens = 0
-				}
-			} else if event.Usage.CacheCreation != nil {
-				acc.cacheCreationTokens, acc.cacheCreation5mTokens, acc.cacheCreation1hTokens = anthropic.NormalizeCacheCreationUsage(
-					acc.cacheCreationTokens, event.Usage.CacheCreation,
-				)
-			}
-			if event.Usage.ServerToolUse != nil && event.Usage.ServerToolUse.WebSearchRequests > 0 {
-				acc.webSearchRequests = event.Usage.ServerToolUse.WebSearchRequests
-			}
-			if event.Usage.CacheType != "" {
-				acc.cacheType = event.Usage.CacheType
-			}
+			acc.applyDeltaUsage(event.Usage)
 		}
-
-	case "message_stop":
-		// Stream is ending; completion events emitted after the scan loop.
-
 	case "error":
 		errorType := "api_error"
 		message := "Anthropic stream error"
@@ -353,6 +164,166 @@ func processAnthropicEvent(w io.Writer, acc *anthropicStreamAccumulator, event *
 		return fmt.Errorf("anthropic stream error (%s): %s", errorType, message)
 	}
 	return nil
+}
+
+func startAnthropicContentBlock(w io.Writer, acc *anthropicStreamAccumulator, block *anthropic.ContentBlock) error {
+	if block == nil {
+		return nil
+	}
+	acc.currentBlockType = block.Type
+	acc.currentBlockID = block.ID
+	acc.currentBlockName = block.Name
+	acc.currentText = ""
+	acc.currentThinking = ""
+	acc.currentEncrypted = thinkingEncryptedContent(*block)
+	acc.currentToolArgs = ""
+
+	switch block.Type {
+	case "thinking", "redacted_thinking", "tool_use", "server_tool_use":
+		if !acc.headerEmitted {
+			if err := emitAnthropicHeaderEvents(w, acc); err != nil {
+				return err
+			}
+		}
+	default:
+		return nil
+	}
+	outputIndex := len(acc.outputItems)
+	if acc.messageStarted {
+		outputIndex++
+	}
+	switch block.Type {
+	case "thinking", "redacted_thinking":
+		// Announce the reasoning item immediately so the client knows its output_index.
+		acc.currentReasoningID = generateItemID("rs_")
+		acc.currentReasoningIdx = outputIndex
+		for _, ev := range responses.BuildReasoningItemOpenEvents(acc.currentReasoningIdx, acc.currentReasoningID) {
+			if err := writeAnthropicSSE(w, ev["type"].(string), ev, acc); err != nil {
+				return err
+			}
+		}
+
+	case "tool_use":
+		acc.currentToolItemID = generateItemID("fc_")
+		return openAnthropicToolItem(w, acc, outputIndex, map[string]interface{}{
+			"type": "function_call", "call_id": block.ID, "name": block.Name, "arguments": "",
+		})
+	case "server_tool_use":
+		acc.currentToolItemID = generateItemID("ws_")
+		return openAnthropicToolItem(w, acc, outputIndex, map[string]interface{}{"type": "web_search_call"})
+	}
+	return nil
+}
+
+func openAnthropicToolItem(w io.Writer, acc *anthropicStreamAccumulator, outputIndex int, item map[string]interface{}) error {
+	acc.currentToolOutputIndex = outputIndex
+	item["id"] = acc.currentToolItemID
+	item["status"] = "in_progress"
+	return writeAnthropicSSE(w, "response.output_item.added", map[string]interface{}{
+		"type": "response.output_item.added", "output_index": outputIndex, "item": item,
+	}, acc)
+}
+
+func processAnthropicContentDelta(w io.Writer, acc *anthropicStreamAccumulator, delta *anthropic.AnthropicStreamDelta) error {
+	if delta == nil {
+		return nil
+	}
+	switch delta.Type {
+	case "text_delta":
+		if delta.Text != "" {
+			return handleAnthropicTextDelta(w, acc, delta.Text)
+		}
+	case "thinking_delta":
+		acc.currentThinking += delta.Thinking
+		if delta.Thinking != "" && acc.currentReasoningID != "" {
+			if err := writeAnthropicSSE(w, "response.reasoning_summary_text.delta",
+				responses.BuildReasoningSummaryTextDeltaEvent(acc.currentReasoningID, acc.currentReasoningIdx, 0, delta.Thinking), acc); err != nil {
+				return err
+			}
+		}
+	case "signature_delta":
+		acc.currentEncrypted += delta.Signature
+	case "citations_delta":
+		if delta.Citation != nil {
+			acc.currentCitations = append(acc.currentCitations, *delta.Citation)
+		}
+	case "input_json_delta":
+		acc.currentToolArgs += delta.PartialJSON
+		// Only function_call blocks stream argument deltas to the client
+		// this way; server_tool_use (web_search) accumulates silently
+		// into currentToolArgs and is parsed once at block_stop instead —
+		// OpenAI's own web_search_call doesn't stream partial queries.
+		if acc.currentBlockType == "tool_use" && delta.PartialJSON != "" && acc.currentToolItemID != "" {
+			if err := writeAnthropicSSE(w, "response.function_call_arguments.delta", map[string]interface{}{
+				"type":         "response.function_call_arguments.delta",
+				"item_id":      acc.currentToolItemID,
+				"output_index": acc.currentToolOutputIndex,
+				"delta":        delta.PartialJSON,
+			}, acc); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (acc *anthropicStreamAccumulator) applyStartUsage(usage *anthropic.AnthropicUsage) {
+	acc.inputTokens = usage.InputTokens
+	acc.reasoningTokens = usage.ReasoningTokens()
+	acc.cachedTokens = usage.CacheReadInputTokens
+	acc.cacheCreationTokens, acc.cacheCreation5mTokens, acc.cacheCreation1hTokens = anthropic.NormalizeCacheCreationUsage(
+		usage.CacheCreationInputTokens, usage.CacheCreation,
+	)
+	acc.cacheType = usage.CacheType
+	if usage.ServerToolUse != nil && usage.ServerToolUse.WebSearchRequests > 0 {
+		acc.webSearchRequests = usage.ServerToolUse.WebSearchRequests
+	}
+}
+
+func (acc *anthropicStreamAccumulator) applyDeltaUsage(usage *anthropic.AnthropicStreamUsage) {
+	// Anthropic reports the real input_tokens in message_start and normally omits
+	// the field here. Some Anthropic-compatible providers invert that: their
+	// message_start carries a placeholder usage:{input_tokens:0,output_tokens:0}
+	// and the true input count only arrives in message_delta.
+	// Without this the accumulator keeps the placeholder and the final usage
+	// reports input_tokens as just the cached count — or zero — under-billing the
+	// request. Only a positive value overwrites what message_start reported, so a
+	// provider that legitimately ends at zero (and providers that omit the field
+	// altogether) keep their existing behaviour.
+	if usage.InputTokens != nil {
+		if inputTokens := nonNegativeAnthropicStreamTokenCount(*usage.InputTokens); inputTokens > 0 {
+			acc.inputTokens = inputTokens
+		}
+	}
+	if usage.OutputTokens != nil {
+		acc.outputTokens = *usage.OutputTokens
+	}
+	if usage.OutputTokensDetails != nil {
+		acc.reasoningTokens = nonNegativeAnthropicStreamTokenCount(usage.OutputTokensDetails.ThinkingTokens)
+	}
+	if usage.CacheReadInputTokens != nil {
+		acc.cachedTokens = nonNegativeAnthropicStreamTokenCount(*usage.CacheReadInputTokens)
+	}
+	if usage.CacheCreationInputTokens != nil {
+		acc.cacheCreationTokens = nonNegativeAnthropicStreamTokenCount(*usage.CacheCreationInputTokens)
+		// An explicit zero without a breakdown clears the previous split.
+		// A nonzero aggregate by itself leaves the previous TTL counters intact.
+		if usage.CacheCreation == nil && acc.cacheCreationTokens == 0 {
+			acc.cacheCreation5mTokens = 0
+			acc.cacheCreation1hTokens = 0
+		}
+	}
+	if usage.CacheCreation != nil {
+		acc.cacheCreationTokens, acc.cacheCreation5mTokens, acc.cacheCreation1hTokens = anthropic.NormalizeCacheCreationUsage(
+			acc.cacheCreationTokens, usage.CacheCreation,
+		)
+	}
+	if usage.ServerToolUse != nil && usage.ServerToolUse.WebSearchRequests > 0 {
+		acc.webSearchRequests = usage.ServerToolUse.WebSearchRequests
+	}
+	if usage.CacheType != "" {
+		acc.cacheType = usage.CacheType
+	}
 }
 
 func nonNegativeAnthropicStreamTokenCount(value int) int {

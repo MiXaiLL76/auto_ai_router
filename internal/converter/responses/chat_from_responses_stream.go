@@ -46,246 +46,212 @@ type responsesStreamEvent struct {
 //	error / response.error                  — provider-side stream error, surfaced as content
 func TransformResponsesStreamToChat(reader io.Reader, model string, output io.Writer) error {
 	scanner := bufio.NewScanner(reader)
-	// A single event can carry a whole generated image (output_item.done for an
-	// image_generation_call) and the terminal event repeats the full output, so
-	// use the shared cap instead of a local 1 MiB one.
+	// Image output and terminal events can carry the entire generated image.
 	scanner.Buffer(make([]byte, 1024*1024), converterutil.MaxSSELineBytes)
-
-	var chatID string
-	timestamp := converterutil.GetCurrentTimestamp()
-	isFirstChunk := true
-
-	// output_index -> chat tool_call slot index, assigned the first time a
-	// function_call item is seen at that output_index. Chat Completions
-	// indexes tool_calls among themselves, not among every output item, so a
-	// message item sharing the output array never consumes a slot.
-	toolCallSlots := make(map[int]int)
-	nextToolCallIdx := 0
-	imageIdx := 0
-	streamedContent := false // any text/refusal already sent, so a failed status doesn't clobber it
-	// streamErrorReported tracks whether a standalone "error"/"response.error" event
-	// already delivered an error-content chunk and a finish_reason to the client. A
-	// real Responses API stream commonly sends that event AND a terminal
-	// response.failed event describing the same failure (see the switch cases below);
-	// without this flag the terminal event's own failed-status handling would
-	// re-derive and resend the same error text plus a second finish_reason -- data
-	// arriving after the client already considers the stream finished.
-	streamErrorReported := false
-
-	ensureChatID := func() string {
-		if chatID == "" {
-			chatID = converterutil.GenerateID()
-		}
-		return chatID
-	}
-	writeFirstChunkOnce := func() error {
-		if !isFirstChunk {
-			return nil
-		}
-		isFirstChunk = false
-		return writeChatStreamChunk(output, ensureChatID(), model, timestamp, openai.OpenAIStreamingDelta{Role: "assistant"}, nil)
+	stream := responsesToChatStream{
+		output:        output,
+		model:         model,
+		timestamp:     converterutil.GetCurrentTimestamp(),
+		toolCallSlots: make(map[int]int),
 	}
 
 	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "data: ") {
+		data, ok := strings.CutPrefix(scanner.Text(), "data: ")
+		if !ok || data == "" || data == "[DONE]" {
 			continue
 		}
-		jsonData := strings.TrimPrefix(line, "data: ")
-		if jsonData == "" || jsonData == "[DONE]" {
-			continue
-		}
-
 		var event responsesStreamEvent
-		if err := json.Unmarshal([]byte(jsonData), &event); err != nil {
-			// Malformed chunk — skip silently, matching every other stream
-			// transformer in this codebase (anthropic.TransformAnthropicStreamToOpenAI).
+		if err := json.Unmarshal([]byte(data), &event); err != nil {
+			// Match the other stream converters: one malformed event does
+			// not prevent subsequent events from reaching the client.
 			continue
 		}
-
-		switch event.Type {
-		case "response.created", "response.in_progress":
-			if event.Response != nil && event.Response.ID != "" {
-				chatID = chatCompletionIDFromResponses(event.Response.ID)
-			}
-			if err := writeFirstChunkOnce(); err != nil {
-				return err
-			}
-
-		case "response.output_item.added":
-			if err := writeFirstChunkOnce(); err != nil {
-				return err
-			}
-			if event.Item == nil || event.Item.Type != "function_call" {
-				continue
-			}
-			idx := toolCallSlotFor(toolCallSlots, &nextToolCallIdx, event.OutputIndex)
-			tc := openai.OpenAIStreamingToolCall{
-				Index: idx,
-				ID:    event.Item.CallID,
-				Type:  "function",
-				Function: &openai.OpenAIStreamingToolFunction{
-					Name:      event.Item.Name,
-					Arguments: "",
-				},
-			}
-			delta := openai.OpenAIStreamingDelta{ToolCalls: []openai.OpenAIStreamingToolCall{tc}}
-			if err := writeChatStreamChunk(output, ensureChatID(), model, timestamp, delta, nil); err != nil {
-				return err
-			}
-
-		case "response.output_text.delta":
-			if err := writeFirstChunkOnce(); err != nil {
-				return err
-			}
-			if event.Delta == "" {
-				continue
-			}
-			streamedContent = true
-			delta := openai.OpenAIStreamingDelta{Content: event.Delta}
-			if err := writeChatStreamChunk(output, ensureChatID(), model, timestamp, delta, nil); err != nil {
-				return err
-			}
-
-		case "response.refusal.delta":
-			if err := writeFirstChunkOnce(); err != nil {
-				return err
-			}
-			if event.Delta == "" {
-				continue
-			}
-			streamedContent = true
-			delta := openai.OpenAIStreamingDelta{Refusal: event.Delta}
-			if err := writeChatStreamChunk(output, ensureChatID(), model, timestamp, delta, nil); err != nil {
-				return err
-			}
-
-		case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
-			if err := writeFirstChunkOnce(); err != nil {
-				return err
-			}
-			if event.Delta == "" {
-				continue
-			}
-			delta := openai.OpenAIStreamingDelta{ReasoningContent: event.Delta}
-			if err := writeChatStreamChunk(output, ensureChatID(), model, timestamp, delta, nil); err != nil {
-				return err
-			}
-
-		case "response.function_call_arguments.delta":
-			if event.Delta == "" {
-				continue
-			}
-			idx := toolCallSlotFor(toolCallSlots, &nextToolCallIdx, event.OutputIndex)
-			tc := openai.OpenAIStreamingToolCall{
-				Index:    idx,
-				Function: &openai.OpenAIStreamingToolFunction{Arguments: event.Delta},
-			}
-			delta := openai.OpenAIStreamingDelta{ToolCalls: []openai.OpenAIStreamingToolCall{tc}}
-			if err := writeChatStreamChunk(output, ensureChatID(), model, timestamp, delta, nil); err != nil {
-				return err
-			}
-
-		case "response.output_item.done":
-			// Same output as ResponseToChat's image_generation_call case; the
-			// partial_image events before it are previews and are not relayed.
-			if event.Item == nil || event.Item.Type != "image_generation_call" || event.Item.Result == "" {
-				continue
-			}
-			if err := writeFirstChunkOnce(); err != nil {
-				return err
-			}
-			streamedContent = true
-			idx := imageIdx
-			imageIdx++
-			delta := openai.OpenAIStreamingDelta{Images: []openai.ImageData{{Type: "image_url", Index: &idx, B64JSON: event.Item.Result}}}
-			if err := writeChatStreamChunk(output, ensureChatID(), model, timestamp, delta, nil); err != nil {
-				return err
-			}
-
-		case "response.completed", "response.incomplete", "response.failed":
-			if event.Response == nil {
-				continue
-			}
-			if streamErrorReported {
-				// A standalone "error"/"response.error" event already delivered the
-				// error content and a finish_reason ("stop") to the client -- this
-				// terminal event describes the same failure a real Responses API
-				// stream commonly repeats. Re-running the block below would resend
-				// that same error text and a second finish_reason: data the client
-				// sees arriving after a stream it already considers finished. Usage
-				// is the one thing only this event can carry (the standalone error
-				// event has no usage field), so still forward it alone if present.
-				if usage := responsesUsageToChat(event.Response.Usage); usage != nil {
-					if err := writeChatUsageChunk(output, ensureChatID(), model, timestamp, usage); err != nil {
-						return err
-					}
-				}
-				continue
-			}
-			// surface the error text for a bare failure, same as ResponseToChat does non-streaming
-			if event.Response.Status == "failed" && !streamedContent && nextToolCallIdx == 0 {
-				if msg := responsesErrorMessage(event.Response.Error); msg != "" {
-					if err := writeFirstChunkOnce(); err != nil {
-						return err
-					}
-					delta := openai.OpenAIStreamingDelta{Content: msg}
-					if err := writeChatStreamChunk(output, ensureChatID(), model, timestamp, delta, nil); err != nil {
-						return err
-					}
-				}
-			}
-			// same as ResponseToChat: echo the reasoning item(s) back as
-			// thinking_blocks so a follow-up tool-call turn keeps its
-			// chain of thought. The terminal event carries the full final
-			// Response, so this is the only place a streamed reply can
-			// grab it.
-			if blocks := reasoningBlocksFromOutput(event.Response.Output); len(blocks) > 0 {
-				if err := writeFirstChunkOnce(); err != nil {
-					return err
-				}
-				if err := writeThinkingBlocksChunk(output, ensureChatID(), model, timestamp, blocks); err != nil {
-					return err
-				}
-			}
-			reason := responsesFinishReason(event.Response.Status, event.Response.IncompleteDetails, nextToolCallIdx > 0)
-			usage := responsesUsageToChat(event.Response.Usage)
-			if err := writeChatTerminalChunks(output, ensureChatID(), model, timestamp, reason, usage); err != nil {
-				return err
-			}
-
-		case "error", "response.error":
-			msg := "responses API stream error"
-			if event.Message != "" {
-				msg = event.Message
-			}
-			reason := "stop"
-			delta := openai.OpenAIStreamingDelta{Content: msg}
-			if err := writeFirstChunkOnce(); err != nil {
-				return err
-			}
-			if err := writeChatStreamChunk(output, ensureChatID(), model, timestamp, delta, &reason); err != nil {
-				return err
-			}
-			// A terminal response.completed/.incomplete/.failed event commonly follows
-			// this one describing the same failure -- see the streamErrorReported
-			// check above, which stops that event from resending this same content
-			// and finish_reason.
-			streamErrorReported = true
-
-		default:
-			// response.content_part.*, response.image_generation_call.partial_image,
-			// response.output_text.done, response.function_call_arguments.done,
-			// etc.: bookkeeping-only events already reflected by the deltas
-			// streamed above; nothing further for the client to see.
+		if err := stream.processEvent(&event); err != nil {
+			return err
 		}
 	}
-
 	if err := scanner.Err(); err != nil {
 		return fmt.Errorf("responses stream scanner error: %w", err)
 	}
 
 	_, _ = fmt.Fprintf(output, "data: [DONE]\n\n")
+	return nil
+}
+
+type responsesToChatStream struct {
+	output    io.Writer
+	model     string
+	timestamp int64
+	chatID    string
+	opened    bool
+
+	// Responses indexes every output item; Chat indexes only tool calls.
+	toolCallSlots   map[int]int
+	nextToolCallIdx int
+	imageIdx        int
+	streamedContent bool
+
+	// Standalone errors send their own finish_reason. A later terminal
+	// event can still supply usage, but should not repeat the failure.
+	streamErrorReported bool
+}
+
+func (s *responsesToChatStream) ensureChatID() string {
+	if s.chatID == "" {
+		s.chatID = converterutil.GenerateID()
+	}
+	return s.chatID
+}
+
+func (s *responsesToChatStream) open() error {
+	if s.opened {
+		return nil
+	}
+	s.opened = true
+	return s.writeDelta(openai.OpenAIStreamingDelta{Role: "assistant"}, nil)
+}
+
+func (s *responsesToChatStream) writeDelta(delta openai.OpenAIStreamingDelta, reason *string) error {
+	return writeChatStreamChunk(s.output, s.ensureChatID(), s.model, s.timestamp, delta, reason)
+}
+
+func (s *responsesToChatStream) processEvent(event *responsesStreamEvent) error {
+	switch event.Type {
+	case "response.created", "response.in_progress":
+		if !s.opened && event.Response != nil && event.Response.ID != "" {
+			s.chatID = chatCompletionIDFromResponses(event.Response.ID)
+		}
+		return s.open()
+	case "response.output_item.added":
+		return s.announceToolCall(event)
+	case "response.output_text.delta", "response.refusal.delta",
+		"response.reasoning_summary_text.delta", "response.reasoning_text.delta":
+		return s.relayTextDelta(event)
+	case "response.function_call_arguments.delta":
+		if event.Delta == "" {
+			return nil
+		}
+		// Providers can omit output_item.added, so allocate the slot on first use.
+		idx := toolCallSlotFor(s.toolCallSlots, &s.nextToolCallIdx, event.OutputIndex)
+		return s.writeDelta(openai.OpenAIStreamingDelta{ToolCalls: []openai.OpenAIStreamingToolCall{{
+			Index:    idx,
+			Function: &openai.OpenAIStreamingToolFunction{Arguments: event.Delta},
+		}}}, nil)
+	case "response.output_item.done":
+		return s.relayFinishedImage(event.Item)
+	case "response.completed", "response.incomplete", "response.failed":
+		return s.finish(event.Response)
+	case "error", "response.error":
+		return s.reportError(event.Message)
+	}
+	return nil
+}
+
+func (s *responsesToChatStream) announceToolCall(event *responsesStreamEvent) error {
+	// The role-only opening also precedes non-tool items.
+	if err := s.open(); err != nil {
+		return err
+	}
+	if event.Item == nil || event.Item.Type != "function_call" {
+		return nil
+	}
+	idx := toolCallSlotFor(s.toolCallSlots, &s.nextToolCallIdx, event.OutputIndex)
+	return s.writeDelta(openai.OpenAIStreamingDelta{ToolCalls: []openai.OpenAIStreamingToolCall{{
+		Index:    idx,
+		ID:       event.Item.CallID,
+		Type:     "function",
+		Function: &openai.OpenAIStreamingToolFunction{Name: event.Item.Name},
+	}}}, nil)
+}
+
+func (s *responsesToChatStream) relayTextDelta(event *responsesStreamEvent) error {
+	// Empty text/refusal/reasoning deltas can still open the Chat stream.
+	if err := s.open(); err != nil {
+		return err
+	}
+	if event.Delta == "" {
+		return nil
+	}
+	var delta openai.OpenAIStreamingDelta
+	switch event.Type {
+	case "response.output_text.delta":
+		delta.Content = event.Delta
+		s.streamedContent = true
+	case "response.refusal.delta":
+		delta.Refusal = event.Delta
+		s.streamedContent = true
+	default:
+		delta.ReasoningContent = event.Delta
+	}
+	return s.writeDelta(delta, nil)
+}
+
+func (s *responsesToChatStream) relayFinishedImage(item *OutputItem) error {
+	// Partial images are previews. Only a finished image enters Chat output.
+	if item == nil || item.Type != "image_generation_call" || item.Result == "" {
+		return nil
+	}
+	if err := s.open(); err != nil {
+		return err
+	}
+	s.streamedContent = true
+	idx := s.imageIdx
+	s.imageIdx++
+	return s.writeDelta(openai.OpenAIStreamingDelta{
+		Images: []openai.ImageData{{Type: "image_url", Index: &idx, B64JSON: item.Result}},
+	}, nil)
+}
+
+func (s *responsesToChatStream) finish(response *Response) error {
+	if response == nil {
+		return nil
+	}
+	if s.streamErrorReported {
+		if usage := responsesUsageToChat(response.Usage); usage != nil {
+			return writeChatUsageChunk(s.output, s.ensureChatID(), s.model, s.timestamp, usage)
+		}
+		return nil
+	}
+
+	// Surface a bare failure as text. Existing visible output or tool calls
+	// already give the client a turn, so keep their content intact.
+	if response.Status == "failed" && !s.streamedContent && s.nextToolCallIdx == 0 {
+		if message := responsesErrorMessage(response.Error); message != "" {
+			if err := s.open(); err != nil {
+				return err
+			}
+			if err := s.writeDelta(openai.OpenAIStreamingDelta{Content: message}, nil); err != nil {
+				return err
+			}
+		}
+	}
+
+	// The terminal response carries full reasoning items. Echo them as
+	// thinking_blocks so the client can retain them in its next tool turn.
+	if blocks := reasoningBlocksFromOutput(response.Output); len(blocks) > 0 {
+		if err := s.open(); err != nil {
+			return err
+		}
+		if err := writeThinkingBlocksChunk(s.output, s.ensureChatID(), s.model, s.timestamp, blocks); err != nil {
+			return err
+		}
+	}
+	reason := responsesFinishReason(response.Status, response.IncompleteDetails, s.nextToolCallIdx > 0)
+	return writeChatTerminalChunks(s.output, s.ensureChatID(), s.model, s.timestamp, reason, responsesUsageToChat(response.Usage))
+}
+
+func (s *responsesToChatStream) reportError(message string) error {
+	if message == "" {
+		message = "responses API stream error"
+	}
+	if err := s.open(); err != nil {
+		return err
+	}
+	reason := "stop"
+	if err := s.writeDelta(openai.OpenAIStreamingDelta{Content: message}, &reason); err != nil {
+		return err
+	}
+	s.streamErrorReported = true
 	return nil
 }
 

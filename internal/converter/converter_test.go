@@ -1433,6 +1433,67 @@ func TestExtractTokenUsage_ResponsesAPIStreamingEvent(t *testing.T) {
 	}
 }
 
+func TestExtractTokenUsage_MixedTopLevelAndNestedDetails(t *testing.T) {
+	body := []byte(`{
+		"usage": {
+			"completion_tokens": 8,
+			"total_tokens": 99,
+			"completion_tokens_details": {"image_tokens": 2}
+		},
+		"response": {"usage": {
+			"input_tokens": 21,
+			"output_tokens": 11,
+			"total_tokens": 35,
+			"input_tokens_details": {"image_tokens": 4},
+			"output_tokens_details": {"image_tokens": 5, "reasoning_tokens": 3}
+		}}
+	}`)
+	for _, nestedTotal := range []string{`"total_tokens": 35,`, ""} {
+		input := bytes.Replace(body, []byte(`"total_tokens": 35,`), []byte(nestedTotal), 1)
+		total, usage := ExtractTotalTokensAndUsageWithOptions(input, TokenUsageExtractionOptions{})
+		if total != 99 || usage == nil || usage.PromptTokens != 0 || usage.CompletionTokens != 8 {
+			t.Fatalf("total = %d, usage = %+v, want total 99 and top-level token counts (0, 8)", total, usage)
+		}
+	}
+
+	body = bytes.Replace(body, []byte(`"total_tokens": 99,`), nil, 1)
+	total, _ := ExtractTotalTokensAndUsageWithOptions(body, TokenUsageExtractionOptions{})
+	if total != 35 {
+		t.Fatalf("reported total = %d, want nested fallback 35", total)
+	}
+}
+
+func TestExtractTokenUsage_NestedUsagePreservesTopLevelCacheTTL(t *testing.T) {
+	body := []byte(`{"usage":{"input_tokens":0,"cache_creation":{"ephemeral_1h_input_tokens":500}},"response":{"usage":{"input_tokens":20,"output_tokens":5}}}`)
+	usage := ExtractTokenUsage(body)
+	if usage == nil || usage.CacheCreation1hTokens != 500 || usage.CacheCreationTokens != 500 || usage.PromptTokens != 520 {
+		t.Errorf("usage = %+v, want 500 one-hour cache writes and 520 inclusive input tokens", usage)
+	}
+
+	body = bytes.Replace(body, []byte(`"input_tokens":20,"output_tokens":5`), []byte(`"input_tokens":0,"output_tokens":0`), 1)
+	usage = ExtractTokenUsage(body)
+	if usage != nil {
+		t.Fatalf("usage = %+v, want nil for cache writes alone", usage)
+	}
+}
+
+func TestExtractTokenUsage_StandaloneCountersWithoutTokens(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+	}{
+		{"fetch", `{"usage":{"web_fetch_requests":2}}`},
+		{"search", `{"usage":{"prompt_tokens_details":{"web_search_requests":3}}}`},
+		{"cache read", `{"usage":{"cache_read_input_tokens":30}}`},
+		{"cache write", `{"usage":{"cache_creation_input_tokens":40}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if usage := ExtractTokenUsage([]byte(tc.body)); usage != nil {
+				t.Fatalf("usage = %+v, want nil", usage)
+			}
+		})
+	}
+}
+
 func TestExtractTokenUsage_WebSearchRequests(t *testing.T) {
 	tests := []struct {
 		name string
