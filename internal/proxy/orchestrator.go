@@ -284,12 +284,8 @@ func (p *Proxy) orchestrateRequest(
 		// This must happen after any history prepending but before RequestToChat removes
 		// "input", and before the vision fallback: the stored history keeps the images.
 		responsesMetadata.AccumulatedInput = responses.ExtractInputArray(baseBody)
-		if prevEntryHandled && logCtx.CacheEligibilitySource == cacheEligibilityPromptHash {
-			if key := p.resolvePromptStickyKey(logCtx, baseBody, logCtx.PublicModelID); key != "" {
-				logCtx.SessionID = key
-			}
-		}
 	}
+	p.bindPromptSession(logCtx, baseBody)
 
 	// Images sent to a model configured with supports_vision: false are handled once
 	// per request on the base body, before a credential is picked, so a rejected
@@ -1430,12 +1426,6 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 	// comment on RequestLogContext for why this exists alongside
 	// CacheControlOutcome.
 	logCtx.CacheMarkersIn = anthropicconv.CountCacheMarkers(body)
-	if sessionID == "" {
-		if key := p.resolvePromptStickyKey(logCtx, body, modelID); key != "" {
-			logCtx.SessionID = key
-			logCtx.CacheEligibilitySource = cacheEligibilityPromptHash
-		}
-	}
 
 	if modelID == "" {
 		p.logger.WarnContext(r.Context(), "Model not specified in request body",

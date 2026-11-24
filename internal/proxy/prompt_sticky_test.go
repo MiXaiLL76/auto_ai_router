@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -27,100 +26,80 @@ const (
 	stickyChatOtherMsg = `{"model":"gpt-4","tools":[{"type":"function","function":{"name":"f","parameters":{"type":"object"}}}],"messages":[{"role":"system","content":[{"type":"text","text":"rules","cache_control":{"type":"ephemeral"}}]},{"role":"user","content":"bye"}]}`
 )
 
-func promptStickyKeyFor(body, token, model string) string {
-	return promptStickyKey([]byte(body), token, model, anthropicconv.CountCacheMarkers([]byte(body)).Total() > 0)
+func promptSessionIDFor(body, token string) string {
+	prx := &Proxy{stickyPromptHash: true, sessionStore: NewSessionStore(time.Minute)}
+	logCtx := &RequestLogContext{Token: token, CacheMarkersIn: anthropicconv.CountCacheMarkers([]byte(body))}
+	prx.bindPromptSession(logCtx, []byte(body))
+	return logCtx.SessionID
 }
 
-func TestPromptStickyKey(t *testing.T) {
-	base := promptStickyKeyFor(stickyChatCached, "sk-a", "gpt-4")
-	require.True(t, validPromptStickyKey(base), base)
+func TestBindPromptSession(t *testing.T) {
+	base := promptSessionIDFor(stickyChatCached, "sk-a")
+	assert.Regexp(t, promptSessionIDPattern, base)
 
-	assert.Equal(t, base, promptStickyKeyFor(stickyChatMovedBP, "sk-a", "gpt-4"), "later turns and a moved breakpoint keep the key")
-	assert.NotEqual(t, base, promptStickyKeyFor(stickyChatCached, "sk-b", "gpt-4"), "client key")
-	assert.NotEqual(t, base, promptStickyKeyFor(stickyChatCached, "sk-a", "gpt-5"), "model")
-	assert.NotEqual(t, base, promptStickyKeyFor(stickyChatOtherMsg, "sk-a", "gpt-4"), "first user message")
-	assert.Empty(t, promptStickyKeyFor(stickyChatNoCache, "sk-a", "gpt-4"), "no cache_control")
-	assert.Empty(t, promptStickyKey([]byte(`not json`), "sk-a", "gpt-4", true))
+	assert.Equal(t, base, promptSessionIDFor(stickyChatMovedBP, "sk-a"), "later turns and a moved breakpoint keep the key")
+	assert.NotEqual(t, base, promptSessionIDFor(stickyChatCached, "sk-b"), "client key")
+	assert.NotEqual(t, base, promptSessionIDFor(stickyChatOtherMsg, "sk-a"), "first user message")
+	assert.Empty(t, promptSessionIDFor(stickyChatNoCache, "sk-a"), "no cache_control")
+	assert.Empty(t, promptSessionIDFor(`not json "cache_control"`, "sk-a"))
+	assert.Empty(t, promptSessionIDFor(`{"model":"claude","cache_control":{"type":"other"},"messages":[{"role":"user","content":"hello"}]}`, "sk-a"))
+
+	logCtx := &RequestLogContext{SessionID: "sess-1", CacheMarkersIn: anthropicconv.CountCacheMarkers([]byte(stickyChatCached))}
+	(&Proxy{stickyPromptHash: true, sessionStore: NewSessionStore(time.Minute)}).bindPromptSession(logCtx, []byte(stickyChatCached))
+	assert.Equal(t, "sess-1", logCtx.SessionID, "client session wins")
 }
 
-func TestPromptStickyKey_Shapes(t *testing.T) {
-	messages := `{"model":"claude","system":[{"type":"text","text":"rules","cache_control":{"type":"ephemeral"}}],"tools":[{"name":"f","input_schema":{"type":"object"},"cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"hello"}]}`
-	messagesNext := `{"model":"claude","system":[{"type":"text","text":"rules"}],"tools":[{"name":"f","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":[{"type":"text","text":"more","cache_control":{"type":"ephemeral"}}]}]}`
-	a := promptStickyKeyFor(messages, "sk", "claude")
-	require.NotEmpty(t, a)
-	assert.Equal(t, a, promptStickyKeyFor(messagesNext, "sk", "claude"))
-
-	topLevel := `{"model":"claude","cache_control":{"type":"ephemeral"},"system":"rules","messages":[{"role":"user","content":"hello"}]}`
-	topLevelNext := `{"model":"claude","cache_control":{"type":"ephemeral"},"system":"rules","messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":"more"}]}`
-	b := promptStickyKeyFor(topLevel, "sk", "claude")
-	require.NotEmpty(t, b, "top-level cache_control")
-	assert.Equal(t, b, promptStickyKeyFor(topLevelNext, "sk", "claude"))
-	assert.Empty(t, promptStickyKeyFor(`{"model":"claude","cache_control":{"type":"other"},"messages":[{"role":"user","content":"hello"}]}`, "sk", "claude"))
-
-	responses := `{"model":"claude","instructions":"rules","input":[{"role":"user","content":[{"type":"input_text","text":"hello","cache_control":{"type":"ephemeral"}}]}]}`
-	responsesNext := `{"model":"claude","instructions":"rules","input":[{"role":"user","content":[{"type":"input_text","text":"hello"}]},{"type":"function_call","call_id":"c1","name":"f","arguments":"{}"},{"type":"function_call_output","call_id":"c1","output":"x","cache_control":{"type":"ephemeral"}}]}`
-	c := promptStickyKeyFor(responses, "sk", "claude")
-	require.NotEmpty(t, c)
-	assert.Equal(t, c, promptStickyKeyFor(responsesNext, "sk", "claude"))
-
-	stringInput := promptStickyKeyFor(`{"model":"claude","cache_control":{"type":"ephemeral"},"instructions":"rules","input":"hello"}`, "sk", "claude")
-	assert.NotEmpty(t, stringInput)
-	assert.NotEqual(t, stringInput, promptStickyKeyFor(`{"model":"claude","cache_control":{"type":"ephemeral"},"instructions":"rules","input":"bye"}`, "sk", "claude"))
-}
-
-func TestPromptStickyKey_ContentForms(t *testing.T) {
+func TestBindPromptSession_Turns(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
 		first, next string
 	}{
+		{
+			"messages: markers on system and tools, then on the tail",
+			`{"model":"claude","system":[{"type":"text","text":"rules","cache_control":{"type":"ephemeral"}}],"tools":[{"name":"f","input_schema":{"type":"object"},"cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"hello"}]}`,
+			`{"model":"claude","system":[{"type":"text","text":"rules"}],"tools":[{"name":"f","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":[{"type":"text","text":"more","cache_control":{"type":"ephemeral"}}]}]}`,
+		},
+		{
+			"messages: top-level cache_control",
+			`{"model":"claude","cache_control":{"type":"ephemeral"},"system":"rules","messages":[{"role":"user","content":"hello"}]}`,
+			`{"model":"claude","cache_control":{"type":"ephemeral"},"system":"rules","messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":"more"}]}`,
+		},
 		{
 			"chat: marker on the first message, then on the tail",
 			`{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"hello","cache_control":{"type":"ephemeral"}}]}]}`,
 			`{"model":"m","messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":[{"type":"text","text":"more","cache_control":{"type":"ephemeral"}}]}]}`,
 		},
 		{
-			"messages: system string and blocks",
-			`{"model":"m","cache_control":{"type":"ephemeral"},"system":"rules","messages":[{"role":"user","content":"hello"}]}`,
-			`{"model":"m","system":[{"type":"text","text":"rules","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":"more"}]}`,
+			"responses: marker on the first input, then on a tool output",
+			`{"model":"claude","instructions":"rules","input":[{"role":"user","content":[{"type":"input_text","text":"hello","cache_control":{"type":"ephemeral"}}]}]}`,
+			`{"model":"claude","instructions":"rules","input":[{"role":"user","content":[{"type":"input_text","text":"hello"}]},{"type":"function_call","call_id":"c1","name":"f","arguments":"{}"},{"type":"function_call_output","call_id":"c1","output":"x","cache_control":{"type":"ephemeral"}}]}`,
 		},
 		{
 			"responses: string input, then history",
 			`{"model":"m","cache_control":{"type":"ephemeral"},"instructions":"rules","input":"hello"}`,
 			`{"model":"m","cache_control":{"type":"ephemeral"},"instructions":"rules","input":[{"role":"user","content":"hello"},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]},{"role":"user","content":"more"}]}`,
 		},
-		{
-			"responses: message item with input_text",
-			`{"model":"m","cache_control":{"type":"ephemeral"},"input":"hello"}`,
-			`{"model":"m","cache_control":{"type":"ephemeral"},"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]},{"role":"user","content":"more"}]}`,
-		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			first := promptStickyKeyFor(tc.first, "sk", "m")
+			first := promptSessionIDFor(tc.first, "sk")
 			require.NotEmpty(t, first)
-			assert.Equal(t, first, promptStickyKeyFor(tc.next, "sk", "m"))
+			assert.Equal(t, first, promptSessionIDFor(tc.next, "sk"))
 		})
 	}
+
+	assert.NotEqual(t,
+		promptSessionIDFor(`{"model":"m","cache_control":{"type":"ephemeral"},"input":"hello"}`, "sk"),
+		promptSessionIDFor(`{"model":"m","cache_control":{"type":"ephemeral"},"input":"bye"}`, "sk"))
 }
 
-func TestPromptStickyKey_KeepsSchemaPropertyNamedCacheControl(t *testing.T) {
+func TestBindPromptSession_KeepsSchemaPropertyNamedCacheControl(t *testing.T) {
 	tool := func(propType string) string {
 		return `{"model":"m","tools":[{"name":"f","input_schema":{"type":"object","properties":{"cache_control":{"type":"` + propType + `"}}}}],"system":[{"type":"text","text":"rules","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"hello"}]}`
 	}
-	assert.NotEqual(t, promptStickyKeyFor(tool("string"), "sk", "m"), promptStickyKeyFor(tool("integer"), "sk", "m"))
+	assert.NotEqual(t, promptSessionIDFor(tool("string"), "sk"), promptSessionIDFor(tool("integer"), "sk"))
 }
 
-func TestValidPromptStickyKey(t *testing.T) {
-	assert.True(t, validPromptStickyKey(promptStickyKeyPrefix+strings.Repeat("a", promptStickyKeyHexSize)))
-	for _, key := range []string{
-		"",
-		"sess-1",
-		promptStickyKeyPrefix + strings.Repeat("a", promptStickyKeyHexSize-1),
-		promptStickyKeyPrefix + strings.Repeat("z", promptStickyKeyHexSize),
-		"x:" + strings.Repeat("a", promptStickyKeyHexSize),
-	} {
-		assert.False(t, validPromptStickyKey(key), key)
-	}
-}
+const promptSessionIDPattern = `^p:[0-9a-f]{32}$`
 
 func newCountingServers(t *testing.T, n int) ([]*httptest.Server, []*atomic.Int32) {
 	t.Helper()
@@ -221,16 +200,7 @@ func TestProxyRequest_PromptHashStickyForwardedToAIRHop(t *testing.T) {
 
 	sendChat(t, prx, stickyChatCached)
 
-	assert.True(t, validPromptStickyKey(gotSession), gotSession)
-}
-
-func validPromptStickyKey(key string) bool {
-	hexPart, ok := strings.CutPrefix(key, promptStickyKeyPrefix)
-	if !ok || len(hexPart) != promptStickyKeyHexSize {
-		return false
-	}
-	_, err := hex.DecodeString(hexPart)
-	return err == nil
+	assert.Regexp(t, promptSessionIDPattern, gotSession)
 }
 
 func TestProxyRequest_PromptHashStickyKeepsKeyAcrossPreviousResponseID(t *testing.T) {

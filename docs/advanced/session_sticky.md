@@ -295,7 +295,7 @@ Applies when both hold:
 - the request has no session ID from any [source](#sources-of-session-id), `user` included;
 - it carries `cache_control` (`{"type":"ephemeral"}`) on a content block, a tool, or at the top level.
 
-The key is a hash of the client API key, the model, `tools`, `system` / `instructions`, and `messages` / `input` up to and including the first user message. `cache_control` fields are left out of the hash, so moving a breakpoint keeps the key.
+The key is a hash of the client API key, `tools`, `system` / `instructions`, and `messages` / `input` up to and including the first user message. `cache_control` fields are left out of the hash, so moving a breakpoint keeps the key; string content counts as one text block.
 
 Later turns of the same conversation keep the key, so they land on the credential that served the first turn and its warm cache. The binding uses the same store, TTL and failover rules as a session.
 
