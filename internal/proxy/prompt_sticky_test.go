@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,9 +13,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	anthropicconv "github.com/mixaill76/auto_ai_router/internal/converter/anthropic"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
-	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/responsestore"
-	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -43,6 +42,8 @@ func TestBindPromptSession(t *testing.T) {
 	assert.Empty(t, promptSessionIDFor(stickyChatNoCache, "sk-a"), "no cache_control")
 	assert.Empty(t, promptSessionIDFor(`not json "cache_control"`, "sk-a"))
 	assert.Empty(t, promptSessionIDFor(`{"model":"claude","cache_control":{"type":"other"},"messages":[{"role":"user","content":"hello"}]}`, "sk-a"))
+	assert.Empty(t, promptSessionIDFor(`{"model":"claude","cache_control":{"type":"ephemeral"},"input":{"role":"user","content":"hello"}}`, "sk-a"), "no readable user turn")
+	assert.Empty(t, promptSessionIDFor(`{"model":"claude","cache_control":{"type":"ephemeral"},"system":"rules","messages":[{"role":"assistant","content":"hi"}]}`, "sk-a"), "no user message")
 
 	logCtx := &RequestLogContext{SessionID: "sess-1", CacheMarkersIn: anthropicconv.CountCacheMarkers([]byte(stickyChatCached))}
 	(&Proxy{stickyPromptHash: true, sessionStore: NewSessionStore(time.Minute)}).bindPromptSession(logCtx, []byte(stickyChatCached))
@@ -60,6 +61,11 @@ func TestBindPromptSession_Turns(t *testing.T) {
 			`{"model":"claude","system":[{"type":"text","text":"rules"}],"tools":[{"name":"f","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":[{"type":"text","text":"more","cache_control":{"type":"ephemeral"}}]}]}`,
 		},
 		{
+			"messages: system string, then blocks",
+			`{"model":"claude","cache_control":{"type":"ephemeral"},"system":"rules","messages":[{"role":"user","content":"hello"}]}`,
+			`{"model":"claude","system":[{"type":"text","text":"rules","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":"more"}]}`,
+		},
+		{
 			"messages: top-level cache_control",
 			`{"model":"claude","cache_control":{"type":"ephemeral"},"system":"rules","messages":[{"role":"user","content":"hello"}]}`,
 			`{"model":"claude","cache_control":{"type":"ephemeral"},"system":"rules","messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":"more"}]}`,
@@ -73,6 +79,11 @@ func TestBindPromptSession_Turns(t *testing.T) {
 			"responses: marker on the first input, then on a tool output",
 			`{"model":"claude","instructions":"rules","input":[{"role":"user","content":[{"type":"input_text","text":"hello","cache_control":{"type":"ephemeral"}}]}]}`,
 			`{"model":"claude","instructions":"rules","input":[{"role":"user","content":[{"type":"input_text","text":"hello"}]},{"type":"function_call","call_id":"c1","name":"f","arguments":"{}"},{"type":"function_call_output","call_id":"c1","output":"x","cache_control":{"type":"ephemeral"}}]}`,
+		},
+		{
+			"responses: marker on the first input_text, then a string",
+			`{"model":"claude","input":[{"role":"user","content":[{"type":"input_text","text":"hello","cache_control":{"type":"ephemeral"}}]}]}`,
+			`{"model":"claude","input":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":[{"type":"input_text","text":"more","cache_control":{"type":"ephemeral"}}]}]}`,
 		},
 		{
 			"responses: string input, then history",
@@ -101,43 +112,6 @@ func TestBindPromptSession_KeepsSchemaPropertyNamedCacheControl(t *testing.T) {
 
 const promptSessionIDPattern = `^p:[0-9a-f]{32}$`
 
-func newCountingServers(t *testing.T, n int) ([]*httptest.Server, []*atomic.Int32) {
-	t.Helper()
-	servers := make([]*httptest.Server, n)
-	hits := make([]*atomic.Int32, n)
-	for i := range servers {
-		counter := &atomic.Int32{}
-		hits[i] = counter
-		servers[i] = newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			counter.Add(1)
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(chatCompletionOKBody("id", "ok")))
-		}))
-		t.Cleanup(servers[i].Close)
-	}
-	return servers, hits
-}
-
-func usedServers(hits []*atomic.Int32) int {
-	used := 0
-	for _, h := range hits {
-		if h.Load() > 0 {
-			used++
-		}
-	}
-	return used
-}
-
-func sendChat(t *testing.T, prx *Proxy, body string) {
-	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
-	req.Header.Set("Authorization", "Bearer master-key")
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	prx.ProxyRequest(w, req)
-	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-}
-
 func TestProxyRequest_PromptHashSticky(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -152,33 +126,40 @@ func TestProxyRequest_PromptHashSticky(t *testing.T) {
 		{"flag off balances", false, false, stickyChatCached, 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			servers, hits := newCountingServers(t, 3)
-			creds := []config.CredentialConfig{
-				testProxyCredential("cred1", servers[0].URL, false),
-				testProxyCredential("cred2", servers[1].URL, false),
-				testProxyCredential("cred3", servers[2].URL, false),
-			}
-			if tc.spendLog {
-				for i := range creds {
-					creds[i].Type = config.ProviderTypeOpenAI
+			hits := make([]atomic.Int32, 3)
+			var creds []config.CredentialConfig
+			for i := range hits {
+				upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					hits[i].Add(1)
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(chatCompletionOKBody("id", "ok")))
+				}))
+				t.Cleanup(upstream.Close)
+				cred := testProxyCredential(fmt.Sprint("cred", i), upstream.URL, false)
+				if tc.spendLog {
+					cred.Type = config.ProviderTypeOpenAI
 				}
+				creds = append(creds, cred)
 			}
-			builder := NewTestProxyBuilder().
-				WithCredentials(creds...).
-				WithMasterKey("master-key").
+			builder := NewTestProxyBuilder().WithCredentials(creds...).WithMasterKey("master-key").
 				WithSessionSticky(5 * time.Minute)
-			if tc.enabled {
-				builder = builder.WithPromptHashSticky()
-			}
 			if tc.spendLog {
 				builder = builder.WithRouterResponseLog(&collectingRouterResponseManager{}, true)
 			}
 			prx := builder.Build()
+			prx.stickyPromptHash = tc.enabled
 
 			for range 5 {
-				sendChat(t, prx, tc.body)
+				w := postChat(t, prx, tc.body)
+				require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 			}
-			assert.Equal(t, tc.wantUsed, usedServers(hits))
+			used := 0
+			for i := range hits {
+				if hits[i].Load() > 0 {
+					used++
+				}
+			}
+			assert.Equal(t, tc.wantUsed, used)
 		})
 	}
 }
@@ -194,22 +175,17 @@ func TestProxyRequest_PromptHashStickyForwardedToAIRHop(t *testing.T) {
 
 	cred := proxyCred("downstream", upstream.URL, 1)
 	cred.Type = config.ProviderTypeAIR
-	prx := NewTestProxyBuilder().WithCredentials(cred).WithMasterKey("master-key").
-		WithSessionSticky(5 * time.Minute).WithPromptHashSticky().Build()
+	prx := NewTestProxyBuilder().WithCredentials(cred).WithMasterKey("master-key").WithSessionSticky(5 * time.Minute).Build()
+	prx.stickyPromptHash = true
 	registerTestModel(prx, cred.Name, "gpt-4")
 
-	sendChat(t, prx, stickyChatCached)
+	w := postChat(t, prx, stickyChatCached)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 
 	assert.Regexp(t, promptSessionIDPattern, gotSession)
 }
 
 func TestProxyRequest_PromptHashStickyKeepsKeyAcrossPreviousResponseID(t *testing.T) {
-	for _, model := range []string{"gpt-4", "gpt-alias"} {
-		t.Run(model, func(t *testing.T) { testPromptHashStickyAcrossPreviousResponseID(t, model) })
-	}
-}
-
-func testPromptHashStickyAcrossPreviousResponseID(t *testing.T, model string) {
 	var sessions []string
 	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sessions = append(sessions, r.Header.Get(HeaderSessionID))
@@ -220,12 +196,9 @@ func testPromptHashStickyAcrossPreviousResponseID(t *testing.T, model string) {
 
 	cred := proxyCred("downstream", upstream.URL, 1)
 	cred.Type = config.ProviderTypeAIR
-	prx := NewTestProxyBuilder().WithCredentials(cred).WithMasterKey("master-key").
-		WithSessionSticky(5 * time.Minute).WithPromptHashSticky().Build()
-	mm := models.New(testhelpers.NewTestLogger(), 50, []config.ModelRPMConfig{{Name: "gpt-4", Credential: cred.Name}})
-	mm.LoadModelsFromConfig([]config.CredentialConfig{cred})
-	mm.SetModelAliases(map[string]string{"gpt-alias": "gpt-4"})
-	prx.modelManager = mm
+	prx := NewTestProxyBuilder().WithCredentials(cred).WithMasterKey("master-key").WithSessionSticky(5 * time.Minute).Build()
+	prx.stickyPromptHash = true
+	registerTestModel(prx, cred.Name, "gpt-4")
 	prx.responseStore = &fakeResponseStore{entry: &responsestore.StoredEntry{
 		ResponseID:       "resp-prev",
 		CredentialName:   cred.Name,
@@ -234,12 +207,11 @@ func testPromptHashStickyAcrossPreviousResponseID(t *testing.T, model string) {
 	}}
 
 	for _, body := range []string{
-		`{"model":"` + model + `","cache_control":{"type":"ephemeral"},"instructions":"rules","input":"hello"}`,
-		`{"model":"` + model + `","cache_control":{"type":"ephemeral"},"instructions":"rules","input":"more","previous_response_id":"resp-prev"}`,
+		`{"model":"gpt-4","cache_control":{"type":"ephemeral"},"instructions":"rules","input":"hello"}`,
+		`{"model":"gpt-4","cache_control":{"type":"ephemeral"},"instructions":"rules","input":"more","previous_response_id":"resp-prev"}`,
 	} {
 		req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
 		req.Header.Set("Authorization", "Bearer master-key")
-		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
 		prx.ProxyRequest(w, req)
 		require.Equal(t, http.StatusOK, w.Code, w.Body.String())

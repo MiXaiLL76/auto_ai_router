@@ -20,9 +20,7 @@ type promptSessionRequest struct {
 	Input        goccyjson.RawMessage `json:"input"`
 }
 
-// bindPromptSession gives a request that asks for prompt caching but has no session ID
-// one hashed from its client key, tools, system prompt and conversation up to the first
-// user message (session_sticky_prompt_hash).
+// bindPromptSession sets a prompt-hash session ID on a cache_control request without one.
 func (p *Proxy) bindPromptSession(logCtx *RequestLogContext, body []byte) {
 	if !p.stickyPromptHash || p.sessionStore == nil || logCtx.SessionID != "" ||
 		!bytes.Contains(body, []byte(`"cache_control"`)) {
@@ -33,20 +31,22 @@ func (p *Proxy) bindPromptSession(logCtx *RequestLogContext, body []byte) {
 		(logCtx.CacheMarkersIn.Total() == 0 && req.CacheControl["type"] != "ephemeral") {
 		return
 	}
-	prefix, err := json.Marshal(stripCacheControl([]any{
-		logCtx.Token, req.Tools, req.System, req.Instructions,
-		firstUserTurn(req.Messages), firstUserTurn(req.Input),
-	}))
-	if err != nil {
+	turn := append(firstUserTurn(req.Messages), firstUserTurn(req.Input)...)
+	if len(turn) == 0 {
 		return
 	}
+	prefix, _ := json.Marshal(normalizePrompt([]any{
+		logCtx.Token, req.Tools,
+		map[string]any{"role": "system", "content": req.System},
+		map[string]any{"role": "system", "content": req.Instructions},
+		turn,
+	}))
 	sum := sha256.Sum256(prefix)
 	logCtx.SessionID = "p:" + hex.EncodeToString(sum[:16])
 	logCtx.CacheEligibilitySource = "prompt_hash"
 }
 
-// firstUserTurn decodes conversation items up to and including the first user message,
-// with string input and string content in block form; the rest is not read.
+// firstUserTurn decodes conversation items up to and including the first user message.
 func firstUserTurn(raw []byte) []any {
 	if len(raw) > 0 && raw[0] == '"' {
 		raw = slices.Concat([]byte(`[{"role":"user","content":`), raw, []byte(`}]`))
@@ -61,30 +61,33 @@ func firstUserTurn(raw []byte) []any {
 		if dec.Decode(&item) != nil {
 			return nil
 		}
-		if text, ok := item["content"].(string); ok {
-			item["content"] = []any{map[string]any{"type": "text", "text": text}}
-		}
 		items = append(items, item)
 		if item["role"] == "user" {
-			break
+			return items
 		}
 	}
-	return items
+	return nil
 }
 
-// stripCacheControl drops cache_control markers in place, so moving a breakpoint keeps the key.
-func stripCacheControl(v any) any {
+// normalizePrompt drops cache_control markers and spells text content one way, in place.
+func normalizePrompt(v any) any {
 	switch t := v.(type) {
 	case map[string]any:
 		if cc, ok := t["cache_control"].(map[string]any); ok && cc["type"] == "ephemeral" {
 			delete(t, "cache_control")
 		}
+		if t["type"] == "input_text" {
+			t["type"] = "text"
+		}
+		if text, ok := t["content"].(string); ok {
+			t["content"] = []any{map[string]any{"type": "text", "text": text}}
+		}
 		for _, val := range t {
-			stripCacheControl(val)
+			normalizePrompt(val)
 		}
 	case []any:
 		for _, item := range t {
-			stripCacheControl(item)
+			normalizePrompt(item)
 		}
 	}
 	return v

@@ -187,7 +187,8 @@ type SpendEvent struct {
 	// CacheEligibilitySource is the client-supplied signal, if any, that made
 	// this request eligible for the router's automatic Anthropic
 	// cache_control injection: "session_header", "session_body",
-	// "safety_identifier", "user_field", "previous_response_id", or empty
+	// "safety_identifier", "user_field", "previous_response_id", "prompt_hash"
+	// (session_sticky_prompt_hash), or empty
 	// when the client sent none of those. safety_identifier and user_field
 	// are kept apart because the latter is routinely just an
 	// application-level end-user id with no session intent at all.

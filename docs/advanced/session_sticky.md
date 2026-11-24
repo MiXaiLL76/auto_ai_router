@@ -290,7 +290,7 @@ server:
   session_sticky_prompt_hash: true
 ```
 
-Applies when both hold:
+Requires `session_sticky_enabled`. Applies when both hold:
 
 - the request has no session ID from any [source](#sources-of-session-id), `user` included;
 - it carries `cache_control` (`{"type":"ephemeral"}`) on a content block, a tool, or at the top level.
