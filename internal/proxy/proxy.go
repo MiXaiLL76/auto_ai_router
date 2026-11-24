@@ -527,34 +527,10 @@ type RequestLogContext struct {
 	// loopGateStripUsage: the gate asked vLLM for the running usage of the
 	// current streamed attempt, which the client did not ask for.
 	loopGateStripUsage bool
-	// lastUsageInfo is the most recent stream chunk whose usage extractor
-	// returned something, kept as the parsed object. finalizeStreamingLog reads
-	// field presence from it in preference to the stream's final data chunk: a
-	// provider can close a stream with frames that carry no usage (Anthropic's
-	// message_stop), and an explicit completion_tokens:0 in the last usage frame
-	// must still be seen — the merged TokenUsage keeps the earlier non-zero,
-	// because MergeNonZero drops zeros. Keeping the parsed object (rather than
-	// the raw bytes) also makes an all-zero usage frame visible to that tracking:
-	// the shared converter turns it into no TokenUsage at all.
-	//
-	// It describes the attempt that reported it, like TokenUsage: a path that
-	// starts a new attempt on the same logCtx clears TokenUsage, and has to clear
-	// this, lastUsageAnswerProgress and answerProgress with it
-	// (resetSimulatedAttemptState is the only such place today — a direct
-	// streaming response is never retried, and the proxy-like writer keeps its
-	// own tracking per call, see writeProxyStreamingResponseWithTokens).
-	lastUsageInfo *StreamUsageInfo
-	// lastUsageAnswerProgress is the answer accumulator's AnswerProgress when
-	// lastUsageInfo was recorded. A usage frame can arrive before the text it
-	// describes (a provider's placeholder output_tokens:0 in message_start, or a
-	// running completion_tokens count in the middle of a stream): that frame's
-	// count says "so much so far", not "so much in the end", so it only counts as
-	// the provider's final word when no answer text followed it.
+	// Reset these with TokenUsage when starting a new attempt.
+	lastUsageInfo           *StreamUsageInfo
 	lastUsageAnswerProgress int
-	// answerProgress is the answer accumulator's current AnswerProgress, updated
-	// as the stream passes so the finalizer can compare it with the tracked
-	// frame without holding the accumulator itself.
-	answerProgress int
+	answerProgress          int
 
 	// keptEmbeddings of embeddingInputs: a failed fanned-out embeddings request
 	// was billed for the inputs the provider had already embedded (see

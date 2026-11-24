@@ -621,3 +621,120 @@ func TestProxyRequest_ZeroOnlyUsageEstimatesPrompt(t *testing.T) {
 		})
 	}
 }
+
+func TestProxyRequest_PromptOnlyFramePreservesExplicitZeroCompletion(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, frame := range []string{
+			`{"choices":[],"usage":{"prompt_tokens":900,"completion_tokens":1}}`,
+			`{"choices":[],"usage":{"completion_tokens":0}}`,
+			`{"choices":[],"usage":{"prompt_tokens":900}}`,
+			`{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+			"[DONE]",
+		} {
+			_, _ = w.Write([]byte("data: " + frame + "\n\n"))
+			w.(http.Flusher).Flush()
+		}
+	}))
+	defer upstream.Close()
+	for _, cred := range chatStreamCreditTypes {
+		t.Run(string(cred), func(t *testing.T) {
+			p, db := newChatStreamTestProxy(t, upstream.URL, cred, "test-empty")
+			require.Equal(t, http.StatusOK, postChatStream(t, p, "test-empty").Code)
+			require.Len(t, db.loggedEntries, 1)
+			require.Equal(t, 900, db.loggedEntries[0].PromptTokens)
+			require.Zero(t, db.loggedEntries[0].CompletionTokens, "spend=%v", db.loggedEntries[0].Spend)
+		})
+	}
+}
+
+func TestProxyRequest_PromptOnlyFramePreservesStaleCompletionTracking(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, frame := range []string{
+			`{"choices":[],"usage":{"prompt_tokens":900,"completion_tokens":1}}`,
+			`{"choices":[{"index":0,"delta":{"content":"The answer contains many more words than one token."}}]}`,
+			`{"choices":[],"usage":{"prompt_tokens":900}}`,
+			`{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+			"[DONE]",
+		} {
+			_, _ = w.Write([]byte("data: " + frame + "\n\n"))
+			w.(http.Flusher).Flush()
+		}
+	}))
+	defer upstream.Close()
+	for _, cred := range chatStreamCreditTypes {
+		t.Run(string(cred), func(t *testing.T) {
+			p, db := newChatStreamTestProxy(t, upstream.URL, cred, "test-empty")
+			w := postChatStream(t, p, "test-empty")
+			require.Equal(t, http.StatusOK, w.Code)
+			require.Contains(t, w.Body.String(), "The answer contains")
+			require.Len(t, db.loggedEntries, 1)
+			require.Greater(t, db.loggedEntries[0].CompletionTokens, 1, "spend=%v", db.loggedEntries[0].Spend)
+		})
+	}
+}
+
+func TestProxyRequest_FinalMessagesUsagePreservesCacheBilling(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/v1/messages", r.URL.Path)
+		w.Header().Set("Content-Type", "text/event-stream")
+		events := []string{
+			`event: message_start
+data: {"type":"message_start","message":{"id":"msg_mid","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1000,"output_tokens":1}}}
+
+`,
+			`event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":null,"stop_sequence":null},"usage":{"output_tokens":1}}
+
+`,
+			`event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":1000,"output_tokens":0,"cache_read_input_tokens":100,"cache_creation_input_tokens":50}}
+
+`,
+		}
+		for _, e := range events {
+			_, _ = w.Write([]byte(e))
+		}
+	}))
+	defer upstream.Close()
+
+	for _, credType := range []config.ProviderType{config.ProviderTypeProxy} {
+		t.Run(string(credType), func(t *testing.T) {
+			cred := config.CredentialConfig{
+				Name: string(credType), Type: credType,
+				BaseURL: upstream.URL, APIKey: "upstream-key", RPM: 100, TPM: 10000,
+			}
+			prx := NewTestProxyBuilder().WithCredentials(cred).WithMasterKey("master-key").Build()
+			dbStub := &stubLiteLLMManager{}
+			prx.LiteLLMDB = dbStub
+			prx.responseCompat = compatlitellm.New()
+
+			registry := pricing.NewModelPriceRegistry()
+			registry.Update(map[string]*pricing.ModelPrice{
+				"claude-mid": {InputCostPerToken: 1, OutputCostPerToken: 2, CacheReadInputTokenCost: 0.5, CacheCreationInputTokenCost: 3},
+			})
+			prx.priceRegistry = registry
+
+			req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{
+		"model":"claude-mid",
+		"max_tokens":100,
+		"stream":true,
+		"messages":[{"role":"user","content":"hello"}]
+	}`))
+			req.Header.Set("Authorization", "Bearer master-key")
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+
+			prx.ProxyRequest(w, req)
+
+			require.Equal(t, http.StatusOK, w.Code)
+			require.Len(t, dbStub.loggedEntries, 1)
+			entry := dbStub.loggedEntries[0]
+			assert.Equal(t, 1150, entry.PromptTokens)
+			assert.Zero(t, entry.CompletionTokens,
+				"message_stop is the last data chunk, but the final usage lives in the message_delta before it")
+			assert.Equal(t, float64(1200), entry.Spend)
+		})
+	}
+}

@@ -2,6 +2,13 @@ package proxy
 
 import "github.com/mixaill76/auto_ai_router/internal/converter"
 
+// Keep the latest frame that reports completion, including an explicit zero.
+// MergeNonZero preserves fields omitted by partial frames, so it cannot apply
+// a zero correction by itself.
+func shouldTrackStreamUsage(previous, current *StreamUsageInfo) bool {
+	return current != nil && (previous == nil || current.CompletionTokensPresent)
+}
+
 // streamUsageResolution is the provider-report state a streaming spend writer
 // has to apply to the counts it merged while the stream passed. The finalizer
 // (finalizeStreamingLogParsed) and the proxy-like writer

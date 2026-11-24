@@ -1229,14 +1229,10 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 	return streamErr
 }
 
-// rememberLastUsageFrame stores the provider's last usage frame, already parsed
-// by its extractor; see lastUsageInfo's doc comment. Callers pass the frame
-// whenever the extractor saw a usage object — an all-zero one included, which
-// the shared converter turns into no TokenUsage at all. answerProgress is the
-// accumulator's AnswerProgress at that same moment, used to tell the provider's
-// final word from a running count later text outgrew.
+// rememberLastUsageFrame saves the answer position with the completion count
+// so the resolver can detect a running count followed by more output.
 func (logCtx *RequestLogContext) rememberLastUsageFrame(info *StreamUsageInfo, answerProgress int) {
-	if logCtx == nil || info == nil {
+	if logCtx == nil || !shouldTrackStreamUsage(logCtx.lastUsageInfo, info) {
 		return
 	}
 	logCtx.lastUsageInfo = info
@@ -1244,15 +1240,7 @@ func (logCtx *RequestLogContext) rememberLastUsageFrame(info *StreamUsageInfo, a
 }
 
 // finalizeStreamingLog extracts usage info from the last streaming chunk and logs spend to LiteLLM DB.
-//
-// fallbackCompletion is a LOCAL estimate of the answer's token count, counted from the
-// text actually streamed to the client. It is the last resort for completion_tokens when
-// the provider never reported any usage, and must never be a prompt-side figure: a
-// request-shaped count (prompt, or prompt+completion, or prompt+cache) is only ever a
-// plausible completion count when the answer was empty, which is exactly the case that
-// must bill zero. Passing the rate limiter's total_tokens here used to turn every empty
-// stream into completion_tokens == prompt_tokens — output is priced 50x cache reads, so
-// those rows dominated spend.
+// fallbackCompletion is the local estimate of generated tokens.
 func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, fallbackCompletion int, lastChunk []byte, providerName string, statusCode int, audioInputAlreadyExcludesCachedAudio bool) {
 	p.finalizeStreamingLogParsed(logCtx, fallbackCompletion, lastChunk, nil, providerName, statusCode, audioInputAlreadyExcludesCachedAudio)
 }
@@ -1378,24 +1366,6 @@ func (p *Proxy) finalizeStreamingLogParsed(logCtx *RequestLogContext, fallbackCo
 		)
 	}
 
-	// explicitZeroUsage: the provider sent a usage object that reported BOTH fields as zero
-	// together (e.g. a filtered/cancelled request that legitimately produced nothing) — a
-	// coherent signal, trusted as-is, same as before this fix. Derived from field presence,
-	// not just from the values: a zero is only trustworthy when the provider actually said
-	// both fields were zero, whereas a usage object that omits a field says nothing about it.
-	//
-	// A zero PromptTokens alongside a genuine non-zero CompletionTokens is distrusted and
-	// falls back to the local estimate for prompt tokens specifically: this is internally
-	// inconsistent (a real completion cannot be produced from zero input) and matches the
-	// CometAPI bug, where message_start's placeholder usage:{input_tokens:0,output_tokens:0}
-	// never gets a real input count even though output lands correctly later via
-	// message_delta.
-	//
-	// The reverse — a genuine non-zero PromptTokens alongside a zero CompletionTokens — is
-	// NOT distrusted: it's a normal, legitimate outcome (e.g. output filtered/stopped
-	// immediately). Completion falls back to the local estimate only when the provider
-	// never reported a completion count at all — a partial usage object that carries only
-	// prompt tokens must not veto the estimate for the answer it did stream.
 	_, outcome := resolveStreamUsage(streamUsageResolution{
 		usage:           logCtx.TokenUsage,
 		tracked:         presenceInfo,

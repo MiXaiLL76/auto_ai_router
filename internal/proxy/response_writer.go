@@ -558,24 +558,14 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	}
 	setSuccessfulSSEHeaders(w.Header(), resp.StatusCode)
 
-	var lastUsage *converter.TokenUsage
-	// Field presence cannot be read from lastUsage: values alone cannot tell
-	// "the provider reported completion_tokens:0" from "the provider never
-	// reported it", and MergeNonZero drops zeros. Two sources are tracked, the
-	// same ones finalizeStreamingLog reads: the stream's final data payload
-	// (lastDataPayload) and the last usage frame the extractor saw
-	// (lastUsageInfo) — parsed here, not read second-hand from lastUsage, so an
-	// all-zero frame the shared converter drops is still visible. Both are
-	// per-call state, so a retry that reaches this function starts from an empty
-	// picture by construction.
 	usageExtractor := streamUsageExtractorFor("openai", !tokenUsageOptions.AudioInputIncludesCachedAudio)
-	lastUsage = &converter.TokenUsage{}
+	lastUsage := &converter.TokenUsage{}
 	var lastUsageInfo *StreamUsageInfo
 	var lastUsageAnswerProgress int
 	var lastDataPayload []byte
 	recordUsage := func(usage *converter.TokenUsage, info *StreamUsageInfo, answerProgress int) {
 		lastUsage.MergeNonZero(usage)
-		if info != nil {
+		if shouldTrackStreamUsage(lastUsageInfo, info) {
 			lastUsageInfo = info
 			lastUsageAnswerProgress = answerProgress
 		}
@@ -620,24 +610,19 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 		usageLines.Observe(chunk, onLine)
 	}
 
-	// buildFallbackUsage applies the provider-report rules shared with
-	// finalizeStreamingLogParsed (resolveStreamUsage): a field the provider
-	// reported is never replaced by an estimate (a completion zero included — it
-	// overrides an intermediate non-zero the merge kept), a missing field falls
-	// back to the local estimate, and an all-zero usage object is trusted as the
-	// provider's coherent "nothing happened" report. A frame that arrives before
-	// the answer it describes (a placeholder zero, or a running count) is not the
-	// provider's final word and its completion count is treated as missing.
 	buildFallbackUsage := func() *converter.TokenUsage {
 		var finalPayloadInfo *StreamUsageInfo
 		if len(lastDataPayload) > 0 {
 			finalPayloadInfo = usageExtractor.ExtractUsage(lastDataPayload)
+			// The converter's prompt count includes Anthropic cache tokens.
+			if finalPayloadInfo != nil && finalPayloadInfo.PromptTokens > 0 && lastUsage.PromptTokens > 0 {
+				finalPayloadInfo.PromptTokens = lastUsage.PromptTokens
+			}
 		}
 		var promptEstimate func() int
 		if logCtx != nil {
 			promptEstimate = logCtx.promptTokensEstimate
 		}
-		hadUsage := lastUsage != nil && lastUsage.Total() > 0
 		usage, outcome := resolveStreamUsage(streamUsageResolution{
 			usage:           lastUsage,
 			tracked:         lastUsageInfo,
@@ -654,8 +639,7 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 				logCtx.UsageSource = "estimated"
 			}
 		}
-		if !hadUsage && !outcome.providerUsage &&
-			usage.PromptTokens == 0 && usage.CompletionTokens == 0 {
+		if !outcome.providerUsage && usage.IsZero() {
 			return nil
 		}
 		return usage
