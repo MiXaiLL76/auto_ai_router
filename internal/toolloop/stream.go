@@ -28,6 +28,18 @@ import (
 // list could mistake a client's own tool call for the router's and loop on a
 // request it has no tool to run -- sending the very same request upstream a
 // second time and billing the client for both sends.
+//
+// A stream that breaks mid-way returns the bytes that DID arrive together
+// with the error, not an empty body: the provider's connection can die after
+// it has already streamed most of its answer (measured against Moonshot and
+// DeepSeek, whose streams break at a fixed 30 s and 45 s), and throwing the
+// received text away gives the client a bare 502 instead of the answer the
+// model had already produced. The caller decides what to do with the error;
+// it can no longer assume the bytes are empty.
+//
+// The tool calls are returned with them as well, so a caller can tell whether
+// the partial stream carries a call of the ROUTER'S OWN -- one the client
+// never declared, and so never one to relay.
 func CollectStreamToolCalls(resp *http.Response, runner Runner) ([]byte, []ToolCall, *openai.OpenAIUsage, error) {
 	if resp == nil || resp.Body == nil {
 		return nil, nil, nil, errors.New("toolloop: no stream to read")
@@ -35,13 +47,35 @@ func CollectStreamToolCalls(resp *http.Response, runner Runner) ([]byte, []ToolC
 	defer func() { _ = resp.Body.Close() }()
 
 	var buffered bytes.Buffer
-	if _, err := io.Copy(&buffered, resp.Body); err != nil {
-		return nil, nil, nil, err
-	}
+	_, err := io.Copy(&buffered, resp.Body)
 	raw := buffered.Bytes()
 
 	calls, usage := callsFromStream(raw)
+	if err != nil {
+		// The bytes that arrived are still the answer so far: hand them over
+		// with the error rather than as nothing.
+		return raw, OwnedCalls(calls, runner), usage, err
+	}
+
 	return raw, OwnedCalls(calls, runner), usage, nil
+}
+
+// HasUnnamedToolCall reports whether the stream carries a tool call whose
+// name never arrived.
+//
+// A streamed tool call carries its name on the first piece and its
+// arguments over the next ones, so a stream that breaks in between leaves
+// the call nameless. An unnamed call cannot be told apart from one of the
+// router's own -- and one of the router's own must never reach the client,
+// which never declared it. So a nameless call counts as the router's.
+func HasUnnamedToolCall(raw []byte) bool {
+	calls, _ := callsFromStream(raw)
+	for _, call := range calls {
+		if call.Name == "" {
+			return true
+		}
+	}
+	return false
 }
 
 // CallsFromStream reads the router's own tool calls out of a buffered stream.
@@ -55,6 +89,12 @@ func CallsFromStream(raw []byte, runner Runner) []ToolCall {
 //
 // It is for the step that reads the model's NEXT answer: the calls in it are
 // not needed there, only the stream itself and its figures.
+//
+// Unlike CollectStreamToolCalls it keeps the old contract on a broken
+// stream: the bytes are dropped and only the error comes back. A step of the
+// loop that breaks half-way is not an answer -- it may carry the tool call
+// the client never declared, which must not reach the client -- so the
+// partial stream of a step is never relayed.
 func ReadStream(resp *http.Response) ([]byte, *openai.OpenAIUsage, error) {
 	if resp == nil || resp.Body == nil {
 		return nil, nil, errors.New("toolloop: no stream to read")

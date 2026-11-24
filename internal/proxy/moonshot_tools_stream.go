@@ -31,6 +31,13 @@ type moonshotStreamCycleResult struct {
 	// lastChunk is the last chunk of the final stream, which the streaming
 	// log reads its figures from.
 	lastChunk []byte
+	// partial marks a body that is the fragment of the provider's FIRST
+	// answer, cut short by a broken connection: it carries no tool call of
+	// the router's, so it can be relayed to the client as the answer it
+	// is. A step of the loop that broke is not partial in this sense --
+	// it may carry the tool call the client never declared -- and is
+	// never relayed.
+	partial bool
 }
 
 // runMoonshotStreamToolLoop drives the router-run tool loop for a streaming
@@ -60,6 +67,15 @@ func (p *Proxy) runMoonshotStreamToolLoop(
 	}
 	result, err := p.runMoonshotStreamToolLoopBuffered(r, w, logCtx, prepared, cred, modelID, realModelID, body, resp, start, attemptedCreds)
 	if err != nil {
+		// The provider's stream broke part-way. The buffered loop hands the
+		// bytes that arrived back with the error, and those bytes are the
+		// answer so far: the model had already produced them. They are
+		// relayed to the client here, as the stream they are -- a stream
+		// that ends without a finish_reason is what a broken provider's
+		// answer looks like, and the client can use the text it got.
+		if result != nil && result.partial {
+			p.replayToolStream(w, resp, r, modelID, logCtx, result.body)
+		}
 		return result, err
 	}
 	// The final step's stream is what the client gets.
@@ -90,7 +106,46 @@ func (p *Proxy) runMoonshotStreamToolLoopBuffered(
 	// The collector returns the router's OWN calls only.
 	raw, owned, usage, err := toolloop.CollectStreamToolCalls(resp, runner)
 	if err != nil {
-		return nil, err
+		// The provider's stream broke part-way. The bytes that arrived
+		// are the answer so far -- the model had already produced them,
+		// and the client is waiting for exactly that -- so the partial
+		// stream is handed over with the error instead of being dropped.
+		//
+		// Unless it carries a call of the ROUTER'S OWN: the client never
+		// declared it, so relaying it would show the client a function
+		// it does not know and no answer. That case is the failure the
+		// client is told about.
+		//
+		// A call whose name never arrived counts as one of ours: the
+		// stream broke between the piece with the name and the pieces
+		// with its arguments, and an unnamed call cannot be told apart
+		// from the router's own.
+		if len(raw) == 0 || len(owned) > 0 || toolloop.HasUnnamedToolCall(raw) {
+			return nil, err
+		}
+		// The client went away: the upstream request rode the client's
+		// context, so its read fails with the cancellation when the
+		// client disconnects. That is not a broken provider -- there is
+		// nobody left to answer -- and the loop must stop without
+		// writing to the dead connection.
+		if isClientDisconnectError(err) {
+			return nil, errMoonshotToolCycleAborted
+		}
+		// The provider reported no usage (its stream broke before the
+		// usage frame), so the loop's own counts are empty. The answer's
+		// size is counted locally instead, from the text that was
+		// streamed: an empty usage would make the spend row zero, and
+		// the client got a real answer.
+		streamUsage := toolloop.UsageFromStreamUsage(usage)
+		loopUsage := moonshotUsageOf(streamUsage, nil)
+		loopUsage.CompletionTokens = p.countStreamedTextTokens(modelID, raw)
+		return &moonshotStreamCycleResult{
+			body:        raw,
+			usage:       loopUsage,
+			totalTokens: streamUsage.TotalTokens,
+			lastChunk:   sse.LastPayload(raw),
+			partial:     true,
+		}, err
 	}
 	if len(owned) == 0 {
 		// No tool call: the client gets the provider's stream as it is.
