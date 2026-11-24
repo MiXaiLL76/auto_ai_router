@@ -2188,6 +2188,11 @@ func resetSimulatedAttemptState(logCtx *RequestLogContext) (outcome string) {
 	// back to zero by MergeNonZero, so it would otherwise survive into the
 	// billed usage of a response that never had it.
 	logCtx.TokenUsage = nil
+	// The tracked usage frame describes the attempt that reported it too: keeping
+	// it would let a dead attempt's field presence decide whether the successful
+	// attempt's zero is final.
+	logCtx.lastUsageChunk = nil
+	logCtx.lastUsageAnswerTokens = 0
 	return outcome
 }
 

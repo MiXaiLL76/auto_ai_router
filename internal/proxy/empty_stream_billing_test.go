@@ -154,6 +154,50 @@ func TestProxyRequest_EmptyChatStreamBillsNoOutput(t *testing.T) {
 	assert.Equal(t, float64(900), entry.Spend)
 }
 
+// chatStreamCreditTypes are the credential kinds whose chat streams reach the spend
+// writer through different code paths: a direct provider finalises through
+// finalizeStreamingLog, a proxy-like one (ProviderTypeProxy/AIR) has
+// writeProxyStreamingResponseWithTokens write the row itself. Both have to honour
+// the same provider-report rules, so the usage cases below run against both.
+var chatStreamCreditTypes = []config.ProviderType{config.ProviderTypeOpenAI, config.ProviderTypeProxy, config.ProviderTypeAIR}
+
+// newChatStreamTestProxy builds a proxy serving the given credential, with the spend
+// stub and a price for model attached.
+func newChatStreamTestProxy(t *testing.T, upstreamURL string, credType config.ProviderType, model string) (*Proxy, *stubLiteLLMManager) {
+	t.Helper()
+	prx := NewTestProxyBuilder().WithCredentials(config.CredentialConfig{
+		Name: string(credType), Type: credType,
+		BaseURL: upstreamURL, APIKey: "upstream-key", RPM: 100,
+	}).WithMasterKey("master-key").Build()
+	prx.responseCompat = compatlitellm.New()
+
+	dbStub := &stubLiteLLMManager{}
+	prx.LiteLLMDB = dbStub
+
+	registry := pricing.NewModelPriceRegistry()
+	registry.Update(map[string]*pricing.ModelPrice{
+		model: {InputCostPerToken: 1, OutputCostPerToken: 2},
+	})
+	prx.priceRegistry = registry
+	return prx, dbStub
+}
+
+// postChatStream sends a streaming chat completion for model and returns the recorder.
+func postChatStream(t *testing.T, prx *Proxy, model string) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{
+		"model": model, "max_tokens": 32, "stream": true,
+		"messages": []map[string]string{{"role": "user", "content": "hello"}},
+	})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(string(body)))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	prx.ProxyRequest(w, req)
+	return w
+}
+
 // TestProxyRequest_PartialUsageStillBillsStreamedAnswer covers the [P1] review case: a
 // provider reports prompt_tokens only — no completion_tokens anywhere in the stream — and
 // then streams the answer text. The old completion gate keyed off the coarse providerUsage
@@ -173,40 +217,21 @@ func TestProxyRequest_PartialUsageStillBillsStreamedAnswer(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	prx := NewTestProxyBuilder().WithCredentials(config.CredentialConfig{
-		Name: "openai", Type: config.ProviderTypeOpenAI,
-		BaseURL: upstream.URL, APIKey: "upstream-key", RPM: 100,
-	}).WithMasterKey("master-key").Build()
-	prx.responseCompat = compatlitellm.New()
+	for _, credType := range chatStreamCreditTypes {
+		t.Run(string(credType), func(t *testing.T) {
+			prx, dbStub := newChatStreamTestProxy(t, upstream.URL, credType, "test-partial")
 
-	dbStub := &stubLiteLLMManager{}
-	prx.LiteLLMDB = dbStub
+			w := postChatStream(t, prx, "test-partial")
 
-	registry := pricing.NewModelPriceRegistry()
-	registry.Update(map[string]*pricing.ModelPrice{
-		"test-partial": {InputCostPerToken: 1, OutputCostPerToken: 2},
-	})
-	prx.priceRegistry = registry
-
-	body, err := json.Marshal(map[string]any{
-		"model": "test-partial", "max_tokens": 32, "stream": true,
-		"messages": []map[string]string{{"role": "user", "content": "hello"}},
-	})
-	require.NoError(t, err)
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(string(body)))
-	req.Header.Set("Authorization", "Bearer master-key")
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-
-	prx.ProxyRequest(w, req)
-
-	require.Equal(t, http.StatusOK, w.Code)
-	require.Len(t, dbStub.loggedEntries, 1)
-	entry := dbStub.loggedEntries[0]
-	assert.Equal(t, 900, entry.PromptTokens)
-	assert.Greater(t, entry.CompletionTokens, 0,
-		"text was streamed to the client, so the missing provider count must fall back to the local estimate")
-	assert.Equal(t, float64(900+2*entry.CompletionTokens), entry.Spend)
+			require.Equal(t, http.StatusOK, w.Code)
+			require.Len(t, dbStub.loggedEntries, 1)
+			entry := dbStub.loggedEntries[0]
+			assert.Equal(t, 900, entry.PromptTokens)
+			assert.Greater(t, entry.CompletionTokens, 0,
+				"text was streamed to the client, so the missing provider count must fall back to the local estimate")
+			assert.Equal(t, float64(900+2*entry.CompletionTokens), entry.Spend)
+		})
+	}
 }
 
 // TestProxyRequest_PlaceholderZeroBeforeTextStillBillsStreamedAnswer covers the [P2]
@@ -230,40 +255,56 @@ func TestProxyRequest_PlaceholderZeroBeforeTextStillBillsStreamedAnswer(t *testi
 	}))
 	defer upstream.Close()
 
-	prx := NewTestProxyBuilder().WithCredentials(config.CredentialConfig{
-		Name: "openai", Type: config.ProviderTypeOpenAI,
-		BaseURL: upstream.URL, APIKey: "upstream-key", RPM: 100,
-	}).WithMasterKey("master-key").Build()
-	prx.responseCompat = compatlitellm.New()
+	for _, credType := range chatStreamCreditTypes {
+		t.Run(string(credType), func(t *testing.T) {
+			prx, dbStub := newChatStreamTestProxy(t, upstream.URL, credType, "test-placeholder")
 
-	dbStub := &stubLiteLLMManager{}
-	prx.LiteLLMDB = dbStub
+			w := postChatStream(t, prx, "test-placeholder")
 
-	registry := pricing.NewModelPriceRegistry()
-	registry.Update(map[string]*pricing.ModelPrice{
-		"test-placeholder": {InputCostPerToken: 1, OutputCostPerToken: 2},
-	})
-	prx.priceRegistry = registry
+			require.Equal(t, http.StatusOK, w.Code)
+			require.Len(t, dbStub.loggedEntries, 1)
+			entry := dbStub.loggedEntries[0]
+			assert.Equal(t, 900, entry.PromptTokens)
+			assert.Greater(t, entry.CompletionTokens, 0,
+				"the zero arrived before the answer, so it cannot stand for the whole stream")
+			assert.Equal(t, float64(900+2*entry.CompletionTokens), entry.Spend)
+		})
+	}
+}
 
-	body, err := json.Marshal(map[string]any{
-		"model": "test-placeholder", "max_tokens": 32, "stream": true,
-		"messages": []map[string]string{{"role": "user", "content": "hello"}},
-	})
-	require.NoError(t, err)
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(string(body)))
-	req.Header.Set("Authorization", "Bearer master-key")
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
+// TestProxyRequest_FinalZeroInLastAnswerChunkBillsNoOutput pins the other side of the
+// staleness boundary: a completion_tokens:0 that arrives together with the last answer
+// text (or after all of it) is the provider's final word about the whole stream, so it
+// wins over the estimate even though text was streamed — the local count is not allowed
+// to override an explicit provider zero.
+func TestProxyRequest_FinalZeroInLastAnswerChunkBillsNoOutput(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/v1/chat/completions", r.URL.Path)
+		w.Header().Set("Content-Type", "text/event-stream")
+		// The usage frame carries the final text of the answer itself.
+		_, _ = w.Write([]byte(
+			"data: {\"id\":\"chat-samechunk\",\"model\":\"test-samechunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello there\"},\"finish_reason\":null}]}\n\n" +
+				"data: {\"id\":\"chat-samechunk\",\"model\":\"test-samechunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" again\"}}],\"usage\":{\"prompt_tokens\":900,\"completion_tokens\":0,\"total_tokens\":900}}\n\n" +
+				"data: {\"id\":\"chat-samechunk\",\"model\":\"test-samechunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+				"data: [DONE]\n\n"))
+	}))
+	defer upstream.Close()
 
-	prx.ProxyRequest(w, req)
+	for _, credType := range chatStreamCreditTypes {
+		t.Run(string(credType), func(t *testing.T) {
+			prx, dbStub := newChatStreamTestProxy(t, upstream.URL, credType, "test-samechunk")
 
-	require.Equal(t, http.StatusOK, w.Code)
-	require.Len(t, dbStub.loggedEntries, 1)
-	entry := dbStub.loggedEntries[0]
-	assert.Equal(t, 900, entry.PromptTokens)
-	assert.Greater(t, entry.CompletionTokens, 0,
-		"the zero arrived before the answer, so it cannot stand for the whole stream")
-	assert.Equal(t, float64(900+2*entry.CompletionTokens), entry.Spend)
+			w := postChatStream(t, prx, "test-samechunk")
+
+			require.Equal(t, http.StatusOK, w.Code)
+			require.Len(t, dbStub.loggedEntries, 1)
+			entry := dbStub.loggedEntries[0]
+			assert.Equal(t, 900, entry.PromptTokens)
+			assert.Zero(t, entry.CompletionTokens,
+				"the zero came with the last answer text, so it speaks for the whole stream")
+			assert.Equal(t, float64(900), entry.Spend)
+		})
+	}
 }
 
 // TestProxyRequest_FinalZeroCompletionOverridesIntermediate covers the [P2] review case: an
@@ -283,40 +324,21 @@ func TestProxyRequest_FinalZeroCompletionOverridesIntermediate(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	prx := NewTestProxyBuilder().WithCredentials(config.CredentialConfig{
-		Name: "openai", Type: config.ProviderTypeOpenAI,
-		BaseURL: upstream.URL, APIKey: "upstream-key", RPM: 100,
-	}).WithMasterKey("master-key").Build()
-	prx.responseCompat = compatlitellm.New()
+	for _, credType := range chatStreamCreditTypes {
+		t.Run(string(credType), func(t *testing.T) {
+			prx, dbStub := newChatStreamTestProxy(t, upstream.URL, credType, "test-zero")
 
-	dbStub := &stubLiteLLMManager{}
-	prx.LiteLLMDB = dbStub
+			w := postChatStream(t, prx, "test-zero")
 
-	registry := pricing.NewModelPriceRegistry()
-	registry.Update(map[string]*pricing.ModelPrice{
-		"test-zero": {InputCostPerToken: 1, OutputCostPerToken: 2},
-	})
-	prx.priceRegistry = registry
-
-	body, err := json.Marshal(map[string]any{
-		"model": "test-zero", "max_tokens": 32, "stream": true,
-		"messages": []map[string]string{{"role": "user", "content": "hello"}},
-	})
-	require.NoError(t, err)
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(string(body)))
-	req.Header.Set("Authorization", "Bearer master-key")
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-
-	prx.ProxyRequest(w, req)
-
-	require.Equal(t, http.StatusOK, w.Code)
-	require.Len(t, dbStub.loggedEntries, 1)
-	entry := dbStub.loggedEntries[0]
-	assert.Equal(t, 900, entry.PromptTokens)
-	assert.Zero(t, entry.CompletionTokens,
-		"an explicit final completion_tokens:0 must overwrite the intermediate 1")
-	assert.Equal(t, float64(900), entry.Spend)
+			require.Equal(t, http.StatusOK, w.Code)
+			require.Len(t, dbStub.loggedEntries, 1)
+			entry := dbStub.loggedEntries[0]
+			assert.Equal(t, 900, entry.PromptTokens)
+			assert.Zero(t, entry.CompletionTokens,
+				"an explicit final completion_tokens:0 must overwrite the intermediate 1")
+			assert.Equal(t, float64(900), entry.Spend)
+		})
+	}
 }
 
 // TestProxyRequest_FinalZeroNotInLastChunk_Messages covers the same [P2] rule on the

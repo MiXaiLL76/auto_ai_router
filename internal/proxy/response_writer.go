@@ -559,11 +559,24 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	setSuccessfulSSEHeaders(w.Header(), resp.StatusCode)
 
 	var lastUsage *converter.TokenUsage
-	recordUsage := func(usage *converter.TokenUsage) {
+	// lastUsageInfo is field presence of the last payload that carried usage,
+	// and lastUsageAnswerTokens the answer-token count at that moment. Values
+	// alone cannot tell "the provider reported completion_tokens:0" from "the
+	// provider never reported it" — the same distinction finalizeStreamingLog
+	// draws (see its StreamUsageInfo presence flags), and this path writes the
+	// spend row itself rather than going through it.
+	usageExtractor := &openAIStreamUsageExtractor{}
+	var lastUsageInfo *StreamUsageInfo
+	var lastUsageAnswerTokens int
+	recordUsage := func(usage *converter.TokenUsage, info *StreamUsageInfo, answerTokens int) {
 		if lastUsage == nil {
 			lastUsage = &converter.TokenUsage{}
 		}
 		lastUsage.MergeNonZero(usage)
+		if info != nil {
+			lastUsageInfo = info
+			lastUsageAnswerTokens = answerTokens
+		}
 		if logCtx != nil && usage.Total() > 0 {
 			logCtx.UsageSource = "provider"
 		}
@@ -573,31 +586,50 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	onLine := func(chunk []byte) {
 		// Image-bearing usage events can span several HTTP reads.
 		payloadBuf = splitSSEPayloads(chunk, payloadBuf)
+		// Counted before the usage block so a usage object riding the same line as
+		// the answer already counts that answer (see buildFallbackUsage).
+		completion.AddPayloads(payloadBuf)
 		if chunkMayCarryTokenUsage(chunk) {
 			if logCtx != nil && logCtx.IsImageGeneration {
 				logCtx.observeImageStreamPayloads(payloadBuf)
 			}
 			if usage := extractTokenUsageFromPayloads(payloadBuf, tokenUsageOptions); usage != nil {
-				recordUsage(usage)
+				recordUsage(usage, usageExtractor.ExtractUsage(chunk), completion.TokenCount())
 			}
 		}
-		completion.AddPayloads(payloadBuf)
 	}
 	var usageLines streamUsageLines
 	onChunk := func(chunk []byte) {
 		usageLines.Observe(chunk, onLine)
 	}
 
+	// buildFallbackUsage applies the same provider-report rules as
+	// finalizeStreamingLogParsed: a completion count the provider reported is
+	// never replaced by an estimate (zero included — an explicit zero overrides
+	// an intermediate non-zero the merge kept), while a missing count falls back
+	// to the local answer-token count instead of vetoing it. A zero that arrives
+	// before the answer it describes (a placeholder) is not the provider's final
+	// word and is treated as missing, mirroring staleUsageFrame there.
 	buildFallbackUsage := func() *converter.TokenUsage {
-		if lastUsage.Total() > 0 {
-			return lastUsage
-		}
+		answerTokens := completion.TokenCount()
 		usage := lastUsage
-		if tokens := completion.TokenCount(); tokens > 0 {
+		promptPresent := lastUsageInfo != nil && lastUsageInfo.PromptTokensPresent
+		completionReported := lastUsageInfo != nil && lastUsageInfo.CompletionTokensPresent
+		if completionReported && lastUsageInfo.CompletionTokens == 0 {
+			if lastUsageAnswerTokens < answerTokens {
+				completionReported = false
+			} else if usage != nil {
+				usage.CompletionTokens = 0
+			}
+		}
+		explicitZeroUsage := promptPresent && completionReported && usage != nil &&
+			usage.PromptTokens == 0 && usage.CompletionTokens == 0
+		if !completionReported && !explicitZeroUsage && answerTokens > 0 &&
+			(usage == nil || usage.CompletionTokens == 0) {
 			if usage == nil {
 				usage = &converter.TokenUsage{}
 			}
-			usage.CompletionTokens = tokens
+			usage.CompletionTokens = answerTokens
 			if logCtx != nil && logCtx.UsageSource == "" {
 				logCtx.UsageSource = "estimated"
 			}
@@ -621,7 +653,11 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	if logCtx != nil && logCtx.HideWebSearchResults {
 		clientReader = newWebSearchResultsStripReader(clientReader, func(payload []byte) {
 			if usage := converter.ExtractTokenUsageWithOptions(payload, tokenUsageOptions); usage != nil {
-				recordUsage(usage)
+				// This reader is upstream of the accumulator, so the payload's own
+				// text is not in the count yet; that only makes a zero look earlier
+				// than it is, i.e. falls back to the estimate instead of billing
+				// nothing (see buildFallbackUsage).
+				recordUsage(usage, usageExtractor.ExtractUsage(payload), completion.TokenCount())
 			}
 		})
 	}
