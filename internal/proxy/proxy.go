@@ -527,6 +527,20 @@ type RequestLogContext struct {
 	// loopGateStripUsage: the gate asked vLLM for the running usage of the
 	// current streamed attempt, which the client did not ask for.
 	loopGateStripUsage bool
+	// lastUsageChunk is the most recent stream chunk whose usage extractor
+	// returned something, copied so it stays valid after the read buffer is
+	// reused. finalizeStreamingLog parses it in preference to the stream's final
+	// data chunk: a provider can close a stream with frames that carry no usage
+	// (Anthropic's message_stop), and an explicit completion_tokens:0 in the last
+	// usage frame must still be seen — the merged TokenUsage keeps the earlier
+	// non-zero, because MergeNonZero drops zeros.
+	lastUsageChunk []byte
+	// lastUsageAnswerTokens is the answer-token accumulator's count when
+	// lastUsageChunk was recorded. A usage frame can arrive before the text it
+	// describes (a provider's placeholder output_tokens:0 in message_start): its
+	// zero says "nothing so far", not "nothing in the end", so it only counts as
+	// the provider's final word when no answer tokens followed it.
+	lastUsageAnswerTokens int
 
 	// keptEmbeddings of embeddingInputs: a failed fanned-out embeddings request
 	// was billed for the inputs the provider had already embedded (see

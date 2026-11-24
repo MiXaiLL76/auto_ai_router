@@ -933,6 +933,9 @@ func (p *Proxy) handleTransformedStreaming(
 						// must not be clobbered back to zero by a later
 						// chunk's usage read that doesn't carry it.
 						logCtx.TokenUsage.MergeNonZero(usage)
+						// Keep the chunk itself too: field presence (a genuine
+						// zero the merge just dropped) is only in the payload.
+						logCtx.rememberLastUsageChunk(chunk, completion.TokenCount())
 					}
 				}
 
@@ -1048,6 +1051,10 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 		// Parse complete SSE lines, not individual HTTP reads: a large image
 		// event may carry its usage after several stream buffer boundaries.
 		payloadBuf = splitSSEPayloads(chunk, payloadBuf)
+		// Counted before the usage block below so a usage object that rides the
+		// same line as the answer counts that answer as already streamed — the
+		// zero it reports is final only then (see rememberLastUsageChunk).
+		completion.AddPayloads(payloadBuf)
 		if hasUsage := chunkMayCarryTokenUsage(chunk); hasUsage {
 			if logCtx != nil {
 				// The image usage event isn't necessarily the stream's last data
@@ -1064,6 +1071,9 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 					// must not be clobbered back to zero by a later chunk's
 					// usage read that doesn't carry it.
 					logCtx.TokenUsage.MergeNonZero(usage)
+					// Keep the chunk itself too: field presence (a genuine
+					// zero the merge just dropped) is only in the payload.
+					logCtx.rememberLastUsageChunk(chunk, completion.TokenCount())
 				}
 			}
 
@@ -1071,7 +1081,6 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 				totalTokens += tokens
 			}
 		}
-		completion.AddPayloads(payloadBuf)
 
 		// Don't let a bare [DONE] sentinel or empty chunks overwrite a lastChunk that carries usage data.
 		rememberLastStreamDataChunk(&lastChunk, chunk)
@@ -1089,6 +1098,11 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 					logCtx.TokenUsage = &converter.TokenUsage{}
 				}
 				logCtx.TokenUsage.MergeNonZero(usage)
+				// This reader is upstream of the accumulator, so the payload's own
+				// text (if any) is not in the count yet; that only makes a zero look
+				// earlier than it is, i.e. falls back to the estimate instead of
+				// billing nothing.
+				logCtx.rememberLastUsageChunk(payload, completion.TokenCount())
 			}
 		})
 	}
@@ -1166,6 +1180,20 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 	return streamErr
 }
 
+// rememberLastUsageChunk copies chunk into logCtx.lastUsageChunk; see that
+// field's doc comment. Callers pass the chunk whose usage extraction returned
+// something, so finalizeStreamingLog can read field presence from the provider's
+// last usage frame even when later frames close the stream without usage.
+// answerTokens is the accumulator's count at that same moment, used to tell a
+// final zero from a placeholder one (see lastUsageAnswerTokens).
+func (logCtx *RequestLogContext) rememberLastUsageChunk(chunk []byte, answerTokens int) {
+	if logCtx == nil || len(chunk) == 0 {
+		return
+	}
+	logCtx.lastUsageChunk = append(logCtx.lastUsageChunk[:0], chunk...)
+	logCtx.lastUsageAnswerTokens = answerTokens
+}
+
 // finalizeStreamingLog extracts usage info from the last streaming chunk and logs spend to LiteLLM DB.
 //
 // fallbackCompletion is a LOCAL estimate of the answer's token count, counted from the
@@ -1216,10 +1244,12 @@ func (p *Proxy) finalizeStreamingLogParsed(logCtx *RequestLogContext, fallbackCo
 	// The merged struct holds values only, so presence read from it can only mean "a
 	// positive value survived the merge" (MergeNonZero drops zeros). Presence of a zero
 	// completion count — the provider saying "nothing was generated" — is therefore read
-	// from the final usage object below, where the extractor still knows which fields the
-	// provider actually sent. providerReportedCompletionTokens hence means "a completion
-	// count was reported at all", not "a non-zero one": a partial usage object carrying
-	// only prompt tokens must not veto the estimate for the answer it did stream.
+	// from the last usage object, where the extractor still knows which fields the
+	// provider actually sent: the last data chunk when it carries usage, else the last
+	// chunk that did (tracked as the stream passed). providerReportedCompletionTokens
+	// hence means "a completion count was reported at all", not "a non-zero one": a
+	// partial usage object carrying only prompt tokens must not veto the estimate for
+	// the answer it did stream.
 	providerReportedPromptTokens := logCtx.TokenUsage.PromptTokens > 0
 	providerReportedCompletionTokens := logCtx.TokenUsage.CompletionTokens > 0
 	providerUsage := providerReportedPromptTokens || providerReportedCompletionTokens
@@ -1231,14 +1261,55 @@ func (p *Proxy) finalizeStreamingLogParsed(logCtx *RequestLogContext, fallbackCo
 	// coarse providerUsage flag silently accepts that placeholder zero as truth and never
 	// estimates prompt tokens for the request. Gate per-field instead, so a provider that
 	// reports some fields but not others still gets a fallback for the missing one.
+	extractor := getStreamUsageExtractor(providerName)
+	if audioInputAlreadyExcludesCachedAudio {
+		extractor = &openAIStreamUsageExtractor{audioInputAlreadyExcludesCachedAudio: true}
+	}
+
+	// presenceInfo is the provider's LAST usage frame, read for field presence only.
+	// That frame is not necessarily the stream's last data chunk (Anthropic closes
+	// with a usage-less message_stop), so the merging paths save it. Its values are
+	// deliberately not applied here: extractors encode the same count differently
+	// (Anthropic's input_tokens excludes cache, the merge path adds it), so reading
+	// them second-hand would lose counts the merge already kept.
+	var presenceInfo *StreamUsageInfo
+	if parsed != nil {
+		presenceInfo = parsed.usage
+	} else if len(logCtx.lastUsageChunk) > 0 {
+		presenceInfo = extractor.ExtractUsage(logCtx.lastUsageChunk)
+	}
+	// A tracked usage frame is the provider's last usage frame, but not necessarily its
+	// last word: a placeholder output_tokens:0 can arrive before the text it describes
+	// (CometAPI's message_start style), and no later frame repeats the count. Text that
+	// appeared after that frame means the zero said "nothing so far", so it must not
+	// veto the estimate for what was streamed. A frame that carries the count at (or
+	// after) the last answer token still speaks for the whole stream. parsed is the
+	// stream's actual final chunk, so it is never stale.
+	staleUsageFrame := parsed == nil && presenceInfo != nil &&
+		presenceInfo.CompletionTokensPresent && presenceInfo.CompletionTokens == 0 &&
+		logCtx.lastUsageAnswerTokens < fallbackCompletion
+	if presenceInfo != nil {
+		providerUsage = true
+		if presenceInfo.PromptTokensPresent {
+			promptTokensPresent = true
+		}
+		if presenceInfo.CompletionTokensPresent && !staleUsageFrame {
+			providerReportedCompletionTokens = true
+			if presenceInfo.CompletionTokens == 0 {
+				// An explicit final completion_tokens:0 wins over whatever an
+				// intermediate chunk reported. MergeNonZero skipped that zero while
+				// the stream passed, so without this the earlier non-zero would
+				// survive and bill output the provider itself says was not generated.
+				logCtx.TokenUsage.CompletionTokens = 0
+			}
+		}
+	}
+
+	// usageInfo supplies values from the stream's final data chunk, as before.
 	var usageInfo *StreamUsageInfo
 	if parsed != nil {
 		usageInfo = parsed.usage
 	} else if len(lastChunk) > 0 {
-		extractor := getStreamUsageExtractor(providerName)
-		if audioInputAlreadyExcludesCachedAudio {
-			extractor = &openAIStreamUsageExtractor{audioInputAlreadyExcludesCachedAudio: true}
-		}
 		usageInfo = extractor.ExtractUsage(lastChunk)
 	}
 	if usageInfo != nil {
@@ -1251,10 +1322,8 @@ func (p *Proxy) finalizeStreamingLogParsed(logCtx *RequestLogContext, fallbackCo
 			providerReportedPromptTokens = true
 		}
 		if usageInfo.CompletionTokensPresent {
-			// An explicit count in the final usage object wins over whatever an
-			// intermediate chunk reported — zero included. MergeNonZero skipped that
-			// zero while the stream passed, so without this the earlier non-zero would
-			// survive and bill output the provider itself says was not generated.
+			// A completion count present in the final data chunk is authoritative,
+			// zero included (see the presenceInfo branch above for the general case).
 			logCtx.TokenUsage.CompletionTokens = usageInfo.CompletionTokens
 			providerReportedCompletionTokens = true
 		} else if usageInfo.CompletionTokens > 0 {
