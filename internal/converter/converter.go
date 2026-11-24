@@ -878,29 +878,29 @@ func ExtractTotalTokensAndUsageWithOptions(body []byte, opts TokenUsageExtractio
 		return 0, nil
 	}
 
-	_, _, totalTokens := resp.tokenCounts()
-	return totalTokens, tokenUsageFromShape(&resp, opts)
+	return resp.reportedTotalTokens(), tokenUsageFromShape(&resp, opts)
 }
 
-func (resp *tokenUsageResponseShape) tokenCounts() (prompt, completion, total int) {
+func (resp *tokenUsageResponseShape) reportedTotalTokens() int {
+	if resp.Usage.TotalTokens <= 0 && resp.Response.Usage != nil {
+		return resp.Response.Usage.TotalTokens
+	}
+	return max(resp.Usage.TotalTokens, 0)
+}
+
+func (resp *tokenUsageResponseShape) tokenCounts() (prompt, completion int) {
 	prompt = cmp.Or(resp.Usage.PromptTokens, resp.Usage.InputTokens)
 	completion = cmp.Or(resp.Usage.CompletionTokens, resp.Usage.OutputTokens)
-	total = resp.Usage.TotalTokens
-	if nested := resp.Response.Usage; nested != nil {
-		// When nested usage supplies the input count, take its output and
-		// total with it so reasoning accounting uses a single provider report.
-		if prompt == 0 && (nested.InputTokens != 0 || (completion == 0 && nested.OutputTokens != 0)) {
-			return nested.InputTokens, nested.OutputTokens, nested.TotalTokens
-		}
-		total = cmp.Or(total, nested.TotalTokens)
+	if nested := resp.Response.Usage; prompt == 0 && completion == 0 && nested != nil {
+		return nested.InputTokens, nested.OutputTokens
 	}
-	return prompt, completion, total
+	return prompt, completion
 }
 
 // tokenUsageFromShape computes usage from an already-decoded response.
 func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractionOptions) *TokenUsage {
 	nested := resp.Response.Usage
-	promptTokens, completionTokens, totalTokens := resp.tokenCounts()
+	promptTokens, completionTokens := resp.tokenCounts()
 
 	// Each level's server-side tool usage object is decoded once; the
 	// top-level one wins for the per-tool counters, like the other fields.
@@ -945,14 +945,12 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 	if resp.Usage.PromptTokens == 0 && resp.Usage.InputTokens == 0 {
 		nestedDetails = nested
 	}
-	cache := extractUsageCache(resp, nestedDetails)
 	if promptTokens == 0 && completionTokens == 0 && webSearchRequests == 0 &&
-		webFetchRequests <= 0 && routerWebSearchRequests <= 0 &&
-		!toolUsageReported && imageToolGenerations == 0 && imageToolEdits == 0 &&
-		cache.read <= 0 && !cache.hasWrite() {
+		!toolUsageReported && imageToolGenerations == 0 && imageToolEdits == 0 {
 		return nil
 	}
 
+	cache := extractUsageCache(resp, nestedDetails)
 	// Some providers report the short TTL split only in response headers.
 	if !cache.hasShortTTL() {
 		cache.write5m = opts.CacheWriteTTLHeader5mTokens
@@ -967,6 +965,10 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 	// correction below rewrites promptTokens (Anthropic sends no total_tokens).
 	var reasoningAccounting string
 	if !cache.flatRead && !cache.flatWrite {
+		totalTokens := resp.Usage.TotalTokens
+		if nestedDetails != nil {
+			totalTokens = nestedDetails.TotalTokens
+		}
 		reasoningAccounting = detectReasoningAccounting(promptTokens, completionTokens, usage.ReasoningTokens, totalTokens)
 	}
 	providerCost := resp.Usage.providerCostUSD()

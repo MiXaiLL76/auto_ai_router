@@ -1380,7 +1380,8 @@ func TestStreamTransform_CacheUsageSurvivesResponsesConversion(t *testing.T) {
 		{"30m and 12h", `{"prompt_tokens":1500,"prompt_tokens_details":{"cache_write_tokens_details":{"ttl_30m_tokens":200,"ttl_12h_tokens":1000}}}`, 0, 0, 1500, 0, 1200, 200, 0, 1000, 1500},
 		{"header only", `{"prompt_tokens":1500}`, 200, 800, 1500, 0, 1000, 200, 800, 0, 1500},
 		{"header before aliases", `{"prompt_tokens":100,"completion_tokens":20,"total_tokens":123,"prompt_tokens_details":{"cache_creation_token_details":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0},"cache_creation":{"ephemeral_5m_input_tokens":7,"ephemeral_1h_input_tokens":8}},"cache_creation":{"ephemeral_5m_input_tokens":9}}`, 200, 800, 100, 0, 1000, 200, 800, 0, 123},
-		{"flat Anthropic", `{"input_tokens":100,"output_tokens":5,"cache_read_input_tokens":300,"cache_creation_input_tokens":500,"cache_creation":{"ephemeral_1h_input_tokens":500}}`, 0, 0, 900, 300, 500, 0, 500, 0, 905},
+		{"flat Anthropic", `{"input_tokens":100,"output_tokens":5,"cache_read_input_tokens":300,"cache_creation_input_tokens":500,"cache_creation":{"ephemeral_1h_input_tokens":500}}`, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+		{"missing total", `{"prompt_tokens":100,"completion_tokens":5}`, 0, 0, 100, 0, 0, 0, 0, 0, 105},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			input := buildSSEChunk(`{"choices":[],"usage":`+tc.usage+`}`) + "data: [DONE]\n\n"
@@ -1413,7 +1414,12 @@ func TestStreamTransform_CacheUsageSurvivesResponsesConversion(t *testing.T) {
 				require.NoError(t, json.Unmarshal([]byte(payload), &event))
 				require.NotNil(t, event.Response.Usage)
 				assert.Equal(t, tc.total, event.Response.Usage.TotalTokens)
+				assert.Equal(t, tc.input, event.Response.Usage.InputTokens)
 				usage := converter.ExtractTokenUsage([]byte(payload))
+				if tc.input == 0 {
+					assert.Nil(t, usage)
+					return
+				}
 				require.NotNil(t, usage)
 				assert.Equal(t, tc.input, usage.PromptTokens)
 				assert.Equal(t, tc.read, usage.CachedInputTokens)

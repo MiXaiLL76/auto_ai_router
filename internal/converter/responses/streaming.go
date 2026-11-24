@@ -216,16 +216,11 @@ type chatStreamChoice struct {
 }
 
 type chatStreamUsage struct {
-	PromptTokens             int                        `json:"prompt_tokens"`
-	CompletionTokens         int                        `json:"completion_tokens"`
-	InputTokens              int                        `json:"input_tokens"`
-	OutputTokens             int                        `json:"output_tokens"`
-	TotalTokens              *int                       `json:"total_tokens"`
-	CacheReadInputTokens     int                        `json:"cache_read_input_tokens"`
-	CacheCreationInputTokens int                        `json:"cache_creation_input_tokens"`
-	CacheCreation            *CacheCreationTokenDetails `json:"cache_creation"`
-	CacheType                string                     `json:"cache_type"`
-	PromptTokensDetails      *struct {
+	PromptTokens        int    `json:"prompt_tokens"`
+	CompletionTokens    int    `json:"completion_tokens"`
+	TotalTokens         *int   `json:"total_tokens"`
+	CacheType           string `json:"cache_type"`
+	PromptTokensDetails *struct {
 		InputDetails
 		// Alibaba also spells the short TTL breakdown cache_creation.
 		CacheCreation *CacheCreationTokenDetails `json:"cache_creation,omitempty"`
@@ -417,8 +412,8 @@ func (acc *streamAccumulator) captureChatChunkMetadata(chunk *chatStreamChunk) {
 
 func usageFromChatStreamChunk(raw *chatStreamUsage, audioInputIncludesCachedAudio bool, cacheWriteTTLFallback5mTokens, cacheWriteTTLFallback1hTokens int) *chatCompletionsUsage {
 	usage := &chatCompletionsUsage{
-		PromptTokens:     cmp.Or(raw.PromptTokens, raw.InputTokens),
-		CompletionTokens: cmp.Or(raw.CompletionTokens, raw.OutputTokens),
+		PromptTokens:     raw.PromptTokens,
+		CompletionTokens: raw.CompletionTokens,
 		CacheType:        raw.CacheType,
 	}
 	var ttl30m, ttl12h, audioTokens int
@@ -450,19 +445,6 @@ func usageFromChatStreamChunk(raw *chatStreamUsage, audioInputIncludesCachedAudi
 		usage.CacheCreation1hTokens = prompt.CacheCreation.Ephemeral1hInputTokens
 	}
 
-	flatRead := usage.CachedTokens == 0 && raw.CacheReadInputTokens > 0
-	if flatRead {
-		usage.CachedTokens = raw.CacheReadInputTokens
-	}
-	flatWrite := usage.CacheCreationTokens == 0 && raw.CacheCreationInputTokens > 0
-	if flatWrite {
-		usage.CacheCreationTokens = raw.CacheCreationInputTokens
-	}
-	if !usage.hasShortCacheWriteTTL() && ttl30m == 0 && raw.CacheCreation != nil {
-		usage.CacheCreation5mTokens = raw.CacheCreation.Ephemeral5mInputTokens
-		usage.CacheCreation1hTokens = raw.CacheCreation.Ephemeral1hInputTokens
-		flatWrite = flatWrite || usage.hasShortCacheWriteTTL()
-	}
 	if ttl30m > 0 || ttl12h > 0 {
 		usage.CacheWriteTokensDetails = &CacheWriteTokensDetails{TTL30mTokens: ttl30m, TTL12hTokens: ttl12h}
 	}
@@ -470,15 +452,6 @@ func usageFromChatStreamChunk(raw *chatStreamUsage, audioInputIncludesCachedAudi
 		usage.CacheCreationTokens = usage.CacheCreation5mTokens + usage.CacheCreation1hTokens + ttl30m + ttl12h
 	}
 
-	// Anthropic's input_tokens excludes the flat cache counters.
-	if raw.PromptTokens == 0 {
-		if flatRead {
-			usage.PromptTokens += usage.CachedTokens
-		}
-		if flatWrite {
-			usage.PromptTokens += usage.CacheCreationTokens
-		}
-	}
 	usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
 	if raw.TotalTokens != nil {
 		usage.TotalTokens = *raw.TotalTokens
