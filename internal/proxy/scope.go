@@ -11,7 +11,10 @@ import (
 
 const liteLLMMasterKeyIdentity = "litellm-master-key"
 
-var errInvalidScopeAuth = errors.New("invalid authorization")
+var (
+	errInvalidScopeAuth      = errors.New("invalid authorization")
+	errNoPermittedCredential = errors.New("no permitted route available")
+)
 
 func (p *Proxy) ScopeContextForRequest(r *http.Request) (scope.Context, error) {
 	token, credentialState := extractClientToken(r)
