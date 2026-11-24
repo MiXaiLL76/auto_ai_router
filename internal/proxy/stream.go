@@ -117,8 +117,15 @@ var streamBufPool = sync.Pool{
 // It provides a unified structure for token counts across all providers.
 // Not all fields will be populated; some providers don't report certain metrics.
 type StreamUsageInfo struct {
-	PromptTokens             int // May be 0 if not provided in streaming response
+	PromptTokens int // May be 0 if not provided in streaming response
+	// PromptTokensPresent and CompletionTokensPresent tell "the provider reported
+	// this field as zero" apart from "the provider did not report it at all". The
+	// value alone cannot: finalizeStreamingLog has to choose between trusting a
+	// genuine zero (an empty answer) and falling back to a local estimate (usage
+	// that never arrived), and those two cases both read as 0.
+	PromptTokensPresent      bool
 	CompletionTokens         int
+	CompletionTokensPresent  bool
 	CachedTokens             int // Tokens from cached prompt content (prompt_caching feature)
 	CachedAudioTokens        int // Cached prompt tokens whose modality is audio
 	AudioInputTokens         int // Audio tokens in the request
@@ -275,15 +282,17 @@ func (o *openAIStreamUsageExtractor) chatCompletionUsageInfo(usage *chatCompleti
 	toolUsage, _ := usage.ServerSideToolUsage()
 
 	return &StreamUsageInfo{
-		PromptTokens:           intValue(usage.PromptTokens),
-		CompletionTokens:       intValue(usage.CompletionTokens),
-		CachedTokens:           cachedTokens,
-		CachedAudioTokens:      cachedAudioTokens,
-		CacheCreationTokens:    cacheCreationTokens,
-		CacheCreation5mTokens:  cacheCreation5mTokens,
-		CacheCreation1hTokens:  cacheCreation1hTokens,
-		CacheCreation12hTokens: cacheCreation12hTokens,
-		CacheType:              usage.PromptTokensDetails.CacheType,
+		PromptTokens:            intValue(usage.PromptTokens),
+		PromptTokensPresent:     usage.PromptTokens != nil,
+		CompletionTokens:        intValue(usage.CompletionTokens),
+		CompletionTokensPresent: usage.CompletionTokens != nil,
+		CachedTokens:            cachedTokens,
+		CachedAudioTokens:       cachedAudioTokens,
+		CacheCreationTokens:     cacheCreationTokens,
+		CacheCreation5mTokens:   cacheCreation5mTokens,
+		CacheCreation1hTokens:   cacheCreation1hTokens,
+		CacheCreation12hTokens:  cacheCreation12hTokens,
+		CacheType:               usage.PromptTokensDetails.CacheType,
 		AudioInputTokens: normalizeStreamAudioInput(
 			usage.PromptTokensDetails.AudioTokens,
 			cachedTokens,
@@ -389,15 +398,17 @@ func (o *openAIStreamUsageExtractor) responsesAPIUsageInfo(
 	}
 
 	return &StreamUsageInfo{
-		PromptTokens:           intValue(usage.InputTokens),
-		CompletionTokens:       intValue(usage.OutputTokens),
-		CachedTokens:           cachedTokens,
-		CachedAudioTokens:      cachedAudioTokens,
-		CacheCreationTokens:    cacheCreationTokens,
-		CacheCreation5mTokens:  cacheCreation5mTokens,
-		CacheCreation1hTokens:  cacheCreation1hTokens,
-		CacheCreation12hTokens: cacheCreation12hTokens,
-		CacheType:              usage.InputTokensDetails.CacheType,
+		PromptTokens:            intValue(usage.InputTokens),
+		PromptTokensPresent:     usage.InputTokens != nil,
+		CompletionTokens:        intValue(usage.OutputTokens),
+		CompletionTokensPresent: usage.OutputTokens != nil,
+		CachedTokens:            cachedTokens,
+		CachedAudioTokens:       cachedAudioTokens,
+		CacheCreationTokens:     cacheCreationTokens,
+		CacheCreation5mTokens:   cacheCreation5mTokens,
+		CacheCreation1hTokens:   cacheCreation1hTokens,
+		CacheCreation12hTokens:  cacheCreation12hTokens,
+		CacheType:               usage.InputTokensDetails.CacheType,
 		AudioInputTokens: normalizeStreamAudioInput(
 			usage.InputTokensDetails.AudioTokens,
 			cachedTokens,
@@ -511,13 +522,15 @@ func (a *anthropicStreamUsageExtractor) ExtractUsage(chunk []byte) *StreamUsageI
 			cacheCreationTokens = data.Usage.CacheCreation.Ephemeral5mInputTokens + data.Usage.CacheCreation.Ephemeral1hInputTokens
 		}
 		return &StreamUsageInfo{
-			PromptTokens:          intValue(data.Usage.InputTokens),
-			CompletionTokens:      intValue(data.Usage.OutputTokens),
-			CacheCreationTokens:   cacheCreationTokens,
-			CacheCreation5mTokens: data.Usage.CacheCreation.Ephemeral5mInputTokens,
-			CacheCreation1hTokens: data.Usage.CacheCreation.Ephemeral1hInputTokens,
-			CacheReadTokens:       data.Usage.CacheReadInputTokens,
-			WebSearchRequests:     data.Usage.ServerToolUse.WebSearchRequests,
+			PromptTokens:            intValue(data.Usage.InputTokens),
+			PromptTokensPresent:     data.Usage.InputTokens != nil,
+			CompletionTokens:        intValue(data.Usage.OutputTokens),
+			CompletionTokensPresent: data.Usage.OutputTokens != nil,
+			CacheCreationTokens:     cacheCreationTokens,
+			CacheCreation5mTokens:   data.Usage.CacheCreation.Ephemeral5mInputTokens,
+			CacheCreation1hTokens:   data.Usage.CacheCreation.Ephemeral1hInputTokens,
+			CacheReadTokens:         data.Usage.CacheReadInputTokens,
+			WebSearchRequests:       data.Usage.ServerToolUse.WebSearchRequests,
 			// Anthropic separates cache_creation (cached prompt tokens)
 			// For logging purposes, we combine under CachedTokens
 			CachedTokens: data.Usage.CacheReadInputTokens,
@@ -1199,9 +1212,18 @@ func (p *Proxy) finalizeStreamingLogParsed(logCtx *RequestLogContext, fallbackCo
 	// already-merged values keeps the per-field semantics below intact: a field the
 	// provider did report is never overwritten by an estimate, and a field it reported as
 	// a genuine zero is left at zero instead of being replaced by a fallback.
+	//
+	// The merged struct holds values only, so presence read from it can only mean "a
+	// positive value survived the merge" (MergeNonZero drops zeros). Presence of a zero
+	// completion count — the provider saying "nothing was generated" — is therefore read
+	// from the final usage object below, where the extractor still knows which fields the
+	// provider actually sent. providerReportedCompletionTokens hence means "a completion
+	// count was reported at all", not "a non-zero one": a partial usage object carrying
+	// only prompt tokens must not veto the estimate for the answer it did stream.
 	providerReportedPromptTokens := logCtx.TokenUsage.PromptTokens > 0
 	providerReportedCompletionTokens := logCtx.TokenUsage.CompletionTokens > 0
 	providerUsage := providerReportedPromptTokens || providerReportedCompletionTokens
+	promptTokensPresent := providerReportedPromptTokens
 	// Tracked separately from providerUsage: some providers (e.g. CometAPI's Anthropic-
 	// compatible streaming) send a syntactically valid usage object whose message_start
 	// carries a placeholder usage:{input_tokens:0,output_tokens:0} while output tokens
@@ -1221,11 +1243,22 @@ func (p *Proxy) finalizeStreamingLogParsed(logCtx *RequestLogContext, fallbackCo
 	}
 	if usageInfo != nil {
 		providerUsage = true
+		if usageInfo.PromptTokensPresent {
+			promptTokensPresent = true
+		}
 		if usageInfo.PromptTokens > 0 {
 			logCtx.TokenUsage.PromptTokens = usageInfo.PromptTokens
 			providerReportedPromptTokens = true
 		}
-		if usageInfo.CompletionTokens > 0 {
+		if usageInfo.CompletionTokensPresent {
+			// An explicit count in the final usage object wins over whatever an
+			// intermediate chunk reported — zero included. MergeNonZero skipped that
+			// zero while the stream passed, so without this the earlier non-zero would
+			// survive and bill output the provider itself says was not generated.
+			logCtx.TokenUsage.CompletionTokens = usageInfo.CompletionTokens
+			providerReportedCompletionTokens = true
+		} else if usageInfo.CompletionTokens > 0 {
+			// Defensive: every extractor sets the presence flag together with a value.
 			logCtx.TokenUsage.CompletionTokens = usageInfo.CompletionTokens
 			providerReportedCompletionTokens = true
 		}
@@ -1298,9 +1331,11 @@ func (p *Proxy) finalizeStreamingLogParsed(logCtx *RequestLogContext, fallbackCo
 		)
 	}
 
-	// explicitZeroUsage: the provider sent a usage object and reported BOTH fields as zero
+	// explicitZeroUsage: the provider sent a usage object that reported BOTH fields as zero
 	// together (e.g. a filtered/cancelled request that legitimately produced nothing) — a
-	// coherent signal, trusted as-is, same as before this fix.
+	// coherent signal, trusted as-is, same as before this fix. Derived from field presence,
+	// not just from the values: a zero is only trustworthy when the provider actually said
+	// both fields were zero, whereas a usage object that omits a field says nothing about it.
 	//
 	// A zero PromptTokens alongside a genuine non-zero CompletionTokens is distrusted and
 	// falls back to the local estimate for prompt tokens specifically: this is internally
@@ -1311,14 +1346,15 @@ func (p *Proxy) finalizeStreamingLogParsed(logCtx *RequestLogContext, fallbackCo
 	//
 	// The reverse — a genuine non-zero PromptTokens alongside a zero CompletionTokens — is
 	// NOT distrusted: it's a normal, legitimate outcome (e.g. output filtered/stopped
-	// immediately), and no known provider bug produces a stuck-zero completion count while
-	// input is reported correctly. Completion only falls back to the local estimate when no
-	// provider usage object arrived at all.
-	explicitZeroUsage := providerUsage && !providerReportedPromptTokens && !providerReportedCompletionTokens
+	// immediately). Completion falls back to the local estimate only when the provider
+	// never reported a completion count at all — a partial usage object that carries only
+	// prompt tokens must not veto the estimate for the answer it did stream.
+	explicitZeroUsage := providerUsage && promptTokensPresent && providerReportedCompletionTokens &&
+		logCtx.TokenUsage.PromptTokens == 0 && logCtx.TokenUsage.CompletionTokens == 0
 	if !providerReportedPromptTokens && !explicitZeroUsage && logCtx.TokenUsage.PromptTokens == 0 {
 		logCtx.TokenUsage.PromptTokens = logCtx.promptTokensEstimate()
 	}
-	if !providerUsage && logCtx.TokenUsage.CompletionTokens == 0 {
+	if !providerReportedCompletionTokens && !explicitZeroUsage && logCtx.TokenUsage.CompletionTokens == 0 {
 		logCtx.TokenUsage.CompletionTokens = fallbackCompletion
 	}
 	logCtx.TokenUsage.Normalize()
