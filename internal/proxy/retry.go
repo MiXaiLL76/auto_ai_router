@@ -482,11 +482,6 @@ func (p *Proxy) writeFallbackResponse(
 			// corrupt the response).
 			// Still propagate partial token usage so the defer-logged spend entry isn't empty.
 			if streamUsage != nil && logCtx != nil {
-				if streamUsage.PromptTokens == 0 && logCtx.UsageSource != "provider" {
-					if estimate := logCtx.promptTokensEstimate(); estimate > 0 {
-						streamUsage.PromptTokens = estimate
-					}
-				}
 				logCtx.TokenUsage = streamUsage
 			}
 			if logCtx != nil && !logCtx.Logged {
@@ -502,12 +497,6 @@ func (p *Proxy) writeFallbackResponse(
 			return true, "fallback_stream_write_failed"
 		}
 		if streamUsage != nil && logCtx != nil {
-			// Backfill PromptTokens from estimate when provider didn't include it.
-			if streamUsage.PromptTokens == 0 && logCtx.UsageSource != "provider" {
-				if estimate := logCtx.promptTokensEstimate(); estimate > 0 {
-					streamUsage.PromptTokens = estimate
-				}
-			}
 			logCtx.TokenUsage = streamUsage
 			if proxyResp.StatusCode < 400 {
 				p.metrics.RecordTokenUsage(fallbackCred.Name, modelID,

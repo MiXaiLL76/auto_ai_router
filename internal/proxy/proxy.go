@@ -534,6 +534,13 @@ type RequestLogContext struct {
 	// (Anthropic's message_stop), and an explicit completion_tokens:0 in the last
 	// usage frame must still be seen — the merged TokenUsage keeps the earlier
 	// non-zero, because MergeNonZero drops zeros.
+	//
+	// It describes the attempt that reported it, like TokenUsage: a path that
+	// starts a new attempt on the same logCtx clears TokenUsage, and has to clear
+	// this and lastUsageAnswerTokens with it (resetSimulatedAttemptState is the
+	// only such place today — a direct streaming response is never retried, and
+	// the proxy-like writer keeps its own tracking per call, see
+	// writeProxyStreamingResponseWithTokens).
 	lastUsageChunk []byte
 	// lastUsageAnswerTokens is the answer-token accumulator's count when
 	// lastUsageChunk was recorded. A usage frame can arrive before the text it
@@ -2695,11 +2702,6 @@ dispatch:
 					streamCompleted = true
 				}
 				if streamUsage != nil {
-					// Backfill PromptTokens from estimate when provider didn't include it
-					// (e.g. stream cut before usage chunk, or provider omits prompt tokens).
-					if streamUsage.PromptTokens == 0 && logCtx.UsageSource != "provider" {
-						streamUsage.PromptTokens = logCtx.promptTokensEstimate()
-					}
 					logCtx.TokenUsage = streamUsage
 					if proxyResp.StatusCode < 400 {
 						p.metrics.RecordTokenUsage(cred.Name, modelID,

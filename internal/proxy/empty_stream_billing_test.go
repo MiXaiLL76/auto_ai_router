@@ -185,9 +185,16 @@ func newChatStreamTestProxy(t *testing.T, upstreamURL string, credType config.Pr
 // postChatStream sends a streaming chat completion for model and returns the recorder.
 func postChatStream(t *testing.T, prx *Proxy, model string) *httptest.ResponseRecorder {
 	t.Helper()
+	return postChatStreamPrompt(t, prx, model, "hello")
+}
+
+// postChatStreamPrompt is postChatStream with an explicit request text, for cases where the
+// prompt-token estimate itself is what the test reads.
+func postChatStreamPrompt(t *testing.T, prx *Proxy, model, content string) *httptest.ResponseRecorder {
+	t.Helper()
 	body, err := json.Marshal(map[string]any{
 		"model": model, "max_tokens": 32, "stream": true,
-		"messages": []map[string]string{{"role": "user", "content": "hello"}},
+		"messages": []map[string]string{{"role": "user", "content": content}},
 	})
 	require.NoError(t, err)
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(string(body)))
@@ -466,4 +473,77 @@ func TestProxyRequest_FinalZeroNotInLastChunk_Chat(t *testing.T) {
 	assert.Zero(t, entry.CompletionTokens,
 		"the zero usage frame is followed by a non-usage frame, so lastChunk alone cannot see it")
 	assert.Equal(t, float64(900), entry.Spend)
+}
+
+// TestProxyRequest_ZeroOnlyUsageEstimatesPrompt covers the review case of a usage object that
+// reports prompt_tokens:0 for a non-empty request (the placeholder some providers put in the
+// first frame). The direct path estimates the prompt and bills it; the proxy-like path used to
+// bill nothing at all, because the shared converter turns an all-zero usage into no TokenUsage,
+// so the caller's PromptTokens backfill never ran. The rule now lives in buildFallbackUsage, so
+// every credential kind reports the same prompt for the same stream and request.
+func TestProxyRequest_ZeroOnlyUsageEstimatesPrompt(t *testing.T) {
+	const model = "test-zero-only"
+	longPrompt := strings.Repeat("word ", 300)
+	zeroUsage := `data: {"id":"z","model":"test-zero-only","choices":[],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}` + "\n\n"
+	zeroPromptUsage := `data: {"id":"z","model":"test-zero-only","choices":[],"usage":{"prompt_tokens":0,"completion_tokens":6,"total_tokens":6}}` + "\n\n"
+	finish := `data: {"id":"z","model":"test-zero-only","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n"
+	done := "data: [DONE]\n\n"
+
+	tests := []struct {
+		name           string
+		sse            string
+		wantEstimate   bool
+		wantCompletion int
+	}{
+		// The review's probe: a usage-less finish frame follows, so the provider's last word
+		// about the stream is the answer, not the placeholder zero — the prompt must be
+		// estimated rather than billed as zero input for a 300-word request.
+		{name: "zero usage followed by a finish frame", sse: zeroUsage + finish + done, wantEstimate: true},
+		// A zero that closes the stream is the provider's final report and is trusted, the
+		// same explicitZeroUsage rule TestFinalizeStreamingLogKeepsExplicitZeroProviderUsage
+		// pins for the direct path.
+		{name: "zero usage closing the stream", sse: zeroUsage + done},
+		// A zero prompt alongside a real completion count is the internally inconsistent
+		// CometAPI placeholder: the completion is kept as reported, the prompt is estimated.
+		{name: "zero prompt with a reported completion", sse: zeroPromptUsage + done,
+			wantEstimate: true, wantCompletion: 6},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = w.Write([]byte(tt.sse))
+			}))
+			defer upstream.Close()
+
+			prompts := make(map[config.ProviderType]int, len(chatStreamCreditTypes))
+			for _, credType := range chatStreamCreditTypes {
+				prx, dbStub := newChatStreamTestProxy(t, upstream.URL, credType, model)
+
+				w := postChatStreamPrompt(t, prx, model, longPrompt)
+
+				require.Equal(t, http.StatusOK, w.Code)
+				require.Len(t, dbStub.loggedEntries, 1)
+				entry := dbStub.loggedEntries[0]
+				assert.Equal(t, tt.wantCompletion, entry.CompletionTokens,
+					"a reported completion count is kept, a zero one is the provider's final word")
+				if tt.wantEstimate {
+					assert.Greater(t, entry.PromptTokens, 0,
+						"the request was not empty, so a placeholder zero cannot bill zero input")
+				} else {
+					assert.Zero(t, entry.PromptTokens,
+						"an all-zero usage that closes the stream is the provider's final report")
+				}
+				assert.Equal(t, float64(entry.PromptTokens+2*entry.CompletionTokens), entry.Spend)
+				prompts[credType] = entry.PromptTokens
+			}
+
+			want := prompts[chatStreamCreditTypes[0]]
+			for _, credType := range chatStreamCreditTypes {
+				assert.Equal(t, want, prompts[credType],
+					"%s must apply the same prompt rule as %s", credType, chatStreamCreditTypes[0])
+			}
+		})
+	}
 }
