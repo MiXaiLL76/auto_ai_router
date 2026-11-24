@@ -527,6 +527,10 @@ type RequestLogContext struct {
 	// loopGateStripUsage: the gate asked vLLM for the running usage of the
 	// current streamed attempt, which the client did not ask for.
 	loopGateStripUsage bool
+	// Reset these with TokenUsage when starting a new attempt.
+	lastUsageInfo           *StreamUsageInfo
+	lastUsageAnswerProgress int
+	answerProgress          int
 
 	// keptEmbeddings of embeddingInputs: a failed fanned-out embeddings request
 	// was billed for the inputs the provider had already embedded (see
@@ -2681,11 +2685,6 @@ dispatch:
 					streamCompleted = true
 				}
 				if streamUsage != nil {
-					// Backfill PromptTokens from estimate when provider didn't include it
-					// (e.g. stream cut before usage chunk, or provider omits prompt tokens).
-					if streamUsage.PromptTokens == 0 && logCtx.UsageSource != "provider" {
-						streamUsage.PromptTokens = logCtx.promptTokensEstimate()
-					}
 					logCtx.TokenUsage = streamUsage
 					if proxyResp.StatusCode < 400 {
 						p.metrics.RecordTokenUsage(cred.Name, modelID,
@@ -3851,7 +3850,15 @@ func (p *Proxy) writeDirectStreamingResponse(
 					// before, the log's own reading would overwrite the
 					// cached and reasoning tokens with the last step's.
 					logCtx.DeepSeekToolUsage = loop.usage
-					p.finalizeStreamingLog(logCtx, loop.totalTokens,
+					// The fallback must be a local estimate of the answer text
+					// the loop streamed, never the loop's totalTokens (which is
+					// request-shaped: prompt + completion). The loop buffered the
+					// final answer, so count its delta text here.
+					tokenizerModelID := realModelID
+					if tokenizerModelID == "" {
+						tokenizerModelID = modelID
+					}
+					p.finalizeStreamingLog(logCtx, p.countStreamedTextTokens(tokenizerModelID, loop.body),
 						withDeepSeekToolUsage(loop.lastChunk, loop.usage),
 						"openai", resp.StatusCode, false)
 				}

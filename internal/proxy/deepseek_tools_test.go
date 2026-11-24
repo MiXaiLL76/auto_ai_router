@@ -653,6 +653,78 @@ func TestDeepSeekStreamingToolLoopRunsSearch(t *testing.T) {
 	}
 }
 
+// TestDeepSeekStreamingToolLoopWithoutUsageBillsTheStreamedAnswer is the
+// regression guard for the loop's missing usage: the provider sends no usage
+// object at all, so the loop's summed counts are zero. That zero is "not
+// reported", not "nothing generated": the looped answer the client received
+// still has to be billed, estimated locally from the loop's own stream rather
+// than zeroed by the loop's empty sum.
+func TestDeepSeekStreamingToolLoopWithoutUsageBillsTheStreamedAnswer(t *testing.T) {
+	fake := &deepSeekFake{
+		searchResults: []map[string]any{{
+			"title": "DeepSeek V4 released",
+			"url":   "https://example.com/v4",
+		}},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/tools/search":
+			fake.mu.Lock()
+			fake.searchCalls++
+			results := fake.searchResults
+			fake.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"results": results})
+		case "/v1/chat/completions":
+			fake.mu.Lock()
+			fake.chatCalls++
+			call := fake.chatCalls
+			fake.mu.Unlock()
+			w.Header().Set("Content-Type", "text/event-stream")
+			if call == 1 {
+				_, _ = w.Write([]byte("data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_s1","type":"function","function":{"name":"` + deepseektools.SearchToolName + `","arguments":"{\"query\":\"deepseek v4\"}"}}]}}]}` + "\n\n"))
+				_, _ = w.Write([]byte("data: " + `{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}` + "\n\n"))
+				_, _ = w.Write([]byte("data: [DONE]\n\n"))
+				return
+			}
+			// The final answer streams real text, but no usage frame at all.
+			_, _ = w.Write([]byte("data: " + `{"choices":[{"index":0,"delta":{"content":"DeepSeek V4 was released with a much longer explanation than a single token."}}]}` + "\n\n"))
+			_, _ = w.Write([]byte("data: " + `{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n"))
+			_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	fake.baseURL = server.URL
+
+	prx, dbStub := deepSeekTestProxy(t, fake)
+
+	body := `{
+		"model": "deepseek-flash",
+		"messages": [{"role": "user", "content": "What is new in DeepSeek V4?"}],
+		"tools": [{"type": "web_search"}],
+		"stream": true
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	prx.ProxyRequest(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if len(dbStub.loggedEntries) != 1 {
+		t.Fatalf("got %d spend rows, want 1", len(dbStub.loggedEntries))
+	}
+	entry := dbStub.loggedEntries[0]
+	if entry.CompletionTokens <= 1 {
+		t.Errorf("CompletionTokens = %d, want the streamed answer estimated, not the loop's empty sum",
+			entry.CompletionTokens)
+	}
+}
+
 // TestDeepSeekForceStreamToolLoopRunsSearch covers the path a non-streaming
 // client actually takes when the router forces stream:true upstream: the
 // provider's SSE is reassembled into the Chat JSON, and a tool call in it

@@ -425,3 +425,20 @@ func TestWriteProxyStreamingResponseQwenDrainCapturesUsage(t *testing.T) {
 	assert.Equal(t, 357, usage.OutputTextTokens)
 	assert.Equal(t, 4417, usage.ReasoningTokens)
 }
+
+func TestWriteProxyStreamingResponsePreservesToolOnlyUsage(t *testing.T) {
+	const stream = "data: {\"choices\":[{\"message\":{\"annotations\":[{\"type\":\"url_citation\"}]}}]}\n\ndata: [DONE]\n\n"
+	resp := &ProxyResponse{
+		StatusCode:  http.StatusOK,
+		Headers:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		StreamBody:  io.NopCloser(strings.NewReader(stream)),
+		IsStreaming: true,
+	}
+	p := NewTestProxyBuilder().Build()
+	cred := &config.CredentialConfig{Name: "proxy", Type: config.ProviderTypeProxy}
+	logCtx := &RequestLogContext{Credential: cred}
+	usage, err := p.writeProxyStreamingResponseWithTokens(httptest.NewRecorder(), resp, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil), cred, "test-model", "test-model", logCtx)
+	require.NoError(t, err)
+	require.NotNil(t, usage)
+	require.Equal(t, 1, usage.WebSearchRequests)
+}

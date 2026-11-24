@@ -312,8 +312,12 @@ func TestHandleStreamingWithTokens_LoggingToLiteLLMDB(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 
+		// The usage chunk is deliberately not the last data chunk: usage has to be
+		// picked up from the stream itself, not from lastChunk. It also carries the
+		// full OpenAI usage shape — a total_tokens-only payload cannot be split into
+		// prompt/completion and must not be read as a completion count.
 		chunks := []string{
-			"data: {\"usage\": {\"total_tokens\": 10}}\n\n",
+			"data: {\"usage\": {\"prompt_tokens\": 5, \"completion_tokens\": 10, \"total_tokens\": 15}}\n\n",
 			"data: {\"choices\": [{\"delta\": {\"content\": \"test\"}}]}\n\n",
 			"data: [DONE]\n\n",
 		}

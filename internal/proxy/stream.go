@@ -117,8 +117,15 @@ var streamBufPool = sync.Pool{
 // It provides a unified structure for token counts across all providers.
 // Not all fields will be populated; some providers don't report certain metrics.
 type StreamUsageInfo struct {
-	PromptTokens             int // May be 0 if not provided in streaming response
+	PromptTokens int // May be 0 if not provided in streaming response
+	// PromptTokensPresent and CompletionTokensPresent tell "the provider reported
+	// this field as zero" apart from "the provider did not report it at all". The
+	// value alone cannot: finalizeStreamingLog has to choose between trusting a
+	// genuine zero (an empty answer) and falling back to a local estimate (usage
+	// that never arrived), and those two cases both read as 0.
+	PromptTokensPresent      bool
 	CompletionTokens         int
+	CompletionTokensPresent  bool
 	CachedTokens             int // Tokens from cached prompt content (prompt_caching feature)
 	CachedAudioTokens        int // Cached prompt tokens whose modality is audio
 	AudioInputTokens         int // Audio tokens in the request
@@ -275,15 +282,17 @@ func (o *openAIStreamUsageExtractor) chatCompletionUsageInfo(usage *chatCompleti
 	toolUsage, _ := usage.ServerSideToolUsage()
 
 	return &StreamUsageInfo{
-		PromptTokens:           intValue(usage.PromptTokens),
-		CompletionTokens:       intValue(usage.CompletionTokens),
-		CachedTokens:           cachedTokens,
-		CachedAudioTokens:      cachedAudioTokens,
-		CacheCreationTokens:    cacheCreationTokens,
-		CacheCreation5mTokens:  cacheCreation5mTokens,
-		CacheCreation1hTokens:  cacheCreation1hTokens,
-		CacheCreation12hTokens: cacheCreation12hTokens,
-		CacheType:              usage.PromptTokensDetails.CacheType,
+		PromptTokens:            intValue(usage.PromptTokens),
+		PromptTokensPresent:     usage.PromptTokens != nil,
+		CompletionTokens:        intValue(usage.CompletionTokens),
+		CompletionTokensPresent: usage.CompletionTokens != nil,
+		CachedTokens:            cachedTokens,
+		CachedAudioTokens:       cachedAudioTokens,
+		CacheCreationTokens:     cacheCreationTokens,
+		CacheCreation5mTokens:   cacheCreation5mTokens,
+		CacheCreation1hTokens:   cacheCreation1hTokens,
+		CacheCreation12hTokens:  cacheCreation12hTokens,
+		CacheType:               usage.PromptTokensDetails.CacheType,
 		AudioInputTokens: normalizeStreamAudioInput(
 			usage.PromptTokensDetails.AudioTokens,
 			cachedTokens,
@@ -389,15 +398,17 @@ func (o *openAIStreamUsageExtractor) responsesAPIUsageInfo(
 	}
 
 	return &StreamUsageInfo{
-		PromptTokens:           intValue(usage.InputTokens),
-		CompletionTokens:       intValue(usage.OutputTokens),
-		CachedTokens:           cachedTokens,
-		CachedAudioTokens:      cachedAudioTokens,
-		CacheCreationTokens:    cacheCreationTokens,
-		CacheCreation5mTokens:  cacheCreation5mTokens,
-		CacheCreation1hTokens:  cacheCreation1hTokens,
-		CacheCreation12hTokens: cacheCreation12hTokens,
-		CacheType:              usage.InputTokensDetails.CacheType,
+		PromptTokens:            intValue(usage.InputTokens),
+		PromptTokensPresent:     usage.InputTokens != nil,
+		CompletionTokens:        intValue(usage.OutputTokens),
+		CompletionTokensPresent: usage.OutputTokens != nil,
+		CachedTokens:            cachedTokens,
+		CachedAudioTokens:       cachedAudioTokens,
+		CacheCreationTokens:     cacheCreationTokens,
+		CacheCreation5mTokens:   cacheCreation5mTokens,
+		CacheCreation1hTokens:   cacheCreation1hTokens,
+		CacheCreation12hTokens:  cacheCreation12hTokens,
+		CacheType:               usage.InputTokensDetails.CacheType,
 		AudioInputTokens: normalizeStreamAudioInput(
 			usage.InputTokensDetails.AudioTokens,
 			cachedTokens,
@@ -511,13 +522,15 @@ func (a *anthropicStreamUsageExtractor) ExtractUsage(chunk []byte) *StreamUsageI
 			cacheCreationTokens = data.Usage.CacheCreation.Ephemeral5mInputTokens + data.Usage.CacheCreation.Ephemeral1hInputTokens
 		}
 		return &StreamUsageInfo{
-			PromptTokens:          intValue(data.Usage.InputTokens),
-			CompletionTokens:      intValue(data.Usage.OutputTokens),
-			CacheCreationTokens:   cacheCreationTokens,
-			CacheCreation5mTokens: data.Usage.CacheCreation.Ephemeral5mInputTokens,
-			CacheCreation1hTokens: data.Usage.CacheCreation.Ephemeral1hInputTokens,
-			CacheReadTokens:       data.Usage.CacheReadInputTokens,
-			WebSearchRequests:     data.Usage.ServerToolUse.WebSearchRequests,
+			PromptTokens:            intValue(data.Usage.InputTokens),
+			PromptTokensPresent:     data.Usage.InputTokens != nil,
+			CompletionTokens:        intValue(data.Usage.OutputTokens),
+			CompletionTokensPresent: data.Usage.OutputTokens != nil,
+			CacheCreationTokens:     cacheCreationTokens,
+			CacheCreation5mTokens:   data.Usage.CacheCreation.Ephemeral5mInputTokens,
+			CacheCreation1hTokens:   data.Usage.CacheCreation.Ephemeral1hInputTokens,
+			CacheReadTokens:         data.Usage.CacheReadInputTokens,
+			WebSearchRequests:       data.Usage.ServerToolUse.WebSearchRequests,
 			// Anthropic separates cache_creation (cached prompt tokens)
 			// For logging purposes, we combine under CachedTokens
 			CachedTokens: data.Usage.CacheReadInputTokens,
@@ -659,6 +672,43 @@ func getStreamUsageExtractor(providerName string) StreamUsageExtractor {
 		// Fallback: try OpenAI format first (most common)
 		return &openAIStreamUsageExtractor{}
 	}
+}
+
+// streamUsageExtractorFor returns the provider-aware usage extractor for a
+// stream, honouring the audio-usage contract: when the provider's audio input
+// already excludes cached audio, the OpenAI extractor must not subtract it
+// again. Shared so the finalizer and the proxy-like writer cannot disagree.
+func streamUsageExtractorFor(providerName string, audioInputAlreadyExcludesCachedAudio bool) StreamUsageExtractor {
+	extractor := getStreamUsageExtractor(providerName)
+	if audioInputAlreadyExcludesCachedAudio {
+		return &openAIStreamUsageExtractor{audioInputAlreadyExcludesCachedAudio: true}
+	}
+	return extractor
+}
+
+// streamUsageFrameInfo returns the usage frame's field presence for a chunk
+// whose usage the caller is merging, or nil when the chunk carries no usage
+// object.
+//
+// The extractor is the only decoder that knows which fields the provider sent,
+// but it re-parses the JSON the converter already decoded for the same bytes.
+// When the chunk is a single payload and the converter read a positive prompt
+// and completion count, both fields are present by definition and the
+// extractor's result would only repeat those values, so it is synthesized from
+// the converter's result and the second decode is skipped. Every other shape — a
+// zero or missing field, or several payloads whose values the merge combines —
+// still goes through the extractor: only it can say whether a zero was reported,
+// and which payload's frame is the provider's last word.
+func streamUsageFrameInfo(extractor StreamUsageExtractor, usage *converter.TokenUsage, singlePayload bool, chunk []byte) *StreamUsageInfo {
+	if usage != nil && singlePayload && usage.PromptTokens > 0 && usage.CompletionTokens > 0 {
+		return &StreamUsageInfo{
+			PromptTokens:            usage.PromptTokens,
+			PromptTokensPresent:     true,
+			CompletionTokens:        usage.CompletionTokens,
+			CompletionTokensPresent: true,
+		}
+	}
+	return extractor.ExtractUsage(chunk)
 }
 
 func normalizeStreamAudioInput(audioTokens, cachedTokens, cachedAudioTokens int, alreadyExcludesCachedAudio bool) int {
@@ -845,6 +895,10 @@ func (p *Proxy) handleTransformedStreaming(
 	}()
 	var totalTokens int
 	completion := p.newCompletionTokenAccumulator(modelID, logCtx)
+	// Field presence is read from the usage frame itself: the merged TokenUsage
+	// holds values only, and the converter turns an all-zero usage into no
+	// TokenUsage at all, so neither can say "the provider reported zero".
+	usageExtractor := getStreamUsageExtractor(providerName)
 
 	// This billing extraction re-parses the already-converted (provider →
 	// Responses/Messages/Chat SSE) output bytes, which for Kimi/Moonshot never
@@ -911,7 +965,8 @@ func (p *Proxy) handleTransformedStreaming(
 					if logCtx.IsImageGeneration {
 						logCtx.observeImageStreamPayloads(payloads)
 					}
-					if usage := extractTokenUsageFromPayloads(payloads, billingTokenUsageOpts); usage != nil {
+					usage := extractTokenUsageFromPayloads(payloads, billingTokenUsageOpts)
+					if usage != nil {
 						if logCtx.TokenUsage == nil {
 							logCtx.TokenUsage = &converter.TokenUsage{}
 						}
@@ -920,6 +975,9 @@ func (p *Proxy) handleTransformedStreaming(
 						// must not be clobbered back to zero by a later
 						// chunk's usage read that doesn't carry it.
 						logCtx.TokenUsage.MergeNonZero(usage)
+					}
+					if info := streamUsageFrameInfo(usageExtractor, usage, len(payloads) == 1, chunk); info != nil {
+						logCtx.rememberLastUsageFrame(info, completion.AnswerProgress())
 					}
 				}
 
@@ -943,16 +1001,14 @@ func (p *Proxy) handleTransformedStreaming(
 			"credential", credName, "provider", providerName, "model", modelID)
 		wg.Wait()
 		// Stream aborted before the final usage chunk — log with whatever tokens we have.
-		// Fall back to local token counting when totalTokens is still 0.
-		estimated := totalTokens
-		if estimated == 0 {
-			estimated = completion.TokenCount()
-		}
+		// totalTokens is the rate limiter's request-shaped figure (prompt + completion +
+		// cache), so it cannot stand in for a missing completion count; the local text
+		// estimate can.
 		if detectProviderStreamError {
 			err = resolveCapturedProviderStreamError(logCtx, resp.StatusCode, err, rawProviderStreamError, outputStreamError)
 		}
 		markStreamFailure(logCtx, err)
-		p.finalizeStreamingLog(logCtx, estimated, lastChunk, providerName, resp.StatusCode, true)
+		p.finalizeStreamingLog(logCtx, completion.TokenCount(), lastChunk, providerName, resp.StatusCode, true)
 		return err
 	}
 	wg.Wait()
@@ -986,7 +1042,7 @@ func (p *Proxy) handleTransformedStreaming(
 		p.logger.DebugContext(respCtx(resp), "Streaming token usage recorded", "credential", credName, "model", modelID, "tokens", totalTokens)
 	}
 
-	p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerName, resp.StatusCode, true)
+	p.finalizeStreamingLog(logCtx, completion.TokenCount(), lastChunk, providerName, resp.StatusCode, true)
 
 	if streamErr == nil {
 		p.logger.DebugContext(respCtx(resp), "Streaming response completed", "provider", providerName, "credential", credName)
@@ -1002,6 +1058,9 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 	var totalTokens int
 	completion := p.newCompletionTokenAccumulator(modelID, logCtx)
 	chunkCount := 0
+	// Raw OpenAI-compatible passthrough: the stream is the provider's own Chat
+	// Completions SSE, so the OpenAI extractor reads its usage frames.
+	usageExtractor := getStreamUsageExtractor("openai")
 
 	// Kimi/Moonshot never puts its cache-write TTL split in the SSE body
 	// (cache_creation_token_details stays null) — it arrives once, on the
@@ -1037,6 +1096,10 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 		// Parse complete SSE lines, not individual HTTP reads: a large image
 		// event may carry its usage after several stream buffer boundaries.
 		payloadBuf = splitSSEPayloads(chunk, payloadBuf)
+		// Counted before the usage block below so a usage object that rides the
+		// same line as the answer counts that answer as already streamed — the
+		// zero it reports is final only then (see rememberLastUsageFrame).
+		completion.AddPayloads(payloadBuf)
 		if hasUsage := chunkMayCarryTokenUsage(chunk); hasUsage {
 			if logCtx != nil {
 				// The image usage event isn't necessarily the stream's last data
@@ -1044,7 +1107,8 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 				if logCtx.IsImageGeneration {
 					logCtx.observeImageStreamPayloads(payloadBuf)
 				}
-				if usage := extractTokenUsageFromPayloads(payloadBuf, tokenUsageOpts); usage != nil {
+				usage := extractTokenUsageFromPayloads(payloadBuf, tokenUsageOpts)
+				if usage != nil {
 					if logCtx.TokenUsage == nil {
 						logCtx.TokenUsage = &converter.TokenUsage{}
 					}
@@ -1054,13 +1118,15 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 					// usage read that doesn't carry it.
 					logCtx.TokenUsage.MergeNonZero(usage)
 				}
+				if info := streamUsageFrameInfo(usageExtractor, usage, len(payloadBuf) == 1, chunk); info != nil {
+					logCtx.rememberLastUsageFrame(info, completion.AnswerProgress())
+				}
 			}
 
 			if tokens := extractTokensFromPayloads(payloadBuf); tokens > 0 {
 				totalTokens += tokens
 			}
 		}
-		completion.AddPayloads(payloadBuf)
 
 		// Don't let a bare [DONE] sentinel or empty chunks overwrite a lastChunk that carries usage data.
 		rememberLastStreamDataChunk(&lastChunk, chunk)
@@ -1073,11 +1139,19 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 
 	if logCtx != nil && logCtx.HideWebSearchResults {
 		providerReader = newWebSearchResultsStripReader(providerReader, func(payload []byte) {
-			if usage := converter.ExtractTokenUsageWithOptions(payload, tokenUsageOpts); usage != nil {
+			usage := converter.ExtractTokenUsageWithOptions(payload, tokenUsageOpts)
+			if usage != nil {
 				if logCtx.TokenUsage == nil {
 					logCtx.TokenUsage = &converter.TokenUsage{}
 				}
 				logCtx.TokenUsage.MergeNonZero(usage)
+			}
+			if info := streamUsageFrameInfo(usageExtractor, usage, true, payload); info != nil {
+				// This reader is upstream of the accumulator, so the payload's own
+				// text (if any) is not in the count yet; that only makes a frame
+				// look earlier than it is, i.e. falls back to the estimate instead
+				// of billing nothing.
+				logCtx.rememberLastUsageFrame(info, completion.AnswerProgress())
 			}
 		})
 	}
@@ -1108,15 +1182,11 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 			p.drainUpstream(drainCtx, clientReader, onChunk, credName)
 		}
 		usageLines.Finalize(onLine)
-		estimated := totalTokens
-		if estimated == 0 {
-			estimated = completion.TokenCount()
-		}
 		if detectProviderStreamError {
 			err = resolveCapturedProviderStreamError(logCtx, resp.StatusCode, err, providerStreamError)
 		}
 		markStreamFailure(logCtx, err)
-		p.finalizeStreamingLog(logCtx, estimated, lastChunk, "openai", resp.StatusCode, false)
+		p.finalizeStreamingLog(logCtx, completion.TokenCount(), lastChunk, "openai", resp.StatusCode, false)
 		return err
 	}
 
@@ -1151,7 +1221,7 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 		p.logger.DebugContext(respCtx(resp), "Streaming token usage recorded", "credential", credName, "model", modelID, "tokens", totalTokens)
 	}
 
-	p.finalizeStreamingLog(logCtx, logTokens, lastChunk, "openai", resp.StatusCode, false)
+	p.finalizeStreamingLog(logCtx, completion.TokenCount(), lastChunk, "openai", resp.StatusCode, false)
 
 	if streamErr == nil {
 		p.logger.DebugContext(respCtx(resp), "Streaming response completed", "credential", credName)
@@ -1159,9 +1229,20 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 	return streamErr
 }
 
+// rememberLastUsageFrame saves the answer position with the completion count
+// so the resolver can detect a running count followed by more output.
+func (logCtx *RequestLogContext) rememberLastUsageFrame(info *StreamUsageInfo, answerProgress int) {
+	if logCtx == nil || !shouldTrackStreamUsage(logCtx.lastUsageInfo, info) {
+		return
+	}
+	logCtx.lastUsageInfo = info
+	logCtx.lastUsageAnswerProgress = answerProgress
+}
+
 // finalizeStreamingLog extracts usage info from the last streaming chunk and logs spend to LiteLLM DB.
-func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int, lastChunk []byte, providerName string, statusCode int, audioInputAlreadyExcludesCachedAudio bool) {
-	p.finalizeStreamingLogParsed(logCtx, totalTokens, lastChunk, nil, providerName, statusCode, audioInputAlreadyExcludesCachedAudio)
+// fallbackCompletion is the local estimate of generated tokens.
+func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, fallbackCompletion int, lastChunk []byte, providerName string, statusCode int, audioInputAlreadyExcludesCachedAudio bool) {
+	p.finalizeStreamingLogParsed(logCtx, fallbackCompletion, lastChunk, nil, providerName, statusCode, audioInputAlreadyExcludesCachedAudio)
 }
 
 // finalChunkParse is what finalizeStreamingLog reads from its last chunk,
@@ -1175,7 +1256,7 @@ type finalChunkParse struct {
 // finalizeStreamingLogParsed is finalizeStreamingLog with lastChunk already
 // parsed when parsed is not nil; lastChunk then only serves the error message
 // of a failed (HTTP >= 400) stream.
-func (p *Proxy) finalizeStreamingLogParsed(logCtx *RequestLogContext, totalTokens int, lastChunk []byte, parsed *finalChunkParse, providerName string, statusCode int, audioInputAlreadyExcludesCachedAudio bool) {
+func (p *Proxy) finalizeStreamingLogParsed(logCtx *RequestLogContext, fallbackCompletion int, lastChunk []byte, parsed *finalChunkParse, providerName string, statusCode int, audioInputAlreadyExcludesCachedAudio bool) {
 	if logCtx == nil || logCtx.Logged {
 		return
 	}
@@ -1186,39 +1267,37 @@ func (p *Proxy) finalizeStreamingLogParsed(logCtx *RequestLogContext, totalToken
 	if logCtx.TokenUsage == nil {
 		logCtx.TokenUsage = &converter.TokenUsage{}
 	}
-	fallbackCompletion := totalTokens
 
-	providerUsage := false
-	// Tracked separately from providerUsage: some providers (e.g. CometAPI's Anthropic-
-	// compatible streaming) send a syntactically valid usage object whose message_start
-	// carries a placeholder usage:{input_tokens:0,output_tokens:0} while output tokens
-	// land correctly later via message_delta. Gating the local tiktoken fallback on the
-	// coarse providerUsage flag silently accepts that placeholder zero as truth and never
-	// estimates prompt tokens for the request. Gate per-field instead, so a provider that
-	// reports some fields but not others still gets a fallback for the missing one.
-	providerReportedPromptTokens := false
-	providerReportedCompletionTokens := false
+	// Usage merged into logCtx.TokenUsage while the stream passed is the provider's own
+	// report, not an estimate: every streaming path records a usage object there as it
+	// goes (tokenCapturingWriter's onChunk, handleStreamingWithTokens' onLine). It has to
+	// be consulted here because a Messages stream ends with message_stop, which carries no
+	// usage — so the lastChunk extractor below never sees one, and providerUsage used to
+	// be false for every Messages stream, normal or empty. The per-field rules live in
+	// resolveStreamUsage, shared with the proxy-like writer.
+	extractor := streamUsageExtractorFor(providerName, audioInputAlreadyExcludesCachedAudio)
+
+	// presenceInfo is the provider's LAST usage frame, read for field presence only.
+	// That frame is not necessarily the stream's last data chunk (Anthropic closes
+	// with a usage-less message_stop), so the merging paths save its parsed form. Its
+	// values are deliberately not applied here: extractors encode the same count
+	// differently (Anthropic's input_tokens excludes cache, the merge path adds it),
+	// so reading them second-hand would lose counts the merge already kept.
+	var presenceInfo *StreamUsageInfo
+	if parsed != nil {
+		presenceInfo = parsed.usage
+	} else {
+		presenceInfo = logCtx.lastUsageInfo
+	}
+
+	// usageInfo supplies values from the stream's final data chunk, as before.
 	var usageInfo *StreamUsageInfo
 	if parsed != nil {
 		usageInfo = parsed.usage
 	} else if len(lastChunk) > 0 {
-		extractor := getStreamUsageExtractor(providerName)
-		if audioInputAlreadyExcludesCachedAudio {
-			extractor = &openAIStreamUsageExtractor{audioInputAlreadyExcludesCachedAudio: true}
-		}
 		usageInfo = extractor.ExtractUsage(lastChunk)
 	}
 	if usageInfo != nil {
-		providerUsage = true
-		if usageInfo.PromptTokens > 0 {
-			logCtx.TokenUsage.PromptTokens = usageInfo.PromptTokens
-			providerReportedPromptTokens = true
-		}
-		if usageInfo.CompletionTokens > 0 {
-			logCtx.TokenUsage.CompletionTokens = usageInfo.CompletionTokens
-			providerReportedCompletionTokens = true
-		}
-
 		if usageInfo.CachedTokens > 0 {
 			logCtx.TokenUsage.CachedInputTokens = usageInfo.CachedTokens
 		}
@@ -1287,29 +1366,17 @@ func (p *Proxy) finalizeStreamingLogParsed(logCtx *RequestLogContext, totalToken
 		)
 	}
 
-	// explicitZeroUsage: the provider sent a usage object and reported BOTH fields as zero
-	// together (e.g. a filtered/cancelled request that legitimately produced nothing) — a
-	// coherent signal, trusted as-is, same as before this fix.
-	//
-	// A zero PromptTokens alongside a genuine non-zero CompletionTokens is distrusted and
-	// falls back to the local estimate for prompt tokens specifically: this is internally
-	// inconsistent (a real completion cannot be produced from zero input) and matches the
-	// CometAPI bug, where message_start's placeholder usage:{input_tokens:0,output_tokens:0}
-	// never gets a real input count even though output lands correctly later via
-	// message_delta.
-	//
-	// The reverse — a genuine non-zero PromptTokens alongside a zero CompletionTokens — is
-	// NOT distrusted: it's a normal, legitimate outcome (e.g. output filtered/stopped
-	// immediately), and no known provider bug produces a stuck-zero completion count while
-	// input is reported correctly. Completion only falls back to the local estimate when no
-	// provider usage object arrived at all.
-	explicitZeroUsage := providerUsage && !providerReportedPromptTokens && !providerReportedCompletionTokens
-	if !providerReportedPromptTokens && !explicitZeroUsage && logCtx.TokenUsage.PromptTokens == 0 {
-		logCtx.TokenUsage.PromptTokens = logCtx.promptTokensEstimate()
-	}
-	if !providerUsage && logCtx.TokenUsage.CompletionTokens == 0 {
-		logCtx.TokenUsage.CompletionTokens = fallbackCompletion
-	}
+	_, outcome := resolveStreamUsage(streamUsageResolution{
+		usage:           logCtx.TokenUsage,
+		tracked:         presenceInfo,
+		trackedProgress: logCtx.lastUsageAnswerProgress,
+		trackedIsFinal:  parsed != nil,
+		finalInfo:       usageInfo,
+		answerProgress:  logCtx.answerProgress,
+		answerTokens:    fallbackCompletion,
+		promptEstimate:  logCtx.promptTokensEstimate,
+	})
+	providerUsage := outcome.providerUsage
 	logCtx.TokenUsage.Normalize()
 	// The router-run search/fetch loop's own usage wins over the figures read
 	// from the last chunk: the loop made several upstream requests, and the
@@ -2225,15 +2292,11 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 		if len(completedEventPayload) > 0 {
 			finalChunk, finalParse = completedEventPayload, completedEventParse
 		}
-		logTokens := totalTokens
-		if logTokens == 0 {
-			logTokens = completion.TokenCount()
-		}
 		if detectStreamError {
 			err = resolveCapturedProviderStreamError(logCtx, resp.StatusCode, err, providerStreamError)
 		}
 		markStreamFailure(logCtx, err)
-		p.finalizeStreamingLogParsed(logCtx, logTokens, finalChunk, finalParse, "openai", resp.StatusCode, audioInputAlreadyExcludesCachedAudio)
+		p.finalizeStreamingLogParsed(logCtx, completion.TokenCount(), finalChunk, finalParse, "openai", resp.StatusCode, audioInputAlreadyExcludesCachedAudio)
 		return err
 	}
 
@@ -2272,6 +2335,6 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 		finalChunk, finalParse = completedEventPayload, completedEventParse
 	}
 
-	p.finalizeStreamingLogParsed(logCtx, logTokens, finalChunk, finalParse, "openai", resp.StatusCode, audioInputAlreadyExcludesCachedAudio)
+	p.finalizeStreamingLogParsed(logCtx, completion.TokenCount(), finalChunk, finalParse, "openai", resp.StatusCode, audioInputAlreadyExcludesCachedAudio)
 	return streamErr
 }

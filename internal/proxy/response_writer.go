@@ -558,13 +558,18 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	}
 	setSuccessfulSSEHeaders(w.Header(), resp.StatusCode)
 
-	var lastUsage *converter.TokenUsage
-	recordUsage := func(usage *converter.TokenUsage) {
-		if lastUsage == nil {
-			lastUsage = &converter.TokenUsage{}
-		}
+	usageExtractor := streamUsageExtractorFor("openai", !tokenUsageOptions.AudioInputIncludesCachedAudio)
+	lastUsage := &converter.TokenUsage{}
+	var lastUsageInfo *StreamUsageInfo
+	var lastUsageAnswerProgress int
+	var lastDataPayload []byte
+	recordUsage := func(usage *converter.TokenUsage, info *StreamUsageInfo, answerProgress int) {
 		lastUsage.MergeNonZero(usage)
-		if logCtx != nil && usage.Total() > 0 {
+		if shouldTrackStreamUsage(lastUsageInfo, info) {
+			lastUsageInfo = info
+			lastUsageAnswerProgress = answerProgress
+		}
+		if logCtx != nil && usage != nil && usage.Total() > 0 {
 			logCtx.UsageSource = "provider"
 		}
 	}
@@ -573,15 +578,32 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	onLine := func(chunk []byte) {
 		// Image-bearing usage events can span several HTTP reads.
 		payloadBuf = splitSSEPayloads(chunk, payloadBuf)
+		// Counted before the usage block so a usage object riding the same line as
+		// the answer already counts that answer (see buildFallbackUsage).
+		completion.AddPayloads(payloadBuf)
 		if chunkMayCarryTokenUsage(chunk) {
 			if logCtx != nil && logCtx.IsImageGeneration {
 				logCtx.observeImageStreamPayloads(payloadBuf)
 			}
-			if usage := extractTokenUsageFromPayloads(payloadBuf, tokenUsageOptions); usage != nil {
-				recordUsage(usage)
+			usage := extractTokenUsageFromPayloads(payloadBuf, tokenUsageOptions)
+			// The frame's field presence, which the converter's merged values
+			// cannot express (an all-zero usage yields no TokenUsage at all) and
+			// which can correct an earlier non-zero. A single payload's positive
+			// counts already imply both fields, so the extractor is skipped there
+			// and the frame is decoded once (see streamUsageFrameInfo).
+			info := streamUsageFrameInfo(usageExtractor, usage, len(payloadBuf) == 1, chunk)
+			if usage != nil || info != nil {
+				recordUsage(usage, info, completion.AnswerProgress())
 			}
 		}
-		completion.AddPayloads(payloadBuf)
+		// The final data payload, read the way the finalizer reads lastChunk: a
+		// provider that closes with an all-zero usage frame is reporting that zero
+		// explicitly, even though the converter above turns an all-zero usage into
+		// no TokenUsage at all. A payload without usage replaces it, exactly like a
+		// usage-less final chunk does there.
+		for _, payload := range payloadBuf {
+			rememberLastStreamDataChunk(&lastDataPayload, payload)
+		}
 	}
 	var usageLines streamUsageLines
 	onChunk := func(chunk []byte) {
@@ -589,18 +611,36 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	}
 
 	buildFallbackUsage := func() *converter.TokenUsage {
-		if lastUsage.Total() > 0 {
-			return lastUsage
-		}
-		usage := lastUsage
-		if tokens := completion.TokenCount(); tokens > 0 {
-			if usage == nil {
-				usage = &converter.TokenUsage{}
+		var finalPayloadInfo *StreamUsageInfo
+		if len(lastDataPayload) > 0 {
+			finalPayloadInfo = usageExtractor.ExtractUsage(lastDataPayload)
+			// The converter's prompt count includes Anthropic cache tokens.
+			if finalPayloadInfo != nil && finalPayloadInfo.PromptTokens > 0 && lastUsage.PromptTokens > 0 {
+				finalPayloadInfo.PromptTokens = lastUsage.PromptTokens
 			}
-			usage.CompletionTokens = tokens
-			if logCtx != nil && logCtx.UsageSource == "" {
+		}
+		var promptEstimate func() int
+		if logCtx != nil {
+			promptEstimate = logCtx.promptTokensEstimate
+		}
+		usage, outcome := resolveStreamUsage(streamUsageResolution{
+			usage:           lastUsage,
+			tracked:         lastUsageInfo,
+			trackedProgress: lastUsageAnswerProgress,
+			finalInfo:       finalPayloadInfo,
+			answerProgress:  completion.AnswerProgress(),
+			answerTokens:    completion.TokenCount(),
+			promptEstimate:  promptEstimate,
+		})
+		if logCtx != nil {
+			if outcome.providerUsage {
+				logCtx.UsageSource = "provider"
+			} else if logCtx.UsageSource == "" && usage.Total() > 0 {
 				logCtx.UsageSource = "estimated"
 			}
+		}
+		if !outcome.providerUsage && usage.IsZero() {
+			return nil
 		}
 		return usage
 	}
@@ -620,8 +660,14 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	)
 	if logCtx != nil && logCtx.HideWebSearchResults {
 		clientReader = newWebSearchResultsStripReader(clientReader, func(payload []byte) {
-			if usage := converter.ExtractTokenUsageWithOptions(payload, tokenUsageOptions); usage != nil {
-				recordUsage(usage)
+			usage := converter.ExtractTokenUsageWithOptions(payload, tokenUsageOptions)
+			info := streamUsageFrameInfo(usageExtractor, usage, true, payload)
+			if usage != nil || info != nil {
+				// This reader is upstream of the accumulator, so the payload's own
+				// text is not in the progress yet; that only makes a frame look
+				// earlier than it is, i.e. falls back to the estimate instead of
+				// billing nothing (see buildFallbackUsage).
+				recordUsage(usage, info, completion.AnswerProgress())
 			}
 		})
 	}
