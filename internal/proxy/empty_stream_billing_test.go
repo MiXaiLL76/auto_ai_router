@@ -345,7 +345,9 @@ func TestProxyRequest_FinalZeroCompletionOverridesIntermediate(t *testing.T) {
 // Messages wire, where the provider's final usage is not the stream's final data frame:
 // usage rides in message_delta, and message_stop closes the stream with no usage at all.
 // Presence therefore cannot be read from lastChunk; it is read from the last chunk that
-// carried usage, which is what the merging paths now keep.
+// carried usage, which is what the merging paths now keep. Both a direct Anthropic
+// credential (finalizeStreamingLog) and a proxy-like one (which writes its own spend
+// row) have to honour it.
 func TestProxyRequest_FinalZeroNotInLastChunk_Messages(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/v1/messages", r.URL.Path)
@@ -374,40 +376,44 @@ data: {"type":"message_stop"}
 	}))
 	defer upstream.Close()
 
-	cred := config.CredentialConfig{
-		Name: "anthropic", Type: config.ProviderTypeAnthropic,
-		BaseURL: upstream.URL, APIKey: "upstream-key", RPM: 100, TPM: 10000,
-	}
-	prx := NewTestProxyBuilder().WithCredentials(cred).WithMasterKey("master-key").Build()
-	dbStub := &stubLiteLLMManager{}
-	prx.LiteLLMDB = dbStub
-	prx.responseCompat = compatlitellm.New()
+	for _, credType := range []config.ProviderType{config.ProviderTypeAnthropic, config.ProviderTypeProxy} {
+		t.Run(string(credType), func(t *testing.T) {
+			cred := config.CredentialConfig{
+				Name: string(credType), Type: credType,
+				BaseURL: upstream.URL, APIKey: "upstream-key", RPM: 100, TPM: 10000,
+			}
+			prx := NewTestProxyBuilder().WithCredentials(cred).WithMasterKey("master-key").Build()
+			dbStub := &stubLiteLLMManager{}
+			prx.LiteLLMDB = dbStub
+			prx.responseCompat = compatlitellm.New()
 
-	registry := pricing.NewModelPriceRegistry()
-	registry.Update(map[string]*pricing.ModelPrice{
-		"claude-mid": {InputCostPerToken: 1, OutputCostPerToken: 2},
-	})
-	prx.priceRegistry = registry
+			registry := pricing.NewModelPriceRegistry()
+			registry.Update(map[string]*pricing.ModelPrice{
+				"claude-mid": {InputCostPerToken: 1, OutputCostPerToken: 2},
+			})
+			prx.priceRegistry = registry
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{
+			req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{
 		"model":"claude-mid",
 		"max_tokens":100,
 		"stream":true,
 		"messages":[{"role":"user","content":"hello"}]
 	}`))
-	req.Header.Set("Authorization", "Bearer master-key")
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
+			req.Header.Set("Authorization", "Bearer master-key")
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
 
-	prx.ProxyRequest(w, req)
+			prx.ProxyRequest(w, req)
 
-	require.Equal(t, http.StatusOK, w.Code)
-	require.Len(t, dbStub.loggedEntries, 1)
-	entry := dbStub.loggedEntries[0]
-	assert.Equal(t, 1000, entry.PromptTokens)
-	assert.Zero(t, entry.CompletionTokens,
-		"message_stop is the last data chunk, but the final usage lives in the message_delta before it")
-	assert.Equal(t, float64(1000), entry.Spend)
+			require.Equal(t, http.StatusOK, w.Code)
+			require.Len(t, dbStub.loggedEntries, 1)
+			entry := dbStub.loggedEntries[0]
+			assert.Equal(t, 1000, entry.PromptTokens)
+			assert.Zero(t, entry.CompletionTokens,
+				"message_stop is the last data chunk, but the final usage lives in the message_delta before it")
+			assert.Equal(t, float64(1000), entry.Spend)
+		})
+	}
 }
 
 // TestProxyRequest_FinalZeroNotInLastChunk_Chat is the Chat Completions twin: the final
