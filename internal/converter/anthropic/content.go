@@ -276,11 +276,6 @@ var imageDialContext = converterutil.GuardedDialContext(&net.Dialer{Timeout: con
 // two lookups of the same name on every successful fetch.
 var imageURLGuard = converterutil.IsBlockedHostURL
 
-const (
-	imageDialTimeout     = 3 * time.Second
-	imageDownloadTimeout = 8 * time.Second
-)
-
 // allowedImageMediaTypes lists the media types accepted by the Anthropic API.
 var allowedImageMediaTypes = map[string]bool{
 	"image/jpeg": true,
