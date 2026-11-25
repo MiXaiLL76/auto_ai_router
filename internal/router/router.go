@@ -22,6 +22,7 @@ type Router struct {
 	appConfig           *config.Config
 	logger              *slog.Logger
 	isReady             atomic.Bool
+	inFlight            inFlightLimit
 	videoHandler        http.Handler
 	yandexSearchHandler http.Handler
 }
@@ -119,13 +120,17 @@ func (r *Router) SetReady(v bool) {
 }
 
 func New(p *proxy.Proxy, modelManager *models.Manager, monitoringConfig *config.MonitoringConfig, logger *slog.Logger, appConfig *config.Config) *Router {
-	return &Router{
+	r := &Router{
 		proxy:            p,
 		modelManager:     modelManager,
 		monitoringConfig: monitoringConfig,
 		appConfig:        appConfig,
 		logger:           logger,
 	}
+	if appConfig != nil {
+		r.inFlight.max = int64(appConfig.Server.MaxInFlightRequests)
+	}
+	return r
 }
 
 func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
@@ -135,6 +140,13 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	normalizePublicPath(req)
+	if isAPIPath(req.URL.Path) && req.URL.Path != r.monitoringConfig.HealthCheckPath {
+		if !r.inFlight.acquire() {
+			writeShed(w)
+			return
+		}
+		defer r.inFlight.release()
+	}
 
 	// Recover from handler panics so they land in our logging system at ERROR
 	// (net/http's built-in recovery only prints to stderr) and the client gets

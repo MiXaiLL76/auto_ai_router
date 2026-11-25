@@ -120,6 +120,13 @@ var (
 		[]string{"credential", "endpoint"},
 	)
 
+	RequestsShedTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_requests_shed_total",
+			Help: "API requests answered 503 at server.max_in_flight_requests, before their body was read",
+		},
+	)
+
 	AbortedRequestsTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "auto_ai_router_aborted_requests_total",

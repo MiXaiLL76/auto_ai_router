@@ -124,6 +124,7 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 		"max_idle_conns_per_host", cfg.Server.MaxIdleConnsPerHost,
 		"idle_conn_timeout", cfg.Server.IdleConnTimeout.String(),
 		"max_connection_lifetime", cfg.Server.MaxConnectionLifetime.String(),
+		"max_in_flight_requests", cfg.Server.MaxInFlightRequests,
 		"model_prices_link", cfg.Server.ModelPricesLink,
 		"model_prices_sync_interval", cfg.Server.ModelPricesSyncInterval.String(),
 		"max_provider_retries", cfg.Server.MaxProviderRetries,

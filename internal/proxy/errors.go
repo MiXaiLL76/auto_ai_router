@@ -226,6 +226,16 @@ func WriteErrorServiceUnavailable(w http.ResponseWriter, message string) {
 	WriteJSONError(w, http.StatusServiceUnavailable, message, errorTypeForStatus(http.StatusServiceUnavailable), nil, nil)
 }
 
+// ErrorCodeOverloaded is the error code of a request refused at server.max_in_flight_requests.
+const ErrorCodeOverloaded = "overloaded"
+
+// WriteErrorOverloaded writes the 503 of a request the router refuses because it is at its in-flight
+// cap. The code tells it apart from the router's other 503s.
+func WriteErrorOverloaded(w http.ResponseWriter, message string) {
+	code := ErrorCodeOverloaded
+	WriteJSONError(w, http.StatusServiceUnavailable, message, errorTypeForStatus(http.StatusServiceUnavailable), nil, &code)
+}
+
 // WriteErrorBadGateway writes a 502 Bad Gateway JSON error.
 func WriteErrorBadGateway(w http.ResponseWriter, message string) {
 	WriteJSONError(w, http.StatusBadGateway, message, errorTypeForStatus(http.StatusBadGateway), nil, nil)
