@@ -44,17 +44,6 @@ var fixedErrorMessages = map[string]string{ //nolint:gosec // G101: these are th
 	"content_policy_violation":   "The prompt was blocked by the provider's content policy",
 	"invalid_image_size":         "Invalid image size",
 	"invalid_image":              "Invalid image data",
-	// The router's own image-fetch failures. A client-supplied image URL
-	// that the router cannot resolve is a fault of the request, not of the
-	// provider: these codes are what the router answers with, and the
-	// classifier has to recognize them so a router body survives a
-	// re-classification pass (litellm compatibility mode, an AIR-to-AIR
-	// proxy chain) instead of degrading to the generic message.
-	"image_fetch_failed":          "Failed to fetch image URL",
-	"image_url_not_allowed":       "Image URL is not allowed",
-	"unsupported_image_media_type": "Unsupported image media type",
-	"image_too_large":             "Image is too large",
-	"invalid_image_data":          "Image URL did not return a valid image",
 	"missing_required_parameter": "Missing required parameter",
 	"invalid_type":               "Invalid parameter type",
 	"invalid_json":               "Invalid JSON",
@@ -64,6 +53,26 @@ var fixedErrorMessages = map[string]string{ //nolint:gosec // G101: these are th
 	accountBlockedCode:           accountBlockedMessage,
 	sessionBlockedCode:           sessionBlockedMessage,
 	upstreamFetchFailedCode:      upstreamFetchFailedMessage,
+}
+
+// fixedImageErrorMessages holds the router's own image-fetch failures.
+//
+// A client-supplied image URL that the router cannot resolve is a fault of
+// the request, not of the provider: these codes are what the router answers
+// with, and the classifier has to recognize them so a router body survives a
+// re-classification pass (litellm compatibility mode, an AIR-to-AIR proxy
+// chain) instead of degrading to the generic message.
+//
+// Kept in its own map rather than in fixedErrorMessages so the two concerns
+// stay separate: "invalid_image" there is the classifier's verdict on a
+// provider's own "Invalid image data", and the router's "not an image"
+// verdict uses its own code so the two never collide.
+var fixedImageErrorMessages = map[string]string{ //nolint:gosec // G101: these are the classifier's own client-facing messages, not credentials
+	"image_fetch_failed":           "Failed to fetch image URL",
+	"image_url_not_allowed":        "Image URL is not allowed",
+	"unsupported_image_media_type": "Unsupported image media type",
+	"image_too_large":              "Image is too large",
+	"invalid_image_data":           "Image URL did not return a valid image",
 }
 
 // routerContextLengthMessageRe matches the message contextLengthMessage
@@ -170,6 +179,9 @@ func extractRouterClassification(body []byte, expectedType string) (BadRequest, 
 // like any other provider body.
 func isRouterMessage(code, message string, param *string) bool {
 	if fixed, ok := fixedErrorMessages[code]; ok {
+		return message == fixed
+	}
+	if fixed, ok := fixedImageErrorMessages[code]; ok {
 		return message == fixed
 	}
 	if code == "context_length_exceeded" {
