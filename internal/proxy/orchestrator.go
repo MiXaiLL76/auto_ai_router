@@ -388,7 +388,7 @@ func (p *Proxy) orchestrateRequest(
 
 	return &orchestratedRequest{
 		request:                    r,
-		imageBudget:                newImageFetchBudget(r),
+		imageBudget:                newImageFetchBudget(),
 		body:                       body,
 		proxyBody:                  credentialReq.proxyBody,
 		proxyPath:                  credentialReq.proxyPath,
@@ -1704,10 +1704,10 @@ const (
 	imageFetchBudgetTimeout = 15 * time.Second
 )
 
-// newImageFetchBudget returns the image budget for a request.
+// newImageFetchBudget returns the image budget for one request.
 //
-// A nil budget (no request in scope) means the downloads run with their own
-// per-fetch timeout only.
-func newImageFetchBudget(r *http.Request) *converterutil.ImageFetchBudget {
+// The budget is per request, not per credential: a request that retries on
+// another credential must not get a fresh allowance of image downloads.
+func newImageFetchBudget() *converterutil.ImageFetchBudget {
 	return converterutil.NewImageFetchBudget(maxImagesPerRequest, imageFetchBudgetTimeout)
 }
