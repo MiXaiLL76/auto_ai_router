@@ -19,6 +19,21 @@ const (
 	// connection refused, timeout, truncated body. The remote host may be
 	// reachable but broken, slow, or gone — from the client's point of view
 	// the request carries an attachment that cannot be resolved.
+	//
+	// TODO: this reason conflates a permanent fault of the request with a
+	// transient fault of the network. A URL that no longer resolves and a
+	// one-off DNS glitch both land here, and because the error unwraps to
+	// *RequestValidationError the request fails permanently on the first
+	// attempt — a transient blip on a healthy image host never gets the
+	// retry it deserves.
+	//
+	// The fix is to separate the reasons (a permanent "the URL does not
+	// resolve" from a transient "the fetch failed") and route the transient
+	// one through the retryable-fault mechanism the proxy already has for
+	// provider-side failures (RetryReasonNetErr / shouldRetry). It is left
+	// as one reason for now because splitting it changes the client-facing
+	// contract, and the overwhelming majority of production failures here
+	// are the permanent kind — a URL that never worked.
 	ImageErrorFetchFailed ImageErrorReason = iota
 	// ImageErrorInvalidData covers a response that arrived but is not a
 	// usable image: an HTML error page, a non-image content type, or bytes
@@ -100,6 +115,22 @@ var imageErrorDetails = map[ImageErrorReason]struct {
 // It deliberately carries no detail about the failed fetch: the full URL,
 // the resolved host and the upstream status belong in the router's internal
 // log, not in a response body that may be surfaced to end users.
+//
+// TODO: the "this is the request's fault, not the credential's" decision is
+// made here by the error's Go type (the proxy asks for a
+// *RequestValidationError), which is a mechanism of its own. The codebase
+// already has another one for the same decision: the marker-based
+// CredentialScopedMarkers in internal/upstreamerror, consumed by
+// internal/proxy/retry.go.
+//
+// Two mechanisms for one decision means an engineer auditing "why was this
+// credential not penalised" or "why did this not retry" has to know about
+// both. Folding the image errors into the marker convention -- or making the
+// marker convention understand request-scoped faults -- would be the
+// consistent shape. It is left as it is for now: the marker convention works
+// on response bodies from a provider, while an image error is produced
+// before the provider is contacted at all, and the two do not have a common
+// representation yet.
 type ImageError struct {
 	RequestValidationError
 	Reason ImageErrorReason
