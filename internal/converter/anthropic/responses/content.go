@@ -121,9 +121,12 @@ func convertInputImageToAnthropic(partMap map[string]interface{}) (*anthropic.Co
 	}
 
 	// Regular URL → download and base64-encode; Anthropic does not support url sources.
-	block := anthropic.DownloadAndEncodeImage(imgURL)
-	if block == nil {
-		return nil, fmt.Errorf("input_image: failed to download image from %s", imgURL)
+	// DownloadAndEncodeImage returns a converterutil.ImageError whose message
+	// is fixed per failure kind: the URL must never reach the client, since
+	// image URLs are often presigned links carrying a token.
+	block, err := anthropic.DownloadAndEncodeImage(imgURL, "input_image.image_url")
+	if err != nil {
+		return nil, err
 	}
 	return block, nil
 }

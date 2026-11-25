@@ -3,6 +3,7 @@ package anthropicresponses
 import (
 	"encoding/json"
 	"errors"
+	"net/http"
 	"testing"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
@@ -943,4 +944,34 @@ func TestResponsesRequestToAnthropic_TextFormatText(t *testing.T) {
 
 	assert.NotContains(t, ar, "output_config")
 	assert.NotContains(t, ar, "system")
+}
+
+// TestResponsesRequestToAnthropic_UnreachableImageURL checks the Responses
+// path reports an unreachable image the same way the chat-completions path
+// does: a classified client error naming the Responses field, with no URL
+// in the message. The image URL used to be interpolated straight into the
+// error text, which would have exposed a presigned link to the client.
+func TestResponsesRequestToAnthropic_UnreachableImageURL(t *testing.T) {
+	const imgURL = "http://image-host.invalid/nonexistent.png?sig=SECRETSIGNATURE"
+	body := `{
+		"model": "claude-sonnet-4-5",
+		"input": [{"role": "user", "content": [
+			{"type": "input_image", "image_url": "` + imgURL + `"},
+			{"type": "input_text", "text": "read it"}
+		]}]
+	}`
+
+	_, err := ResponsesRequestToAnthropic([]byte(body), "claude-sonnet-4-5")
+	require.Error(t, err)
+
+	var validationErr *converterutil.RequestValidationError
+	require.True(t, errors.As(err, &validationErr))
+	assert.Equal(t, "input_image.image_url", validationErr.Param)
+	assert.Equal(t, "image_fetch_failed", validationErr.Code)
+	assert.Equal(t, http.StatusBadRequest, validationErr.StatusCode)
+
+	// No part of the URL may reach the client.
+	assert.NotContains(t, err.Error(), "SECRETSIGNATURE")
+	assert.NotContains(t, err.Error(), "image-host.invalid")
+	assert.NotContains(t, err.Error(), "http://")
 }

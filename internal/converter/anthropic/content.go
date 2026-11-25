@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -164,9 +165,9 @@ func convertImageURLToAnthropic(url string) (*ContentBlock, error) {
 	}
 
 	if strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") {
-		block := DownloadAndEncodeImage(url)
-		if block == nil {
-			return nil, fmt.Errorf("image_url: failed to download image")
+		block, err := DownloadAndEncodeImage(url, imageDownloadParam)
+		if err != nil {
+			return nil, err
 		}
 		return block, nil
 	}
@@ -174,7 +175,65 @@ func convertImageURLToAnthropic(url string) (*ContentBlock, error) {
 	return nil, converterutil.NewRequestValidationError("messages.content.image_url.url", "unsupported image_url source")
 }
 
-var imageHTTPClient = &http.Client{Timeout: 15 * time.Second}
+// imageDownloadParam is the request field reported to the client when an
+// image URL cannot be resolved. It names the field to fix without disclosing
+// anything about the target host.
+const imageDownloadParam = "messages.content.image_url.url"
+
+// maxImageDownloadBytes caps how much of a remote image the router will
+// download. Anthropic's own limit for a base64 image is 5 MB per image;
+// refusing anything much larger keeps a single client-supplied URL from
+// pulling an unbounded payload into the router's memory and then into the
+// base64-encoded request body.
+var maxImageDownloadBytes = 25 * 1024 * 1024
+
+// imageHTTPClient fetches remote images on the client's behalf.
+//
+// The dialer refuses to connect to private or link-local addresses, so a
+// client-supplied URL cannot be used to reach the pod's own network, the
+// cluster API, or a cloud metadata endpoint (SSRF). The timeouts are
+// deliberately short: the router is in the request path, and a client that
+// waited out a 15s image fetch would abandon the request long before the
+// router gave up on it.
+//
+// No HTTP_PROXY-style proxy is used here on purpose. A forward proxy is
+// reached by address, so the guard below would only vet the proxy's IP and
+// never the target host — the SSRF check would be bypassed entirely, and
+// the proxy could be used to reach link-local metadata endpoints on its own
+// host. Image URLs are public CDN links by nature, so they are fetched
+// directly.
+var imageHTTPClient = &http.Client{
+	Timeout: imageDownloadTimeout,
+	Transport: &http.Transport{
+		// The dialer is read at connect time rather than captured here, so
+		// the SSRF guard can be swapped out in tests without rebuilding the
+		// client.
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return imageDialContext(ctx, network, addr)
+		},
+		TLSHandshakeTimeout:   imageDialTimeout,
+		ResponseHeaderTimeout: imageDownloadTimeout,
+		ExpectContinueTimeout: time.Second,
+		MaxIdleConnsPerHost:   4,
+		DisableCompression:    true,
+	},
+}
+
+// imageDialContext is the dialer used for image downloads. It is a variable
+// so tests can substitute a permissive dialer for a loopback httptest
+// server; production always uses the SSRF-guarded one.
+var imageDialContext = converterutil.GuardedDialContext(&net.Dialer{Timeout: imageDialTimeout})
+
+// imageURLGuard vets an image URL before it is fetched. It is a variable for
+// the same reason as imageDialContext: tests need to reach a loopback
+// httptest server, which the real guard rejects. The guard itself is covered
+// by its own tests in converterutil.
+var imageURLGuard = converterutil.IsPrivateURL
+
+const (
+	imageDialTimeout     = 3 * time.Second
+	imageDownloadTimeout = 8 * time.Second
+)
 
 // allowedImageMediaTypes lists the media types accepted by the Anthropic API.
 var allowedImageMediaTypes = map[string]bool{
@@ -186,61 +245,112 @@ var allowedImageMediaTypes = map[string]bool{
 
 // DownloadAndEncodeImage fetches an image from an HTTP/HTTPS URL and returns a base64
 // ContentBlock. Anthropic does not support URL sources, so we must download and encode.
-func DownloadAndEncodeImage(imgURL string) *ContentBlock {
+//
+// The returned error is always a converterutil.ImageError, whose client-facing
+// message is fixed per failure kind and never mentions the URL, the host, or
+// the upstream status. The detailed reason (and the URL) goes to the router's
+// internal log only.
+//
+// param names the request field the client must fix (e.g.
+// "messages.content.image_url.url"); it is echoed to the client as the
+// "param" field of the error and must not contain the image URL itself.
+func DownloadAndEncodeImage(imgURL, param string) (*ContentBlock, error) {
+	// Reject URLs pointing at private/internal address space before making
+	// any request: the router fetches this URL itself, so an unvetted URL
+	// would let a client reach the pod network, the cluster API, or a cloud
+	// metadata endpoint.
+	if imageURLGuard(imgURL) {
+		slog.Warn("Refusing to download image from a non-public address",
+			"url", imgURL, "reason", "private_address")
+		return nil, converterutil.NewImageError(converterutil.ImageErrorURLNotAllowed, param)
+	}
+
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, imgURL, nil)
 	if err != nil {
-		slog.Warn("Failed to create image download request for Anthropic", "url", imgURL, "error", err)
-		return nil
+		slog.Warn("Failed to create image download request", "url", imgURL, "error", err)
+		return nil, converterutil.NewImageError(converterutil.ImageErrorFetchFailed, param)
 	}
-	// Use a browser-like User-Agent to avoid bot-blocking (e.g. Wikimedia returns 403 for Go-http-client).
+	// A browser-like User-Agent: some CDNs reject unknown clients outright.
+	// Note this only helps against naive bot filters — Wikimedia, for
+	// instance, rejects browser-like UAs from datacenter IPs as well, so a
+	// blocked host stays blocked regardless of the User-Agent.
 	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; auto-ai-router/1.0)")
+	req.Header.Set("Accept", "image/*,*/*;q=0.8")
 
 	resp, err := imageHTTPClient.Do(req)
 	if err != nil {
-		slog.Warn("Failed to download image for Anthropic", "url", imgURL, "error", err)
-		return nil
+		slog.Warn("Failed to download image", "url", imgURL, "error", err)
+		return nil, converterutil.NewImageError(converterutil.ImageErrorFetchFailed, param)
 	}
 	defer func() {
-		err := resp.Body.Close()
-		if err != nil {
-			slog.Warn("Failed to close body", "error", err)
+		if err := resp.Body.Close(); err != nil {
+			slog.Warn("Failed to close image body", "error", err)
 		}
 	}()
 	if resp.StatusCode != http.StatusOK {
-		slog.Warn("Image download returned non-200 status for Anthropic",
+		slog.Warn("Image download returned non-200 status",
 			"url", imgURL, "status", resp.StatusCode)
-		return nil
+		return nil, converterutil.NewImageError(converterutil.ImageErrorFetchFailed, param)
 	}
 
-	data, err := io.ReadAll(resp.Body)
+	// Read one byte past the limit so an oversized body is detected without
+	// buffering the whole thing.
+	data, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxImageDownloadBytes)+1))
 	if err != nil {
-		slog.Warn("Failed to read image body for Anthropic", "url", imgURL, "error", err)
-		return nil
+		slog.Warn("Failed to read image body", "url", imgURL, "error", err)
+		return nil, converterutil.NewImageError(converterutil.ImageErrorFetchFailed, param)
+	}
+	if len(data) > maxImageDownloadBytes {
+		slog.Warn("Image exceeds the download limit",
+			"url", imgURL, "limit_bytes", maxImageDownloadBytes)
+		return nil, converterutil.NewImageError(converterutil.ImageErrorTooLarge, param)
+	}
+	if len(data) == 0 {
+		slog.Warn("Image response body is empty", "url", imgURL)
+		return nil, converterutil.NewImageError(converterutil.ImageErrorInvalidData, param)
 	}
 
 	mediaType := resp.Header.Get("Content-Type")
 	if idx := strings.Index(mediaType, ";"); idx != -1 {
 		mediaType = strings.TrimSpace(mediaType[:idx])
 	}
-	// If Content-Type is missing or not an accepted image type, detect from magic bytes.
-	if !allowedImageMediaTypes[mediaType] {
-		mediaType = detectImageMediaType(data, imgURL)
+	mediaType = strings.ToLower(mediaType)
+
+	// A content type the provider accepts is authoritative — the bytes may
+	// still be junk, but the server claims to be sending an image.
+	if allowedImageMediaTypes[mediaType] {
+		return &ContentBlock{
+			Type: "image",
+			Source: &MediaSource{
+				Type:      "base64",
+				MediaType: mediaType,
+				Data:      base64.StdEncoding.EncodeToString(data),
+			},
+		}, nil
 	}
 
-	if !allowedImageMediaTypes[mediaType] {
-		slog.Warn("Unsupported image media type for Anthropic, skipping",
-			"url", imgURL, "media_type", mediaType)
-		return nil
+	// The content type is missing or not an image type. Sniff the actual
+	// format from the bytes: plenty of hosts serve images as
+	// application/octet-stream or with no type at all.
+	detected := detectImageMediaType(data, imgURL)
+	if detected == "" {
+		slog.Warn("Image URL did not return a recognizable image",
+			"url", imgURL, "content_type", mediaType)
+		return nil, converterutil.NewImageError(converterutil.ImageErrorInvalidData, param)
+	}
+	if !allowedImageMediaTypes[detected] {
+		slog.Warn("Unsupported image media type", "url", imgURL, "media_type", detected)
+		return nil, converterutil.NewImageError(converterutil.ImageErrorUnsupportedMediaType, param)
 	}
 
 	return &ContentBlock{
 		Type: "image",
 		Source: &MediaSource{
 			Type:      "base64",
-			MediaType: mediaType,
+			MediaType: detected,
 			Data:      base64.StdEncoding.EncodeToString(data),
 		},
-	}
+	}, nil
 }
 
 // detectImageMediaType detects image format from magic bytes, falling back to URL extension.

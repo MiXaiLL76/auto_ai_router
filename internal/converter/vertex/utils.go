@@ -1,12 +1,9 @@
 package vertex
 
 import (
-	"context"
 	"encoding/base64"
 	"fmt"
 	"math"
-	"net"
-	"net/url"
 	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
@@ -140,62 +137,21 @@ var mimeTypeMap = map[string]string{
 // Exported so the Responses API converter package (vertexresponses) can apply
 // the same SSRF guard to its own FileData URL fallback.
 //
-// When the hostname is not a literal IP, it is resolved once via net.LookupIP
-// and the result is checked against private ranges.  This is vulnerable to DNS
-// rebinding: an attacker can serve a public IP during this check and then flip
-// the DNS record to a private address before Vertex AI makes its own request.
-// The risk is accepted because (a) Vertex AI fetches the URL server-side and
-// may apply its own protections, and (b) exploitation requires the attacker to
-// control DNS with a very short TTL.  Do not rely on this function as the sole
-// SSRF defence in higher-trust environments.
+// The implementation lives in converterutil so that every place the router
+// acts on a client-supplied URL — including the Anthropic image downloader,
+// which fetches the URL itself rather than letting the provider do it —
+// shares one vetted list of blocked ranges. The previous local copy checked
+// only the first resolved address and omitted link-local IPv6 (fe80::/10)
+// and the metadata.goog alias; the shared version checks every resolved
+// address and covers those gaps.
+//
+// Note this check alone does not close the DNS-rebinding window (an
+// attacker can answer with a public IP here and a private one at connect
+// time). For URLs the router fetches itself, converterutil.GuardedDialContext
+// re-checks the address at dial time; for URLs Vertex fetches server-side
+// the provider's own protections apply.
 func IsPrivateURL(rawURL string) bool {
-	parsed, err := url.Parse(rawURL)
-	if err != nil {
-		return true // block unparseable URLs
-	}
-
-	hostname := parsed.Hostname()
-
-	// Block well-known metadata endpoints
-	blockedHosts := []string{"metadata.google.internal", "metadata.aws.internal"}
-	for _, blocked := range blockedHosts {
-		if strings.EqualFold(hostname, blocked) {
-			return true
-		}
-	}
-
-	// Block localhost
-	if strings.EqualFold(hostname, "localhost") {
-		return true
-	}
-
-	// Resolve hostname and check IP ranges
-	ip := net.ParseIP(hostname)
-	if ip == nil {
-		// Could be a hostname — resolve it
-		ips, err := net.DefaultResolver.LookupIPAddr(context.Background(), hostname)
-		if err != nil || len(ips) == 0 {
-			return false // can't resolve, let Vertex handle it
-		}
-		ip = ips[0].IP
-	}
-
-	// Private IP ranges
-	privateRanges := []string{
-		"127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12",
-		"192.168.0.0/16", "169.254.0.0/16", "::1/128", "fc00::/7",
-	}
-	for _, cidr := range privateRanges {
-		_, network, err := net.ParseCIDR(cidr)
-		if err != nil {
-			continue
-		}
-		if network.Contains(ip) {
-			return true
-		}
-	}
-
-	return false
+	return converterutil.IsPrivateURL(rawURL)
 }
 
 // parseURLToPart converts a regular URL or file reference to a genai.Part.

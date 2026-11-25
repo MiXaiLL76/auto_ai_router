@@ -385,7 +385,17 @@ func normalizeError(status int, body []byte) []byte {
 	case http.StatusRequestTimeout, http.StatusGatewayTimeout:
 		message = "Request timed out"
 	case http.StatusRequestEntityTooLarge:
+		// The router's own classification is preserved when it is present:
+		// an oversized image attachment is reported as "Image is too large"
+		// with a code that says so, which is more actionable than the
+		// generic size message. A body the router did not classify (e.g. a
+		// provider's own 413) still gets the generic wording.
 		message = "Request entity too large"
+		if classified := upstreamerror.ClassifyBadRequest(body); classified.Code != "invalid_request" {
+			message = classified.Message
+			code = classified.Code
+			param = classified.Param
+		}
 	}
 
 	result, _ := json.Marshal(map[string]any{
@@ -446,7 +456,7 @@ func isRoutingMetadataField(key string) bool {
 
 func errorTypeForStatus(status int) string {
 	switch status {
-	case http.StatusBadRequest, http.StatusUnprocessableEntity:
+	case http.StatusBadRequest, http.StatusUnprocessableEntity, http.StatusRequestEntityTooLarge:
 		return "invalid_request_error"
 	case http.StatusUnauthorized:
 		return "authentication_error"

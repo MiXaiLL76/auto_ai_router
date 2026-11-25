@@ -49,6 +49,7 @@ func TestConvertImageURLToAnthropic(t *testing.T) {
 	})
 
 	t.Run("http_url", func(t *testing.T) {
+		withPermissiveImageFetch(t)
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			assert.Contains(t, r.Header.Get("User-Agent"), "auto-ai-router")
 			w.Header().Set("Content-Type", "image/jpeg")
