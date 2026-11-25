@@ -1635,6 +1635,8 @@ type LiteLLMDBConfig struct {
 	// queue into Postgres. Each worker batches and flushes independently, so a
 	// slow INSERT or retry backoff in one worker doesn't stall the others.
 	LogWorkers int `yaml:"log_workers"` // default: 4
+	// SpendUpdatesSingleRoundTrip sends a batch's counter and daily updates as one pgx batch.
+	SpendUpdatesSingleRoundTrip bool `yaml:"spend_updates_single_round_trip"` // default: false
 
 	// DisableSpendLogsWrite disables writing SpendLogEntry/Daily* aggregates to
 	// Postgres while leaving auth (ValidateToken) untouched. Intended for setups
@@ -2017,6 +2019,7 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 		LogBatchSize                string `yaml:"log_batch_size"`
 		LogFlushInterval            string `yaml:"log_flush_interval"`
 		LogWorkers                  string `yaml:"log_workers"`
+		SpendUpdatesSingleRoundTrip string `yaml:"spend_updates_single_round_trip"`
 		DisableSpendLogsWrite       string `yaml:"disable_spend_logs_write"`
 		IncludeTeamSpendInUserSpend string `yaml:"include_team_spend_in_user_spend"`
 
@@ -2051,6 +2054,9 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if l.DisableSpendLogsWrite, err = parseField(temp.DisableSpendLogsWrite, false, strconv.ParseBool, "litellm_db.disable_spend_logs_write"); err != nil {
+		return err
+	}
+	if l.SpendUpdatesSingleRoundTrip, err = parseField(temp.SpendUpdatesSingleRoundTrip, false, strconv.ParseBool, "litellm_db.spend_updates_single_round_trip"); err != nil {
 		return err
 	}
 	if l.IncludeTeamSpendInUserSpend, err = parseField(temp.IncludeTeamSpendInUserSpend, true, strconv.ParseBool, "litellm_db.include_team_spend_in_user_spend"); err != nil {

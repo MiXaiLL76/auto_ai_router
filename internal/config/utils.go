@@ -292,6 +292,7 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 			"log_batch_size", cfg.LiteLLMDB.LogBatchSize,
 			"log_flush_interval", cfg.LiteLLMDB.LogFlushInterval.String(),
 			"log_workers", cfg.LiteLLMDB.LogWorkers,
+			"spend_updates_single_round_trip", cfg.LiteLLMDB.SpendUpdatesSingleRoundTrip,
 			"disable_spend_logs_write", cfg.LiteLLMDB.DisableSpendLogsWrite,
 			"include_team_spend_in_user_spend", cfg.LiteLLMDB.IncludeTeamSpendInUserSpend,
 			"enforce_budget_reservation", cfg.LiteLLMDB.EnforceBudgetReservation,

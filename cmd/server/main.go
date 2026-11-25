@@ -1201,6 +1201,7 @@ func initializeLiteLLMDB(cfg *config.Config, log *slog.Logger) litellmdb.Manager
 		LogBatchSize:                cfg.LiteLLMDB.LogBatchSize,
 		LogFlushInterval:            cfg.LiteLLMDB.LogFlushInterval,
 		LogWorkers:                  cfg.LiteLLMDB.LogWorkers,
+		SpendUpdatesSingleRoundTrip: cfg.LiteLLMDB.SpendUpdatesSingleRoundTrip,
 		DisableSpendLogsWrite:       cfg.LiteLLMDB.DisableSpendLogsWrite,
 		IncludeTeamSpendInUserSpend: &cfg.LiteLLMDB.IncludeTeamSpendInUserSpend,
 		DailySpendTimezone:          cfg.LiteLLMDB.DailySpendTimezone,

@@ -37,20 +37,20 @@ func TestUpdateKeyBudgetWindows_SchemaWithoutWindowTable(t *testing.T) {
 	tx := noWindowTableTx{&atomicTestTx{}}
 	entries := []*models.SpendLogEntry{atomicTestEntry("req-old-schema")}
 
-	err := logger.updateKeyBudgetWindows(context.Background(), tx, entries)
+	err := logger.updateKeyBudgetWindows(context.Background(), tx, tx, entries)
 	require.Error(t, err, "the aborted transaction is retried")
 	assert.False(t, schemaHasKeyBudgetWindows.Load())
 
 	// The retry writes the batch without the window projection.
 	tx.queries = nil
-	require.NoError(t, logger.updateKeyBudgetWindows(context.Background(), tx, entries))
+	require.NoError(t, logger.updateKeyBudgetWindows(context.Background(), tx, tx, entries))
 	assert.Empty(t, tx.queries)
 }
 
 func TestUpdateKeyBudgetWindows_DisabledDoesNotQuery(t *testing.T) {
 	logger := newAtomicTestLogger()
 	tx := noWindowTableTx{&atomicTestTx{}}
-	require.NoError(t, logger.updateKeyBudgetWindows(context.Background(), tx, []*models.SpendLogEntry{atomicTestEntry("disabled")}))
+	require.NoError(t, logger.updateKeyBudgetWindows(context.Background(), tx, tx, []*models.SpendLogEntry{atomicTestEntry("disabled")}))
 	assert.Empty(t, tx.queries)
 }
 
@@ -158,7 +158,7 @@ func (db windowTestDB) write(logger *Logger, entries ...*models.SpendLogEntry) {
 		_, err := tx.Exec(db.t.Context(), `UPDATE "LiteLLM_VerificationToken" SET spend = spend + $1 WHERE token = $2`, entry.Spend, entry.APIKey)
 		require.NoError(db.t, err)
 	}
-	require.NoError(db.t, logger.updateKeyBudgetWindows(db.t.Context(), tx, entries))
+	require.NoError(db.t, logger.updateKeyBudgetWindows(db.t.Context(), tx, tx, entries))
 	require.NoError(db.t, tx.Commit(db.t.Context()))
 }
 
@@ -277,7 +277,7 @@ func TestUpdateKeyBudgetWindows_Postgres(t *testing.T) {
 
 		_, err = first.Exec(t.Context(), `UPDATE "LiteLLM_VerificationToken" SET spend = spend + 1 WHERE token = 'race'`)
 		require.NoError(t, err)
-		require.NoError(t, logger.updateKeyBudgetWindows(t.Context(), first, []*models.SpendLogEntry{firstEntry}))
+		require.NoError(t, logger.updateKeyBudgetWindows(t.Context(), first, first, []*models.SpendLogEntry{firstEntry}))
 
 		done := make(chan error, 1)
 		go func() {
@@ -285,7 +285,7 @@ func TestUpdateKeyBudgetWindows_Postgres(t *testing.T) {
 				done <- err
 				return
 			}
-			if err := logger.updateKeyBudgetWindows(context.Background(), second, []*models.SpendLogEntry{secondEntry}); err != nil {
+			if err := logger.updateKeyBudgetWindows(context.Background(), second, second, []*models.SpendLogEntry{secondEntry}); err != nil {
 				done <- err
 				return
 			}

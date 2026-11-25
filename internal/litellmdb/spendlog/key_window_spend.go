@@ -51,7 +51,7 @@ type keyBudgetWindow struct {
 // The windows are the key's budget_limits plus any row the key already has,
 // so a limit taken off and put back within a window finds a row that kept
 // counting.
-func (sl *Logger) updateKeyBudgetWindows(ctx context.Context, tx pgx.Tx, entries []*models.SpendLogEntry) error {
+func (sl *Logger) updateKeyBudgetWindows(ctx context.Context, tx pgx.Tx, exec spendUpdateExecer, entries []*models.SpendLogEntry) error {
 	if sl.config == nil || !sl.config.EnforceKeyBudgetWindows {
 		return nil
 	}
@@ -73,6 +73,10 @@ func (sl *Logger) updateKeyBudgetWindows(ctx context.Context, tx pgx.Tx, entries
 	}
 	slices.Sort(keys)
 
+	// The read needs the token row locks of the updates still queued.
+	if err := flushSpendUpdates(ctx, exec); err != nil {
+		return err
+	}
 	durations, stored, cumulative, err := sl.readKeyBudgetWindows(ctx, tx, keys)
 	if err != nil {
 		if isUndefinedTable(err) || isColumnNotExist(err) {
@@ -109,7 +113,7 @@ func (sl *Logger) updateKeyBudgetWindows(ctx context.Context, tx pgx.Tx, entries
 					if s.spend == 0 {
 						continue
 					}
-					if _, err := tx.Exec(ctx, queries.QueryAddKeyBudgetWindowSpend, key, duration, s.start, s.spend); err != nil {
+					if _, err := exec.Exec(ctx, queries.QueryAddKeyBudgetWindowSpend, key, duration, s.start, s.spend); err != nil {
 						return err
 					}
 				case hasRow && current.After(s.start):
@@ -121,7 +125,7 @@ func (sl *Logger) updateKeyBudgetWindows(ctx context.Context, tx pgx.Tx, entries
 						// this window's spend, including any pre-existing usage.
 						total = cumulative[key]
 					}
-					if _, err := tx.Exec(ctx, queries.QuerySetKeyBudgetWindowSpend, key, duration, s.start, total); err != nil {
+					if _, err := exec.Exec(ctx, queries.QuerySetKeyBudgetWindowSpend, key, duration, s.start, total); err != nil {
 						return err
 					}
 					current, hasRow = s.start, true

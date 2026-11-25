@@ -125,6 +125,8 @@ type Config struct {
 	LogFlushInterval    time.Duration // Flush interval (default: 5s)
 	LogWorkers          int           // Number of parallel queue-draining workers (default: 4)
 	DisableSpendLogging bool          // Control-plane managers set this to avoid creating a writer
+	// SpendUpdatesSingleRoundTrip sends a batch's counter and daily updates as one pgx batch.
+	SpendUpdatesSingleRoundTrip bool
 
 	// DisableSpendLogsWrite disables writing SpendLogEntry/Daily* aggregates to
 	// Postgres while leaving auth (ValidateToken) untouched (default: false).

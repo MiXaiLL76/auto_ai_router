@@ -698,10 +698,15 @@ func (sl *Logger) writeBatchInTransaction(ctx context.Context, tx pgx.Tx, batch 
 		insertedEntries(accountingBatch),
 		sl.config.TeamSpendUpdatesUserSpend(),
 	)
-	if err := executeSpendUpdates(ctx, tx, spendUpdates); err != nil {
+	// With spend_updates_single_round_trip the statements below are queued and sent as one batch, in the same order.
+	var exec spendUpdateExecer = tx
+	if sl.config.SpendUpdatesSingleRoundTrip {
+		exec = &spendBatch{tx: tx}
+	}
+	if err := executeSpendUpdates(ctx, exec, spendUpdates); err != nil {
 		return nil, fmt.Errorf("spend updates: %w", err)
 	}
-	if err := sl.updateKeyBudgetWindows(ctx, tx, insertedEntries(accountingBatch)); err != nil {
+	if err := sl.updateKeyBudgetWindows(ctx, tx, exec, insertedEntries(accountingBatch)); err != nil {
 		return nil, fmt.Errorf("key budget windows: %w", err)
 	}
 
@@ -712,7 +717,10 @@ func (sl *Logger) writeBatchInTransaction(ctx context.Context, tx pgx.Tx, batch 
 	if err != nil {
 		return nil, fmt.Errorf("build daily aggregation records: %w", err)
 	}
-	if err := sl.runAggregators(ctx, tx, "atomic", records); err != nil {
+	if err := sl.runAggregators(ctx, exec, "atomic", records); err != nil {
+		return nil, err
+	}
+	if err := flushSpendUpdates(ctx, exec); err != nil {
 		return nil, err
 	}
 
