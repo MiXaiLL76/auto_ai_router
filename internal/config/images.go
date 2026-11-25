@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -74,6 +75,20 @@ type ImageDownloadConfig struct {
 	// ConnectTimeout is the timeout of establishing the connection to an
 	// image host.
 	ConnectTimeout time.Duration `yaml:"connect_timeout"`
+	// BlockedCIDRs are additional address ranges the router refuses to
+	// fetch, on top of the built-in ones. A deployment whose cluster uses
+	// an address range the router does not know about adds it here, so a
+	// client cannot reach it through an image URL.
+	BlockedCIDRs []string `yaml:"blocked_cidr"`
+	// AllowedHosts are host names the router may fetch from even when they
+	// resolve to a blocked address. A client whose images live on its own
+	// storage (a presigned URL on an internal S3, say) needs this: the
+	// image host is inside the network by design.
+	//
+	// The exception is by host name, not by address: the same name may
+	// resolve to a public address from the router's side and to a private
+	// one from the client's, and only the name is known to both.
+	AllowedHosts []string `yaml:"allowed_hosts"`
 }
 
 // UnmarshalYAML reads the section, applying the defaults to the fields left
@@ -81,12 +96,14 @@ type ImageDownloadConfig struct {
 // limit" too, so an explicit 0 is different from an omitted field.
 func (c *ImageDownloadConfig) UnmarshalYAML(value *yaml.Node) error {
 	type rawImageDownloadConfig struct {
-		MaxBytes        string `yaml:"max_bytes"`
-		MaxTotalBytes   string `yaml:"max_total_bytes"`
-		MaxCount        string `yaml:"max_count"`
-		Timeout         string `yaml:"timeout"`
-		TimeoutPerImage string `yaml:"timeout_per_image"`
-		ConnectTimeout  string `yaml:"connect_timeout"`
+		MaxBytes        string   `yaml:"max_bytes"`
+		MaxTotalBytes   string   `yaml:"max_total_bytes"`
+		MaxCount        string   `yaml:"max_count"`
+		Timeout         string   `yaml:"timeout"`
+		TimeoutPerImage string   `yaml:"timeout_per_image"`
+		ConnectTimeout  string   `yaml:"connect_timeout"`
+		BlockedCIDRs    []string `yaml:"blocked_cidr"`
+		AllowedHosts    []string `yaml:"allowed_hosts"`
 	}
 	var raw rawImageDownloadConfig
 	if err := value.Decode(&raw); err != nil {
@@ -111,6 +128,23 @@ func (c *ImageDownloadConfig) UnmarshalYAML(value *yaml.Node) error {
 	}
 	if c.ConnectTimeout, err = parseField(raw.ConnectTimeout, DefaultImageFetchConnectTimeout, time.ParseDuration, "image_download.connect_timeout"); err != nil {
 		return err
+	}
+	for _, raw := range raw.BlockedCIDRs {
+		entry := strings.TrimSpace(resolveEnvString(raw))
+		if entry == "" {
+			continue
+		}
+		if _, _, err := net.ParseCIDR(entry); err != nil {
+			return fmt.Errorf("invalid image_download.blocked_cidr: %w", err)
+		}
+		c.BlockedCIDRs = append(c.BlockedCIDRs, entry)
+	}
+	for _, raw := range raw.AllowedHosts {
+		entry := strings.TrimSpace(resolveEnvString(raw))
+		if entry == "" {
+			continue
+		}
+		c.AllowedHosts = append(c.AllowedHosts, strings.ToLower(entry))
 	}
 	return nil
 }
@@ -185,6 +219,11 @@ func (c *ImageDownloadConfig) Validate() error {
 	if c.MaxBytes > 0 && c.MaxTotalBytes > 0 && c.MaxBytes > c.MaxTotalBytes {
 		return fmt.Errorf("image_download.max_bytes (%d) must not exceed image_download.max_total_bytes (%d)",
 			c.MaxBytes, c.MaxTotalBytes)
+	}
+	for _, cidr := range c.BlockedCIDRs {
+		if _, _, err := net.ParseCIDR(cidr); err != nil {
+			return fmt.Errorf("invalid image_download.blocked_cidr %q: %w", cidr, err)
+		}
 	}
 	return nil
 }

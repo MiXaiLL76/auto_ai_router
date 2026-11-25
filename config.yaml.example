@@ -76,6 +76,19 @@ image_download:
   timeout: 15s  # Total time the images of one request may take to download, shared by all of them (default: 15s)
   timeout_per_image: 8s  # Timeout of a single image fetch (default: 8s; the shorter of it and timeout wins)
   connect_timeout: 3s  # Timeout of establishing the connection to an image host (default: 3s)
+  # Additional address ranges the router refuses to fetch, on top of the
+  # built-in ones (the private, loopback, link-local, CGNAT, multicast and
+  # documentation ranges). Add here a range your cluster uses that the router
+  # does not know about, so a client cannot reach it through an image URL.
+  # blocked_cidr:
+  #   - 172.31.0.0/16
+  # Host names the router may fetch from even though they resolve to a
+  # blocked address: a client whose images live on its own storage (a
+  # presigned URL on an internal S3, say) needs that, the image host being
+  # inside the network by design. Matched by name, exactly as it appears in
+  # the URL.
+  # allowed_hosts:
+  #   - images.internal.example
 
 fail2ban:
   max_attempts: 3

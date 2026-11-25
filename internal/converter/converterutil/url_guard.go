@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/url"
 	"strings"
+	"sync"
 )
 
 // blockedMetadataHosts are well-known cloud metadata endpoints. Fetching one
@@ -65,6 +66,78 @@ var privateNetworks = func() []*net.IPNet {
 	return nets
 }()
 
+// guardSettings holds the deployment's own additions to the guard: the
+// address ranges its cluster uses that the built-in list does not know
+// about, and the host names that may be fetched from even though they
+// resolve to a blocked address.
+var guardSettings struct {
+	sync.RWMutex
+	extraNetworks []*net.IPNet
+	allowedHosts  map[string]struct{}
+}
+
+// SetBlockedCIDRs adds address ranges to the ones the guard refuses. A
+// deployment whose cluster uses a range the built-in list does not cover
+// adds it here, so a client cannot reach it through an image URL.
+//
+// The built-in ranges are never dropped: this only adds to them.
+func SetBlockedCIDRs(cidrs []string) {
+	networks := make([]*net.IPNet, 0, len(cidrs))
+	for _, cidr := range cidrs {
+		_, network, err := net.ParseCIDR(strings.TrimSpace(cidr))
+		if err != nil {
+			continue
+		}
+		networks = append(networks, network)
+	}
+
+	guardSettings.Lock()
+	defer guardSettings.Unlock()
+	guardSettings.extraNetworks = networks
+}
+
+// SetAllowedHosts names the hosts the router may fetch from even when they
+// resolve to a blocked address.
+//
+// The exception is by host name, not by address: the same name may resolve
+// to a public address from the router's side and to a private one from the
+// client's, and only the name is known to both. A client whose images live
+// on its own storage (a presigned URL on an internal S3, say) needs this:
+// the image host is inside the network by design.
+//
+// The names are matched exactly, so a name has to be given as it appears in
+// the URL.
+func SetAllowedHosts(hosts []string) {
+	allowed := make(map[string]struct{}, len(hosts))
+	for _, host := range hosts {
+		name := strings.ToLower(strings.TrimSpace(host))
+		if name == "" {
+			continue
+		}
+		allowed[name] = struct{}{}
+	}
+
+	guardSettings.Lock()
+	defer guardSettings.Unlock()
+	guardSettings.allowedHosts = allowed
+}
+
+// isAllowedHost reports whether a host name is on the deployment's
+// allowlist.
+func isAllowedHost(hostname string) bool {
+	guardSettings.RLock()
+	defer guardSettings.RUnlock()
+	_, ok := guardSettings.allowedHosts[strings.ToLower(hostname)]
+	return ok
+}
+
+// extraBlockedNetworks returns the deployment's additional blocked ranges.
+func extraBlockedNetworks() []*net.IPNet {
+	guardSettings.RLock()
+	defer guardSettings.RUnlock()
+	return guardSettings.extraNetworks
+}
+
 // IsBlockedHostURL reports whether a URL is refused by name or by its
 // literal address, without resolving anything.
 //
@@ -85,6 +158,13 @@ func IsBlockedHostURL(rawURL string) bool {
 	hostname := parsed.Hostname()
 	if hostname == "" {
 		return true
+	}
+
+	// The deployment's own hosts are fetched even when they resolve to a
+	// blocked address: a client whose images live on its own storage
+	// (a presigned URL on an internal S3) needs that.
+	if isAllowedHost(hostname) {
+		return false
 	}
 
 	for _, blocked := range blockedMetadataHosts {
@@ -169,6 +249,13 @@ func isPrivateIP(ip net.IP) bool {
 			return true
 		}
 	}
+	// The deployment's own ranges: a cluster may use an address range the
+	// built-in list does not know about.
+	for _, network := range extraBlockedNetworks() {
+		if network.Contains(ip) {
+			return true
+		}
+	}
 	return false
 }
 
@@ -188,6 +275,13 @@ func GuardedDialContext(dialer *net.Dialer) func(ctx context.Context, network, a
 		host, _, err := net.SplitHostPort(addr)
 		if err != nil {
 			return nil, err
+		}
+		// The deployment's own hosts are dialed as they are: the guard on
+		// the address is skipped for them, exactly as it is in the URL
+		// pre-check. Both places must agree, or an allowed host would pass
+		// the first check and be refused at connect time.
+		if isAllowedHost(host) {
+			return dialer.DialContext(ctx, network, addr)
 		}
 		if ip := net.ParseIP(host); ip != nil {
 			if isPrivateIP(ip) {

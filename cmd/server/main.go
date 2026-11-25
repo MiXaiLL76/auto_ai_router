@@ -328,6 +328,12 @@ func main() {
 		TimeoutPerImage: cfg.ImageDownload.TimeoutPerImage,
 		ConnectTimeout:  cfg.ImageDownload.ConnectTimeout,
 	})
+	// The SSRF guard's own additions: the ranges this deployment's cluster
+	// uses that the built-in list does not know about, and the hosts the
+	// router may fetch from even though they resolve to a blocked address
+	// (a client whose images live on its own storage).
+	converterutil.SetBlockedCIDRs(cfg.ImageDownload.BlockedCIDRs)
+	converterutil.SetAllowedHosts(cfg.ImageDownload.AllowedHosts)
 
 	prx := proxy.New(&proxy.Config{
 		Balancer:                     bal,

@@ -2,6 +2,7 @@ package converterutil
 
 import (
 	"context"
+	"errors"
 	"net"
 	"testing"
 
@@ -152,4 +153,66 @@ func TestBlockedAddressErrorMessageIsSafe(t *testing.T) {
 	err := &BlockedAddressError{Host: "169.254.169.254"}
 	assert.NotContains(t, err.Error(), "169.254.169.254")
 	assert.NotContains(t, err.Error(), "10.")
+}
+
+// TestSetBlockedCIDRs checks that a deployment can add the address ranges
+// its own cluster uses, which the built-in list does not know about.
+func TestSetBlockedCIDRs(t *testing.T) {
+	t.Cleanup(func() { SetBlockedCIDRs(nil) })
+
+	// 172.31.0.0/16 is inside the built-in 172.16.0.0/12, so use a range
+	// that is public by default.
+	SetBlockedCIDRs([]string{"198.51.100.0/24"})
+	t.Cleanup(func() { SetBlockedCIDRs(nil) })
+
+	// 203.0.113.0/24 is a documentation range the built-in list already
+	// covers, so pick one it does not: 192.88.99.0/24 (6to4 relay anycast).
+	SetBlockedCIDRs([]string{"192.88.99.0/24"})
+
+	assert.True(t, IsPrivateURL("http://192.88.99.10/image.png"),
+		"a range the deployment added must be blocked")
+	assert.False(t, IsPrivateURL("http://93.184.216.34/image.png"),
+		"a public address stays allowed")
+}
+
+// TestSetAllowedHosts checks the exception a deployment needs for a client
+// whose images live on its own storage: the host is inside the network by
+// design, so the address-based guard must not refuse it.
+func TestSetAllowedHosts(t *testing.T) {
+	SetAllowedHosts([]string{"images.internal.example", "S3.INTERNAL.EXAMPLE"})
+	t.Cleanup(func() { SetAllowedHosts(nil) })
+
+	assert.False(t, IsBlockedHostURL("http://images.internal.example/pic.png"),
+		"an allowed host is fetched even though it resolves to a blocked address")
+	assert.False(t, IsBlockedHostURL("http://S3.INTERNAL.EXAMPLE/pic.png"),
+		"the allowlist matches the name case-insensitively")
+
+	// Every other host is unaffected.
+	assert.True(t, IsBlockedHostURL("http://169.254.169.254/latest/meta-data/"),
+		"the metadata endpoint stays blocked")
+	assert.True(t, IsBlockedHostURL("http://10.0.0.1/pic.png"),
+		"a private address stays blocked")
+	// A name that is not on the allowlist is not blocked by NAME (it is
+	// blocked by ADDRESS, once it resolves -- see IsPrivateURL), so the
+	// pre-check alone does not refuse it.
+	assert.False(t, IsBlockedHostURL("http://other.internal.example/pic.png"),
+		"a host that is not on the allowlist is not blocked by name")
+}
+
+// TestAllowedHostIsDialed checks that the exception holds at connect time
+// as well: the URL pre-check and the dial-time check have to agree, or an
+// allowed host would pass the first and be refused at the second.
+func TestAllowedHostIsDialed(t *testing.T) {
+	SetAllowedHosts([]string{"images.internal.example"})
+	t.Cleanup(func() { SetAllowedHosts(nil) })
+
+	dial := GuardedDialContext(&net.Dialer{})
+	// The name resolves to nothing here, so the dial fails with a DNS
+	// error rather than the guard's refusal -- which is what tells the two
+	// apart.
+	_, err := dial(context.Background(), "tcp", "images.internal.example:80")
+	require.Error(t, err)
+	var blocked *BlockedAddressError
+	assert.False(t, errors.As(err, &blocked),
+		"an allowed host must not be refused by the address guard")
 }

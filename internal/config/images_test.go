@@ -129,3 +129,41 @@ func TestImageDownloadConfig_NullSection(t *testing.T) {
 	assert.Equal(t, int64(DefaultImageMaxBytes), cfg.ImageDownload.MaxBytes)
 	assert.Equal(t, DefaultImageMaxCount, cfg.ImageDownload.MaxCount)
 }
+
+// TestImageDownloadConfig_BlockedCIDRsAndAllowedHosts covers the two
+// settings that adapt the SSRF guard to a deployment: the ranges its
+// cluster uses that the built-in list does not know about, and the hosts
+// it may fetch from even though they resolve to a blocked address.
+func TestImageDownloadConfig_BlockedCIDRsAndAllowedHosts(t *testing.T) {
+	var cfg ImageDownloadConfig
+	require.NoError(t, yaml.Unmarshal([]byte(`
+blocked_cidr:
+  - 172.31.0.0/16
+  - "10.11.0.0/16"
+allowed_hosts:
+  - images.internal.example
+  - S3.INTERNAL.EXAMPLE
+`), &cfg))
+	assert.Equal(t, []string{"172.31.0.0/16", "10.11.0.0/16"}, cfg.BlockedCIDRs)
+	assert.Equal(t, []string{"images.internal.example", "s3.internal.example"}, cfg.AllowedHosts,
+		"the host names are lowercased so the match is case-insensitive")
+}
+
+// TestImageDownloadConfig_InvalidCIDR checks that a malformed range is
+// refused at parse time rather than silently ignored.
+func TestImageDownloadConfig_InvalidCIDR(t *testing.T) {
+	var cfg ImageDownloadConfig
+	assert.ErrorContains(t,
+		yaml.Unmarshal([]byte("blocked_cidr:\n  - not-a-cidr\n"), &cfg),
+		"image_download.blocked_cidr")
+}
+
+// TestImageDownloadConfig_ValidateCIDR checks the same at validation time,
+// for a config built in code.
+func TestImageDownloadConfig_ValidateCIDR(t *testing.T) {
+	cfg := ImageDownloadConfig{BlockedCIDRs: []string{"not-a-cidr"}}
+	assert.ErrorContains(t, cfg.Validate(), "image_download.blocked_cidr")
+
+	cfg = ImageDownloadConfig{BlockedCIDRs: []string{"172.31.0.0/16"}}
+	assert.NoError(t, cfg.Validate())
+}
