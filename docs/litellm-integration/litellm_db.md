@@ -35,6 +35,7 @@ litellm_db:
 | `log_queue_size`                   | int      | 5000    | Spend log queue size                                                                       |
 | `log_batch_size`                   | int      | 100     | Spend log batch size                                                                       |
 | `log_flush_interval`               | duration | 5s      | Spend log flush interval                                                                   |
+| `log_queue_full_timeout`           | duration | 5s      | Wait for room in a full spend queue before the row is dropped (`0`: drop at once)          |
 | `log_workers`                      | int      | 4       | Parallel spend log writer workers                                                          |
 | `spend_updates_single_round_trip`  | bool     | false   | Send a batch's counter, budget window and daily updates in one round trip (a pgx batch)    |
 | `disable_spend_logs_write`         | bool     | false   | Skip spend writes to Postgres ([Kafka](kafka_spend_log.md) as the only sink)               |

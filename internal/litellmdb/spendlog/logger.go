@@ -166,7 +166,7 @@ func (sl *Logger) Start() {
 }
 
 // Log adds an entry to the queue with backpressure handling
-// BLOCKING: Waits up to 5 seconds for queue space if full
+// BLOCKING: Waits up to log_queue_full_timeout (5s by default) for queue space if full; 0 drops at once
 // Returns ErrQueueFull if timeout reached (entry not queued)
 // This preserves all spend entries with slight latency impact on API calls
 // If queue has space, returns immediately
@@ -183,8 +183,14 @@ func (sl *Logger) Log(entry *models.SpendLogEntry) error {
 		return nil
 	}
 
+	timeout := sl.config.QueueFullTimeout()
+	if timeout <= 0 {
+		sl.recordQueueDrop(entry, "queue_full_no_wait")
+		return models.ErrQueueFull
+	}
+
 	// Queue was full, now attempt blocking send with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	atomic.AddInt64(&sl.pendingEntries, 1)
 
@@ -200,7 +206,7 @@ func (sl *Logger) Log(entry *models.SpendLogEntry) error {
 
 	case <-ctx.Done():
 		atomic.AddInt64(&sl.pendingEntries, -1)
-		// Timeout reached - queue still full after 5 seconds
+		// Timeout reached - queue still full after the timeout
 		sl.recordQueueDrop(entry, "queue_full_timeout")
 		return models.ErrQueueFull
 
@@ -280,7 +286,7 @@ func (sl *Logger) tryEnqueueNow(entry *models.SpendLogEntry) bool {
 func (sl *Logger) recordQueueDrop(entry *models.SpendLogEntry, reason string) {
 	atomic.AddUint64(&sl.dropped, 1)
 	atomic.AddUint64(&sl.queueFullCount, 1)
-	monitoring.RecordSpendDropped(1)
+	monitoring.RecordSpendDropped(reason, 1)
 	sl.publishSnapshot()
 	sl.logger.Error("[DB] SpendLog entry dropped: queue full",
 		"request_id", entry.RequestID,

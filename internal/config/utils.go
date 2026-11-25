@@ -290,6 +290,7 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 			"auth_cache_ttl", cfg.LiteLLMDB.AuthCacheTTL.String(),
 			"auth_cache_size", cfg.LiteLLMDB.AuthCacheSize,
 			"log_queue_size", cfg.LiteLLMDB.LogQueueSize,
+			"log_queue_full_timeout", cfg.LiteLLMDB.LogQueueFullTimeout.String(),
 			"log_batch_size", cfg.LiteLLMDB.LogBatchSize,
 			"log_flush_interval", cfg.LiteLLMDB.LogFlushInterval.String(),
 			"log_workers", cfg.LiteLLMDB.LogWorkers,

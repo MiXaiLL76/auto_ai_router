@@ -379,6 +379,7 @@ litellm_db:
   log_queue_size: 5000  # Spend log queue size (default: 5000)
   log_batch_size: 100  # Spend log batch size (default: 100)
   log_flush_interval: 5s  # Spend log flush interval (default: 5s)
+  log_queue_full_timeout: 5s  # Wait for room in a full spend queue before dropping the row; 0 drops at once (default: 5s)
   log_workers: 4  # Parallel queue-draining writer workers (default: 4)
   spend_updates_single_round_trip: false  # Send a batch's counter and daily updates in one round trip (default: false)
   disable_spend_logs_write: false  # Skip spend writes to Postgres, e.g. when Kafka is the only spend sink (default: false)

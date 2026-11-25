@@ -488,11 +488,12 @@ var (
 		},
 	)
 
-	SpendDroppedTotal = promauto.NewCounter(
+	SpendDroppedTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "auto_ai_router_spend_dropped_total",
 			Help: "Total spend entries dropped before persistence",
 		},
+		[]string{"reason"},
 	)
 
 	SpendDLQOverflowTotal = promauto.NewCounter(
@@ -576,8 +577,17 @@ func addCounter(counter prometheus.Counter, count uint64) {
 	}
 }
 
-func RecordSpendDropped(count uint64) {
-	addCounter(SpendDroppedTotal, count)
+// SpendDropReasons are the reasons a spend entry is dropped before it is queued.
+var SpendDropReasons = []string{"queue_full_timeout", "queue_full_no_wait"}
+
+func init() {
+	for _, reason := range SpendDropReasons {
+		SpendDroppedTotal.WithLabelValues(reason)
+	}
+}
+
+func RecordSpendDropped(reason string, count uint64) {
+	addCounter(SpendDroppedTotal.WithLabelValues(reason), count)
 }
 
 func RecordSpendDLQOverflow(count uint64) {
