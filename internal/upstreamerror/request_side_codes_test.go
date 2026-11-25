@@ -12,9 +12,9 @@ import (
 // TestClassifyProviderErrorSignals_RequestSideCodes covers the provider
 // codes that mean the REQUEST is at fault.
 //
-// Several providers answer with an HTTP 200 and put the failure in the
-// body (Alibaba's dashscope does), so the router has to read the code out
-// of the body to classify the failure. Without that, the failure came out
+// Some providers answer with an HTTP 200 and put the failure in the
+// body, so the router has to read the code out of the body to classify
+// the failure. Without that, the failure came out
 // as a generic 502 "Request failed" -- indistinguishable from the provider
 // being down, and the credential was blamed for a fault every credential
 // would reproduce identically.
@@ -23,8 +23,8 @@ func TestClassifyProviderErrorSignals_RequestSideCodes(t *testing.T) {
 		name string
 		body string
 	}{
-		{"alibaba invalid_parameter_error", `{"error":{"code":"invalid_parameter_error","param":null,"message":"Model output became abnormal while generating a JSON response for response_format."}}`},
-		{"alibaba invalid_parameter_error with type", `{"error":{"code":"invalid_parameter_error","param":null,"message":"Range of input length should be [1, 262144]","type":"invalid_request_error"}}`},
+		{"provider invalid_parameter_error", `{"error":{"code":"invalid_parameter_error","param":null,"message":"Model output became abnormal while generating a JSON response for response_format."}}`},
+		{"provider invalid_parameter_error with type", `{"error":{"code":"invalid_parameter_error","param":null,"message":"Range of input length should be [1, 262144]","type":"invalid_request_error"}}`},
 		{"openai invalid_request_error type", `{"error":{"type":"invalid_request_error","message":"bad request"}}`},
 		{"invalid_parameter code", `{"error":{"code":"invalid_parameter","message":"bad parameter"}}`},
 		{"invalid_request code", `{"error":{"code":"invalid_request","message":"bad request"}}`},

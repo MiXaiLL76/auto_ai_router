@@ -13,8 +13,8 @@ import (
 )
 
 // TestProxyRequest_ProviderErrorIn200Body covers a provider that answers
-// with an HTTP 200 and puts the failure in the body -- Alibaba's dashscope
-// does this for a model that cannot satisfy the requested response_format.
+// with an HTTP 200 and puts the failure in the body -- some do this for a
+// model that cannot satisfy the requested response_format.
 //
 // The failure used to reach the client as a generic 502 "Request failed":
 // indistinguishable from the provider being down, and the credential was
@@ -36,7 +36,7 @@ func TestProxyRequest_ProviderErrorIn200Body(t *testing.T) {
 		Build()
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
-		"model":"qwen3.5-397b-a17b",
+		"model":"test-model",
 		"max_tokens":64,
 		"messages":[{"role":"user","content":"hi"}]
 	}`))
@@ -80,7 +80,7 @@ func TestProxyRequest_ProviderErrorIn200BodyIsNotRetried(t *testing.T) {
 		Build()
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
-		"model":"qwen3.5-397b-a17b","max_tokens":64,
+		"model":"test-model","max_tokens":64,
 		"messages":[{"role":"user","content":"hi"}]
 	}`))
 	req.Header.Set("Authorization", "Bearer master-key")

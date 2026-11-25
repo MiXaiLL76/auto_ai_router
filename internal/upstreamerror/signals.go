@@ -160,12 +160,12 @@ func ClassifyProviderErrorSignals(signals []string) int {
 		}
 	}
 
-	// A provider's own code that says the REQUEST is at fault. Several
+	// A provider's own code that says the REQUEST is at fault. Some
 	// providers answer with an HTTP 200 and put the failure in the body
-	// (Alibaba's dashscope does: {"error":{"code":"invalid_parameter_error",
-	// "message":"..."}}), so without this the failure classified as a generic
-	// 502 -- "Request failed" to the client, and the credential blamed for
-	// a fault that every credential would reproduce identically.
+	// ({"error":{"code":"invalid_parameter_error","message":"..."}}), so
+	// without this the failure classified as a generic 502 -- "Request
+	// failed" to the client, and the credential blamed for a fault that
+	// every credential would reproduce identically.
 	//
 	// The codes are the request-side ones a provider states, in its own
 	// spelling. They are checked AFTER the keyword pass above, so a rate
