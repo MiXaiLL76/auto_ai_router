@@ -389,7 +389,7 @@ func TestFable52ThinkingFromVersionParser(t *testing.T) {
 
 			for _, effort := range []string{"low", "high", "xhigh", "max"} {
 				body := `{"model":"m","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"` + effort + `","temperature":0,"top_p":0.5}`
-				out, err := OpenAIToAnthropic([]byte(body), model, true)
+				out, err := OpenAIToAnthropic([]byte(body), model, true, nil)
 				require.NoError(t, err)
 				var req map[string]interface{}
 				require.NoError(t, json.Unmarshal(out, &req))
@@ -403,7 +403,7 @@ func TestFable52ThinkingFromVersionParser(t *testing.T) {
 				assert.Equal(t, map[string]interface{}{"effort": effort}, got["output_config"], effort)
 			}
 
-			out, err := OpenAIToAnthropic([]byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`), model, true)
+			out, err := OpenAIToAnthropic([]byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`), model, true, nil)
 			require.NoError(t, err)
 			var req map[string]interface{}
 			require.NoError(t, json.Unmarshal(out, &req))

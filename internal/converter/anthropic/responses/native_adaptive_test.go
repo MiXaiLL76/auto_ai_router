@@ -25,7 +25,7 @@ func TestResponsesRequestToAnthropic_NativeAdaptiveEffort(t *testing.T) {
 	for _, effort := range []string{"low", "medium", "high", "xhigh", "max"} {
 		t.Run(effort, func(t *testing.T) {
 			body := `{"model":"minimax-m3.1-flash","input":"hi","max_output_tokens":1000,"reasoning":{"effort":"` + effort + `"}}`
-			converted, err := ResponsesRequestToAnthropic([]byte(body), nativeAdaptiveModel)
+			converted, err := ResponsesRequestToAnthropic([]byte(body), nativeAdaptiveModel, nil)
 			require.NoError(t, err)
 			request := decodeRequest(t, converted)
 			assert.Equal(t, map[string]interface{}{"type": "adaptive"}, request["thinking"])
@@ -36,7 +36,7 @@ func TestResponsesRequestToAnthropic_NativeAdaptiveEffort(t *testing.T) {
 	}
 
 	t.Run("no reasoning keeps the model default", func(t *testing.T) {
-		converted, err := ResponsesRequestToAnthropic([]byte(`{"model":"m","input":"hi","max_output_tokens":1000}`), nativeAdaptiveModel)
+		converted, err := ResponsesRequestToAnthropic([]byte(`{"model":"m","input":"hi","max_output_tokens":1000}`), nativeAdaptiveModel, nil)
 		require.NoError(t, err)
 		request := decodeRequest(t, converted)
 		assert.NotContains(t, request, "thinking")
@@ -46,7 +46,7 @@ func TestResponsesRequestToAnthropic_NativeAdaptiveEffort(t *testing.T) {
 	// Regression guard: models outside the rule keep the budget mapping.
 	t.Run("other minimax model keeps budget thinking", func(t *testing.T) {
 		body := `{"model":"m","input":"hi","max_output_tokens":1000,"reasoning":{"effort":"high"}}`
-		converted, err := ResponsesRequestToAnthropic([]byte(body), "MiniMax-M3")
+		converted, err := ResponsesRequestToAnthropic([]byte(body), "MiniMax-M3", nil)
 		require.NoError(t, err)
 		request := decodeRequest(t, converted)
 		assert.Equal(t, map[string]interface{}{"type": "enabled", "budget_tokens": float64(30000)}, request["thinking"])

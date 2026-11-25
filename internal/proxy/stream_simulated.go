@@ -411,9 +411,16 @@ func (p *Proxy) handleSimulatedNonStream(
 		lastOutcome := resetSimulatedAttemptState(logCtx)
 
 		if attempt > 0 {
-			nextCred, nextReq, ready, rateLimited := p.nextRetryCredential(
+			nextCred, nextReq, ready, rateLimited, prepFault := p.nextRetryCredential(
 				r, logCtx, modelID, cred, prepared, streaming, attempt, triedCreds, attemptedCreds,
 			)
+			if prepFault != nil {
+				// The request itself is at fault: no other credential can
+				// accept it either, so the client gets the classified error
+				// instead of the transport failure that triggered the retry.
+				writeClientRequestFault(w, logCtx, prepFault)
+				return
+			}
 			if !ready {
 				// Every candidate was rate limited (not "no candidate at
 				// all"): remember it so the outcome is a 429 with a
@@ -1187,9 +1194,16 @@ func (p *Proxy) handleSimulatedNativeNonStream(
 		lastOutcome := resetSimulatedAttemptState(logCtx)
 
 		if attempt > 0 {
-			nextCred, nextReq, ready, rateLimited := p.nextRetryCredential(
+			nextCred, nextReq, ready, rateLimited, prepFault := p.nextRetryCredential(
 				r, logCtx, modelID, cred, prepared, streaming, attempt, triedCreds, attemptedCreds,
 			)
+			if prepFault != nil {
+				// The request itself is at fault: no other credential can
+				// accept it either, so the client gets the classified error
+				// instead of the transport failure that triggered the retry.
+				writeClientRequestFault(w, logCtx, prepFault)
+				return
+			}
 			if !ready {
 				// Every candidate was rate limited (not "no candidate at
 				// all"): remember it so the outcome is a 429 with a
@@ -1749,9 +1763,16 @@ func (p *Proxy) handleSimulatedPassthroughNonStream(
 		lastOutcome := resetSimulatedAttemptState(logCtx)
 
 		if attempt > 0 {
-			nextCred, nextReq, ready, rateLimited := p.nextRetryCredential(
+			nextCred, nextReq, ready, rateLimited, prepFault := p.nextRetryCredential(
 				r, logCtx, modelID, cred, prepared, streaming, attempt, triedCreds, attemptedCreds,
 			)
+			if prepFault != nil {
+				// The request itself is at fault: no other credential can
+				// accept it either, so the client gets the classified error
+				// instead of the transport failure that triggered the retry.
+				writeClientRequestFault(w, logCtx, prepFault)
+				return
+			}
 			if !ready {
 				// Every candidate was rate limited (not "no candidate at
 				// all"): remember it so the outcome is a 429 with a

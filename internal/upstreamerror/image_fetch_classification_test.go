@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -76,5 +77,35 @@ func TestClassifyBadRequest_ImageErrorsCarryNoURL(t *testing.T) {
 		assert.NotContains(t, classified.Message, "SECRET")
 		assert.NotContains(t, classified.Message, "cdn.example.com")
 		assert.NotContains(t, classified.Message, "http")
+	}
+}
+
+// TestFixedImageErrorMessagesMatchConverterUtil guards the single source
+// of truth for the router's image error wording: the upstream classifier
+// and the converter that writes the body must agree on every code and its
+// message.
+//
+// They used to be two independent literals. A wording change in one left
+// the other behind, and the router's own body then stopped being recognized
+// on a re-classification pass (LiteLLM compatibility mode, an AIR-to-AIR
+// chain) -- it silently degraded to the generic message instead.
+func TestFixedImageErrorMessagesMatchConverterUtil(t *testing.T) {
+	codes := converterutil.ImageErrorCodes()
+	require.NotEmpty(t, codes)
+
+	for _, code := range codes {
+		want, ok := converterutil.ImageErrorMessageForCode(code)
+		require.True(t, ok, "code %q must resolve to a message", code)
+
+		got, known := fixedImageErrorMessages[code]
+		require.True(t, known, "the classifier must know the router's code %q", code)
+		assert.Equal(t, want, got, "the classifier's message for %q drifted from the router's", code)
+	}
+
+	// And the other way around: the classifier must not claim codes the
+	// router never writes.
+	for code := range fixedImageErrorMessages {
+		_, known := converterutil.ImageErrorMessageForCode(code)
+		assert.True(t, known, "the classifier knows the code %q but the router never writes it", code)
 	}
 }

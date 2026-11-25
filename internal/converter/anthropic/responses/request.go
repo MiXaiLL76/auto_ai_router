@@ -11,13 +11,13 @@ import (
 
 // ResponsesRequestToAnthropic converts a Responses API request body to the
 // Anthropic Messages API format (as JSON).
-func ResponsesRequestToAnthropic(body []byte, model string) ([]byte, error) {
+func ResponsesRequestToAnthropic(body []byte, model string, budget *converterutil.ImageFetchBudget) ([]byte, error) {
 	var req responses.Request
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, converterutil.RequestJSONValidationError(err)
 	}
 
-	anthropicReq, err := buildAnthropicRequest(&req, model)
+	anthropicReq, err := buildAnthropicRequest(&req, model, budget)
 	if err != nil {
 		return nil, fmt.Errorf("ResponsesRequestToAnthropic: build: %w", err)
 	}
@@ -29,7 +29,7 @@ func ResponsesRequestToAnthropic(body []byte, model string) ([]byte, error) {
 	return result, nil
 }
 
-func buildAnthropicRequest(req *responses.Request, model string) (*anthropic.AnthropicRequest, error) {
+func buildAnthropicRequest(req *responses.Request, model string, budget *converterutil.ImageFetchBudget) (*anthropic.AnthropicRequest, error) {
 	if model == "" {
 		model = req.Model
 	}
@@ -116,7 +116,7 @@ func buildAnthropicRequest(req *responses.Request, model string) (*anthropic.Ant
 	}
 
 	// Messages from input
-	messages, err := inputToAnthropicMessages(req.Input)
+	messages, err := inputToAnthropicMessages(req.Input, budget)
 	if err != nil {
 		return nil, err
 	}
@@ -126,7 +126,7 @@ func buildAnthropicRequest(req *responses.Request, model string) (*anthropic.Ant
 }
 
 // inputToAnthropicMessages converts the Responses API input to Anthropic messages.
-func inputToAnthropicMessages(input interface{}) ([]anthropic.AnthropicMessage, error) {
+func inputToAnthropicMessages(input interface{}, budget *converterutil.ImageFetchBudget) ([]anthropic.AnthropicMessage, error) {
 	if input == nil {
 		return nil, nil
 	}
@@ -179,7 +179,7 @@ func inputToAnthropicMessages(input interface{}) ([]anthropic.AnthropicMessage, 
 		switch itemType {
 		case "message", "":
 			flushPendingToolUse()
-			msg, err := messageItemToAnthropic(itemMap, role)
+			msg, err := messageItemToAnthropic(itemMap, role, budget)
 			if err != nil {
 				return nil, err
 			}
@@ -298,7 +298,7 @@ func inputToAnthropicMessages(input interface{}) ([]anthropic.AnthropicMessage, 
 }
 
 // messageItemToAnthropic converts an input message item to an AnthropicMessage.
-func messageItemToAnthropic(itemMap map[string]interface{}, role string) (*anthropic.AnthropicMessage, error) {
+func messageItemToAnthropic(itemMap map[string]interface{}, role string, budget *converterutil.ImageFetchBudget) (*anthropic.AnthropicMessage, error) {
 	anthropicRole := "user"
 	if role == "assistant" || role == "model" {
 		anthropicRole = "assistant"
@@ -318,7 +318,7 @@ func messageItemToAnthropic(itemMap map[string]interface{}, role string) (*anthr
 			if !ok {
 				continue
 			}
-			block, err := contentPartToAnthropic(pm)
+			block, err := contentPartToAnthropic(pm, budget)
 			if err != nil {
 				return nil, err
 			}

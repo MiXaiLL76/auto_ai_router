@@ -2,6 +2,7 @@ package responses
 
 import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 )
 
 // ResponsesRequestMode holds context for a native Responses API conversion session.
@@ -9,6 +10,9 @@ type ResponsesRequestMode struct {
 	ModelID        string // real provider model name
 	DisplayModelID string // alias to echo in responses; falls back to ModelID when empty
 	IsStreaming    bool
+	// ImageBudget bounds the image downloads performed while converting this
+	// request. A nil budget means every download runs with its own timeout.
+	ImageBudget *converterutil.ImageFetchBudget
 }
 
 // DisplayModel returns the model name to embed in responses.

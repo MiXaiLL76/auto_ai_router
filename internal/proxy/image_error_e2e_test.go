@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -182,4 +183,73 @@ func TestProxyRequest_WorkingImageURLReachesProvider(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 	assert.Equal(t, int32(1), atomic.LoadInt32(&upstreamCalls),
 		"a valid image must still reach the provider")
+}
+
+// TestProxyRequest_ImageErrorOnRetryPath checks the bug class the first
+// attempt's classification does not cover: a request whose image URL is
+// bad can reach the retry path (the first credential failed for an
+// unrelated reason), and the retry path must still answer with the
+// classified 4xx rather than the earlier transport error.
+//
+// If a retry site swallowed the classification, the client would get a
+// 502/503 for a bad image URL — the exact "wrong status surfaces instead
+// of a classified client error" bug this PR exists to fix.
+func TestProxyRequest_ImageErrorOnRetryPath(t *testing.T) {
+	const unreachableURL = "http://image-host.invalid/nonexistent.png"
+
+	// The first credential fails with a 503, which is retryable; the
+	// second one is the one whose conversion hits the bad image URL.
+	var firstCalls, secondCalls int32
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&firstCalls, 1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":{"message":"upstream busy"}}`))
+	}))
+	defer first.Close()
+
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&secondCalls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","role":"assistant",
+			"model":"claude-sonnet-4-5","content":[{"type":"text","text":"ok"}],
+			"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer second.Close()
+
+	prx := NewTestProxyBuilder().
+		WithCredentials(
+			config.CredentialConfig{
+				Name: "anthropic-first", Type: "anthropic",
+				BaseURL: first.URL, APIKey: "k1", Priority: 1,
+			},
+			config.CredentialConfig{
+				Name: "anthropic-second", Type: "anthropic",
+				BaseURL: second.URL, APIKey: "k2", Priority: 2,
+			},
+		).
+		Build()
+
+	body := fmt.Sprintf(`{
+		"model":"claude-sonnet-4-5",
+		"max_tokens":128,
+		"messages":[{"role":"user","content":[
+			{"type":"image_url","image_url":{"url":"%s"}},
+			{"type":"text","text":"describe it"}
+		]}]
+	}`, unreachableURL)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	// Whatever the client gets, it must be a 4xx about the image -- not a
+	// 5xx carried over from the first credential's failure.
+	require.Less(t, w.Code, 500, "a bad image URL must not surface as a 5xx: %s", w.Body.String())
+
+	respBody := w.Body.String()
+	assert.NotContains(t, respBody, "image-host.invalid")
+	assert.NotContains(t, respBody, unreachableURL)
 }

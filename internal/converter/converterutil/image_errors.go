@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 )
 
 // ImageErrorReason enumerates the ways an image attachment can fail to
@@ -33,6 +34,9 @@ const (
 	// ImageErrorTooLarge covers an image whose payload exceeds the router's
 	// download limit.
 	ImageErrorTooLarge
+	// ImageErrorTooManyImages covers a request carrying more image
+	// attachments than the router is willing to download for one request.
+	ImageErrorTooManyImages
 )
 
 // imageErrorDetails maps each reason to its fixed client-facing contract.
@@ -73,6 +77,11 @@ var imageErrorDetails = map[ImageErrorReason]struct {
 		message: "Image is too large",
 		code:    "image_too_large",
 		status:  http.StatusRequestEntityTooLarge,
+	},
+	ImageErrorTooManyImages: {
+		message: "Too many images in the request",
+		code:    "too_many_images",
+		status:  http.StatusBadRequest,
 	},
 }
 
@@ -148,6 +157,34 @@ func ImageErrorCode(reason ImageErrorReason) string {
 		details = imageErrorDetails[ImageErrorFetchFailed]
 	}
 	return details.code
+}
+
+// ImageErrorCodes lists every image error code the router can emit.
+//
+// The upstream classifier needs the same code-to-message mapping to recognize
+// a router-written body on a re-classification pass (LiteLLM compatibility
+// mode, an AIR-to-AIR chain). Exposing the codes from here keeps that
+// mapping in one place: the two used to be separate literals, and a wording
+// change in one but not the other silently degraded the router's own body to
+// the generic message.
+func ImageErrorCodes() []string {
+	codes := make([]string, 0, len(imageErrorDetails))
+	for reason := range imageErrorDetails {
+		codes = append(codes, imageErrorDetails[reason].code)
+	}
+	sort.Strings(codes)
+	return codes
+}
+
+// ImageErrorMessageForCode returns the fixed message for an image error code,
+// and whether the code is one this package owns.
+func ImageErrorMessageForCode(code string) (string, bool) {
+	for _, details := range imageErrorDetails {
+		if details.code == code {
+			return details.message, true
+		}
+	}
+	return "", false
 }
 
 // DescribeImageError renders an image error for the router's internal log.

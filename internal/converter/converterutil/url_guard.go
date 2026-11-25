@@ -19,15 +19,38 @@ var blockedMetadataHosts = []string{
 
 // privateIPRanges are the address ranges that must never be reachable
 // through a client-supplied URL.
+//
+// The list covers the RFC 1918 and RFC 6598 private space, the loopback and
+// link-local ranges, and the documentation/b benchmarking ranges. The
+// documentation ranges are here because a host resolving to one is never a
+// real image host, and the benchmarking range (198.18.0.0/15) because it is
+// used by transparent proxies that sit between the router and the internet.
+//
+// The same set is denied by internal/video/storage.go for artifact fetches;
+// both lists cover the same ground so a URL cannot be fetchable through one
+// path and blocked through the other.
 var privateIPRanges = []string{
-	"127.0.0.0/8",
+	"0.0.0.0/8",
 	"10.0.0.0/8",
-	"172.16.0.0/12",
-	"192.168.0.0/16",
+	"100.64.0.0/10", // RFC 6598 shared address space (CGNAT)
+	"127.0.0.0/8",
 	"169.254.0.0/16",
+	"172.16.0.0/12",
+	"192.0.0.0/24", // IETF protocol assignments
+	"192.0.2.0/24", // TEST-NET-1
+	"192.168.0.0/16",
+	"198.18.0.0/15",   // benchmarking
+	"198.51.100.0/24", // TEST-NET-2
+	"203.0.113.0/24",  // TEST-NET-3
+	"224.0.0.0/4",     // multicast
+	"240.0.0.0/4",     // reserved, includes 255.255.255.255
+	"::/128",
 	"::1/128",
-	"fc00::/7",
-	"fe80::/10",
+	"100::/64",      // discard-only
+	"2001:db8::/32", // documentation
+	"fc00::/7",      // unique local
+	"fe80::/10",     // link-local
+	"ff00::/8",      // multicast
 }
 
 var privateNetworks = func() []*net.IPNet {
@@ -42,22 +65,20 @@ var privateNetworks = func() []*net.IPNet {
 	return nets
 }()
 
-// IsPrivateURL reports whether a URL points at private or link-local address
-// space, a loopback address, or a cloud metadata endpoint.
+// IsBlockedHostURL reports whether a URL is refused by name or by its
+// literal address, without resolving anything.
 //
-// This is the SSRF guard for any URL the router fetches on the client's
-// behalf. It resolves the hostname once and checks every returned address,
-// so a hostname with several A records cannot smuggle a private one through.
+// It covers the cases that need no DNS: a malformed URL, an empty host, a
+// known metadata host, "localhost", and a literal IP in a blocked range.
 //
-// DNS rebinding remains possible in principle: an attacker-controlled
-// resolver can answer with a public IP here and a private one at connect
-// time. Callers that fetch the URL themselves should therefore also pin the
-// address they connect to — see GuardedDialContext, which re-checks the
-// resolved address at dial time and closes that gap.
-func IsPrivateURL(rawURL string) bool {
+// A hostname is NOT resolved here: the caller that connects to the URL
+// checks the resolved address at dial time (see GuardedDialContext), so
+// resolving here too would mean two lookups of the same name on the
+// successful path — paid on every image fetch, not only on failures.
+func IsBlockedHostURL(rawURL string) bool {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
-		// An unparseable URL is treated as private: fail closed.
+		// An unparseable URL is treated as blocked: fail closed.
 		return true
 	}
 
@@ -75,6 +96,40 @@ func IsPrivateURL(rawURL string) bool {
 		return true
 	}
 
+	if ip := net.ParseIP(hostname); ip != nil {
+		return isPrivateIP(ip)
+	}
+	return false
+}
+
+// IsPrivateURL reports whether a URL points at private or link-local address
+// space, a loopback address, or a cloud metadata endpoint.
+//
+// This is the SSRF guard for a URL the router does NOT fetch itself, but
+// hands to a provider to fetch (the Vertex path): there is no dial-time
+// check to rely on, so the hostname has to be resolved and vetted here.
+//
+// A caller that fetches the URL itself should use IsBlockedHostURL for the
+// cheap pre-check and let GuardedDialContext do the DNS-bound check at
+// connect time — that way the name is resolved once, not twice.
+//
+// DNS rebinding remains possible in principle: an attacker-controlled
+// resolver can answer with a public IP here and a private one at connect
+// time. GuardedDialContext re-checks the address it is about to connect to,
+// which closes that gap.
+func IsPrivateURL(rawURL string) bool {
+	if IsBlockedHostURL(rawURL) {
+		return true
+	}
+
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return true
+	}
+	hostname := parsed.Hostname()
+	if hostname == "" {
+		return true
+	}
 	if ip := net.ParseIP(hostname); ip != nil {
 		return isPrivateIP(ip)
 	}
@@ -97,6 +152,13 @@ func IsPrivateURL(rawURL string) bool {
 func isPrivateIP(ip net.IP) bool {
 	if ip == nil {
 		return true
+	}
+	// An IPv4 address reached through an IPv6 socket arrives as a
+	// 4-in-6 form (::ffff:10.0.0.1). Unmap it first, or the range check
+	// below would compare it against the IPv6 prefixes only and let it
+	// through.
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
 	}
 	if ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() ||
 		ip.IsMulticast() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {

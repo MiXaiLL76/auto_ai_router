@@ -19,7 +19,7 @@ func TestResponsesRequestToAnthropic_StringInput(t *testing.T) {
 		"max_output_tokens": 512
 	}`
 
-	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5")
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5", nil)
 	require.NoError(t, err)
 
 	var ar map[string]interface{}
@@ -44,7 +44,7 @@ func TestResponsesRequestToAnthropic_StringInput(t *testing.T) {
 func TestResponsesRequestToAnthropic_MaxOutputTokensWrongTypeReportsParam(t *testing.T) {
 	body := `{"model":"claude-haiku-4-5","input":"Say OK.","max_output_tokens":"five"}`
 
-	_, err := ResponsesRequestToAnthropic([]byte(body), "claude-haiku-4-5")
+	_, err := ResponsesRequestToAnthropic([]byte(body), "claude-haiku-4-5", nil)
 	require.Error(t, err)
 	var validationErr *converterutil.RequestValidationError
 	require.True(t, errors.As(err, &validationErr))
@@ -57,7 +57,7 @@ func TestResponsesRequestToAnthropic_SamplingRemoved(t *testing.T) {
 
 	// Opus 4.7+ reject sampling params -> temperature/top_p must be dropped.
 	for _, m := range []string{"claude-opus-4-7", "claude-opus-4-8", "claude-opus-5", "claude-sonnet-5", "claude-fable-5"} {
-		result, err := ResponsesRequestToAnthropic([]byte(body), m)
+		result, err := ResponsesRequestToAnthropic([]byte(body), m, nil)
 		require.NoError(t, err)
 		var ar map[string]interface{}
 		require.NoError(t, json.Unmarshal(result, &ar))
@@ -69,7 +69,7 @@ func TestResponsesRequestToAnthropic_SamplingRemoved(t *testing.T) {
 
 	// Older models still accept them.
 	for _, m := range []string{"claude-opus-4-6", "claude-sonnet-4-5"} {
-		result, err := ResponsesRequestToAnthropic([]byte(body), m)
+		result, err := ResponsesRequestToAnthropic([]byte(body), m, nil)
 		require.NoError(t, err)
 		var ar map[string]interface{}
 		require.NoError(t, json.Unmarshal(result, &ar))
@@ -84,7 +84,7 @@ func TestResponsesRequestToAnthropic_Instructions(t *testing.T) {
 		"input": "Hello"
 	}`
 
-	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5")
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5", nil)
 	require.NoError(t, err)
 
 	var ar map[string]interface{}
@@ -96,7 +96,7 @@ func TestResponsesRequestToAnthropic_Instructions(t *testing.T) {
 func TestResponsesRequestToAnthropic_MaxTokensDefault(t *testing.T) {
 	body := `{"model": "claude-opus-4-5", "input": "hi"}`
 
-	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5")
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5", nil)
 	require.NoError(t, err)
 
 	var ar map[string]interface{}
@@ -118,7 +118,7 @@ func TestResponsesRequestToAnthropic_InputFileFileData(t *testing.T) {
 		}]
 	}`
 
-	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-sonnet-4-5")
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-sonnet-4-5", nil)
 	require.NoError(t, err)
 
 	block := firstUserContentBlock(t, result)
@@ -135,7 +135,7 @@ func TestResponsesRequestToAnthropic_InputFileFileIDUnsupported(t *testing.T) {
 		"input": [{"role": "user", "content": [{"type": "input_file", "file_id": "file-abc"}]}]
 	}`
 
-	_, err := ResponsesRequestToAnthropic([]byte(body), "claude-sonnet-4-5")
+	_, err := ResponsesRequestToAnthropic([]byte(body), "claude-sonnet-4-5", nil)
 	require.Error(t, err)
 	var validationErr *converterutil.RequestValidationError
 	require.True(t, errors.As(err, &validationErr))
@@ -149,7 +149,7 @@ func TestResponsesRequestToAnthropic_InputImageFileIDUnsupported(t *testing.T) {
 		"input": [{"role": "user", "content": [{"type": "input_image", "file_id": "file-abc"}]}]
 	}`
 
-	_, err := ResponsesRequestToAnthropic([]byte(body), "claude-sonnet-4-5")
+	_, err := ResponsesRequestToAnthropic([]byte(body), "claude-sonnet-4-5", nil)
 	require.Error(t, err)
 	var validationErr *converterutil.RequestValidationError
 	require.True(t, errors.As(err, &validationErr))
@@ -163,7 +163,7 @@ func TestResponsesRequestToAnthropic_InputFileFileURL(t *testing.T) {
 		"input": [{"role": "user", "content": [{"type": "input_file", "file_url": "https://example.com/document.pdf"}]}]
 	}`
 
-	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-sonnet-4-5")
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-sonnet-4-5", nil)
 	require.NoError(t, err)
 
 	block := firstUserContentBlock(t, result)
@@ -179,7 +179,7 @@ func TestResponsesRequestToAnthropic_InputFileMalformedBase64(t *testing.T) {
 		"input": [{"role": "user", "content": [{"type": "input_file", "file_data": "data:application/pdf;base64,###"}]}]
 	}`
 
-	_, err := ResponsesRequestToAnthropic([]byte(body), "claude-sonnet-4-5")
+	_, err := ResponsesRequestToAnthropic([]byte(body), "claude-sonnet-4-5", nil)
 	require.Error(t, err)
 	var validationErr *converterutil.RequestValidationError
 	require.True(t, errors.As(err, &validationErr))
@@ -192,7 +192,7 @@ func TestResponsesRequestToAnthropic_InputFileMissingSource(t *testing.T) {
 		"input": [{"role": "user", "content": [{"type": "input_file"}]}]
 	}`
 
-	_, err := ResponsesRequestToAnthropic([]byte(body), "claude-sonnet-4-5")
+	_, err := ResponsesRequestToAnthropic([]byte(body), "claude-sonnet-4-5", nil)
 	require.Error(t, err)
 	var validationErr *converterutil.RequestValidationError
 	require.True(t, errors.As(err, &validationErr))
@@ -213,7 +213,7 @@ func TestResponsesRequestToAnthropic_FunctionTool(t *testing.T) {
 		]
 	}`
 
-	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5")
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5", nil)
 	require.NoError(t, err)
 
 	var ar map[string]interface{}
@@ -240,7 +240,7 @@ func TestResponsesRequestToAnthropic_ComputerUseTool(t *testing.T) {
 		},
 	})
 
-	result, err := ResponsesRequestToAnthropic(body, "claude-opus-4-5")
+	result, err := ResponsesRequestToAnthropic(body, "claude-opus-4-5", nil)
 	require.NoError(t, err)
 
 	var ar map[string]interface{}
@@ -269,7 +269,7 @@ func TestResponsesRequestToAnthropic_UnsupportedToolsSkipped(t *testing.T) {
 		]
 	}`
 
-	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5")
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5", nil)
 	require.NoError(t, err)
 
 	var ar map[string]interface{}
@@ -298,7 +298,7 @@ func TestResponsesRequestToAnthropic_WebSearchConverted(t *testing.T) {
 				"tools": [{"type": "` + toolType + `"}]
 			}`
 
-			result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5")
+			result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5", nil)
 			require.NoError(t, err)
 
 			var ar map[string]interface{}
@@ -324,7 +324,7 @@ func TestResponsesRequestToAnthropic_NativeWebSearchTypePreserved(t *testing.T) 
 		"tools": [{"type": "web_search_20260318", "name": "web_search"}]
 	}`
 
-	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5")
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5", nil)
 	require.NoError(t, err)
 
 	var ar map[string]interface{}
@@ -348,7 +348,7 @@ func TestResponsesRequestToAnthropic_DatedOpenAIWebSearchTypeMapped(t *testing.T
 		"tools": [{"type": "web_search_2025_08_26"}]
 	}`
 
-	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5")
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5", nil)
 	require.NoError(t, err)
 
 	var ar map[string]interface{}
@@ -372,7 +372,7 @@ func TestResponsesRequestToAnthropic_WebSearchToolChoice(t *testing.T) {
 		"tool_choice": {"type": "web_search"}
 	}`
 
-	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5")
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5", nil)
 	require.NoError(t, err)
 
 	var ar map[string]interface{}
@@ -390,7 +390,7 @@ func TestResponsesRequestToAnthropic_ToolChoiceNone(t *testing.T) {
 		"tool_choice": "none"
 	}`
 
-	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5")
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5", nil)
 	require.NoError(t, err)
 
 	var ar map[string]interface{}
@@ -407,7 +407,7 @@ func TestResponsesRequestToAnthropic_ToolChoiceRequired(t *testing.T) {
 		"tool_choice": "required"
 	}`
 
-	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5")
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5", nil)
 	require.NoError(t, err)
 
 	var ar map[string]interface{}
@@ -424,7 +424,7 @@ func TestResponsesRequestToAnthropic_ToolChoiceFunction(t *testing.T) {
 		"tool_choice": {"type": "function", "name": "search"}
 	}`
 
-	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5")
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5", nil)
 	require.NoError(t, err)
 
 	var ar map[string]interface{}
@@ -442,7 +442,7 @@ func TestResponsesRequestToAnthropic_ReasoningEffortHigh(t *testing.T) {
 		"reasoning": {"effort": "high"}
 	}`
 
-	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-8")
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-8", nil)
 	require.NoError(t, err)
 
 	var ar map[string]interface{}
@@ -469,7 +469,7 @@ func TestResponsesRequestToAnthropic_ReasoningEffortLow(t *testing.T) {
 		"reasoning": {"effort": "low"}
 	}`
 
-	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-8")
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-8", nil)
 	require.NoError(t, err)
 
 	var ar map[string]interface{}
@@ -492,7 +492,7 @@ func TestResponsesRequestToAnthropic_ReasoningBudgetRaisesMaxTokens(t *testing.T
 		"max_output_tokens": 5000
 	}`
 
-	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-sonnet-4-5")
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-sonnet-4-5", nil)
 	require.NoError(t, err)
 
 	var ar map[string]interface{}
@@ -511,7 +511,7 @@ func TestResponsesRequestToAnthropic_ReasoningEffortNone(t *testing.T) {
 		"reasoning": {"effort": "none"}
 	}`
 
-	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5")
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5", nil)
 	require.NoError(t, err)
 
 	var ar map[string]interface{}
@@ -525,7 +525,7 @@ func TestResponsesRequestToAnthropic_ReasoningEffortNone(t *testing.T) {
 // thinking off with between_tools, which takes no effort and no betas.
 func TestResponsesRequestToAnthropic_ReasoningEffortNoneOnSonnet55(t *testing.T) {
 	convert := func(model string) map[string]interface{} {
-		result, err := ResponsesRequestToAnthropic([]byte(`{"model":"m","input":"test","reasoning":{"effort":"none"}}`), model)
+		result, err := ResponsesRequestToAnthropic([]byte(`{"model":"m","input":"test","reasoning":{"effort":"none"}}`), model, nil)
 		require.NoError(t, err)
 		var ar map[string]interface{}
 		require.NoError(t, json.Unmarshal(result, &ar))
@@ -550,7 +550,7 @@ func TestResponsesRequestToAnthropic_ConversationHistory(t *testing.T) {
 		]
 	}`
 
-	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5")
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5", nil)
 	require.NoError(t, err)
 
 	var ar map[string]interface{}
@@ -583,7 +583,7 @@ func TestResponsesRequestToAnthropic_FunctionCallHistory(t *testing.T) {
 		]
 	}`
 
-	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5")
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5", nil)
 	require.NoError(t, err)
 
 	var ar map[string]interface{}
@@ -626,7 +626,7 @@ func TestResponsesRequestToAnthropic_ReasoningItemInHistory(t *testing.T) {
 		]
 	}`
 
-	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5")
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5", nil)
 	require.NoError(t, err)
 
 	var ar map[string]interface{}
@@ -651,7 +651,7 @@ func TestResponsesRequestToAnthropic_ComputerCallHistory(t *testing.T) {
 		]
 	}`
 
-	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5")
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5", nil)
 	require.NoError(t, err)
 
 	var ar map[string]interface{}
@@ -702,7 +702,7 @@ func TestResponsesRequestToAnthropic_ComputerCallOutputHistory_URL(t *testing.T)
 		]
 	}`
 
-	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5")
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5", nil)
 	require.NoError(t, err)
 
 	var ar map[string]interface{}
@@ -757,7 +757,7 @@ func TestResponsesRequestToAnthropic_ComputerCallOutputHistory_Base64(t *testing
 		]
 	}`
 
-	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5")
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5", nil)
 	require.NoError(t, err)
 
 	var ar map[string]interface{}
@@ -814,7 +814,7 @@ func TestResponsesRequestToAnthropic_ReasoningItemWithEncryptedContent(t *testin
 		]
 	}`
 
-	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5")
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5", nil)
 	require.NoError(t, err)
 
 	var ar map[string]interface{}
@@ -860,7 +860,7 @@ func TestResponsesRequestToAnthropic_TextFormatJSONSchema(t *testing.T) {
 		}
 	}`
 
-	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-haiku-4-5")
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-haiku-4-5", nil)
 	require.NoError(t, err)
 
 	var ar map[string]interface{}
@@ -897,7 +897,7 @@ func TestResponsesRequestToAnthropic_TextFormatJSONSchemaWithEffort(t *testing.T
 		}
 	}`
 
-	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-8")
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-8", nil)
 	require.NoError(t, err)
 
 	var ar map[string]interface{}
@@ -917,7 +917,7 @@ func TestResponsesRequestToAnthropic_TextFormatJSONObject(t *testing.T) {
 		"text": {"format": {"type": "json_object"}}
 	}`
 
-	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-haiku-4-5")
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-haiku-4-5", nil)
 	require.NoError(t, err)
 
 	var ar map[string]interface{}
@@ -936,7 +936,7 @@ func TestResponsesRequestToAnthropic_TextFormatText(t *testing.T) {
 		"text": {"format": {"type": "text"}}
 	}`
 
-	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-haiku-4-5")
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-haiku-4-5", nil)
 	require.NoError(t, err)
 
 	var ar map[string]interface{}
@@ -961,7 +961,7 @@ func TestResponsesRequestToAnthropic_UnreachableImageURL(t *testing.T) {
 		]}]
 	}`
 
-	_, err := ResponsesRequestToAnthropic([]byte(body), "claude-sonnet-4-5")
+	_, err := ResponsesRequestToAnthropic([]byte(body), "claude-sonnet-4-5", nil)
 	require.Error(t, err)
 
 	var validationErr *converterutil.RequestValidationError

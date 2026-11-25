@@ -55,7 +55,7 @@ func SamplingRemoved(model string) bool {
 //   - service_tier / store: not supported
 //   - parallel_tool_calls: Anthropic always allows parallel tool calls
 //   - prediction / verbosity / prompt_cache_key: not supported
-func OpenAIToAnthropic(openAIBody []byte, model string, isRealAnthropicBackend bool) ([]byte, error) {
+func OpenAIToAnthropic(openAIBody []byte, model string, isRealAnthropicBackend bool, budget *converterutil.ImageFetchBudget) ([]byte, error) {
 	var req openai.OpenAIRequest
 	if err := json.Unmarshal(openAIBody, &req); err != nil {
 		return nil, converterutil.RequestJSONValidationError(err)
@@ -206,7 +206,7 @@ func OpenAIToAnthropic(openAIBody []byte, model string, isRealAnthropicBackend b
 	}
 
 	// Messages (system messages are extracted to the top-level system field)
-	systemContent, messages, err := convertOpenAIMessagesToAnthropic(req.Messages)
+	systemContent, messages, err := convertOpenAIMessagesToAnthropic(req.Messages, budget)
 	if err != nil {
 		return nil, err
 	}
@@ -394,7 +394,7 @@ func reasoningObjectEffort(value interface{}) string {
 // System / developer messages are aggregated into the top-level system field.
 // Tool result messages become user-role messages containing tool_result blocks.
 // Returns (systemContent, messages).
-func convertOpenAIMessagesToAnthropic(openAIMessages []openai.OpenAIMessage) (interface{}, []AnthropicMessage, error) {
+func convertOpenAIMessagesToAnthropic(openAIMessages []openai.OpenAIMessage, budget *converterutil.ImageFetchBudget) (interface{}, []AnthropicMessage, error) {
 	var allSystemBlocks []ContentBlock
 	var messages []AnthropicMessage
 
@@ -405,7 +405,7 @@ func convertOpenAIMessagesToAnthropic(openAIMessages []openai.OpenAIMessage) (in
 			allSystemBlocks = append(allSystemBlocks, sysBlocks...)
 
 		case "user":
-			blocks, err := convertOpenAIContentToAnthropic(msg.Content)
+			blocks, err := convertOpenAIContentToAnthropic(msg.Content, budget)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -430,7 +430,7 @@ func convertOpenAIMessagesToAnthropic(openAIMessages []openai.OpenAIMessage) (in
 					CacheControl: thinking.CacheControl,
 				})
 			}
-			textBlocks, err := convertOpenAIContentToAnthropic(msg.Content)
+			textBlocks, err := convertOpenAIContentToAnthropic(msg.Content, budget)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -455,7 +455,7 @@ func convertOpenAIMessagesToAnthropic(openAIMessages []openai.OpenAIMessage) (in
 			if toolUseID == "" {
 				toolUseID = msg.Name
 			}
-			resultContent, err := convertOpenAIContentToAnthropic(msg.Content)
+			resultContent, err := convertOpenAIContentToAnthropic(msg.Content, budget)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -548,11 +548,11 @@ func toContentBlocks(content interface{}) []ContentBlock {
 // format. It reuses the Anthropic converter and then:
 //   - Removes the "model" field (Bedrock gets model from the URL path)
 //   - Adds "anthropic_version": "bedrock-2023-05-31"
-func OpenAIToBedrock(openAIBody []byte, model string) ([]byte, error) {
+func OpenAIToBedrock(openAIBody []byte, model string, budget *converterutil.ImageFetchBudget) ([]byte, error) {
 	// Bedrock only ever serves Anthropic models here (converter.go gates this call
 	// behind isAnthropicBedrockModel), so the thinking-disable safeguard in
 	// OpenAIToAnthropic never needs to fire.
-	anthropicBody, err := OpenAIToAnthropic(openAIBody, model, true)
+	anthropicBody, err := OpenAIToAnthropic(openAIBody, model, true, budget)
 	if err != nil {
 		return nil, err
 	}

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/stretchr/testify/assert"
@@ -43,7 +44,7 @@ func TestDownloadAndEncodeImageSucceeds(t *testing.T) {
 	}))
 	defer server.Close()
 
-	block, err := DownloadAndEncodeImage(server.URL+"/image.jpg", imageDownloadParam)
+	block, err := DownloadAndEncodeImage(server.URL+"/image.jpg", imageDownloadParam, nil)
 	require.NoError(t, err)
 	require.NotNil(t, block)
 	assert.Equal(t, "image", block.Type)
@@ -66,7 +67,7 @@ func TestDownloadAndEncodeImageSniffsFormat(t *testing.T) {
 	}))
 	defer server.Close()
 
-	block, err := DownloadAndEncodeImage(server.URL+"/image.png", imageDownloadParam)
+	block, err := DownloadAndEncodeImage(server.URL+"/image.png", imageDownloadParam, nil)
 	require.NoError(t, err)
 	require.NotNil(t, block)
 	assert.Equal(t, "image/png", block.Source.MediaType)
@@ -112,7 +113,7 @@ func TestDownloadAndEncodeImageFailures(t *testing.T) {
 		{"empty_body", emptyBody.URL + "/empty.png", converterutil.ImageErrorInvalidData},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			block, err := DownloadAndEncodeImage(tt.url, imageDownloadParam)
+			block, err := DownloadAndEncodeImage(tt.url, imageDownloadParam, nil)
 			require.Error(t, err)
 			assert.Nil(t, block)
 
@@ -140,7 +141,7 @@ func TestDownloadAndEncodeImageRejectsPrivateURL(t *testing.T) {
 		"http://192.168.1.10/image.png",
 	} {
 		t.Run(url, func(t *testing.T) {
-			block, err := DownloadAndEncodeImage(url, imageDownloadParam)
+			block, err := DownloadAndEncodeImage(url, imageDownloadParam, nil)
 			require.Error(t, err)
 			assert.Nil(t, block)
 
@@ -168,7 +169,7 @@ func TestDownloadAndEncodeImageRejectsOversized(t *testing.T) {
 	}))
 	defer server.Close()
 
-	block, err := DownloadAndEncodeImage(server.URL+"/big.png", imageDownloadParam)
+	block, err := DownloadAndEncodeImage(server.URL+"/big.png", imageDownloadParam, nil)
 	require.Error(t, err)
 	assert.Nil(t, block)
 
@@ -190,7 +191,7 @@ func TestConvertImageURLToAnthropicReportsClientError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	result, err := convertImageURLToAnthropic(server.URL + "/missing.png")
+	result, err := convertImageURLToAnthropic(server.URL+"/missing.png", nil)
 	require.Error(t, err)
 	assert.Nil(t, result)
 
@@ -218,8 +219,137 @@ func TestDownloadAndEncodeImageSendsBrowserLikeUserAgent(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, err := DownloadAndEncodeImage(server.URL+"/image.png", imageDownloadParam)
+	_, err := DownloadAndEncodeImage(server.URL+"/image.png", imageDownloadParam, nil)
 	require.NoError(t, err)
 	assert.Contains(t, gotUA, "Mozilla/5.0")
 	assert.True(t, strings.Contains(gotAccept, "image/*"), "Accept header should allow images, got %q", gotAccept)
+}
+
+// TestDownloadAndEncodeImageRejectsHTMLAtImageURL covers the case the
+// extension fallback used to get wrong: an expired-link or login page
+// served at a presigned URL whose name ends in .jpg is HTML, not a
+// picture. Accepting it because the URL mentions ".jpg" would forward the
+// page to the provider as a genuine image.
+func TestDownloadAndEncodeImageRejectsHTMLAtImageURL(t *testing.T) {
+	withPermissiveImageFetch(t)
+
+	html := []byte("<html><body>Your link has expired</body></html>")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// No Content-Type, so the router has to decide from the bytes.
+		_, _ = w.Write(html)
+	}))
+	defer server.Close()
+
+	// The path ends in .jpg and the query carries a signature — both would
+	// fool a substring match on the whole URL.
+	block, err := DownloadAndEncodeImage(server.URL+"/photo.jpg?X-Amz-Signature=SECRET", imageDownloadParam, nil)
+	require.Error(t, err)
+	assert.Nil(t, block)
+
+	var imageErr *converterutil.ImageError
+	require.True(t, errors.As(err, &imageErr))
+	assert.Equal(t, converterutil.ImageErrorInvalidData, imageErr.Reason)
+	assert.NotContains(t, err.Error(), "SECRET")
+}
+
+// TestDownloadAndEncodeImageDetectsUnsupportedFormat covers a well-formed
+// image in a format the provider rejects: the client should be told the
+// format is unsupported, not that the image data is corrupt.
+func TestDownloadAndEncodeImageDetectsUnsupportedFormat(t *testing.T) {
+	withPermissiveImageFetch(t)
+
+	svg := []byte(`<svg xmlns="http://www.w3.org/2000/svg"></svg>`)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/svg+xml")
+		_, _ = w.Write(svg)
+	}))
+	defer server.Close()
+
+	block, err := DownloadAndEncodeImage(server.URL+"/vector.svg", imageDownloadParam, nil)
+	require.Error(t, err)
+	assert.Nil(t, block)
+
+	var imageErr *converterutil.ImageError
+	require.True(t, errors.As(err, &imageErr))
+	assert.Equal(t, converterutil.ImageErrorUnsupportedMediaType, imageErr.Reason)
+}
+
+// TestDetectImageFormat checks the byte-level sniffing directly, including
+// the formats this router cannot forward.
+func TestDetectImageFormat(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		data  []byte
+		want  string
+		known bool
+	}{
+		{"jpeg", []byte{0xFF, 0xD8, 0xFF, 0xE0}, "image/jpeg", true},
+		{"png", []byte("\x89PNG\r\n\x1a\n"), "image/png", true},
+		{"gif", []byte("GIF89a..."), "image/gif", true},
+		{"webp", []byte("RIFF\x00\x00\x00\x00WEBPVP8 "), "image/webp", true},
+		{"svg", []byte(`<svg xmlns="...">`), "image/svg+xml", true},
+		{"bmp", []byte("BM\x00\x00..."), "image/bmp", true},
+		{"html", []byte("<html>expired</html>"), "", false},
+		{"json", []byte(`{"error":"nope"}`), "", false},
+		{"empty", nil, "", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, known := detectImageFormat(tt.data)
+			assert.Equal(t, tt.want, got)
+			assert.Equal(t, tt.known, known)
+		})
+	}
+}
+
+// TestImageMediaTypeFromExtension checks that only the path is considered:
+// a ".jpg" in the query string must not make a non-image look like one.
+func TestImageMediaTypeFromExtension(t *testing.T) {
+	for _, tt := range []struct {
+		url  string
+		want string
+	}{
+		{"https://cdn.example.com/photo.jpg", "image/jpeg"},
+		{"https://cdn.example.com/photo.JPEG", "image/jpeg"},
+		{"https://cdn.example.com/a/b/c.png?token=x", "image/png"},
+		{"https://cdn.example.com/photo.jpg?sig=abc.png", "image/jpeg"},
+		{"https://cdn.example.com/vector.svg", "image/svg+xml"},
+		{"https://cdn.example.com/bitmap.bmp", "image/bmp"},
+		{"https://cdn.example.com/no-extension", ""},
+		{"https://cdn.example.com/", ""},
+		{"https://cdn.example.com/photo.gif?x=.webp", "image/gif"},
+	} {
+		t.Run(tt.url, func(t *testing.T) {
+			assert.Equal(t, tt.want, imageMediaTypeFromExtension(tt.url))
+		})
+	}
+}
+
+// TestDownloadAndEncodeImageRespectsBudget checks the per-request budget:
+// the cap is enforced across the images of one request, not per image.
+func TestDownloadAndEncodeImageRespectsBudget(t *testing.T) {
+	withPermissiveImageFetch(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'})
+	}))
+	defer server.Close()
+
+	budget := converterutil.NewImageFetchBudget(2, time.Minute)
+
+	for i := range 2 {
+		block, err := DownloadAndEncodeImage(server.URL+"/image.png", imageDownloadParam, budget)
+		require.NoError(t, err, "image %d must fit the budget", i)
+		require.NotNil(t, block)
+	}
+
+	// The third image exceeds the cap.
+	block, err := DownloadAndEncodeImage(server.URL+"/image.png", imageDownloadParam, budget)
+	require.Error(t, err)
+	assert.Nil(t, block)
+
+	var imageErr *converterutil.ImageError
+	require.True(t, errors.As(err, &imageErr))
+	assert.Equal(t, converterutil.ImageErrorTooManyImages, imageErr.Reason)
+	assert.NotContains(t, err.Error(), server.URL)
 }

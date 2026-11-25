@@ -30,7 +30,7 @@ type AnthropicResponses struct {
 
 // RequestFrom converts a Responses API request body to Anthropic Messages API JSON.
 func (a *AnthropicResponses) RequestFrom(body []byte) ([]byte, string, error) {
-	converted, err := ResponsesRequestToAnthropic(body, a.mode.ModelID)
+	converted, err := ResponsesRequestToAnthropic(body, a.mode.ModelID, a.mode.ImageBudget)
 	if err != nil {
 		return nil, "", err
 	}

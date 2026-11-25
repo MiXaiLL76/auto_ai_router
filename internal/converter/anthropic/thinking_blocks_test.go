@@ -48,7 +48,7 @@ func TestAnthropicToOpenAI_ReturnsSignedThinkingBlocks(t *testing.T) {
 	request := `{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"","thinking_blocks":` +
 		string(resp.Choices[0].Message.ThinkingBlocks) + `,"tool_calls":[{"id":"toolu_1","type":"function","function":{"name":"f","arguments":"{}"}}]},` +
 		`{"role":"tool","tool_call_id":"toolu_1","content":"ok"}]}`
-	converted, err := OpenAIToAnthropic([]byte(request), "claude-sonnet-5-5", true)
+	converted, err := OpenAIToAnthropic([]byte(request), "claude-sonnet-5-5", true, nil)
 	require.NoError(t, err)
 	var anthropicReq struct {
 		Messages []struct {
@@ -82,7 +82,7 @@ func TestAnthropicToOpenAI_InterleavedThinkingEchoesThinkingFirst(t *testing.T) 
 	request := `{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":` + string(message["content"]) +
 		`,"thinking_blocks":` + string(message["thinking_blocks"]) + `,"tool_calls":` + string(message["tool_calls"]) + `},` +
 		`{"role":"tool","tool_call_id":"toolu_1","content":"ok"}]}`
-	converted, err := OpenAIToAnthropic([]byte(request), "claude-sonnet-5-5", true)
+	converted, err := OpenAIToAnthropic([]byte(request), "claude-sonnet-5-5", true, nil)
 	require.NoError(t, err)
 	var anthropicReq struct {
 		Messages []struct {

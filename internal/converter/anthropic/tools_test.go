@@ -384,7 +384,7 @@ func TestOpenAIToAnthropic_AllowedToolsExpanded(t *testing.T) {
 		"max_tokens": 200
 	}`
 
-	out, err := OpenAIToAnthropic([]byte(body), "", true)
+	out, err := OpenAIToAnthropic([]byte(body), "", true, nil)
 	require.NoError(t, err)
 
 	var req map[string]interface{}
@@ -423,7 +423,7 @@ func TestOpenAIToAnthropic_AllowedToolsViaExtraBody(t *testing.T) {
 		"max_tokens": 200
 	}`
 
-	out, err := OpenAIToAnthropic([]byte(body), "", true)
+	out, err := OpenAIToAnthropic([]byte(body), "", true, nil)
 	require.NoError(t, err)
 
 	var req map[string]interface{}
@@ -452,7 +452,7 @@ func TestOpenAIToAnthropic_ExtraBodyToolChoiceOverridesRegular(t *testing.T) {
 		"max_tokens": 100
 	}`
 
-	out, err := OpenAIToAnthropic([]byte(body), "", true)
+	out, err := OpenAIToAnthropic([]byte(body), "", true, nil)
 	require.NoError(t, err)
 
 	var req map[string]interface{}

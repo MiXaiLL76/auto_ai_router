@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
@@ -190,6 +191,52 @@ func statusForValidationError(e *converterutil.RequestValidationError) int {
 		return e.StatusCode
 	}
 	return http.StatusBadRequest
+}
+
+// isClientRequestFault reports whether an error is a fault of the client's
+// request rather than of the credential or the upstream.
+//
+// A converter-reported *RequestValidationError is one: the request itself is
+// malformed or carries something the provider cannot accept (an unsupported
+// service tier, an unreachable image URL, a payload over the size limit).
+// Such a request cannot succeed on another credential either, so the retry
+// paths must hand it to the client instead of walking the credential pool
+// and finally reporting a generic 5xx.
+//
+// The distinction matters on the retry paths: the first attempt classifies
+// this error and answers it, but a retry that re-runs the request preparation
+// used to log the error and move on to the next credential, so the client
+// saw the earlier transport failure instead of the actual diagnosis.
+func isClientRequestFault(err error) bool {
+	if err == nil {
+		return false
+	}
+	var validationErr *converterutil.RequestValidationError
+	return errors.As(err, &validationErr)
+}
+
+// writeClientRequestFault answers the client with a classified client-side
+// error and records it on the request log. It is the counterpart of the
+// classification the first attempt performs: the retry paths use it when the
+// request preparation fails with a fault of the request itself.
+//
+// The credential is not blamed: the request never reached the provider, so
+// neither its health nor its retry counters move.
+func writeClientRequestFault(w http.ResponseWriter, logCtx *RequestLogContext, err error) {
+	var validationErr *converterutil.RequestValidationError
+	if !errors.As(err, &validationErr) {
+		logCtx.Status = "failure"
+		logCtx.HTTPStatus = http.StatusBadRequest
+		logCtx.ErrorMsg = err.Error()
+		WriteErrorBadRequest(w, "Failed to convert request")
+		return
+	}
+
+	status := statusForValidationError(validationErr)
+	logCtx.Status = "failure"
+	logCtx.HTTPStatus = status
+	logCtx.ErrorMsg = err.Error()
+	writeValidationError(w, validationErr, err.Error())
 }
 
 // writeValidationError writes the client-facing response for a converter

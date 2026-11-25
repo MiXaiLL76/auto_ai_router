@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"regexp"
 	"strings"
+
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 )
 
 // This file recognizes a body that this package's own classifier has already
@@ -67,12 +69,22 @@ var fixedErrorMessages = map[string]string{ //nolint:gosec // G101: these are th
 // stay separate: "invalid_image" there is the classifier's verdict on a
 // provider's own "Invalid image data", and the router's "not an image"
 // verdict uses its own code so the two never collide.
-var fixedImageErrorMessages = map[string]string{ //nolint:gosec // G101: these are the classifier's own client-facing messages, not credentials
-	"image_fetch_failed":           "Failed to fetch image URL",
-	"image_url_not_allowed":        "Image URL is not allowed",
-	"unsupported_image_media_type": "Unsupported image media type",
-	"image_too_large":              "Image is too large",
-	"invalid_image_data":           "Image URL did not return a valid image",
+//
+// The messages themselves come from converterutil, which owns the codes the
+// router writes into a response body. They used to be spelled out here as
+// well, and the two copies drifted apart: a wording change in one left the
+// other behind, and the router's own body then stopped being recognized on
+// re-classification -- the exact drift this file exists to prevent.
+var fixedImageErrorMessages = buildFixedImageErrorMessages()
+
+func buildFixedImageErrorMessages() map[string]string {
+	messages := make(map[string]string)
+	for _, code := range converterutil.ImageErrorCodes() {
+		if message, ok := converterutil.ImageErrorMessageForCode(code); ok {
+			messages[code] = message
+		}
+	}
+	return messages
 }
 
 // routerContextLengthMessageRe matches the message contextLengthMessage

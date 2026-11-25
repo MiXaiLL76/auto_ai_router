@@ -55,7 +55,10 @@ func convertContentToParts(content interface{}) ([]*genai.Part, error) {
 				}
 				if part == nil {
 					// If not a data URL, treat as regular URL (http/https)
-					part = parseURLToPart(url, imageURL)
+					part, err = parseURLToPart(url, imageURL, "image_url.url")
+					if err != nil {
+						return nil, err
+					}
 				}
 				return part, nil
 			},
@@ -151,7 +154,10 @@ func convertContentToParts(content interface{}) ([]*genai.Part, error) {
 				}
 				if part == nil {
 					// If not a data URL, treat as regular URL (http/https)
-					part = parseURLToPart(fileID, fileObj)
+					part, err = parseURLToPart(fileID, fileObj, "file.file_id")
+					if err != nil {
+						return nil, err
+					}
 				}
 				return part, nil
 			},

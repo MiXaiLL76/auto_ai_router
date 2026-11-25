@@ -32,7 +32,7 @@ func TestExtractMediaType(t *testing.T) {
 func TestConvertImageURLToAnthropic(t *testing.T) {
 	t.Run("data_url", func(t *testing.T) {
 		url := "data:image/jpeg;base64,/9j/4AAQ"
-		result, err := convertImageURLToAnthropic(url)
+		result, err := convertImageURLToAnthropic(url, nil)
 		require.NoError(t, err)
 		require.NotNil(t, result)
 		assert.Equal(t, "image", result.Type)
@@ -43,7 +43,7 @@ func TestConvertImageURLToAnthropic(t *testing.T) {
 
 	t.Run("data_url_no_media_type_rejected", func(t *testing.T) {
 		url := "data:;base64,abc123"
-		result, err := convertImageURLToAnthropic(url)
+		result, err := convertImageURLToAnthropic(url, nil)
 		require.Error(t, err)
 		assert.Nil(t, result)
 	})
@@ -57,7 +57,7 @@ func TestConvertImageURLToAnthropic(t *testing.T) {
 		}))
 		defer server.Close()
 
-		result, err := convertImageURLToAnthropic(server.URL + "/image.jpg")
+		result, err := convertImageURLToAnthropic(server.URL+"/image.jpg", nil)
 		require.NoError(t, err)
 		require.NotNil(t, result)
 		assert.Equal(t, "image", result.Type)
@@ -66,19 +66,19 @@ func TestConvertImageURLToAnthropic(t *testing.T) {
 	})
 
 	t.Run("invalid_data_url_no_comma", func(t *testing.T) {
-		result, err := convertImageURLToAnthropic("data:image/jpeg;base64")
+		result, err := convertImageURLToAnthropic("data:image/jpeg;base64", nil)
 		require.Error(t, err)
 		assert.Nil(t, result)
 	})
 
 	t.Run("invalid_scheme", func(t *testing.T) {
-		result, err := convertImageURLToAnthropic("ftp://example.com/image.jpg")
+		result, err := convertImageURLToAnthropic("ftp://example.com/image.jpg", nil)
 		require.Error(t, err)
 		assert.Nil(t, result)
 	})
 
 	t.Run("pdf_data_url_rejected", func(t *testing.T) {
-		result, err := convertImageURLToAnthropic("data:application/pdf;base64,JVBERi0=")
+		result, err := convertImageURLToAnthropic("data:application/pdf;base64,JVBERi0=", nil)
 		require.Error(t, err)
 		assert.Nil(t, result)
 	})
@@ -130,7 +130,7 @@ func TestConvertOpenAIContentToAnthropicVideo(t *testing.T) {
 				"source": map[string]interface{}{"type": "url", "url": "https://example.com/clip.mp4"},
 			},
 		}
-		blocks, err := convertOpenAIContentToAnthropic(content)
+		blocks, err := convertOpenAIContentToAnthropic(content, nil)
 		require.NoError(t, err)
 		require.Len(t, blocks, 2)
 		assert.Equal(t, "video", blocks[1].Type)
@@ -149,7 +149,7 @@ func TestConvertOpenAIContentToAnthropicVideo(t *testing.T) {
 				"cache_control": map[string]interface{}{"type": "ephemeral"},
 			},
 		}
-		blocks, err := convertOpenAIContentToAnthropic(content)
+		blocks, err := convertOpenAIContentToAnthropic(content, nil)
 		require.NoError(t, err)
 		require.Len(t, blocks, 1)
 		require.NotNil(t, blocks[0].Source)
@@ -166,7 +166,7 @@ func TestConvertOpenAIContentToAnthropicVideo(t *testing.T) {
 			map[string]interface{}{"type": "video", "source": map[string]interface{}{"type": "base64"}},
 			map[string]interface{}{"type": "video", "source": map[string]interface{}{"type": "file_id", "file_id": "x"}},
 		}
-		blocks, err := convertOpenAIContentToAnthropic(content)
+		blocks, err := convertOpenAIContentToAnthropic(content, nil)
 		require.NoError(t, err)
 		assert.Empty(t, blocks)
 	})
@@ -178,7 +178,7 @@ func TestConvertOpenAIContentToAnthropicVideo(t *testing.T) {
 				"video_url": map[string]interface{}{"url": "https://example.com/clip.mp4"},
 			},
 		}
-		blocks, err := convertOpenAIContentToAnthropic(content)
+		blocks, err := convertOpenAIContentToAnthropic(content, nil)
 		require.NoError(t, err)
 		require.Len(t, blocks, 1)
 		assert.Equal(t, "text", blocks[0].Type)

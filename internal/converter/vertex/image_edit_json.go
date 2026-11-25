@@ -88,8 +88,11 @@ func imageEditJSONURL(raw json.RawMessage, param string) (*openai.ImageURL, erro
 		}
 	} else {
 		parsed, err := url.Parse(value)
-		if err != nil || parsed.Host == "" || parsed.Scheme != "https" && parsed.Scheme != "http" && parsed.Scheme != "gs" || parseURLToPart(value, nil) == nil {
+		if err != nil || parsed.Host == "" || parsed.Scheme != "https" && parsed.Scheme != "http" && parsed.Scheme != "gs" {
 			return nil, imageValidationError(param, "Invalid image data", "invalid_image")
+		}
+		if _, err := parseURLToPart(value, nil, param); err != nil {
+			return nil, err
 		}
 	}
 	return &openai.ImageURL{URL: value}, nil

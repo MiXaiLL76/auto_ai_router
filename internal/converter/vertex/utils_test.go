@@ -188,16 +188,11 @@ func TestParseURLToPart(t *testing.T) {
 			fileObj: map[string]interface{}{},
 			wantNil: true,
 		},
-		{
-			name:    "file:// URL blocked (SSRF)",
-			url:     "file:///tmp/data.txt",
-			fileObj: map[string]interface{}{},
-			wantNil: true,
-		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := parseURLToPart(tt.url, tt.fileObj)
+			result, err := parseURLToPart(tt.url, tt.fileObj, "image_url.url")
+			require.NoError(t, err)
 			if tt.wantNil {
 				assert.Nil(t, result)
 				return
@@ -213,7 +208,8 @@ func TestParseURLToPart(t *testing.T) {
 func TestParseURLToPart_PublicIP(t *testing.T) {
 	// Use IP-based URLs to avoid DNS resolution issues in sandboxed environments
 	t.Run("https URL with public IP", func(t *testing.T) {
-		result := parseURLToPart("https://93.184.216.34/photo.jpg", map[string]interface{}{})
+		result, err := parseURLToPart("https://93.184.216.34/photo.jpg", map[string]interface{}{}, "image_url.url")
+		require.NoError(t, err)
 		require.NotNil(t, result)
 		require.NotNil(t, result.FileData)
 		assert.Equal(t, "image/jpeg", result.FileData.MIMEType)
@@ -221,7 +217,8 @@ func TestParseURLToPart_PublicIP(t *testing.T) {
 	})
 
 	t.Run("http URL with public IP and explicit format", func(t *testing.T) {
-		result := parseURLToPart("http://93.184.216.34/file", map[string]interface{}{"format": "image/png"})
+		result, err := parseURLToPart("http://93.184.216.34/file", map[string]interface{}{"format": "image/png"}, "image_url.url")
+		require.NoError(t, err)
 		require.NotNil(t, result)
 		require.NotNil(t, result.FileData)
 		assert.Equal(t, "image/png", result.FileData.MIMEType)
@@ -232,12 +229,14 @@ func TestParseURLToPart_PublicIP(t *testing.T) {
 		// are not in hand to sniff. The part is dropped rather than forwarded with
 		// an "application/octet-stream" placeholder, which Gemini rejects with a
 		// 400 that — being retryable — was replayed across every credential.
-		result := parseURLToPart("https://93.184.216.34/noext", map[string]interface{}{})
+		result, err := parseURLToPart("https://93.184.216.34/noext", map[string]interface{}{}, "image_url.url")
+		require.NoError(t, err)
 		assert.Nil(t, result)
 	})
 
 	t.Run("explicit octet-stream format is skipped", func(t *testing.T) {
-		result := parseURLToPart("https://93.184.216.34/file", map[string]interface{}{"format": "application/octet-stream"})
+		result, err := parseURLToPart("https://93.184.216.34/file", map[string]interface{}{"format": "application/octet-stream"}, "image_url.url")
+		require.NoError(t, err)
 		assert.Nil(t, result)
 	})
 }
@@ -290,5 +289,39 @@ func TestIsImageMIME(t *testing.T) {
 	}
 	for _, mimeType := range []string{"", "image", "video/mp4", "application/pdf", " image/png", "imagex/png"} {
 		assert.False(t, IsImageMIME(mimeType), mimeType)
+	}
+}
+
+// TestParseURLToPart_BlockedURLReportsError covers the SSRF guard: a URL
+// the router refuses to forward is reported as a classified error, not as a
+// nil part.
+//
+// It used to return nil, and the caller treated that as "nothing to add
+// here" -- the client got a normal 200 with the image silently missing and
+// no hint why.
+func TestParseURLToPart_BlockedURLReportsError(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		url  string
+	}{
+		{"file scheme", "file:///etc/passwd"},
+		{"loopback", "http://127.0.0.1/a.png"},
+		{"private 10", "http://10.0.0.1/a.png"},
+		{"link local metadata", "http://169.254.169.254/latest/meta-data/"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := parseURLToPart(tt.url, map[string]interface{}{}, "input[0].image_url")
+			require.Error(t, err)
+			assert.Nil(t, result)
+
+			var imageErr *converterutil.ImageError
+			require.True(t, errors.As(err, &imageErr))
+			assert.Equal(t, converterutil.ImageErrorURLNotAllowed, imageErr.Reason)
+			assert.Equal(t, "input[0].image_url", imageErr.Param)
+
+			// No URL in the client-facing message.
+			assert.NotContains(t, err.Error(), tt.url)
+			assert.NotContains(t, err.Error(), "http://")
+		})
 	}
 }

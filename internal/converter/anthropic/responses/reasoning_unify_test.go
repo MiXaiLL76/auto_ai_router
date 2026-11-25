@@ -108,7 +108,7 @@ func TestTransformAnthropicStreamToResponses_EmptyThinkingEventsPaired(t *testin
 
 func anthropicMessages(t *testing.T, input string) []map[string]interface{} {
 	t.Helper()
-	result, err := ResponsesRequestToAnthropic([]byte(`{"model": "claude", "input": `+input+`}`), "claude")
+	result, err := ResponsesRequestToAnthropic([]byte(`{"model": "claude", "input": `+input+`}`), "claude", nil)
 	require.NoError(t, err)
 	var ar struct {
 		Messages []map[string]interface{} `json:"messages"`

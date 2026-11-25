@@ -31,6 +31,24 @@ func TestIsPrivateURLBlocksInternalTargets(t *testing.T) {
 		{"link_local_v6", "http://[fe80::1]/image.png"},
 		{"unspecified", "http://0.0.0.0/image.png"},
 		{"multicast", "http://224.0.0.1/image.png"},
+		// RFC 6598 shared address space: used by AWS NAT gateways, GCP
+		// and some Kubernetes setups, so a client could reach an internal
+		// service through it.
+		{"cgnat", "http://100.64.0.1/image.png"},
+		{"cgnat_upper_edge", "http://100.127.255.254/image.png"},
+		// Documentation and benchmarking ranges.
+		{"test_net_1", "http://192.0.2.1/image.png"},
+		{"test_net_2", "http://198.51.100.1/image.png"},
+		{"test_net_3", "http://203.0.113.1/image.png"},
+		{"benchmarking", "http://198.18.0.1/image.png"},
+		{"ietf_protocol", "http://192.0.0.1/image.png"},
+		{"reserved", "http://240.0.0.1/image.png"},
+		{"broadcast", "http://255.255.255.255/image.png"},
+		{"documentation_v6", "http://[2001:db8::1]/image.png"},
+		// An IPv4 address reached through an IPv6 socket arrives in the
+		// 4-in-6 form and must be unmapped before the range check.
+		{"ipv4_mapped_cgnat", "http://[::ffff:100.64.0.1]/image.png"},
+		{"ipv4_mapped_private", "http://[::ffff:10.0.0.1]/image.png"},
 		{"metadata_google", "http://metadata.google.internal/computeMetadata/v1/"},
 		{"metadata_aws", "http://metadata.aws.internal/latest/meta-data/"},
 		{"metadata_goog_alias", "http://metadata.goog/computeMetadata/v1/"},
@@ -57,6 +75,9 @@ func TestIsPrivateURLAllowsPublicTargets(t *testing.T) {
 		{"public_with_query", "https://cdn.example.com/img.png?X-Amz-Signature=abc"},
 		// 172.32.0.1 sits just outside the 172.16.0.0/12 private block.
 		{"public_172_edge", "http://172.32.0.1/image.png"},
+		// 100.63.255.255 sits just outside the 100.64.0.0/10 block.
+		{"public_cgnat_edge", "http://100.63.255.255/image.png"},
+		{"public_100_128", "http://100.128.0.1/image.png"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.False(t, IsPrivateURL(tt.url), "%s must be allowed", tt.url)

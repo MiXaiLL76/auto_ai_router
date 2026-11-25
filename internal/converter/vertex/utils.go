@@ -156,24 +156,34 @@ func IsPrivateURL(rawURL string) bool {
 
 // parseURLToPart converts a regular URL or file reference to a genai.Part.
 // Supports https and gs:// URLs. Blocks file:// and private network URLs (SSRF protection).
-func parseURLToPart(rawURL string, fileObj map[string]interface{}) *genai.Part {
+//
+// A URL the router refuses to forward (file://, a private or link-local
+// address) is reported as an error rather than as a nil part. Dropping it
+// silently meant the client got a normal 200 with the image missing and no
+// hint why -- the same opaque failure the Anthropic path answers with a
+// classified 4xx.
+//
+// A nil part with a nil error still means "nothing usable here" (an
+// unsupported scheme, an unknown extension): there is no part to add, and
+// the caller skips it.
+func parseURLToPart(rawURL string, fileObj map[string]interface{}, param string) (*genai.Part, error) {
 	if rawURL == "" {
-		return nil
+		return nil, nil
 	}
 
 	// block file:// URLs completely (SSRF vector)
 	if strings.HasPrefix(rawURL, "file://") {
-		return nil
+		return nil, converterutil.NewImageError(converterutil.ImageErrorURLNotAllowed, param)
 	}
 
 	if !strings.HasPrefix(rawURL, "http://") && !strings.HasPrefix(rawURL, "https://") &&
 		!strings.HasPrefix(rawURL, "gs://") {
-		return nil
+		return nil, nil
 	}
 
 	//  block private/internal network URLs
 	if (strings.HasPrefix(rawURL, "http://") || strings.HasPrefix(rawURL, "https://")) && IsPrivateURL(rawURL) {
-		return nil
+		return nil, converterutil.NewImageError(converterutil.ImageErrorURLNotAllowed, param)
 	}
 
 	// Determine MIME type from explicit format field or URL extension
@@ -192,7 +202,7 @@ func parseURLToPart(rawURL string, fileObj map[string]interface{}) *genai.Part {
 	// took the whole request down across every credential in the rotation. Skip it
 	// instead, as with the other unusable URLs above.
 	if mimeType == "" || strings.EqualFold(mimeType, "application/octet-stream") {
-		return nil
+		return nil, nil
 	}
 
 	return &genai.Part{
@@ -200,7 +210,7 @@ func parseURLToPart(rawURL string, fileObj map[string]interface{}) *genai.Part {
 			MIMEType: mimeType,
 			FileURI:  rawURL,
 		},
-	}
+	}, nil
 }
 
 // getMimeTypeFromURL determines MIME type from URL extension

@@ -52,6 +52,12 @@ type RequestMode struct {
 	// -- provider Type alone can't tell them apart, since both are
 	// configured as type: "openai".
 	BaseURL string
+	// ImageBudget bounds the image downloads performed while converting this
+	// request. A request may carry several image_url parts, and each one is
+	// fetched separately; without a shared budget the added latency is the
+	// sum of the per-fetch timeouts. A nil budget means every download runs
+	// with its own timeout only.
+	ImageBudget *converterutil.ImageFetchBudget
 	// IsVLLM is true when the credential's *original* configured type is
 	// config.ProviderTypeVLLM. Needed separately from providerType (the
 	// constructor argument to New) because CredentialConfig.EffectiveProviderType
@@ -320,13 +326,13 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 			// method's doc comment).
 			return openaiconv.StripStreamOptions(body), nil
 		}
-		return anthropic.OpenAIToAnthropic(body, c.mode.ModelID, c.providerType == config.ProviderTypeAnthropic)
+		return anthropic.OpenAIToAnthropic(body, c.mode.ModelID, c.providerType == config.ProviderTypeAnthropic, c.mode.ImageBudget)
 	case config.ProviderTypeBedrock:
 		if c.mode.IsImageGeneration {
 			return nil, converterutil.NewRequestValidationError("model", "model does not support image generation")
 		}
 		if isAnthropicBedrockModel(c.mode.ModelID) {
-			return anthropic.OpenAIToBedrock(body, c.mode.ModelID)
+			return anthropic.OpenAIToBedrock(body, c.mode.ModelID, c.mode.ImageBudget)
 		}
 		if c.shouldStripCacheSalt() {
 			body = openaiconv.StripCacheSalt(body)

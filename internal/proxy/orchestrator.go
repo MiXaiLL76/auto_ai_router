@@ -10,6 +10,7 @@ import (
 	"maps"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
@@ -28,7 +29,13 @@ import (
 )
 
 type orchestratedRequest struct {
-	request              *http.Request
+	request *http.Request
+	// imageBudget bounds the image downloads performed while converting this
+	// request. A request may carry several image_url parts and each one is
+	// fetched separately; without a shared budget the added latency is the
+	// sum of the per-fetch timeouts, and the router keeps downloading long
+	// after the client has gone away.
+	imageBudget          *converterutil.ImageFetchBudget
 	body                 []byte // body with realModelID substituted (for non-proxy providers)
 	proxyBody            []byte // body with original modelID alias (for proxy forwarding)
 	proxyPath            string
@@ -375,6 +382,7 @@ func (p *Proxy) orchestrateRequest(
 
 	return &orchestratedRequest{
 		request:                    r,
+		imageBudget:                newImageFetchBudget(r),
 		body:                       body,
 		proxyBody:                  credentialReq.proxyBody,
 		proxyPath:                  credentialReq.proxyPath,
@@ -1668,4 +1676,26 @@ func (p *Proxy) selectCredentialForModel(
 	p.setRetryAfterFromBan(w, modelID, exclude, logCtx.Scope)
 	WriteErrorRateLimit(w, errorMsg)
 	return nil, false
+}
+
+// Image download limits for a single client request.
+//
+// The router downloads a client-supplied image itself, so a request with
+// several attachments costs the sum of the per-fetch timeouts and the router
+// keeps working long after the client disconnected. These bounds keep the
+// work proportional to the request.
+const (
+	// maxImagesPerRequest caps how many images one request may fetch.
+	maxImagesPerRequest = 16
+	// imageFetchBudgetTimeout is the total time one request's image
+	// downloads may take together, across all of its images.
+	imageFetchBudgetTimeout = 15 * time.Second
+)
+
+// newImageFetchBudget returns the image budget for a request.
+//
+// A nil budget (no request in scope) means the downloads run with their own
+// per-fetch timeout only.
+func newImageFetchBudget(r *http.Request) *converterutil.ImageFetchBudget {
+	return converterutil.NewImageFetchBudget(maxImagesPerRequest, imageFetchBudgetTimeout)
 }
