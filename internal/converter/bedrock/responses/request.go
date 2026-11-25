@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	anthropicresponses "github.com/mixaill76/auto_ai_router/internal/converter/anthropic/responses"
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 )
 
 // ResponsesRequestToBedrock converts a Responses API request body to Bedrock Anthropic format.
@@ -12,8 +13,8 @@ import (
 //   - Removes "model" (supplied in the URL path instead)
 //   - Removes "stream" (endpoint choice controls streaming)
 //   - Adds "anthropic_version": "bedrock-2023-05-31"
-func ResponsesRequestToBedrock(body []byte, model string) ([]byte, error) {
-	anthropicBody, err := anthropicresponses.ResponsesRequestToAnthropic(body, model)
+func ResponsesRequestToBedrock(body []byte, model string, budget *converterutil.ImageFetchBudget) ([]byte, error) {
+	anthropicBody, err := anthropicresponses.ResponsesRequestToAnthropic(body, model, budget)
 	if err != nil {
 		return nil, err
 	}

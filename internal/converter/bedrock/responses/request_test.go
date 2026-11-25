@@ -17,7 +17,7 @@ func TestResponsesRequestToBedrock_AddsAnthropicVersion(t *testing.T) {
 		"max_output_tokens": 100
 	}`
 
-	result, err := ResponsesRequestToBedrock([]byte(body), "anthropic.claude-opus-4-7")
+	result, err := ResponsesRequestToBedrock([]byte(body), "anthropic.claude-opus-4-7", nil)
 	require.NoError(t, err)
 
 	var req map[string]interface{}
@@ -37,7 +37,7 @@ func TestResponsesRequestToBedrock_StripStreamField(t *testing.T) {
 		"input": [{"role": "user", "content": "Hi"}]
 	}`
 
-	result, err := ResponsesRequestToBedrock([]byte(body), "anthropic.claude-opus-4-7")
+	result, err := ResponsesRequestToBedrock([]byte(body), "anthropic.claude-opus-4-7", nil)
 	require.NoError(t, err)
 
 	var req map[string]interface{}
@@ -53,7 +53,7 @@ func TestResponsesRequestToBedrock_InputFileFileIDUnsupported(t *testing.T) {
 		"input": [{"role": "user", "content": [{"type": "input_file", "file_id": "file-abc"}]}]
 	}`
 
-	_, err := ResponsesRequestToBedrock([]byte(body), "anthropic.claude-opus-4-7")
+	_, err := ResponsesRequestToBedrock([]byte(body), "anthropic.claude-opus-4-7", nil)
 
 	require.Error(t, err)
 	var validationErr *converterutil.RequestValidationError

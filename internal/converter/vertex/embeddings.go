@@ -570,7 +570,10 @@ func embeddingMediaPart(ref, override, defaultMIME, param string) (*genai.Part, 
 	if mimeType == "" {
 		return nil, converterutil.NewRequestValidationError(param, "cannot determine the MIME type of the file; set mime_type")
 	}
-	part := parseURLToPart(ref, map[string]interface{}{"format": mimeType})
+	part, err := parseURLToPart(ref, map[string]interface{}{"format": mimeType}, param)
+	if err != nil {
+		return nil, err
+	}
 	if part == nil {
 		return nil, converterutil.NewRequestValidationError(param, "unsupported URL: use a data: URL, a public https:// URL or a gs:// URI")
 	}

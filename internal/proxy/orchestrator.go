@@ -28,7 +28,13 @@ import (
 )
 
 type orchestratedRequest struct {
-	request              *http.Request
+	request *http.Request
+	// imageBudget bounds the image downloads performed while converting this
+	// request. A request may carry several image_url parts and each one is
+	// fetched separately; without a shared budget the added latency is the
+	// sum of the per-fetch timeouts, and the router keeps downloading long
+	// after the client has gone away.
+	imageBudget          *converterutil.ImageFetchBudget
 	body                 []byte // body with realModelID substituted (for non-proxy providers)
 	proxyBody            []byte // body with original modelID alias (for proxy forwarding)
 	proxyPath            string
@@ -381,6 +387,7 @@ func (p *Proxy) orchestrateRequest(
 
 	return &orchestratedRequest{
 		request:                    r,
+		imageBudget:                p.newImageFetchBudget(),
 		body:                       body,
 		proxyBody:                  credentialReq.proxyBody,
 		proxyPath:                  credentialReq.proxyPath,
@@ -1680,4 +1687,19 @@ func (p *Proxy) selectCredentialForModel(
 	p.setRetryAfterFromBan(w, modelID, exclude, logCtx.Scope)
 	WriteErrorRateLimit(w, errorMsg)
 	return nil, false
+}
+
+// newImageFetchBudget returns the image budget for one request, under the
+// limits of the router's image_download section.
+//
+// The budget is per request, not per credential: a request that retries on
+// another credential must not get a fresh allowance of image downloads.
+func (p *Proxy) newImageFetchBudget() *converterutil.ImageFetchBudget {
+	limits := p.imageDownload
+	return converterutil.NewImageFetchBudget(converterutil.ImageFetchLimits{
+		MaxImages:     limits.MaxCount,
+		MaxImageBytes: limits.MaxBytes,
+		MaxTotalBytes: limits.MaxTotalBytes,
+		Timeout:       limits.Timeout,
+	})
 }

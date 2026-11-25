@@ -39,7 +39,7 @@ func replayedBlocks(t *testing.T, output []responses.OutputItem) string {
 	require.NoError(t, err)
 	var items []interface{}
 	require.NoError(t, json.Unmarshal(input, &items))
-	messages, err := inputToAnthropicMessages(items)
+	messages, err := inputToAnthropicMessages(items, nil)
 	require.NoError(t, err)
 	var blocks []interface{}
 	for _, message := range messages {

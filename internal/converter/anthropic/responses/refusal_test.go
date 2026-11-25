@@ -120,7 +120,7 @@ func TestAnthropicRefusalOutputCanBeReplayed(t *testing.T) {
 			input = append(input, map[string]interface{}{"role": "user", "content": "Explain the result."})
 			request, err := json.Marshal(map[string]interface{}{"input": input, "max_output_tokens": 100})
 			require.NoError(t, err)
-			converted, err := ResponsesRequestToAnthropic(request, "claude-test")
+			converted, err := ResponsesRequestToAnthropic(request, "claude-test", nil)
 			require.NoError(t, err)
 			var native struct {
 				Messages []struct {

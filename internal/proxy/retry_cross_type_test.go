@@ -206,12 +206,13 @@ func TestSimulatedStreamRetryDoesNotSelectAIRForDirectSend(t *testing.T) {
 	air := config.CredentialConfig{Name: "air", Type: config.ProviderTypeAIR, BaseURL: "http://air.invalid", APIKey: "k2", Priority: 1, RPM: 100, TPM: 10000}
 	prx := NewTestProxyBuilder().WithCredentials(direct, air).Build()
 	tried := map[string]bool{"direct": true}
-	_, _, ready, _ := prx.nextRetryCredential(
+	_, _, ready, _, prepFault := prx.nextRetryCredential(
 		httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
 		&RequestLogContext{Scope: scope.PublicContext()}, "gpt-4", &direct,
 		&orchestratedRequest{baseBody: []byte(requestHeadersCases[0].body), baseProxyBody: []byte(requestHeadersCases[0].body), basePath: "/v1/chat/completions"},
 		false, 1, tried, map[string]bool{"direct": true},
 	)
 	assert.False(t, ready)
+	assert.NoError(t, prepFault)
 	assert.False(t, tried["air"], "AIR must not be consumed by a direct-only retry loop")
 }

@@ -298,6 +298,7 @@ type Config struct {
 	Video          VideoConfig          `yaml:"video,omitempty"`
 	YandexSearch   YandexSearchConfig   `yaml:"yandex_search,omitempty"`
 	VisionFallback VisionFallbackConfig `yaml:"vision_fallback,omitempty"`
+	ImageDownload  ImageDownloadConfig  `yaml:"image_download,omitempty"`
 	LoopGate       LoopGateConfig       `yaml:"loop_gate,omitempty"`
 	// ModelTemplates stores x-model-templates entries as raw interface{} so that
 	// both single-model mappings and lists of models can be defined as YAML anchors
@@ -335,6 +336,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		Video                VideoConfig                `yaml:"video,omitempty"`
 		YandexSearch         YandexSearchConfig         `yaml:"yandex_search,omitempty"`
 		VisionFallback       VisionFallbackConfig       `yaml:"vision_fallback,omitempty"`
+		ImageDownload        ImageDownloadConfig        `yaml:"image_download,omitempty"`
 		LoopGate             LoopGateConfig             `yaml:"loop_gate,omitempty"`
 		ModelTemplates       map[string]interface{}     `yaml:"x-model-templates,omitempty"`
 	}
@@ -364,6 +366,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.Video = raw.Video
 	c.YandexSearch = raw.YandexSearch
 	c.VisionFallback = raw.VisionFallback
+	c.ImageDownload = raw.ImageDownload
 	c.LoopGate = raw.LoopGate
 	c.ModelTemplates = raw.ModelTemplates
 
@@ -2365,6 +2368,14 @@ func Load(path string) (*Config, error) {
 		cfg.LoopGate = DefaultLoopGateConfig()
 	}
 	cfg.LoopGate.ApplyDefaults()
+
+	// A null value ("image_download:" with every child commented out) is present
+	// but never reaches ImageDownloadConfig.UnmarshalYAML, so it needs the
+	// defaults too.
+	if node := mappingValue(&root, "image_download"); node == nil || node.Tag == "!!null" {
+		cfg.ImageDownload = defaultImageDownloadConfig()
+	}
+	cfg.ImageDownload.ApplyDefaults()
 
 	// Ensure HealthCheckPath is always set regardless of whether monitoring section exists.
 	// MonitoringConfig.UnmarshalYAML is only called when a "monitoring:" key is present in YAML.

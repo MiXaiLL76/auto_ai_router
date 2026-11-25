@@ -201,7 +201,7 @@ func TestNextRetryCredential_HonoursForceStreamOptOut(t *testing.T) {
 			prx := NewTestProxyBuilder().WithCredentials(first, second).WithForceStreamForTTFT(true).Build()
 			tried := map[string]bool{"first": true}
 
-			_, nextReq, ready, _ := prx.nextRetryCredential(
+			_, nextReq, ready, _, prepFault := prx.nextRetryCredential(
 				httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
 				&RequestLogContext{Scope: scope.PublicContext()}, "gpt-4", &first,
 				&orchestratedRequest{
@@ -212,6 +212,7 @@ func TestNextRetryCredential_HonoursForceStreamOptOut(t *testing.T) {
 			)
 
 			require.True(t, ready)
+			require.NoError(t, prepFault)
 			streamed := strings.Contains(string(nextReq.body), `"stream":true`)
 			c.want(t, streamed, "nextRetryCredential's rebuilt body: stream:true present = %v, opted out = %v", streamed, c.disabled)
 		})
@@ -235,7 +236,7 @@ func TestNextCrossTypeRetryCredential_HonoursForceStreamOptOut(t *testing.T) {
 			prx := NewTestProxyBuilder().WithCredentials(first, second).WithForceStreamForTTFT(true).Build()
 			tried := map[string]bool{"first": true}
 
-			_, nextReq, ready, _ := prx.nextCrossTypeRetryCredential(
+			_, nextReq, ready, _, prepFault := prx.nextCrossTypeRetryCredential(
 				httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
 				&orchestratedRequest{
 					modelID: "gpt-4", baseBody: body, baseProxyBody: body, basePath: "/v1/chat/completions",
@@ -245,6 +246,7 @@ func TestNextCrossTypeRetryCredential_HonoursForceStreamOptOut(t *testing.T) {
 			)
 
 			require.True(t, ready)
+			require.NoError(t, prepFault)
 			streamed := strings.Contains(string(nextReq.body), `"stream":true`)
 			c.want(t, streamed, "nextCrossTypeRetryCredential's rebuilt body: stream:true present = %v, opted out = %v", streamed, c.disabled)
 		})

@@ -28,7 +28,7 @@ type BedrockResponses struct {
 
 // RequestFrom converts a Responses API request body to Bedrock Anthropic JSON.
 func (b *BedrockResponses) RequestFrom(body []byte) ([]byte, string, error) {
-	converted, err := ResponsesRequestToBedrock(body, b.mode.ModelID)
+	converted, err := ResponsesRequestToBedrock(body, b.mode.ModelID, b.mode.ImageBudget)
 	if err != nil {
 		return nil, "", err
 	}

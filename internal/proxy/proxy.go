@@ -132,7 +132,14 @@ func (p *Proxy) applyCredentialCompatibilityRouting(
 		return true
 	}
 
-	nextCred, nextReq, routed := p.nextPrimaryAfterUnsupportedCredential(r, prepared, modelID, cred, logCtx.Scope, reason, provider)
+	nextCred, nextReq, routed, prepErr := p.nextPrimaryAfterUnsupportedCredential(r, prepared, modelID, cred, logCtx.Scope, reason, provider)
+	if prepErr != nil {
+		// The request itself is at fault: no other credential can accept it
+		// either. Answer the client with the classified error instead of
+		// letting the pool run out and reporting a generic 5xx.
+		writeClientRequestFault(w, logCtx, prepErr)
+		return false
+	}
 	if routed {
 		r.URL.Path = nextReq.path
 		prepared.useCredential(nextCred, nextReq)
@@ -192,6 +199,14 @@ func (p *Proxy) applyCredentialCompatibilityRouting(
 	return false
 }
 
+// nextPrimaryAfterUnsupportedCredential picks the next primary credential
+// after the current one turned out to be incompatible with the request.
+//
+// The returned error is non-nil only for a client-side fault (a classified
+// *RequestValidationError from the request validators): such a request
+// cannot succeed on any other credential either, so the caller must answer
+// it instead of trying candidates until the pool runs out and reporting a
+// generic 5xx.
 func (p *Proxy) nextPrimaryAfterUnsupportedCredential(
 	r *http.Request,
 	prepared *orchestratedRequest,
@@ -200,7 +215,7 @@ func (p *Proxy) nextPrimaryAfterUnsupportedCredential(
 	visibility scope.Context,
 	reason string,
 	provider string,
-) (*config.CredentialConfig, credentialPreparedRequest, bool) {
+) (*config.CredentialConfig, credentialPreparedRequest, bool, error) {
 	triedCreds := GetTried(r.Context())
 	triedCreds[currentCred.Name] = true
 
@@ -213,7 +228,7 @@ func (p *Proxy) nextPrimaryAfterUnsupportedCredential(
 				"provider", provider,
 				"reason", reason,
 				"error", err)
-			return nil, credentialPreparedRequest{}, false
+			return nil, credentialPreparedRequest{}, false, nil
 		}
 		triedCreds[candidate.Name] = true
 		if candidateReason, _ := unsupportedCredentialRequest(candidate, prepared.baseBody, modelID); candidateReason != "" {
@@ -236,6 +251,15 @@ func (p *Proxy) nextPrimaryAfterUnsupportedCredential(
 			prepared.forceStreamForTTFTDisabled,
 		)
 		if prepErr != nil {
+			if isClientRequestFault(prepErr) {
+				p.logger.WarnContext(r.Context(), "Alternate primary request rejected by the request validators",
+					"credential", candidate.Name,
+					"provider", string(candidate.Type),
+					"model", modelID,
+					"reason", reason,
+					"error", prepErr)
+				return nil, credentialPreparedRequest{}, false, prepErr
+			}
 			p.logger.WarnContext(r.Context(), "Failed to prepare alternate primary request after provider compatibility skip",
 				"credential", candidate.Name,
 				"provider", string(candidate.Type),
@@ -251,7 +275,7 @@ func (p *Proxy) nextPrimaryAfterUnsupportedCredential(
 			"next_credential", candidate.Name,
 			"model", modelID,
 			"reason", reason)
-		return candidate, nextReq, true
+		return candidate, nextReq, true, nil
 	}
 
 	p.logger.WarnContext(r.Context(), "Provider compatibility skip exhausted primary credential scan",
@@ -259,7 +283,7 @@ func (p *Proxy) nextPrimaryAfterUnsupportedCredential(
 		"provider", provider,
 		"model", modelID,
 		"reason", reason)
-	return nil, credentialPreparedRequest{}, false
+	return nil, credentialPreparedRequest{}, false, nil
 }
 
 // useCredential switches the prepared request to cred and its prepared body.
@@ -298,7 +322,7 @@ func (p *Proxy) nextCrossTypeRetryCredential(
 	attemptedCreds map[string]bool,
 	attempt int,
 	allowProxy bool,
-) (*config.CredentialConfig, credentialPreparedRequest, bool, bool) {
+) (*config.CredentialConfig, credentialPreparedRequest, bool, bool, error) {
 	modelID := prepared.modelID
 	allowProxy = allowProxy && (!logCtx.IsProxyRequest || cred.IsProxyLike())
 	exclude := triedCreds
@@ -314,7 +338,7 @@ func (p *Proxy) nextCrossTypeRetryCredential(
 		if err != nil {
 			p.logger.DebugContext(r.Context(), "No more retry credentials available",
 				"model", modelID, "attempt", attempt, "error", err)
-			return nil, credentialPreparedRequest{}, false, errors.Is(err, balancer.ErrRateLimitExceeded)
+			return nil, credentialPreparedRequest{}, false, errors.Is(err, balancer.ErrRateLimitExceeded), nil
 		}
 		triedCreds[candidate.Name] = true
 		exclude[candidate.Name] = true
@@ -337,6 +361,18 @@ func (p *Proxy) nextCrossTypeRetryCredential(
 			prepared.forceStreamForTTFTDisabled,
 		)
 		if prepErr != nil {
+			if isClientRequestFault(prepErr) {
+				// The request itself is at fault: no other credential can
+				// accept it either, so the client gets the classified error
+				// instead of the transport failure that triggered the retry.
+				p.logger.WarnContext(r.Context(), "Retry request rejected by the request validators",
+					"credential", candidate.Name,
+					"provider", string(candidate.Type),
+					"model", modelID,
+					"attempt", attempt,
+					"error", prepErr)
+				return nil, credentialPreparedRequest{}, false, false, prepErr
+			}
 			p.logger.WarnContext(r.Context(), "Failed to prepare retry request for credential",
 				"credential", candidate.Name,
 				"provider", string(candidate.Type),
@@ -365,7 +401,7 @@ func (p *Proxy) nextCrossTypeRetryCredential(
 		logCtx.billingPriceResolved = true
 		logCtx.billingPriceModelID = retryPriceModelID
 		logCtx.billingPrice = retryPrice
-		return candidate, preparedRetry, true, false
+		return candidate, preparedRetry, true, false, nil
 	}
 }
 
@@ -653,6 +689,7 @@ type Config struct {
 	PriceRegistry             *models.ModelPriceRegistry // Model pricing information (optional)
 	OrganizationPolicies      *models.OrganizationPolicyRegistry
 	MaxProviderRetries        int                        // Max same-type credential retries (default: 2)
+	ImageDownload             config.ImageDownloadConfig // Limits on the images the router fetches for a client
 	MaxFallbackAttempts       int                        // Max fallback proxy hops per request chain (default: 5)
 	AnthropicDefaultMaxTokens int                        // max_tokens sent to a Claude model when the client sends none (default: 32000)
 	DeepSeekTools             config.DeepSeekToolsConfig // The router-run DeepSeek Search/Fetch adapter's settings
@@ -758,15 +795,16 @@ type Proxy struct {
 	banDecisionsExternal         bool                           // external ban source wired (see recordBanSignal)
 	priceRegistry                *models.ModelPriceRegistry     // Model pricing information (optional)
 	organizationPolicies         *models.OrganizationPolicyRegistry
-	maxProviderRetries           int                  // Max same-type credential retries on provider errors
-	retryPolicy                  *retryPolicy         // compiled Config.Retry
-	maxFallbackAttempts          int                  // Max fallback proxy hops per request chain
-	anthropicDefaultMaxTokens    int                  // max_tokens sent to a Claude model when the client sends none (0 = config.AnthropicDefaultMaxTokens)
-	deepSeekToolsEnabled         bool                 // the router runs DeepSeek's own Search/Fetch tools for models that cannot
-	deepSeekToolsTimeout         time.Duration        // timeout of one Search/Fetch call
-	deepSeekToolsMaxSteps        int                  // bound of the router-run tool loop
-	deepSeekToolsMaxRetries      int                  // retries of a Search/Fetch call after a 429 or 5xx
-	deepSeekToolsQuota           *deepseektools.Quota // per-account QPS pools for Search and Fetch
+	maxProviderRetries           int                        // Max same-type credential retries on provider errors
+	imageDownload                config.ImageDownloadConfig // Limits on the images the router fetches for a client
+	retryPolicy                  *retryPolicy               // compiled Config.Retry
+	maxFallbackAttempts          int                        // Max fallback proxy hops per request chain
+	anthropicDefaultMaxTokens    int                        // max_tokens sent to a Claude model when the client sends none (0 = config.AnthropicDefaultMaxTokens)
+	deepSeekToolsEnabled         bool                       // the router runs DeepSeek's own Search/Fetch tools for models that cannot
+	deepSeekToolsTimeout         time.Duration              // timeout of one Search/Fetch call
+	deepSeekToolsMaxSteps        int                        // bound of the router-run tool loop
+	deepSeekToolsMaxRetries      int                        // retries of a Search/Fetch call after a 429 or 5xx
+	deepSeekToolsQuota           *deepseektools.Quota       // per-account QPS pools for Search and Fetch
 	// deepSeekToolsClients holds one client per distinct destination, so the
 	// router's calls to DeepSeek reuse the connections between the requests
 	// instead of paying a fresh handshake each time.
@@ -912,6 +950,7 @@ func New(cfg *Config) *Proxy {
 		priceRegistry:                    cfg.PriceRegistry,
 		organizationPolicies:             cfg.OrganizationPolicies,
 		maxProviderRetries:               cfg.MaxProviderRetries,
+		imageDownload:                    cfg.ImageDownload,
 		maxFallbackAttempts:              cfg.MaxFallbackAttempts,
 		anthropicDefaultMaxTokens:        cfg.AnthropicDefaultMaxTokens,
 		moonshotToolsTimeout:             cfg.MoonshotTools.RequestTimeout,
@@ -1522,7 +1561,7 @@ func (p *Proxy) nextRetryCredential(
 	streaming bool,
 	attempt int,
 	triedCreds, attemptedCreds map[string]bool,
-) (nextCred *config.CredentialConfig, nextReq credentialPreparedRequest, ready bool, rateLimited bool) {
+) (nextCred *config.CredentialConfig, nextReq credentialPreparedRequest, ready bool, rateLimited bool, prepFault error) {
 	// This helper is used by simulated stream handlers, which send through the
 	// direct-provider path. A proxy-like credential needs proxyRequest dispatch.
 	exclude := maps.Clone(triedCreds)
@@ -1534,7 +1573,7 @@ func (p *Proxy) nextRetryCredential(
 		if err != nil {
 			p.logger.DebugContext(r.Context(), "No more retry credentials available",
 				"model", modelID, "attempt", attempt, "error", err)
-			return nil, credentialPreparedRequest{}, false, errors.Is(err, balancer.ErrRateLimitExceeded)
+			return nil, credentialPreparedRequest{}, false, errors.Is(err, balancer.ErrRateLimitExceeded), nil
 		}
 		preparedRetry, prepErr := p.prepareRequestForCredential(
 			r,
@@ -1551,6 +1590,18 @@ func (p *Proxy) nextRetryCredential(
 			prepared.autoCacheControlDisabled,
 			prepared.forceStreamForTTFTDisabled,
 		)
+		if prepErr != nil && isClientRequestFault(prepErr) {
+			// The request itself is at fault: no other credential can accept
+			// it either, so the client gets the classified error instead of
+			// the transport failure that triggered the retry.
+			p.logger.WarnContext(r.Context(), "Retry request rejected by the request validators",
+				"credential", candidate.Name,
+				"provider", string(candidate.Type),
+				"model", modelID,
+				"attempt", attempt,
+				"error", prepErr)
+			return nil, credentialPreparedRequest{}, false, false, prepErr
+		}
 		if prepErr == nil {
 			publicModelID := logCtx.PublicModelID
 			if publicModelID == "" {
@@ -1574,7 +1625,7 @@ func (p *Proxy) nextRetryCredential(
 			logCtx.billingPriceResolved = true
 			logCtx.billingPriceModelID = retryPriceModelID
 			logCtx.billingPrice = retryPrice
-			return candidate, preparedRetry, true, false
+			return candidate, preparedRetry, true, false, nil
 		}
 		triedCreds[candidate.Name] = true
 		exclude[candidate.Name] = true
@@ -1661,6 +1712,7 @@ func (p *Proxy) sendToCredential(
 			ModelID:        realModelID,
 			DisplayModelID: modelID,
 			IsStreaming:    nativeStreaming,
+			ImageBudget:    prepared.imageBudget,
 		}
 		provResponses = responses.NewProviderResponses(cred.EffectiveProviderType(), mode)
 		if provResponses == nil {
@@ -1711,6 +1763,7 @@ func (p *Proxy) sendToCredential(
 		// Use realModelID for URL construction and body conversion (provider-facing name).
 		// modelID (alias) is used for credential selection and rate limiting.
 		conv = converter.New(cred.EffectiveProviderType(), converter.RequestMode{
+			ImageBudget:       prepared.imageBudget,
 			IsImageGeneration: logCtx.IsImageGeneration,
 			IsImageEdit:       isImageEdit,
 			IsEmbeddings:      isEmbeddings,
@@ -2363,7 +2416,14 @@ dispatch:
 
 		for attempt := retryStart; attempt <= p.maxProviderRetries; attempt++ {
 			if attempt > retryStart {
-				nextCred, nextReq, ok, _ := p.nextCrossTypeRetryCredential(r, prepared, logCtx, cred, triedCreds, attemptedCreds, attempt, true)
+				nextCred, nextReq, ok, _, prepFault := p.nextCrossTypeRetryCredential(r, prepared, logCtx, cred, triedCreds, attemptedCreds, attempt, true)
+				if prepFault != nil {
+					// The request itself is at fault: no other credential can
+					// accept it either, so the client gets the classified error
+					// instead of the transport failure that triggered the retry.
+					writeClientRequestFault(w, logCtx, prepFault)
+					return
+				}
 				if !ok {
 					break
 				}
@@ -2900,7 +2960,14 @@ dispatch:
 			// If no credential is available, break while preserving the last HTTP response
 			// (e.g. a 429 from the provider) so the caller returns it instead of 502.
 			// A fan-out's kept replies can't follow the request to a peer router.
-			nextCred, nextReq, ok, retryRateLimited := p.nextCrossTypeRetryCredential(r, prepared, logCtx, cred, triedCreds, attemptedCreds, attempt, len(embedFanOutReplies.byInput) == 0)
+			nextCred, nextReq, ok, retryRateLimited, prepFault := p.nextCrossTypeRetryCredential(r, prepared, logCtx, cred, triedCreds, attemptedCreds, attempt, len(embedFanOutReplies.byInput) == 0)
+			if prepFault != nil {
+				// The request itself is at fault: no other credential can
+				// accept it either, so the client gets the classified error
+				// instead of the transport failure that triggered the retry.
+				writeClientRequestFault(w, logCtx, prepFault)
+				return
+			}
 			if !ok {
 				// The cascade ran out because every candidate was rate-limited
 				// (RPM/TPM saturated), not because there is no candidate at all.

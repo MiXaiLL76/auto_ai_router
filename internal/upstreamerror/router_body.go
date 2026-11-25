@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"regexp"
 	"strings"
+
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 )
 
 // This file recognizes a body that this package's own classifier has already
@@ -53,6 +55,36 @@ var fixedErrorMessages = map[string]string{ //nolint:gosec // G101: these are th
 	accountBlockedCode:           accountBlockedMessage,
 	sessionBlockedCode:           sessionBlockedMessage,
 	upstreamFetchFailedCode:      upstreamFetchFailedMessage,
+}
+
+// fixedImageErrorMessages holds the router's own image-fetch failures.
+//
+// A client-supplied image URL that the router cannot resolve is a fault of
+// the request, not of the provider: these codes are what the router answers
+// with, and the classifier has to recognize them so a router body survives a
+// re-classification pass (litellm compatibility mode, an AIR-to-AIR proxy
+// chain) instead of degrading to the generic message.
+//
+// Kept in its own map rather than in fixedErrorMessages so the two concerns
+// stay separate: "invalid_image" there is the classifier's verdict on a
+// provider's own "Invalid image data", and the router's "not an image"
+// verdict uses its own code so the two never collide.
+//
+// The messages themselves come from converterutil, which owns the codes the
+// router writes into a response body. They used to be spelled out here as
+// well, and the two copies drifted apart: a wording change in one left the
+// other behind, and the router's own body then stopped being recognized on
+// re-classification -- the exact drift this file exists to prevent.
+var fixedImageErrorMessages = buildFixedImageErrorMessages()
+
+func buildFixedImageErrorMessages() map[string]string {
+	messages := make(map[string]string)
+	for _, code := range converterutil.ImageErrorCodes() {
+		if message, ok := converterutil.ImageErrorMessageForCode(code); ok {
+			messages[code] = message
+		}
+	}
+	return messages
 }
 
 // routerContextLengthMessageRe matches the message contextLengthMessage
@@ -159,6 +191,9 @@ func extractRouterClassification(body []byte, expectedType string) (BadRequest, 
 // like any other provider body.
 func isRouterMessage(code, message string, param *string) bool {
 	if fixed, ok := fixedErrorMessages[code]; ok {
+		return message == fixed
+	}
+	if fixed, ok := fixedImageErrorMessages[code]; ok {
 		return message == fixed
 	}
 	if code == "context_length_exceeded" {

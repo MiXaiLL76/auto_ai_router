@@ -252,6 +252,16 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 			"inject_into_response", cfg.VisionFallback.InjectEnabled(),
 		)
 	}
+	logger.Info("image_download",
+		"max_bytes", cfg.ImageDownload.MaxBytes,
+		"max_total_bytes", cfg.ImageDownload.MaxTotalBytes,
+		"max_count", cfg.ImageDownload.MaxCount,
+		"timeout", cfg.ImageDownload.Timeout,
+		"timeout_per_image", cfg.ImageDownload.TimeoutPerImage,
+		"connect_timeout", cfg.ImageDownload.ConnectTimeout,
+		"blocked_cidr", cfg.ImageDownload.BlockedCIDRs,
+		"allowed_hosts", cfg.ImageDownload.AllowedHosts,
+	)
 	if cfg.LoopGate.Enabled() {
 		logger.Info("loop_gate",
 			"mode", cfg.LoopGate.Mode,

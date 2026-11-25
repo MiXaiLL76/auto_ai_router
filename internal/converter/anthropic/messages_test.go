@@ -36,7 +36,7 @@ func TestOpenAIToAnthropic_AdaptiveThinkingDisplay(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := OpenAIToAnthropic([]byte(tt.body), "claude-opus-4-8", true)
+			result, err := OpenAIToAnthropic([]byte(tt.body), "claude-opus-4-8", true, nil)
 			require.NoError(t, err)
 
 			var request map[string]interface{}
@@ -65,7 +65,7 @@ func TestOpenAIToAnthropic_SamplingParamsDroppedForNewModels(t *testing.T) {
 	}
 	for _, m := range dropped {
 		t.Run("dropped/"+m, func(t *testing.T) {
-			result, err := OpenAIToAnthropic([]byte(body), m, false)
+			result, err := OpenAIToAnthropic([]byte(body), m, false, nil)
 			require.NoError(t, err)
 			var req map[string]interface{}
 			require.NoError(t, json.Unmarshal(result, &req))
@@ -81,7 +81,7 @@ func TestOpenAIToAnthropic_SamplingParamsDroppedForNewModels(t *testing.T) {
 	kept := []string{"claude-opus-4-6", "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-haiku-4-5"}
 	for _, m := range kept {
 		t.Run("kept/"+m, func(t *testing.T) {
-			result, err := OpenAIToAnthropic([]byte(body), m, false)
+			result, err := OpenAIToAnthropic([]byte(body), m, false, nil)
 			require.NoError(t, err)
 			var req map[string]interface{}
 			require.NoError(t, json.Unmarshal(result, &req))
@@ -138,7 +138,7 @@ func TestOpenAIToAnthropic_ResponseFormatJSONSchemaIncludesSchema(t *testing.T) 
 				"strict":true
 			}
 		}
-	}`), "claude-sonnet-4-6", true)
+	}`), "claude-sonnet-4-6", true, nil)
 	require.NoError(t, err)
 
 	var request map[string]interface{}
@@ -187,7 +187,7 @@ func TestOpenAIToAnthropic_ResponseFormatJSONSchemaAddsMissingAdditionalProperti
 				"strict":false
 			}
 		}
-	}`), "claude-haiku-4-5", true)
+	}`), "claude-haiku-4-5", true, nil)
 	require.NoError(t, err)
 
 	var request map[string]interface{}
@@ -225,7 +225,7 @@ func TestOpenAIToAnthropic_ResponseFormatJSONSchemaNormalizesNestedObjectWithout
 				}
 			}
 		}
-	}`), "claude-haiku-4-5", true)
+	}`), "claude-haiku-4-5", true, nil)
 	require.NoError(t, err)
 
 	var request map[string]interface{}
@@ -256,7 +256,7 @@ func TestOpenAIToAnthropic_ResponseFormatJSONSchemaPreservesExplicitAdditionalPr
 				}
 			}
 		}
-	}`), "claude-haiku-4-5", true)
+	}`), "claude-haiku-4-5", true, nil)
 	require.NoError(t, err)
 
 	var request map[string]interface{}
@@ -295,7 +295,7 @@ func TestOpenAIToAnthropic_ResponseFormatJSONSchemaDropsTypeUnionAlongsideEnum(t
 				}
 			}
 		}
-	}`), "claude-haiku-4-5", true)
+	}`), "claude-haiku-4-5", true, nil)
 	require.NoError(t, err)
 
 	var request map[string]interface{}
@@ -338,7 +338,7 @@ func TestOpenAIToAnthropic_ResponseFormatJSONSchemaDropsNumberMinMax(t *testing.
 				}
 			}
 		}
-	}`), "claude-haiku-4-5", true)
+	}`), "claude-haiku-4-5", true, nil)
 	require.NoError(t, err)
 
 	var request map[string]interface{}
@@ -369,7 +369,7 @@ func TestOpenAIToAnthropic_ResponseFormatJSONObjectForbidsMarkdownFences(t *test
 		"model":"claude-sonnet-4-6",
 		"messages":[{"role":"user","content":"test"}],
 		"response_format":{"type":"json_object"}
-	}`), "claude-sonnet-4-6", true)
+	}`), "claude-sonnet-4-6", true, nil)
 	require.NoError(t, err)
 
 	var request map[string]interface{}
@@ -391,7 +391,7 @@ func TestOpenAIToAnthropic_ResponseFormatJSONObjectAppendsToExistingSystem(t *te
 			{"role":"user","content":"test"}
 		],
 		"response_format":{"type":"json_object"}
-	}`), "claude-sonnet-4-6", true)
+	}`), "claude-sonnet-4-6", true, nil)
 	require.NoError(t, err)
 
 	var request map[string]interface{}
@@ -419,7 +419,7 @@ func TestOpenAIToAnthropic_ResponseFormatJSONSchemaPreservesExistingSystem(t *te
 				"strict":true
 			}
 		}
-	}`), "claude-sonnet-4-6", true)
+	}`), "claude-sonnet-4-6", true, nil)
 	require.NoError(t, err)
 
 	var request map[string]interface{}
@@ -445,7 +445,7 @@ func TestOpenAIToAnthropic_ResponseFormatJSONSchemaMergesWithThinkingEffort(t *t
 				"strict":true
 			}
 		}
-	}`), "claude-opus-5", true)
+	}`), "claude-opus-5", true, nil)
 	require.NoError(t, err)
 
 	var request map[string]interface{}
@@ -462,7 +462,7 @@ func TestOpenAIToAnthropic_ReasoningEffortPrecedence(t *testing.T) {
 		"reasoning_effort":"low",
 		"extra_body":{"reasoning":{"effort":"medium"}},
 		"reasoning":{"effort":"high"}
-	}`), "claude-opus-5", true)
+	}`), "claude-opus-5", true, nil)
 	require.NoError(t, err)
 
 	var request map[string]interface{}
@@ -483,7 +483,7 @@ func TestOpenAIToAnthropic_ReasoningObjectCanDisableTopLevelEffort(t *testing.T)
 		"messages":[{"role":"user","content":"test"}],
 		"reasoning_effort":"high",
 		"reasoning":{"effort":"none"}
-	}`), "claude-opus-5", true)
+	}`), "claude-opus-5", true, nil)
 	require.NoError(t, err)
 
 	var request map[string]interface{}
@@ -502,7 +502,7 @@ func TestOpenAIToAnthropic_ChatFileFileData(t *testing.T) {
 		}]
 	}`)
 
-	result, err := OpenAIToAnthropic(body, "claude-sonnet-4-5", true)
+	result, err := OpenAIToAnthropic(body, "claude-sonnet-4-5", true, nil)
 	require.NoError(t, err)
 
 	block := firstAnthropicUserBlock(t, result)
@@ -522,7 +522,7 @@ func TestOpenAIToAnthropic_ChatFileFileIDUnsupported(t *testing.T) {
 		}]
 	}`)
 
-	_, err := OpenAIToAnthropic(body, "claude-sonnet-4-5", true)
+	_, err := OpenAIToAnthropic(body, "claude-sonnet-4-5", true, nil)
 	require.Error(t, err)
 	var validationErr *converterutil.RequestValidationError
 	require.True(t, errors.As(err, &validationErr))
@@ -538,7 +538,7 @@ func TestOpenAIToAnthropic_ChatFileFileIDUnsupported(t *testing.T) {
 func TestOpenAIToAnthropic_MaxTokensWrongTypeReportsParam(t *testing.T) {
 	body := []byte(`{"model":"claude-haiku-4-5","messages":[{"role":"user","content":"Say OK."}],"max_tokens":"five"}`)
 
-	_, err := OpenAIToAnthropic(body, "claude-haiku-4-5", true)
+	_, err := OpenAIToAnthropic(body, "claude-haiku-4-5", true, nil)
 	testhelpers.RequireValidationError(t, err, "max_tokens", "invalid_type")
 }
 
@@ -549,7 +549,7 @@ func TestOpenAIToAnthropic_MaxTokensWrongTypeReportsParam(t *testing.T) {
 func TestOpenAIToBedrock_MaxTokensWrongTypeReportsParam(t *testing.T) {
 	body := []byte(`{"model":"claude-haiku-4-5","messages":[{"role":"user","content":"Say OK."}],"max_tokens":"five"}`)
 
-	_, err := OpenAIToBedrock(body, "claude-haiku-4-5")
+	_, err := OpenAIToBedrock(body, "claude-haiku-4-5", nil)
 	testhelpers.RequireValidationError(t, err, "max_tokens", "invalid_type")
 }
 
@@ -562,7 +562,7 @@ func TestOpenAIToAnthropic_ChatPDFAsImageURLRejected(t *testing.T) {
 		}]
 	}`)
 
-	_, err := OpenAIToAnthropic(body, "claude-sonnet-4-5", true)
+	_, err := OpenAIToAnthropic(body, "claude-sonnet-4-5", true, nil)
 	require.Error(t, err)
 	var validationErr *converterutil.RequestValidationError
 	require.True(t, errors.As(err, &validationErr))
@@ -578,7 +578,7 @@ func TestOpenAIToAnthropic_ChatImageURLJPEGStillWorks(t *testing.T) {
 		}]
 	}`)
 
-	result, err := OpenAIToAnthropic(body, "claude-sonnet-4-5", true)
+	result, err := OpenAIToAnthropic(body, "claude-sonnet-4-5", true, nil)
 	require.NoError(t, err)
 
 	block := firstAnthropicUserBlock(t, result)
@@ -598,7 +598,7 @@ func TestOpenAIToAnthropic_ChatImageURLPNGStillWorks(t *testing.T) {
 		}]
 	}`)
 
-	result, err := OpenAIToAnthropic(body, "claude-sonnet-4-5", true)
+	result, err := OpenAIToAnthropic(body, "claude-sonnet-4-5", true, nil)
 	require.NoError(t, err)
 
 	block := firstAnthropicUserBlock(t, result)
@@ -618,7 +618,7 @@ func TestOpenAIToAnthropic_ChatNativeDocument(t *testing.T) {
 		}]
 	}`)
 
-	result, err := OpenAIToAnthropic(body, "claude-sonnet-4-5", true)
+	result, err := OpenAIToAnthropic(body, "claude-sonnet-4-5", true, nil)
 	require.NoError(t, err)
 
 	block := firstAnthropicUserBlock(t, result)
@@ -642,7 +642,7 @@ func TestOpenAIToAnthropic_NonClaudeModelDefaultsThinkingDisabled(t *testing.T) 
 		"model":"gemini-3.5-flash",
 		"messages":[{"role":"user","content":"test"}],
 		"max_tokens":100
-	}`), "gemini-3.5-flash", false)
+	}`), "gemini-3.5-flash", false, nil)
 	require.NoError(t, err)
 
 	var request map[string]interface{}
@@ -661,7 +661,7 @@ func TestOpenAIToAnthropic_ClaudeModelOmitsThinkingByDefault(t *testing.T) {
 	result, err := OpenAIToAnthropic([]byte(`{
 		"model":"claude-opus-5",
 		"messages":[{"role":"user","content":"test"}]
-	}`), "claude-opus-5", true)
+	}`), "claude-opus-5", true, nil)
 	require.NoError(t, err)
 
 	var request map[string]interface{}
@@ -675,7 +675,7 @@ func TestOpenAIToAnthropic_ClaudeModelOmitsThinkingByDefault(t *testing.T) {
 func TestOpenAIToAnthropic_ThinkingOffOnClaude5(t *testing.T) {
 	convert := func(t *testing.T, body, model string, realBackend bool) map[string]interface{} {
 		t.Helper()
-		out, err := OpenAIToAnthropic([]byte(body), model, realBackend)
+		out, err := OpenAIToAnthropic([]byte(body), model, realBackend, nil)
 		require.NoError(t, err)
 		var request map[string]interface{}
 		require.NoError(t, json.Unmarshal(out, &request))

@@ -119,7 +119,7 @@ func TestOpenAIToAnthropic_NativeAdaptiveEffort(t *testing.T) {
 	for _, effort := range nativeAdaptiveEffortLevels {
 		t.Run(effort, func(t *testing.T) {
 			body := `{"model":"minimax-m3.1-flash","max_tokens":1000,"reasoning_effort":"` + effort + `","messages":[{"role":"user","content":"hi"}]}`
-			converted, err := OpenAIToAnthropic([]byte(body), nativeAdaptiveModel, true)
+			converted, err := OpenAIToAnthropic([]byte(body), nativeAdaptiveModel, true, nil)
 			require.NoError(t, err)
 			request := decodeAnthropicRequest(t, converted)
 			assert.Equal(t, map[string]interface{}{"type": "adaptive"}, request["thinking"])
@@ -133,7 +133,7 @@ func TestOpenAIToAnthropic_NativeAdaptiveEffort(t *testing.T) {
 
 	t.Run("client temperature stands", func(t *testing.T) {
 		body := `{"model":"m","max_tokens":1000,"temperature":0.3,"reasoning_effort":"high","messages":[{"role":"user","content":"hi"}]}`
-		converted, err := OpenAIToAnthropic([]byte(body), nativeAdaptiveModel, true)
+		converted, err := OpenAIToAnthropic([]byte(body), nativeAdaptiveModel, true, nil)
 		require.NoError(t, err)
 		request := decodeAnthropicRequest(t, converted)
 		assert.Equal(t, 0.3, request["temperature"])
@@ -142,14 +142,14 @@ func TestOpenAIToAnthropic_NativeAdaptiveEffort(t *testing.T) {
 
 	t.Run("minimal maps to low", func(t *testing.T) {
 		body := `{"model":"m","max_tokens":1000,"reasoning_effort":"minimal","messages":[{"role":"user","content":"hi"}]}`
-		converted, err := OpenAIToAnthropic([]byte(body), nativeAdaptiveModel, true)
+		converted, err := OpenAIToAnthropic([]byte(body), nativeAdaptiveModel, true, nil)
 		require.NoError(t, err)
 		assert.Equal(t, map[string]interface{}{"effort": "low"}, decodeAnthropicRequest(t, converted)["output_config"])
 	})
 
 	t.Run("no effort keeps the model default", func(t *testing.T) {
 		body := `{"model":"m","max_tokens":1000,"messages":[{"role":"user","content":"hi"}]}`
-		converted, err := OpenAIToAnthropic([]byte(body), nativeAdaptiveModel, true)
+		converted, err := OpenAIToAnthropic([]byte(body), nativeAdaptiveModel, true, nil)
 		require.NoError(t, err)
 		request := decodeAnthropicRequest(t, converted)
 		assert.NotContains(t, request, "thinking")
@@ -158,14 +158,14 @@ func TestOpenAIToAnthropic_NativeAdaptiveEffort(t *testing.T) {
 
 	t.Run("no effort behind a gateway does not turn thinking off", func(t *testing.T) {
 		body := `{"model":"m","max_tokens":1000,"messages":[{"role":"user","content":"hi"}]}`
-		converted, err := OpenAIToAnthropic([]byte(body), nativeAdaptiveModel, false)
+		converted, err := OpenAIToAnthropic([]byte(body), nativeAdaptiveModel, false, nil)
 		require.NoError(t, err)
 		assert.NotContains(t, decodeAnthropicRequest(t, converted), "thinking")
 	})
 
 	t.Run("adaptive thinking without effort", func(t *testing.T) {
 		body := `{"model":"m","max_tokens":1000,"thinking":{"type":"adaptive"},"messages":[{"role":"user","content":"hi"}]}`
-		converted, err := OpenAIToAnthropic([]byte(body), nativeAdaptiveModel, true)
+		converted, err := OpenAIToAnthropic([]byte(body), nativeAdaptiveModel, true, nil)
 		require.NoError(t, err)
 		request := decodeAnthropicRequest(t, converted)
 		assert.Equal(t, map[string]interface{}{"type": "adaptive"}, request["thinking"])
@@ -176,7 +176,7 @@ func TestOpenAIToAnthropic_NativeAdaptiveEffort(t *testing.T) {
 	// Regression guard: models outside the rule keep the budget mapping.
 	t.Run("other minimax model keeps budget thinking", func(t *testing.T) {
 		body := `{"model":"m","max_tokens":1000,"reasoning_effort":"high","messages":[{"role":"user","content":"hi"}]}`
-		converted, err := OpenAIToAnthropic([]byte(body), "MiniMax-M3", true)
+		converted, err := OpenAIToAnthropic([]byte(body), "MiniMax-M3", true, nil)
 		require.NoError(t, err)
 		request := decodeAnthropicRequest(t, converted)
 		assert.Equal(t, map[string]interface{}{"type": "enabled", "budget_tokens": float64(30000)}, request["thinking"])
@@ -185,7 +185,7 @@ func TestOpenAIToAnthropic_NativeAdaptiveEffort(t *testing.T) {
 
 	t.Run("claude keeps summarized display", func(t *testing.T) {
 		body := `{"model":"m","max_tokens":1000,"reasoning_effort":"high","messages":[{"role":"user","content":"hi"}]}`
-		converted, err := OpenAIToAnthropic([]byte(body), "claude-opus-4-7", true)
+		converted, err := OpenAIToAnthropic([]byte(body), "claude-opus-4-7", true, nil)
 		require.NoError(t, err)
 		assert.Equal(t, map[string]interface{}{"type": "adaptive", "display": "summarized"}, decodeAnthropicRequest(t, converted)["thinking"])
 	})
@@ -193,7 +193,7 @@ func TestOpenAIToAnthropic_NativeAdaptiveEffort(t *testing.T) {
 	// Regression guard: Claude keeps the effort beta and temperature 1.
 	t.Run("claude keeps the thinking side effects", func(t *testing.T) {
 		body := `{"model":"m","max_tokens":1000,"temperature":0.3,"reasoning_effort":"high","messages":[{"role":"user","content":"hi"}]}`
-		converted, err := OpenAIToAnthropic([]byte(body), "claude-sonnet-4-6", true)
+		converted, err := OpenAIToAnthropic([]byte(body), "claude-sonnet-4-6", true, nil)
 		require.NoError(t, err)
 		request := decodeAnthropicRequest(t, converted)
 		assert.Equal(t, float64(1), request["temperature"])
@@ -239,7 +239,7 @@ func TestMessagesToChat_NativeAdaptiveEffort(t *testing.T) {
 		body := `{"model":"minimax-m3.1-flash","max_tokens":1000,"thinking":{"type":"adaptive"},"output_config":{"effort":"high"},"messages":[{"role":"user","content":"hi"}]}`
 		chatBody, _, err := MessagesToChat([]byte(body))
 		require.NoError(t, err)
-		converted, err := OpenAIToAnthropic(chatBody, nativeAdaptiveModel, true)
+		converted, err := OpenAIToAnthropic(chatBody, nativeAdaptiveModel, true, nil)
 		require.NoError(t, err)
 		request := decodeAnthropicRequest(t, converted)
 		assert.Equal(t, map[string]interface{}{"type": "adaptive"}, request["thinking"])

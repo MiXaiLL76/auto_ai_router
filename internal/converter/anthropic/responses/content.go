@@ -51,7 +51,7 @@ func reasoningItemToThinking(item map[string]interface{}) *anthropic.ContentBloc
 
 // contentPartToAnthropic converts a Responses API content part map to an Anthropic ContentBlock.
 // Returns nil when the part type is unknown and should be silently skipped.
-func contentPartToAnthropic(partMap map[string]interface{}) (*anthropic.ContentBlock, error) {
+func contentPartToAnthropic(partMap map[string]interface{}, budget *converterutil.ImageFetchBudget) (*anthropic.ContentBlock, error) {
 	partType, _ := partMap["type"].(string)
 	switch partType {
 	case "input_text", "output_text", "text":
@@ -64,7 +64,7 @@ func contentPartToAnthropic(partMap map[string]interface{}) (*anthropic.ContentB
 		return &anthropic.ContentBlock{Type: "text", Text: text}, nil
 
 	case "input_image":
-		return convertInputImageToAnthropic(partMap)
+		return convertInputImageToAnthropic(partMap, budget)
 
 	case "input_audio":
 		// Anthropic does not support audio input natively.
@@ -82,7 +82,7 @@ func contentPartToAnthropic(partMap map[string]interface{}) (*anthropic.ContentB
 	}
 }
 
-func convertInputImageToAnthropic(partMap map[string]interface{}) (*anthropic.ContentBlock, error) {
+func convertInputImageToAnthropic(partMap map[string]interface{}, budget *converterutil.ImageFetchBudget) (*anthropic.ContentBlock, error) {
 	var imgURL string
 	switch v := partMap["image_url"].(type) {
 	case string:
@@ -121,9 +121,12 @@ func convertInputImageToAnthropic(partMap map[string]interface{}) (*anthropic.Co
 	}
 
 	// Regular URL → download and base64-encode; Anthropic does not support url sources.
-	block := anthropic.DownloadAndEncodeImage(imgURL)
-	if block == nil {
-		return nil, fmt.Errorf("input_image: failed to download image from %s", imgURL)
+	// DownloadAndEncodeImage returns a converterutil.ImageError whose message
+	// is fixed per failure kind: the URL must never reach the client, since
+	// image URLs are often presigned links carrying a token.
+	block, err := anthropic.DownloadAndEncodeImage(imgURL, "input_image.image_url", budget)
+	if err != nil {
+		return nil, err
 	}
 	return block, nil
 }
