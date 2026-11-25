@@ -301,13 +301,13 @@ func TestMultipleEndpoints(t *testing.T) {
 
 func TestSpendObservabilityMetrics(t *testing.T) {
 	SpendComparisonRowsTotal.Reset()
-	droppedBefore := testutil.ToFloat64(SpendDroppedTotal)
+	droppedBefore := testutil.ToFloat64(SpendDroppedTotal.WithLabelValues("queue_full_timeout"))
 	dlqOverflowBefore := testutil.ToFloat64(SpendDLQOverflowTotal)
 	duplicatesBefore := testutil.ToFloat64(SpendDuplicatesTotal)
 	aggregationErrorsBefore := testutil.ToFloat64(SpendAggregationErrorsTotal)
 	pendingOverflowBefore := testutil.ToFloat64(SpendPendingAggregationOverflowTotal)
 
-	RecordSpendDropped(2)
+	RecordSpendDropped("queue_full_timeout", 2)
 	RecordSpendDLQOverflow(1)
 	RecordSpendDuplicates(3)
 	RecordSpendAggregationErrors(4)
@@ -323,7 +323,7 @@ func TestSpendObservabilityMetrics(t *testing.T) {
 		ComparisonWindowValid: false,
 	})
 
-	assert.Equal(t, droppedBefore+2, testutil.ToFloat64(SpendDroppedTotal))
+	assert.Equal(t, droppedBefore+2, testutil.ToFloat64(SpendDroppedTotal.WithLabelValues("queue_full_timeout")))
 	assert.Equal(t, dlqOverflowBefore+1, testutil.ToFloat64(SpendDLQOverflowTotal))
 	assert.Equal(t, duplicatesBefore+3, testutil.ToFloat64(SpendDuplicatesTotal))
 	assert.Equal(t, aggregationErrorsBefore+4, testutil.ToFloat64(SpendAggregationErrorsTotal))

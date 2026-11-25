@@ -1631,6 +1631,8 @@ type LiteLLMDBConfig struct {
 	LogQueueSize     int           `yaml:"log_queue_size"`     // default: 5000
 	LogBatchSize     int           `yaml:"log_batch_size"`     // default: 100
 	LogFlushInterval time.Duration `yaml:"log_flush_interval"` // default: 5s
+	// LogQueueFullTimeout is how long a request waits for room in a full spend queue before its row is dropped.
+	LogQueueFullTimeout time.Duration `yaml:"log_queue_full_timeout"` // default: 5s; 0 drops the row at once
 	// LogWorkers is the number of goroutines concurrently draining the spend-log
 	// queue into Postgres. Each worker batches and flushes independently, so a
 	// slow INSERT or retry backoff in one worker doesn't stall the others.
@@ -2018,6 +2020,7 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 		LogQueueSize                string `yaml:"log_queue_size"`
 		LogBatchSize                string `yaml:"log_batch_size"`
 		LogFlushInterval            string `yaml:"log_flush_interval"`
+		LogQueueFullTimeout         string `yaml:"log_queue_full_timeout"`
 		LogWorkers                  string `yaml:"log_workers"`
 		SpendUpdatesSingleRoundTrip string `yaml:"spend_updates_single_round_trip"`
 		DisableSpendLogsWrite       string `yaml:"disable_spend_logs_write"`
@@ -2111,6 +2114,9 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if l.LogFlushInterval, err = parseField(temp.LogFlushInterval, 5*time.Second, time.ParseDuration, "litellm_db.log_flush_interval"); err != nil {
+		return err
+	}
+	if l.LogQueueFullTimeout, err = parseField(temp.LogQueueFullTimeout, 5*time.Second, time.ParseDuration, "litellm_db.log_queue_full_timeout"); err != nil {
 		return err
 	}
 	if l.BudgetReservationTTL, err = parseField(temp.BudgetReservationTTL, 15*time.Minute, time.ParseDuration, "litellm_db.budget_reservation_ttl"); err != nil {

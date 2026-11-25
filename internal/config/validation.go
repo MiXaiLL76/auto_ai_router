@@ -484,6 +484,9 @@ func (c *LiteLLMDBConfig) validate() error {
 	if c.LogWorkers <= 0 {
 		return fmt.Errorf("litellm_db.log_workers must be positive, got: %d", c.LogWorkers)
 	}
+	if c.LogQueueFullTimeout < 0 {
+		return fmt.Errorf("litellm_db.log_queue_full_timeout must not be negative, got: %s", c.LogQueueFullTimeout)
+	}
 	return nil
 }
 

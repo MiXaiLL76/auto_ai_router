@@ -128,6 +128,9 @@ type Config struct {
 	// SpendUpdatesSingleRoundTrip sends a batch's counter and daily updates as one pgx batch.
 	SpendUpdatesSingleRoundTrip bool
 
+	// LogQueueFullTimeout is how long Log waits for room in a full queue; nil is 5s, 0 drops at once.
+	LogQueueFullTimeout *time.Duration
+
 	// DisableSpendLogsWrite disables writing SpendLogEntry/Daily* aggregates to
 	// Postgres while leaving auth (ValidateToken) untouched (default: false).
 	DisableSpendLogsWrite bool
@@ -157,6 +160,9 @@ type Config struct {
 	// Logger
 	Logger *slog.Logger
 }
+
+// DefaultLogQueueFullTimeout is how long Log waits for room in a full queue by default.
+const DefaultLogQueueFullTimeout = 5 * time.Second
 
 // DefaultConfig returns configuration with default values
 func DefaultConfig() *Config {
@@ -227,6 +233,14 @@ func (c *Config) BudgetCalendar() BudgetCalendar {
 		return BudgetCalendar{}
 	}
 	return BudgetCalendar{Location: c.BudgetTimezone, ResetTime: c.BudgetResetTime}
+}
+
+// QueueFullTimeout is how long Log waits for room in a full queue before it drops the entry.
+func (c *Config) QueueFullTimeout() time.Duration {
+	if c == nil || c.LogQueueFullTimeout == nil {
+		return DefaultLogQueueFullTimeout
+	}
+	return *c.LogQueueFullTimeout
 }
 
 // TeamSpendUpdatesUserSpend reports the configured user projection policy.
