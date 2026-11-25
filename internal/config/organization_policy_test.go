@@ -258,3 +258,23 @@ func TestOrganizationPolicyConfig_DisableAutoCacheControl(t *testing.T) {
 		}
 	}
 }
+
+func TestOrganizationPolicyConfig_DisableForceStreamForTTFT(t *testing.T) {
+	cases := []struct {
+		doc  string
+		want bool
+	}{
+		{"organization_id: o\ndisable_force_stream_for_ttft: true\n", true},
+		{"organization_id: o\ndisable_force_stream_for_ttft: false\n", false},
+		{"organization_id: o\n", false},
+	}
+	for _, c := range cases {
+		var p OrganizationPolicyConfig
+		if err := yaml.Unmarshal([]byte(c.doc), &p); err != nil {
+			t.Fatalf("unmarshal %q: %v", c.doc, err)
+		}
+		if p.DisableForceStreamForTTFT != c.want {
+			t.Fatalf("%q: DisableForceStreamForTTFT=%v want %v", c.doc, p.DisableForceStreamForTTFT, c.want)
+		}
+	}
+}

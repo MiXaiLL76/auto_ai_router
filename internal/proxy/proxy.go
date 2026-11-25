@@ -233,6 +233,7 @@ func (p *Proxy) nextPrimaryAfterUnsupportedCredential(
 			prepared.responsesPrevHandled,
 			prepared.stickyCacheEligible,
 			prepared.autoCacheControlDisabled,
+			prepared.forceStreamForTTFTDisabled,
 		)
 		if prepErr != nil {
 			p.logger.WarnContext(r.Context(), "Failed to prepare alternate primary request after provider compatibility skip",
@@ -333,6 +334,7 @@ func (p *Proxy) nextCrossTypeRetryCredential(
 			prepared.responsesPrevHandled,
 			prepared.stickyCacheEligible,
 			prepared.autoCacheControlDisabled,
+			prepared.forceStreamForTTFTDisabled,
 		)
 		if prepErr != nil {
 			p.logger.WarnContext(r.Context(), "Failed to prepare retry request for credential",
@@ -1547,6 +1549,7 @@ func (p *Proxy) nextRetryCredential(
 			prepared.responsesPrevHandled,
 			prepared.stickyCacheEligible,
 			prepared.autoCacheControlDisabled,
+			prepared.forceStreamForTTFTDisabled,
 		)
 		if prepErr == nil {
 			publicModelID := logCtx.PublicModelID

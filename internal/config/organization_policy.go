@@ -76,6 +76,11 @@ type OrganizationPolicyConfig struct {
 	// call), while leaving that global setting on for every other
 	// organization. Set via the disable_auto_cache_control field.
 	DisableAutoCacheControl bool `yaml:"-"`
+	// DisableForceStreamForTTFT opts this organization out of the server's
+	// force_stream_for_ttft toggle (see Proxy.applyForceStream), while leaving
+	// that global setting on for every other organization. Set via the
+	// disable_force_stream_for_ttft field.
+	DisableForceStreamForTTFT bool `yaml:"-"`
 }
 
 func (p *OrganizationPolicyConfig) UnmarshalYAML(value *yaml.Node) error {
@@ -84,28 +89,30 @@ func (p *OrganizationPolicyConfig) UnmarshalYAML(value *yaml.Node) error {
 	}
 
 	allowedFields := map[string]struct{}{
-		"organization_id":            {},
-		"price_profile_id":           {},
-		"model_prices_link":          {},
-		"model_allowlist":            {},
-		"model_mappings":             {},
-		"credential_denylist":        {},
-		"return_response_cost":       {},
-		"response_cost_mode":         {},
-		"response_cost_in_body":      {},
-		"disable_auto_cache_control": {},
+		"organization_id":               {},
+		"price_profile_id":              {},
+		"model_prices_link":             {},
+		"model_allowlist":               {},
+		"model_mappings":                {},
+		"credential_denylist":           {},
+		"return_response_cost":          {},
+		"response_cost_mode":            {},
+		"response_cost_in_body":         {},
+		"disable_auto_cache_control":    {},
+		"disable_force_stream_for_ttft": {},
 	}
 
 	var raw struct {
-		OrganizationID           string   `yaml:"organization_id"`
-		PriceProfileID           string   `yaml:"price_profile_id"`
-		ModelPricesLink          string   `yaml:"model_prices_link"`
-		ModelAllowlist           []string `yaml:"model_allowlist,omitempty"`
-		CredentialDenylist       []string `yaml:"credential_denylist,omitempty"`
-		ReturnResponseCost       *bool    `yaml:"return_response_cost,omitempty"`
-		ResponseCostMode         string   `yaml:"response_cost_mode,omitempty"`
-		ReturnResponseCostInBody bool     `yaml:"response_cost_in_body,omitempty"`
-		DisableAutoCacheControl  bool     `yaml:"disable_auto_cache_control,omitempty"`
+		OrganizationID            string   `yaml:"organization_id"`
+		PriceProfileID            string   `yaml:"price_profile_id"`
+		ModelPricesLink           string   `yaml:"model_prices_link"`
+		ModelAllowlist            []string `yaml:"model_allowlist,omitempty"`
+		CredentialDenylist        []string `yaml:"credential_denylist,omitempty"`
+		ReturnResponseCost        *bool    `yaml:"return_response_cost,omitempty"`
+		ResponseCostMode          string   `yaml:"response_cost_mode,omitempty"`
+		ReturnResponseCostInBody  bool     `yaml:"response_cost_in_body,omitempty"`
+		DisableAutoCacheControl   bool     `yaml:"disable_auto_cache_control,omitempty"`
+		DisableForceStreamForTTFT bool     `yaml:"disable_force_stream_for_ttft,omitempty"`
 	}
 	mappings := make(map[string]string)
 
@@ -179,6 +186,7 @@ func (p *OrganizationPolicyConfig) UnmarshalYAML(value *yaml.Node) error {
 	}
 	p.ReturnResponseCostInBody = raw.ReturnResponseCostInBody
 	p.DisableAutoCacheControl = raw.DisableAutoCacheControl
+	p.DisableForceStreamForTTFT = raw.DisableForceStreamForTTFT
 	return nil
 }
 
