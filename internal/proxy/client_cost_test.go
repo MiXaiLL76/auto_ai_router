@@ -713,6 +713,32 @@ func TestResponsesAPICostInjectingReader(t *testing.T) {
 		assert.InDelta(t, wantCost, cost, 1e-12)
 	})
 
+	// Alibaba's Responses API names the explicit cache only in x_details and
+	// reports the write as cache_write_tokens: 100 regular input x1 + 80
+	// explicit cache reads x0.25 + 20 cache writes x3 + 50 output x2, in
+	// millionths. Priced as an implicit read with no write it would be 260.
+	t.Run("Alibaba explicit cache read and write are priced", func(t *testing.T) {
+		p := &Proxy{}
+		logCtx := &RequestLogContext{
+			ModelPrice: &models.ModelPrice{
+				InputCostPerToken:               0.000001,
+				OutputCostPerToken:              0.000002,
+				CacheReadInputTokenCost:         0.0000005,
+				ExplicitCacheReadInputTokenCost: 0.00000025,
+				CacheCreationInputTokenCost:     0.000003,
+			},
+		}
+		completed := "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":200,\"output_tokens\":50,\"total_tokens\":250," +
+			"\"input_tokens_details\":{\"cached_tokens\":80,\"cache_write_tokens\":20}," +
+			"\"x_details\":[{\"x_billing_type\":\"response_api\",\"prompt_tokens_details\":{\"cached_tokens\":80,\"cache_type\":\"ephemeral\"}}]}}}\n\n"
+		r := newResponsesAPICostInjectingReader(strings.NewReader(completed), p, logCtx, opts, true)
+		out, err := io.ReadAll(r)
+		require.NoError(t, err)
+		cost, ok := nestedUsageCost(t, string(out))
+		require.True(t, ok)
+		assert.InDelta(t, 0.00028, cost, 1e-12)
+	})
+
 	t.Run("no price available: completed event passes through without a cost field", func(t *testing.T) {
 		p := &Proxy{}
 		logCtx := &RequestLogContext{}

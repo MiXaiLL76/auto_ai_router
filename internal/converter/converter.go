@@ -1043,7 +1043,7 @@ func extractUsageCache(resp *tokenUsageResponseShape, nested *responsesUsageDeta
 	input := &usage.InputTokensDetails
 	cache := usageCacheBreakdown{
 		read: cmp.Or(prompt.CachedTokens, input.CachedTokens),
-		kind: cmp.Or(prompt.CacheType, input.CacheType, usage.CacheType),
+		kind: cmp.Or(prompt.CacheType, input.CacheType, usage.CacheType, usage.XDetailsCacheType()),
 	}
 	if cache.read == 0 && usage.CacheReadInputTokens > 0 {
 		cache.read = usage.CacheReadInputTokens
@@ -1103,7 +1103,7 @@ func extractUsageCache(resp *tokenUsageResponseShape, nested *responsesUsageDeta
 	}
 	if nested != nil {
 		cache.read = cmp.Or(cache.read, nested.InputTokensDetails.CachedTokens)
-		cache.kind = cmp.Or(cache.kind, nested.InputTokensDetails.CacheType, nested.CacheType)
+		cache.kind = cmp.Or(cache.kind, nested.InputTokensDetails.CacheType, nested.CacheType, nested.XDetailsCacheType())
 		details := &nested.InputTokensDetails
 		cache.write = cmp.Or(cache.write, details.CacheCreationTokens, details.CacheWriteTokens)
 		cache.write12h = cmp.Or(cache.write12h, details.CacheWriteTokensDetails.TTL12hTokens)

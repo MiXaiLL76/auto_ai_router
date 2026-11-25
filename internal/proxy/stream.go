@@ -142,7 +142,7 @@ type StreamUsageInfo struct {
 	CacheCreation1hTokens    int
 	CacheCreation12hTokens   int // OpenAI 12h cache-retention writes (own rate)
 	// CacheType mirrors TokenUsage.CacheType: Alibaba's explicit cache mode
-	// marker ("ephemeral") from prompt_tokens_details.cache_type.
+	// marker ("ephemeral").
 	CacheType         string
 	CacheReadTokens   int // Tokens read from cache (billed at cheaper rate)
 	WebSearchRequests int // Confirmed built-in web search executions
@@ -359,6 +359,10 @@ func (o *openAIStreamUsageExtractor) responsesAPIUsageInfo(
 	if cacheCreationTokens == 0 {
 		cacheCreationTokens = usage.InputTokensDetails.CacheWriteTokens
 	}
+	cacheType := usage.InputTokensDetails.CacheType
+	if cacheType == "" {
+		cacheType = usage.XDetailsCacheType()
+	}
 	cacheCreation12hTokens := usage.InputTokensDetails.CacheWriteTokensDetails.TTL12hTokens
 	cacheCreation5mTokens := usage.InputTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens
 	cacheCreation1hTokens := usage.InputTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens
@@ -408,7 +412,7 @@ func (o *openAIStreamUsageExtractor) responsesAPIUsageInfo(
 		CacheCreation5mTokens:   cacheCreation5mTokens,
 		CacheCreation1hTokens:   cacheCreation1hTokens,
 		CacheCreation12hTokens:  cacheCreation12hTokens,
-		CacheType:               usage.InputTokensDetails.CacheType,
+		CacheType:               cacheType,
 		AudioInputTokens: normalizeStreamAudioInput(
 			usage.InputTokensDetails.AudioTokens,
 			cachedTokens,
@@ -2220,6 +2224,9 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 					logCtx.TokenUsage.CachedInputTokens = cachedTokens
 					logCtx.TokenUsage.CachedAudioInputTokens = cachedAudioTokens
 					logCtx.TokenUsage.CacheCreationTokens = usage.InputTokensDetails.CacheCreationTokens
+					if logCtx.TokenUsage.CacheCreationTokens == 0 {
+						logCtx.TokenUsage.CacheCreationTokens = usage.InputTokensDetails.CacheWriteTokens
+					}
 					if details := usage.InputTokensDetails.CacheCreationTokenDetails; details != nil {
 						logCtx.TokenUsage.CacheCreation5mTokens = details.Ephemeral5mInputTokens
 						logCtx.TokenUsage.CacheCreation1hTokens = details.Ephemeral1hInputTokens
@@ -2250,8 +2257,9 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 					}
 					// The typed usage above has no room for provider extensions:
 					// xAI's server-side tool counters, images of a built-in
-					// image_generation tool in response.output, the reasoning
-					// accounting (total_tokens) and the provider's own cost.
+					// image_generation tool in response.output, Alibaba's cache
+					// mode in x_details, the reasoning accounting (total_tokens)
+					// and the provider's own cost.
 					logCtx.TokenUsage.MergeUsageExtensions(
 						converter.ExtractTokenUsageWithOptions(payload, tokenUsageOptions))
 				}

@@ -715,11 +715,11 @@ func (r *responsesAPICostInjectingReader) injectCostIntoLine(line []byte) []byte
 // handlePassthroughResponsesStreaming's own onChunk closure uses for
 // logCtx.TokenUsage -- including the tool-usage-extension merge
 // (MergeUsageExtensions) that picks up xAI's counters, built-in image
-// generation tool images, reasoning accounting and a provider's own
-// reported cost. Kept independent (not shared with that closure) so the
-// cost-exposure path -- which needs this usage before onChunk gets to run,
-// see the package doc above -- never risks mutating logCtx.TokenUsage
-// itself.
+// generation tool images, Alibaba's cache mode, reasoning accounting and a
+// provider's own reported cost. Kept independent (not shared with that
+// closure) so the cost-exposure path -- which needs this usage before onChunk
+// gets to run, see the package doc above -- never risks mutating
+// logCtx.TokenUsage itself.
 func tokenUsageFromResponsesAPIUsage(
 	usage *responses.Usage,
 	payload []byte,
@@ -733,12 +733,16 @@ func tokenUsageFromResponsesAPIUsage(
 		usage.InputTokensDetails.CachedTokens,
 		usage.InputTokensDetails.CachedAudioTokens,
 	)
+	cacheCreationTokens := usage.InputTokensDetails.CacheCreationTokens
+	if cacheCreationTokens == 0 {
+		cacheCreationTokens = usage.InputTokensDetails.CacheWriteTokens
+	}
 	tu := &converter.TokenUsage{
 		PromptTokens:           usage.InputTokens,
 		CompletionTokens:       usage.OutputTokens,
 		CachedInputTokens:      cachedTokens,
 		CachedAudioInputTokens: cachedAudioTokens,
-		CacheCreationTokens:    usage.InputTokensDetails.CacheCreationTokens,
+		CacheCreationTokens:    cacheCreationTokens,
 		AudioInputTokens: normalizeStreamAudioInput(
 			usage.InputTokensDetails.AudioTokens,
 			cachedTokens,

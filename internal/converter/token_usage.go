@@ -43,7 +43,8 @@ type TokenUsage struct {
 	// is billed at its own rate rather than one rate chosen by the top TTL.
 	CacheCreation12hTokens int
 	// CacheType is the explicit-cache mode marker from
-	// usage.prompt_tokens_details.cache_type (Alibaba/Qwen returns
+	// usage.prompt_tokens_details.cache_type, or in the Responses API from
+	// usage.x_details[].prompt_tokens_details.cache_type (Alibaba/Qwen returns
 	// CacheTypeExplicit when the request ran with an explicit cache marker).
 	// Empty means the request did not use explicit cache — any cached_tokens
 	// then come from implicit (automatic) caching. Explicit and implicit
@@ -296,9 +297,6 @@ func (tu *TokenUsage) MergeNonZero(src *TokenUsage) {
 	if src.CacheCreation12hTokens != 0 {
 		tu.CacheCreation12hTokens = src.CacheCreation12hTokens
 	}
-	if src.CacheType != "" {
-		tu.CacheType = src.CacheType
-	}
 	if src.CachedOutputTokens != 0 {
 		tu.CachedOutputTokens = src.CachedOutputTokens
 	}
@@ -340,15 +338,18 @@ func (tu *TokenUsage) MergeNonZero(src *TokenUsage) {
 
 // MergeUsageExtensions merges from src only what the generic usage
 // extraction derives beyond token counts: the built-in tool counters (with
-// the same cumulative semantics as MergeNonZero), the reasoning accounting
-// and the provider's own cost. MergeNonZero ends with it; stream handlers
-// that read token counts from a typed usage object call it directly so they
-// do not drop these.
+// the same cumulative semantics as MergeNonZero), the cache mode, the
+// reasoning accounting and the provider's own cost. MergeNonZero ends with
+// it; stream handlers that read token counts from a typed usage object call
+// it directly so they do not drop these.
 func (tu *TokenUsage) MergeUsageExtensions(src *TokenUsage) {
 	if tu == nil || src == nil {
 		return
 	}
 	tu.mergeToolUsage(src)
+	if src.CacheType != "" {
+		tu.CacheType = src.CacheType
+	}
 	// The verdict travels with the reasoning tokens it was read from: the
 	// chunk that last reported them decides it, and one that does not settle
 	// it (e.g. no total_tokens) clears an earlier verdict rather than leaving

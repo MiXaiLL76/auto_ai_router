@@ -444,7 +444,7 @@ Two independent loops write to the registry: the price-file refresh (`server.mod
 Cache writes are read from `cache_creation_tokens` or the OpenAI-compatible `cache_write_tokens` alias in both Chat Completions and Responses API usage objects.
 Anthropic's `cache_creation_token_details` (`ephemeral_5m_input_tokens` and `ephemeral_1h_input_tokens`) is preserved in spend-log metadata while the existing aggregate cache-creation token columns remain backward-compatible. Gemini cached-audio counts are taken from `cacheTokensDetails` when the provider supplies a modality breakdown.
 
-Alibaba/Qwen reports explicit-cache mode in `usage.prompt_tokens_details.cache_type` (`"ephemeral"`) and its cache writes in `cache_creation.ephemeral_5m_input_tokens`. `cache_type` decides between the explicit and implicit cache-read tariffs and is stored in spend-log metadata and in the Kafka event. When a response carries only `ephemeral_5m_input_tokens` (no aggregate `cache_creation_input_tokens`), those tokens are billed as cache creation rather than as regular input.
+Alibaba/Qwen reports explicit-cache mode in `usage.prompt_tokens_details.cache_type` (`"ephemeral"`) and its cache writes in `cache_creation.ephemeral_5m_input_tokens`. Its Responses API reports the mode only per billing line, in `usage.x_details[].prompt_tokens_details.cache_type`; it applies only when all lines that read the cache or carry a mode agree on it. `cache_type` decides between the explicit and implicit cache-read tariffs and is stored in spend-log metadata and in the Kafka event. When a response carries only `ephemeral_5m_input_tokens` (no aggregate `cache_creation_input_tokens`), those tokens are billed as cache creation rather than as regular input.
 
 ### Spend storage contract
 
