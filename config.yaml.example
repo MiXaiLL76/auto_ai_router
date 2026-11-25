@@ -13,6 +13,7 @@ server:
   max_idle_conns_per_host: 20  # Maximum idle connections per host (default: 20)
   http2_idle_ping_timeout: 15s  # How long a pooled provider HTTP/2 connection may go without any frame before a liveness PING is sent (default: 15s; a negative duration, e.g. -1s, disables HTTP/2 ping liveness checking — either this or http2_ping_timeout alone turns it off)
   http2_ping_timeout: 10s  # How long to wait for a liveness PING to be acked before closing the connection (default: 10s; a negative duration, e.g. -1s, disables the check too)
+  max_in_flight_requests: 0  # API requests served at once; more are answered 503 (code overloaded) with Retry-After: 1 before their body is read (default: 0, no cap)
   max_connection_lifetime: 0s  # How long a provider connection takes new requests; it closes once its last request ends, so that a proxy on the way can drain (default: 0s, reused for as long as requests come; e.g. 10m)
   logging_level: info  # Options: info, debug, error (default: info)
   stdout_logs_enabled: true  # Write logs to stdout (default: true); set false to ship logs only via OTEL

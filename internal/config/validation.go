@@ -194,6 +194,9 @@ func (s *ServerConfig) validate() error {
 	if s.MaxConnectionLifetime < 0 {
 		return fmt.Errorf("invalid max_connection_lifetime: %s (must be >= 0)", s.MaxConnectionLifetime)
 	}
+	if s.MaxInFlightRequests < 0 {
+		return fmt.Errorf("invalid max_in_flight_requests: %d (must be >= 0, 0 = no cap)", s.MaxInFlightRequests)
+	}
 	if s.SessionStickyTTL < 0 {
 		return fmt.Errorf("invalid session_sticky_ttl_minutes: %d (must be >= 0)", s.SessionStickyTTL)
 	}
