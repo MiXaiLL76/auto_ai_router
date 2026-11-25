@@ -658,7 +658,7 @@ func TestApplyForceStream_SkipsProxyLike(t *testing.T) {
 	body := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`)
 	cred := &config.CredentialConfig{Name: "air", Type: config.ProviderTypeAIR, BaseURL: "http://peer"}
 
-	out := prx.applyForceStream(credentialPreparedRequest{body: body, proxyBody: body, path: "/v1/chat/completions"}, false, cred, req)
+	out := prx.applyForceStream(credentialPreparedRequest{body: body, proxyBody: body, path: "/v1/chat/completions"}, false, cred, req, false)
 	assert.Equal(t, string(body), string(out.body), "proxy-like bodies must be left untouched")
 	assert.NotContains(t, string(out.body), `"stream":true`)
 }
@@ -677,7 +677,7 @@ func TestApplyForceStream_NativeResponses(t *testing.T) {
 		proxyBody:       body,
 		path:            "/v1/responses",
 		nativeResponses: true,
-	}, false, cred, req)
+	}, false, cred, req, false)
 
 	assert.True(t, out.forcedNativeNonStream, "native Responses request must be marked as forced")
 	assert.Contains(t, string(out.body), `"stream":true`, "outbound native body must force stream:true")
@@ -696,7 +696,7 @@ func TestApplyForceStream_NativeResponses_ToggleOff(t *testing.T) {
 		proxyBody:       body,
 		path:            "/v1/responses",
 		nativeResponses: true,
-	}, false, cred, req)
+	}, false, cred, req, false)
 
 	assert.False(t, out.forcedNativeNonStream)
 	assert.NotContains(t, string(out.body), `"stream":true`)
@@ -879,7 +879,7 @@ func TestApplyForceStream_PassthroughResponses(t *testing.T) {
 		proxyBody:            body,
 		path:                 "/v1/responses",
 		passthroughResponses: true,
-	}, false, cred, req)
+	}, false, cred, req, false)
 
 	assert.True(t, out.forcedPassthroughNonStream, "passthrough Responses request must be marked as forced")
 	assert.Contains(t, string(out.body), `"stream":true`, "outbound body must force stream:true")
@@ -1155,7 +1155,7 @@ func TestApplyForceStream_ChatSetsForcedMarker(t *testing.T) {
 	body := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"stream":false}`)
 	cred := &config.CredentialConfig{Name: "openai", Type: config.ProviderTypeOpenAI, BaseURL: "http://upstream"}
 
-	out := prx.applyForceStream(credentialPreparedRequest{body: body, proxyBody: body, path: "/v1/chat/completions"}, false, cred, req)
+	out := prx.applyForceStream(credentialPreparedRequest{body: body, proxyBody: body, path: "/v1/chat/completions"}, false, cred, req, false)
 
 	assert.True(t, out.forcedChatNonStream, "chat request must carry the forced marker")
 	assert.Contains(t, string(out.body), `"stream":true`)
@@ -1315,7 +1315,7 @@ func TestApplyForceStream_SkipsNonChatPaths(t *testing.T) {
 		{"/v1/images/edits", `{"model":"gpt-image-1","prompt":"x"}`},
 		{"/v1/embeddings", `{"model":"text-embedding-3-small","input":"hi"}`},
 	} {
-		out := prx.applyForceStream(credentialPreparedRequest{body: []byte(c.body), proxyBody: []byte(c.body), path: c.path}, false, cred, req)
+		out := prx.applyForceStream(credentialPreparedRequest{body: []byte(c.body), proxyBody: []byte(c.body), path: c.path}, false, cred, req, false)
 		assert.NotContains(t, string(out.body), `"stream":true`, "path %s must not be force-streamed", c.path)
 	}
 }
@@ -1329,8 +1329,83 @@ func TestApplyForceStream_TouchesChatPaths(t *testing.T) {
 	for _, path := range []string{"/v1/chat/completions", "/v1/messages", "/v1/responses", "/v1/completions"} {
 		req := httptest.NewRequest("POST", path, strings.NewReader(`{}`))
 		body := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
-		out := prx.applyForceStream(credentialPreparedRequest{body: body, proxyBody: body, path: path}, false, cred, req)
+		out := prx.applyForceStream(credentialPreparedRequest{body: body, proxyBody: body, path: path}, false, cred, req, false)
 		assert.Contains(t, string(out.body), `"stream":true`, "path %s must be force-streamed", path)
+	}
+}
+
+// TestApplyForceStream_OrganizationOptOut pins the forceStreamForTTFTDisabled
+// gate across every branch applyForceStream can take: an opted-out
+// organization's request must reach upstream exactly as the client sent it,
+// with none of the forced* markers set, on every one of them -- a future
+// branch added below the gate must opt into forcing explicitly, not inherit
+// it by accident.
+func TestApplyForceStream_OrganizationOptOut(t *testing.T) {
+	openaiCred := &config.CredentialConfig{Name: "openai", Type: config.ProviderTypeOpenAI, BaseURL: "http://upstream"}
+	anthropicCred := &config.CredentialConfig{Name: "anthropic", Type: config.ProviderTypeAnthropic, BaseURL: "http://upstream"}
+
+	cases := []struct {
+		name string
+		path string
+		cred *config.CredentialConfig
+		req  credentialPreparedRequest
+	}{
+		{
+			name: "native Responses",
+			path: "/v1/responses",
+			cred: anthropicCred,
+			req: credentialPreparedRequest{
+				path:            "/v1/responses",
+				nativeResponses: true,
+				body:            []byte(`{"model":"claude-haiku-4.5","input":"hi","stream":false}`),
+			},
+		},
+		{
+			name: "passthrough Responses",
+			path: "/v1/responses",
+			cred: openaiCred,
+			req: credentialPreparedRequest{
+				path:                 "/v1/responses",
+				passthroughResponses: true,
+				body:                 []byte(`{"model":"gpt-4o-mini","input":"hi","stream":false}`),
+			},
+		},
+		{
+			name: "chat completions",
+			path: "/v1/chat/completions",
+			cred: openaiCred,
+			req: credentialPreparedRequest{
+				path: "/v1/chat/completions",
+				body: []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"stream":false}`),
+			},
+		},
+		{
+			name: "messages",
+			path: "/v1/messages",
+			cred: anthropicCred,
+			req: credentialPreparedRequest{
+				path: "/v1/messages",
+				body: []byte(`{"model":"claude-haiku-4.5","messages":[{"role":"user","content":"hi"}],"stream":false}`),
+			},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			prx := NewTestProxyBuilder().WithForceStreamForTTFT(true).Build()
+			httpReq := httptest.NewRequest("POST", c.path, strings.NewReader(`{}`))
+
+			optedOut := prx.applyForceStream(c.req, false, c.cred, httpReq, true)
+			assert.NotContains(t, string(optedOut.body), `"stream":true`,
+				"%s: an opted-out organization's body must reach upstream unchanged", c.name)
+			assert.False(t, optedOut.forcedNativeNonStream, "%s: opt-out must not set forcedNativeNonStream", c.name)
+			assert.False(t, optedOut.forcedPassthroughNonStream, "%s: opt-out must not set forcedPassthroughNonStream", c.name)
+			assert.False(t, optedOut.forcedChatNonStream, "%s: opt-out must not set forcedChatNonStream", c.name)
+
+			forced := prx.applyForceStream(c.req, false, c.cred, httpReq, false)
+			assert.Contains(t, string(forced.body), `"stream":true`,
+				"%s: without the opt-out the global toggle must still force stream:true", c.name)
+		})
 	}
 }
 

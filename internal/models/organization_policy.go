@@ -38,11 +38,12 @@ type OrganizationPolicy struct {
 	// two that also works for streaming responses.
 	ReturnResponseCostInBody bool
 
-	allowlist               map[string]struct{}
-	mappings                map[string]string
-	prices                  map[string]*ModelPrice
-	credentialDenylist      []string
-	disableAutoCacheControl bool
+	allowlist                 map[string]struct{}
+	mappings                  map[string]string
+	prices                    map[string]*ModelPrice
+	credentialDenylist        []string
+	disableAutoCacheControl   bool
+	disableForceStreamForTTFT bool
 }
 
 type OrganizationModelResolution struct {
@@ -103,11 +104,12 @@ func LoadOrganizationPolicies(
 	for _, cfg := range policies {
 		if cfg.PriceProfileID == "" {
 			registry.byOrganization[cfg.OrganizationID] = &OrganizationPolicy{
-				OrganizationID:           cfg.OrganizationID,
-				ResponseCostMode:         cfg.ResponseCostMode,
-				ReturnResponseCostInBody: cfg.ReturnResponseCostInBody,
-				credentialDenylist:       append([]string(nil), cfg.CredentialDenylist...),
-				disableAutoCacheControl:  cfg.DisableAutoCacheControl,
+				OrganizationID:            cfg.OrganizationID,
+				ResponseCostMode:          cfg.ResponseCostMode,
+				ReturnResponseCostInBody:  cfg.ReturnResponseCostInBody,
+				credentialDenylist:        append([]string(nil), cfg.CredentialDenylist...),
+				disableAutoCacheControl:   cfg.DisableAutoCacheControl,
+				disableForceStreamForTTFT: cfg.DisableForceStreamForTTFT,
 			}
 			continue
 		}
@@ -129,18 +131,19 @@ func LoadOrganizationPolicies(
 		profiles[cfg.PriceProfileID] = identity
 
 		policy := &OrganizationPolicy{
-			OrganizationID:           cfg.OrganizationID,
-			PriceProfileID:           cfg.PriceProfileID,
-			ModelPricesLink:          cfg.ModelPricesLink,
-			ProfileSHA256:            identity.sha256,
-			AllowlistSet:             cfg.AllowlistSet,
-			ResponseCostMode:         cfg.ResponseCostMode,
-			ReturnResponseCostInBody: cfg.ReturnResponseCostInBody,
-			allowlist:                make(map[string]struct{}, len(cfg.ModelAllowlist)),
-			mappings:                 make(map[string]string, len(cfg.ModelMappings)),
-			prices:                   priceRows,
-			credentialDenylist:       append([]string(nil), cfg.CredentialDenylist...),
-			disableAutoCacheControl:  cfg.DisableAutoCacheControl,
+			OrganizationID:            cfg.OrganizationID,
+			PriceProfileID:            cfg.PriceProfileID,
+			ModelPricesLink:           cfg.ModelPricesLink,
+			ProfileSHA256:             identity.sha256,
+			AllowlistSet:              cfg.AllowlistSet,
+			ResponseCostMode:          cfg.ResponseCostMode,
+			ReturnResponseCostInBody:  cfg.ReturnResponseCostInBody,
+			allowlist:                 make(map[string]struct{}, len(cfg.ModelAllowlist)),
+			mappings:                  make(map[string]string, len(cfg.ModelMappings)),
+			prices:                    priceRows,
+			credentialDenylist:        append([]string(nil), cfg.CredentialDenylist...),
+			disableAutoCacheControl:   cfg.DisableAutoCacheControl,
+			disableForceStreamForTTFT: cfg.DisableForceStreamForTTFT,
 		}
 		for _, modelID := range cfg.ModelAllowlist {
 			policy.allowlist[modelID] = struct{}{}
@@ -204,6 +207,13 @@ func (p *OrganizationPolicy) CredentialDenylist() []string {
 // orchestrator.go's InjectCacheControl call). A nil policy never disables it.
 func (p *OrganizationPolicy) DisablesAutoCacheControl() bool {
 	return p != nil && p.disableAutoCacheControl
+}
+
+// DisablesForceStreamForTTFT reports whether this organization opted out of
+// the server's force_stream_for_ttft toggle (see Proxy.applyForceStream). A
+// nil policy never disables it.
+func (p *OrganizationPolicy) DisablesForceStreamForTTFT() bool {
+	return p != nil && p.disableForceStreamForTTFT
 }
 
 func (r *OrganizationPolicyRegistry) Empty() bool {

@@ -248,6 +248,7 @@ func (p *Proxy) nextPrimaryAfterUnsupportedCredential(
 			prepared.responsesPrevHandled,
 			prepared.stickyCacheEligible,
 			prepared.autoCacheControlDisabled,
+			prepared.forceStreamForTTFTDisabled,
 		)
 		if prepErr != nil {
 			if isClientRequestFault(prepErr) {
@@ -357,6 +358,7 @@ func (p *Proxy) nextCrossTypeRetryCredential(
 			prepared.responsesPrevHandled,
 			prepared.stickyCacheEligible,
 			prepared.autoCacheControlDisabled,
+			prepared.forceStreamForTTFTDisabled,
 		)
 		if prepErr != nil {
 			if isClientRequestFault(prepErr) {
@@ -1583,6 +1585,7 @@ func (p *Proxy) nextRetryCredential(
 			prepared.responsesPrevHandled,
 			prepared.stickyCacheEligible,
 			prepared.autoCacheControlDisabled,
+			prepared.forceStreamForTTFTDisabled,
 		)
 		if prepErr != nil && isClientRequestFault(prepErr) {
 			// The request itself is at fault: no other credential can accept
