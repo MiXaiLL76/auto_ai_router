@@ -79,6 +79,18 @@ The list accepts up to 1024 names and 65536 encoded bytes. Each name may contain
 
 An organization policy entry can also set `disable_auto_cache_control: true` to opt that organization out of the router's automatic Anthropic prompt-cache `cache_control` injection, independently of pricing or credential restrictions. See [Automatic Anthropic Prompt Caching](../advanced/session_sticky.md#automatic-anthropic-prompt-caching) for the full trigger conditions this overrides.
 
+### Disabling force_stream_for_ttft
+
+`server.force_stream_for_ttft` is a single global switch. To keep it on for everyone else but turn it off for one LiteLLM organization — for example, one whose provider contract forbids altering `stream` on its behalf — set `disable_force_stream_for_ttft: true` on that organization's entry under `organization_policies`:
+
+```yaml
+organization_policies:
+  - organization_id: os.environ/NO_FORCED_STREAM_ORG_ID
+    disable_force_stream_for_ttft: true
+```
+
+This field works with or without a tariff profile on the same entry, and does not require `price_profile_id` / `model_prices_link`. A request from an organization with no matching policy entry, or whose policy omits the field, keeps the global default.
+
 ### Refresh interval
 
 Prices are read once at startup and then re-read in the background every `model_prices_sync_interval`. Set it to any Go duration string:

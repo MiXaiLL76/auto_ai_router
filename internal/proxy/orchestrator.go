@@ -79,6 +79,10 @@ type orchestratedRequest struct {
 	// an organization-level opt-out of InjectCacheControl, independent of
 	// stickyCacheEligible and the global session_sticky_auto_cache_control switch.
 	autoCacheControlDisabled bool
+	// forceStreamForTTFTDisabled mirrors logCtx.OrganizationPolicy.DisablesForceStreamForTTFT():
+	// an organization-level opt-out of applyForceStream, independent of the
+	// global force_stream_for_ttft switch.
+	forceStreamForTTFTDisabled bool
 	// cacheControlOutcome mirrors credentialPreparedRequest.cacheControlOutcome
 	// for the credential actually used; see that field's doc comment.
 	cacheControlOutcome string
@@ -323,6 +327,7 @@ func (p *Proxy) orchestrateRequest(
 
 	stickyCacheEligible := logCtx.SessionID != "" || preferredCredentialName != ""
 	autoCacheControlDisabled := logCtx.OrganizationPolicy.DisablesAutoCacheControl()
+	forceStreamForTTFTDisabled := logCtx.OrganizationPolicy.DisablesForceStreamForTTFT()
 	credentialReq, prepErr := p.prepareRequestForCredential(
 		r,
 		baseBody,
@@ -336,6 +341,7 @@ func (p *Proxy) orchestrateRequest(
 		prevEntryHandled,
 		stickyCacheEligible,
 		autoCacheControlDisabled,
+		forceStreamForTTFTDisabled,
 	)
 	if prepErr != nil {
 		var validationErr *converterutil.RequestValidationError
@@ -403,6 +409,7 @@ func (p *Proxy) orchestrateRequest(
 		messagesMetadata:           credentialReq.messagesMetadata,
 		stickyCacheEligible:        stickyCacheEligible,
 		autoCacheControlDisabled:   autoCacheControlDisabled,
+		forceStreamForTTFTDisabled: forceStreamForTTFTDisabled,
 		cacheControlOutcome:        credentialReq.cacheControlOutcome,
 	}, true
 }
@@ -426,9 +433,10 @@ func (p *Proxy) prepareRequestForCredential(
 	prevEntryHandled bool,
 	stickyCacheEligible bool,
 	autoCacheControlDisabled bool,
+	forceStreamForTTFTDisabled bool,
 ) (credentialPreparedRequest, error) {
 	req, err := p.buildCredentialRequest(r, baseBody, baseProxyBody, modelID, baseRealModelID,
-		basePath, streaming, cred, isResponsesAPI, prevEntryHandled, stickyCacheEligible, autoCacheControlDisabled)
+		basePath, streaming, cred, isResponsesAPI, prevEntryHandled, stickyCacheEligible, autoCacheControlDisabled, forceStreamForTTFTDisabled)
 	if err != nil {
 		return req, err
 	}
@@ -600,13 +608,14 @@ func (p *Proxy) buildCredentialRequest(
 	prevEntryHandled bool,
 	stickyCacheEligible bool,
 	autoCacheControlDisabled bool,
+	forceStreamForTTFTDisabled bool,
 ) (credentialPreparedRequest, error) {
 	req, err := p.buildCredentialRequestInner(r, baseBody, baseProxyBody, modelID, baseRealModelID,
 		basePath, streaming, cred, isResponsesAPI, prevEntryHandled, stickyCacheEligible, autoCacheControlDisabled)
 	if err != nil {
 		return req, err
 	}
-	return p.applyForceStream(req, streaming, cred, r), nil
+	return p.applyForceStream(req, streaming, cred, r, forceStreamForTTFTDisabled), nil
 }
 
 // isChatShapedPath reports whether path is one force_stream_for_ttft may touch:
@@ -633,9 +642,12 @@ func isChatShapedPath(path string) bool {
 // provider this router already streams to understands stream:true. Native and
 // passthrough Responses API requests (native provider formats), responses_only
 // conversions and proxy-like (AIR-to-AIR) chains are left untouched — they
-// keep their existing behavior and merely miss the TTFT.
-func (p *Proxy) applyForceStream(req credentialPreparedRequest, streaming bool, cred *config.CredentialConfig, r *http.Request) credentialPreparedRequest {
-	if !p.forceStreamForTTFT || streaming {
+// keep their existing behavior and merely miss the TTFT. forceStreamForTTFTDisabled
+// mirrors logCtx.OrganizationPolicy.DisablesForceStreamForTTFT(): an
+// organization that opted out keeps the request as the client sent it,
+// regardless of the global toggle.
+func (p *Proxy) applyForceStream(req credentialPreparedRequest, streaming bool, cred *config.CredentialConfig, r *http.Request, forceStreamForTTFTDisabled bool) credentialPreparedRequest {
+	if !p.forceStreamForTTFT || streaming || forceStreamForTTFTDisabled {
 		return req
 	}
 	// Only chat-shaped requests are eligible: the simulated response path can

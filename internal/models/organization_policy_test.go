@@ -286,3 +286,40 @@ func TestOrganizationPolicy_DisableAutoCacheControl(t *testing.T) {
 	var nilPolicy *OrganizationPolicy
 	assert.False(t, nilPolicy.DisablesAutoCacheControl())
 }
+
+func TestOrganizationPolicy_DisableForceStreamForTTFT(t *testing.T) {
+	manager := testPolicyManager()
+	registry, err := LoadOrganizationPolicies([]config.OrganizationPolicyConfig{
+		{
+			// No price profile: the "default catalog" construction branch.
+			OrganizationID:            "org-no-pricing",
+			DisableForceStreamForTTFT: true,
+		},
+		{
+			// A price profile: the other construction branch.
+			OrganizationID:            "org-priced",
+			PriceProfileID:            "profile-priced",
+			ModelPricesLink:           writePolicyPrices(t, `{"public/a":{"input_cost_per_token":0.001}}`),
+			DisableForceStreamForTTFT: true,
+		},
+		{
+			OrganizationID: "org-default",
+		},
+	}, manager, validPolicyOptions())
+	require.NoError(t, err)
+
+	noPricing, ok := registry.Policy("org-no-pricing")
+	require.True(t, ok)
+	assert.True(t, noPricing.DisablesForceStreamForTTFT())
+
+	priced, ok := registry.Policy("org-priced")
+	require.True(t, ok)
+	assert.True(t, priced.DisablesForceStreamForTTFT())
+
+	defaultPolicy, ok := registry.Policy("org-default")
+	require.True(t, ok)
+	assert.False(t, defaultPolicy.DisablesForceStreamForTTFT())
+
+	var nilPolicy *OrganizationPolicy
+	assert.False(t, nilPolicy.DisablesForceStreamForTTFT())
+}
