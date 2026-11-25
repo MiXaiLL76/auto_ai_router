@@ -35,6 +35,9 @@ func (c *Config) validateFeatures() error {
 	if err := c.YandexSearch.Validate(); err != nil {
 		return err
 	}
+	if err := c.ImageDownload.Validate(); err != nil {
+		return err
+	}
 	if err := c.VisionFallback.Validate(); err != nil {
 		return err
 	}

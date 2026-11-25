@@ -13,7 +13,7 @@ import (
 // more attachments than the router is willing to download is refused at the
 // cap rather than after downloading all of them.
 func TestImageFetchBudgetCapsImages(t *testing.T) {
-	budget := NewImageFetchBudget(2, time.Minute)
+	budget := NewImageFetchBudget(ImageFetchLimits{MaxImages: 2, Timeout: time.Minute})
 
 	assert.True(t, budget.Reserve(), "the first image fits the budget")
 	assert.True(t, budget.Reserve(), "the second image fits the budget")
@@ -24,7 +24,7 @@ func TestImageFetchBudgetCapsImages(t *testing.T) {
 // TestImageFetchBudgetWithoutCap checks that a non-positive cap means "no
 // limit".
 func TestImageFetchBudgetWithoutCap(t *testing.T) {
-	budget := NewImageFetchBudget(0, time.Minute)
+	budget := NewImageFetchBudget(ImageFetchLimits{Timeout: time.Minute})
 	for range 100 {
 		assert.True(t, budget.Reserve())
 	}
@@ -49,7 +49,7 @@ func TestNilImageFetchBudgetIsPermissive(t *testing.T) {
 // remaining time shrinks and a fetch started after the deadline is
 // cancelled immediately.
 func TestImageFetchBudgetDeadline(t *testing.T) {
-	budget := NewImageFetchBudget(10, 200*time.Millisecond)
+	budget := NewImageFetchBudget(ImageFetchLimits{MaxImages: 10, Timeout: 200 * time.Millisecond})
 
 	remaining := budget.Remaining()
 	assert.Positive(t, remaining, "a budget with a timeout has time left")
@@ -74,7 +74,7 @@ func TestImageFetchBudgetDeadline(t *testing.T) {
 // TestImageFetchBudgetWithoutTimeoutHasNoDeadline checks that a budget
 // without a timeout yields the parent context unchanged.
 func TestImageFetchBudgetWithoutTimeoutHasNoDeadline(t *testing.T) {
-	budget := NewImageFetchBudget(10, 0)
+	budget := NewImageFetchBudget(ImageFetchLimits{MaxImages: 10})
 
 	assert.Equal(t, time.Duration(0), budget.Remaining())
 
@@ -88,7 +88,7 @@ func TestImageFetchBudgetWithoutTimeoutHasNoDeadline(t *testing.T) {
 // use: the cap must hold no matter how many goroutines race for it.
 func TestImageFetchBudgetIsConcurrencySafe(t *testing.T) {
 	const cap = 10
-	budget := NewImageFetchBudget(cap, time.Minute)
+	budget := NewImageFetchBudget(ImageFetchLimits{MaxImages: cap, Timeout: time.Minute})
 
 	granted := make(chan bool, 100)
 	for range 100 {

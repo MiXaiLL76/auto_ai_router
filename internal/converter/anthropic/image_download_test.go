@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -159,9 +160,9 @@ func TestDownloadAndEncodeImageRejectsPrivateURL(t *testing.T) {
 func TestDownloadAndEncodeImageRejectsOversized(t *testing.T) {
 	withPermissiveImageFetch(t)
 
-	origLimit := maxImageDownloadBytes
-	maxImageDownloadBytes = 1024
-	t.Cleanup(func() { maxImageDownloadBytes = origLimit })
+	origLimits := imageLimits
+	imageLimits = ImageDownloadLimits{MaxBytes: 1024, TimeoutPerImage: time.Minute, ConnectTimeout: time.Minute}
+	t.Cleanup(func() { imageLimits = origLimits; imageHTTPClient = newImageHTTPClient(origLimits) })
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
@@ -335,7 +336,7 @@ func TestDownloadAndEncodeImageRespectsBudget(t *testing.T) {
 	}))
 	defer server.Close()
 
-	budget := converterutil.NewImageFetchBudget(2, time.Minute)
+	budget := converterutil.NewImageFetchBudget(converterutil.ImageFetchLimits{MaxImages: 2, Timeout: time.Minute})
 
 	for i := range 2 {
 		block, err := DownloadAndEncodeImage(server.URL+"/image.png", imageDownloadParam, budget)
@@ -352,4 +353,69 @@ func TestDownloadAndEncodeImageRespectsBudget(t *testing.T) {
 	require.True(t, errors.As(err, &imageErr))
 	assert.Equal(t, converterutil.ImageErrorTooManyImages, imageErr.Reason)
 	assert.NotContains(t, err.Error(), server.URL)
+}
+
+// TestSetImageDownloadLimits checks that the configured limits reach the
+// downloader: the size limit is what refuses an oversized image, so it has
+// to come from the router's config and not from a constant.
+func TestSetImageDownloadLimits(t *testing.T) {
+	orig := imageLimits
+	t.Cleanup(func() { SetImageDownloadLimits(orig) })
+
+	SetImageDownloadLimits(ImageDownloadLimits{
+		MaxBytes:        512,
+		TimeoutPerImage: time.Minute,
+		ConnectTimeout:  time.Minute,
+	})
+	assert.Equal(t, int64(512), imageLimits.MaxBytes)
+
+	withPermissiveImageFetch(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(make([]byte, 4096))
+	}))
+	defer server.Close()
+
+	block, err := DownloadAndEncodeImage(server.URL+"/big.png", imageDownloadParam, nil)
+	require.Error(t, err)
+	assert.Nil(t, block)
+
+	var imageErr *converterutil.ImageError
+	require.True(t, errors.As(err, &imageErr))
+	assert.Equal(t, converterutil.ImageErrorTooLarge, imageErr.Reason)
+}
+
+// TestDownloadAndEncodeImageRefusesOversizedByContentLength checks that the
+// size the server announced is enough to refuse the image: the body is not
+// pulled in at all.
+func TestDownloadAndEncodeImageRefusesOversizedByContentLength(t *testing.T) {
+	withPermissiveImageFetch(t)
+
+	var served int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&served, 1)
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Content-Length", "1000000")
+		w.WriteHeader(http.StatusOK)
+		// The body is never read by the router.
+		_, _ = w.Write(make([]byte, 1000000))
+	}))
+	defer server.Close()
+
+	orig := imageLimits
+	t.Cleanup(func() { SetImageDownloadLimits(orig) })
+	SetImageDownloadLimits(ImageDownloadLimits{
+		MaxBytes:        1024,
+		TimeoutPerImage: time.Minute,
+		ConnectTimeout:  time.Minute,
+	})
+
+	block, err := DownloadAndEncodeImage(server.URL+"/big.png", imageDownloadParam, nil)
+	require.Error(t, err)
+	assert.Nil(t, block)
+
+	var imageErr *converterutil.ImageError
+	require.True(t, errors.As(err, &imageErr))
+	assert.Equal(t, converterutil.ImageErrorTooLarge, imageErr.Reason)
 }

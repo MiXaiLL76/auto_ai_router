@@ -10,7 +10,6 @@ import (
 	"maps"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
@@ -388,7 +387,7 @@ func (p *Proxy) orchestrateRequest(
 
 	return &orchestratedRequest{
 		request:                    r,
-		imageBudget:                newImageFetchBudget(),
+		imageBudget:                p.newImageFetchBudget(),
 		body:                       body,
 		proxyBody:                  credentialReq.proxyBody,
 		proxyPath:                  credentialReq.proxyPath,
@@ -1690,24 +1689,17 @@ func (p *Proxy) selectCredentialForModel(
 	return nil, false
 }
 
-// Image download limits for a single client request.
-//
-// The router downloads a client-supplied image itself, so a request with
-// several attachments costs the sum of the per-fetch timeouts and the router
-// keeps working long after the client disconnected. These bounds keep the
-// work proportional to the request.
-const (
-	// maxImagesPerRequest caps how many images one request may fetch.
-	maxImagesPerRequest = 16
-	// imageFetchBudgetTimeout is the total time one request's image
-	// downloads may take together, across all of its images.
-	imageFetchBudgetTimeout = 15 * time.Second
-)
-
-// newImageFetchBudget returns the image budget for one request.
+// newImageFetchBudget returns the image budget for one request, under the
+// limits of the router's image_download section.
 //
 // The budget is per request, not per credential: a request that retries on
 // another credential must not get a fresh allowance of image downloads.
-func newImageFetchBudget() *converterutil.ImageFetchBudget {
-	return converterutil.NewImageFetchBudget(maxImagesPerRequest, imageFetchBudgetTimeout)
+func (p *Proxy) newImageFetchBudget() *converterutil.ImageFetchBudget {
+	limits := p.imageDownload
+	return converterutil.NewImageFetchBudget(converterutil.ImageFetchLimits{
+		MaxImages:     limits.MaxCount,
+		MaxImageBytes: limits.MaxBytes,
+		MaxTotalBytes: limits.MaxTotalBytes,
+		Timeout:       limits.Timeout,
+	})
 }

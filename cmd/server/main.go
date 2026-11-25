@@ -44,6 +44,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/telemetry"
 
 	// Register native Responses API converters for Vertex AI, Anthropic, and Bedrock.
+	anthropicconv "github.com/mixaill76/auto_ai_router/internal/converter/anthropic"
 	_ "github.com/mixaill76/auto_ai_router/internal/converter/anthropic/responses"
 	_ "github.com/mixaill76/auto_ai_router/internal/converter/bedrock/responses"
 	_ "github.com/mixaill76/auto_ai_router/internal/converter/vertex/responses"
@@ -319,10 +320,20 @@ func main() {
 		deepSeekToolsRedis = redisBackend.Client()
 	}
 
+	// The image downloader runs on the router's own limits (the
+	// image_download section of the config): the size of a single image, the
+	// timeouts, and the per-request budget.
+	anthropicconv.SetImageDownloadLimits(anthropicconv.ImageDownloadLimits{
+		MaxBytes:        cfg.ImageDownload.MaxBytes,
+		TimeoutPerImage: cfg.ImageDownload.TimeoutPerImage,
+		ConnectTimeout:  cfg.ImageDownload.ConnectTimeout,
+	})
+
 	prx := proxy.New(&proxy.Config{
 		Balancer:                     bal,
 		Logger:                       log,
 		MaxBodySizeMB:                cfg.Server.MaxBodySizeMB,
+		ImageDownload:                cfg.ImageDownload,
 		ResponseBodyMultiplier:       cfg.Server.ResponseBodyMultiplier,
 		RequestTimeout:               cfg.Server.RequestTimeout,
 		MaxIdleConns:                 cfg.Server.MaxIdleConns,

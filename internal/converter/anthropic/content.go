@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 )
 
@@ -180,12 +181,33 @@ func convertImageURLToAnthropic(url string, budget *converterutil.ImageFetchBudg
 // anything about the target host.
 const imageDownloadParam = "messages.content.image_url.url"
 
-// maxImageDownloadBytes caps how much of a remote image the router will
-// download. Anthropic's own limit for a base64 image is 5 MB per image;
-// refusing anything much larger keeps a single client-supplied URL from
-// pulling an unbounded payload into the router's memory and then into the
-// base64-encoded request body.
-var maxImageDownloadBytes = 25 * 1024 * 1024
+// ImageDownloadLimits are the limits one request's image downloads run
+// under, as configured in the router's image_download section.
+type ImageDownloadLimits struct {
+	// MaxBytes is the largest single image the router fetches. Zero means
+	// no limit.
+	MaxBytes int64
+	// TimeoutPerImage is the timeout of a single image fetch.
+	TimeoutPerImage time.Duration
+	// ConnectTimeout is the timeout of establishing the connection to an
+	// image host.
+	ConnectTimeout time.Duration
+}
+
+// DefaultImageDownloadLimits are the limits used when the router's config
+// carries none.
+func DefaultImageDownloadLimits() ImageDownloadLimits {
+	return ImageDownloadLimits{
+		MaxBytes:        config.DefaultImageMaxBytes,
+		TimeoutPerImage: config.DefaultImageFetchTimeoutPerImage,
+		ConnectTimeout:  config.DefaultImageFetchConnectTimeout,
+	}
+}
+
+// imageLimits are the limits in force for the downloads of one request. The
+// client below is rebuilt whenever they change, so the limits and the
+// timeouts always agree.
+var imageLimits = DefaultImageDownloadLimits()
 
 // imageHTTPClient fetches remote images on the client's behalf.
 //
@@ -193,7 +215,7 @@ var maxImageDownloadBytes = 25 * 1024 * 1024
 // client-supplied URL cannot be used to reach the pod's own network, the
 // cluster API, or a cloud metadata endpoint (SSRF). The timeouts are
 // deliberately short: the router is in the request path, and a client that
-// waited out a 15s image fetch would abandon the request long before the
+// waited out a long image fetch would abandon the request long before the
 // router gave up on it.
 //
 // No HTTP_PROXY-style proxy is used here on purpose. A forward proxy is
@@ -202,27 +224,47 @@ var maxImageDownloadBytes = 25 * 1024 * 1024
 // the proxy could be used to reach link-local metadata endpoints on its own
 // host. Image URLs are public CDN links by nature, so they are fetched
 // directly.
-var imageHTTPClient = &http.Client{
-	Timeout: imageDownloadTimeout,
-	Transport: &http.Transport{
-		// The dialer is read at connect time rather than captured here, so
-		// the SSRF guard can be swapped out in tests without rebuilding the
-		// client.
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return imageDialContext(ctx, network, addr)
+var imageHTTPClient = newImageHTTPClient(imageLimits)
+
+// newImageHTTPClient builds the client for the given limits.
+func newImageHTTPClient(limits ImageDownloadLimits) *http.Client {
+	timeout := limits.TimeoutPerImage
+	if timeout <= 0 {
+		timeout = config.DefaultImageFetchTimeoutPerImage
+	}
+	connect := limits.ConnectTimeout
+	if connect <= 0 {
+		connect = config.DefaultImageFetchConnectTimeout
+	}
+	return &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			// The dialer is read at connect time rather than captured here, so
+			// the SSRF guard can be swapped out in tests without rebuilding the
+			// client.
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				return imageDialContext(ctx, network, addr)
+			},
+			TLSHandshakeTimeout:   connect,
+			ResponseHeaderTimeout: timeout,
+			ExpectContinueTimeout: time.Second,
+			MaxIdleConnsPerHost:   4,
+			DisableCompression:    true,
 		},
-		TLSHandshakeTimeout:   imageDialTimeout,
-		ResponseHeaderTimeout: imageDownloadTimeout,
-		ExpectContinueTimeout: time.Second,
-		MaxIdleConnsPerHost:   4,
-		DisableCompression:    true,
-	},
+	}
 }
 
-// imageDialContext is the dialer used for image downloads. It is a variable
-// so tests can substitute a permissive dialer for a loopback httptest
+// SetImageDownloadLimits applies the configured limits to the image
+// downloader. The router calls it once at start-up.
+func SetImageDownloadLimits(limits ImageDownloadLimits) {
+	imageLimits = limits
+	imageHTTPClient = newImageHTTPClient(limits)
+}
+
+// imageDialContext is the dialer used for image downloads. It is a variable for
+// tests to substitute a permissive dialer for a loopback httptest
 // server; production always uses the SSRF-guarded one.
-var imageDialContext = converterutil.GuardedDialContext(&net.Dialer{Timeout: imageDialTimeout})
+var imageDialContext = converterutil.GuardedDialContext(&net.Dialer{Timeout: config.DefaultImageFetchConnectTimeout})
 
 // imageURLGuard vets an image URL before it is fetched. It is a variable for
 // the same reason as imageDialContext: tests need to reach a loopback
@@ -312,18 +354,32 @@ func DownloadAndEncodeImage(imgURL, param string, budget *converterutil.ImageFet
 		return nil, converterutil.NewImageError(converterutil.ImageErrorFetchFailed, param)
 	}
 
-	// Read one byte past the limit so an oversized body is detected without
-	// buffering the whole thing.
-	data, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxImageDownloadBytes)+1))
+	limit := imageLimits.MaxBytes
+	if limit <= 0 {
+		limit = config.DefaultImageMaxBytes
+	}
+
+	// The size the server announced is checked before the body is read, so
+	// an oversized image is refused without pulling it in.
+	if announced := resp.ContentLength; announced > 0 && !budget.CheckImageSize(announced) {
+		slog.Warn("Image exceeds the configured limit",
+			"url", imgURL, "size_bytes", announced, "limit_bytes", limit)
+		return nil, converterutil.NewImageError(converterutil.ImageErrorTooLarge, param)
+	}
+
+	// The size the server announced is checked before the body is read: an
+	// oversized image is then refused without pulling it in at all.
+	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		slog.Warn("Failed to read image body", "url", imgURL, "error", err)
 		return nil, converterutil.NewImageError(converterutil.ImageErrorFetchFailed, param)
 	}
-	if len(data) > maxImageDownloadBytes {
+	if int64(len(data)) > limit {
 		slog.Warn("Image exceeds the download limit",
-			"url", imgURL, "limit_bytes", maxImageDownloadBytes)
+			"url", imgURL, "limit_bytes", limit)
 		return nil, converterutil.NewImageError(converterutil.ImageErrorTooLarge, param)
 	}
+	budget.AccountDownload(int64(len(data)))
 	if len(data) == 0 {
 		slog.Warn("Image response body is empty", "url", imgURL)
 		return nil, converterutil.NewImageError(converterutil.ImageErrorInvalidData, param)

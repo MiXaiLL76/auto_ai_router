@@ -689,6 +689,7 @@ type Config struct {
 	PriceRegistry             *models.ModelPriceRegistry // Model pricing information (optional)
 	OrganizationPolicies      *models.OrganizationPolicyRegistry
 	MaxProviderRetries        int                        // Max same-type credential retries (default: 2)
+	ImageDownload             config.ImageDownloadConfig // Limits on the images the router fetches for a client
 	MaxFallbackAttempts       int                        // Max fallback proxy hops per request chain (default: 5)
 	AnthropicDefaultMaxTokens int                        // max_tokens sent to a Claude model when the client sends none (default: 32000)
 	DeepSeekTools             config.DeepSeekToolsConfig // The router-run DeepSeek Search/Fetch adapter's settings
@@ -794,15 +795,16 @@ type Proxy struct {
 	banDecisionsExternal         bool                           // external ban source wired (see recordBanSignal)
 	priceRegistry                *models.ModelPriceRegistry     // Model pricing information (optional)
 	organizationPolicies         *models.OrganizationPolicyRegistry
-	maxProviderRetries           int                  // Max same-type credential retries on provider errors
-	retryPolicy                  *retryPolicy         // compiled Config.Retry
-	maxFallbackAttempts          int                  // Max fallback proxy hops per request chain
-	anthropicDefaultMaxTokens    int                  // max_tokens sent to a Claude model when the client sends none (0 = config.AnthropicDefaultMaxTokens)
-	deepSeekToolsEnabled         bool                 // the router runs DeepSeek's own Search/Fetch tools for models that cannot
-	deepSeekToolsTimeout         time.Duration        // timeout of one Search/Fetch call
-	deepSeekToolsMaxSteps        int                  // bound of the router-run tool loop
-	deepSeekToolsMaxRetries      int                  // retries of a Search/Fetch call after a 429 or 5xx
-	deepSeekToolsQuota           *deepseektools.Quota // per-account QPS pools for Search and Fetch
+	maxProviderRetries           int                        // Max same-type credential retries on provider errors
+	imageDownload                config.ImageDownloadConfig // Limits on the images the router fetches for a client
+	retryPolicy                  *retryPolicy               // compiled Config.Retry
+	maxFallbackAttempts          int                        // Max fallback proxy hops per request chain
+	anthropicDefaultMaxTokens    int                        // max_tokens sent to a Claude model when the client sends none (0 = config.AnthropicDefaultMaxTokens)
+	deepSeekToolsEnabled         bool                       // the router runs DeepSeek's own Search/Fetch tools for models that cannot
+	deepSeekToolsTimeout         time.Duration              // timeout of one Search/Fetch call
+	deepSeekToolsMaxSteps        int                        // bound of the router-run tool loop
+	deepSeekToolsMaxRetries      int                        // retries of a Search/Fetch call after a 429 or 5xx
+	deepSeekToolsQuota           *deepseektools.Quota       // per-account QPS pools for Search and Fetch
 	// deepSeekToolsClients holds one client per distinct destination, so the
 	// router's calls to DeepSeek reuse the connections between the requests
 	// instead of paying a fresh handshake each time.
@@ -948,6 +950,7 @@ func New(cfg *Config) *Proxy {
 		priceRegistry:                    cfg.PriceRegistry,
 		organizationPolicies:             cfg.OrganizationPolicies,
 		maxProviderRetries:               cfg.MaxProviderRetries,
+		imageDownload:                    cfg.ImageDownload,
 		maxFallbackAttempts:              cfg.MaxFallbackAttempts,
 		anthropicDefaultMaxTokens:        cfg.AnthropicDefaultMaxTokens,
 		moonshotToolsTimeout:             cfg.MoonshotTools.RequestTimeout,

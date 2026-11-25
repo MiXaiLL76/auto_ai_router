@@ -61,6 +61,22 @@ server:
   response_headers:
     mode: passthrough  # Use allowlist to expose only standard response metadata
 
+# The limits on the images the router fetches for a client: a request may
+# carry an image by URL, and the router downloads it itself, base64-encodes
+# it and sends it upstream. These bound that work.
+#
+# The defaults follow the providers' own limits: Anthropic accepts 10 MB per
+# image (5 MB on Bedrock) and Gemini bounds the whole request at 20 MB, so
+# downloading more only wastes the router's time before the provider refuses
+# the request anyway.
+image_download:
+  max_bytes: 10MB  # Largest single image the router fetches (default: 10MB, Anthropic's per-image limit; 0 = no limit)
+  max_total_bytes: 100MB  # Largest total the images of one request may occupy (default: 100MB, the server's max_body_size_mb; 0 = no limit)
+  max_count: 100  # Most images one request may carry (default: 100, Anthropic's floor; production peaks at 11; 0 = no limit)
+  timeout: 15s  # Total time the images of one request may take to download, shared by all of them (default: 15s)
+  timeout_per_image: 8s  # Timeout of a single image fetch (default: 8s; the shorter of it and timeout wins)
+  connect_timeout: 3s  # Timeout of establishing the connection to an image host (default: 3s)
+
 fail2ban:
   max_attempts: 3
   ban_duration: permanent  # Use 'permanent' for permanent bans, or duration like '1h30m'

@@ -31,19 +31,39 @@ var ErrImageBudgetExhausted = errors.New("image budget exhausted")
 // timeout. The methods handle a nil receiver, so callers do not have to
 // check.
 type ImageFetchBudget struct {
-	mu        sync.Mutex
-	deadline  time.Time
-	maxImages int
-	fetched   int
+	mu              sync.Mutex
+	deadline        time.Time
+	maxImages       int
+	maxImageBytes   int64
+	maxTotalBytes   int64
+	fetched         int
+	downloadedBytes int64
 }
 
-// NewImageFetchBudget returns a budget for one request. maxImages caps the
-// number of downloads; timeout is the total time the request's downloads may
-// take together. A non-positive maxImages means no cap.
-func NewImageFetchBudget(maxImages int, timeout time.Duration) *ImageFetchBudget {
-	budget := &ImageFetchBudget{maxImages: maxImages}
-	if timeout > 0 {
-		budget.deadline = time.Now().Add(timeout)
+// ImageFetchLimits are the limits one request's image downloads run under.
+type ImageFetchLimits struct {
+	// MaxImages caps the number of images one request may fetch. Zero means
+	// no cap.
+	MaxImages int
+	// MaxImageBytes caps the size of a single image. Zero means no cap.
+	MaxImageBytes int64
+	// MaxTotalBytes caps the total size of the images of one request. Zero
+	// means no cap.
+	MaxTotalBytes int64
+	// Timeout is the total time the request's downloads may take together.
+	// Zero means no time limit.
+	Timeout time.Duration
+}
+
+// NewImageFetchBudget returns a budget for one request.
+func NewImageFetchBudget(limits ImageFetchLimits) *ImageFetchBudget {
+	budget := &ImageFetchBudget{
+		maxImages:     limits.MaxImages,
+		maxImageBytes: limits.MaxImageBytes,
+		maxTotalBytes: limits.MaxTotalBytes,
+	}
+	if limits.Timeout > 0 {
+		budget.deadline = time.Now().Add(limits.Timeout)
 	}
 	return budget
 }
@@ -64,6 +84,37 @@ func (b *ImageFetchBudget) Reserve() bool {
 	}
 	b.fetched++
 	return true
+}
+
+// CheckImageSize reports whether an image of the given size fits the
+// budget: the single-image limit and the request's total limit.
+//
+// It is asked before the download, with the size the server announced (the
+// Content-Length), so an oversized image is refused without pulling it in.
+func (b *ImageFetchBudget) CheckImageSize(size int64) bool {
+	if b == nil || size <= 0 {
+		return true
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.maxImageBytes > 0 && size > b.maxImageBytes {
+		return false
+	}
+	if b.maxTotalBytes > 0 && b.downloadedBytes+size > b.maxTotalBytes {
+		return false
+	}
+	return true
+}
+
+// AccountDownload records the size of a fetched image against the
+// request's total.
+func (b *ImageFetchBudget) AccountDownload(size int64) {
+	if b == nil || size <= 0 {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.downloadedBytes += size
 }
 
 // Fetched returns how many image downloads the budget has accounted for.
