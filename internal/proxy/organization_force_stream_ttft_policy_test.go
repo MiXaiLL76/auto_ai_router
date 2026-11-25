@@ -13,6 +13,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	dbmodels "github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	routermodels "github.com/mixaill76/auto_ai_router/internal/models"
+	"github.com/mixaill76/auto_ai_router/internal/scope"
 	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -169,4 +170,83 @@ func TestOrganizationPolicy_NoPolicyStillAppliesForceStreamForTTFT(t *testing.T)
 	streamed, _ := body["stream"].(bool)
 	assert.True(t, streamed,
 		"force_stream_for_ttft must still apply when no organization policy exists")
+}
+
+// TestNextRetryCredential_HonoursForceStreamOptOut and
+// TestNextCrossTypeRetryCredential_HonoursForceStreamOptOut pin that the
+// opt-out survives the two retry entry points that rebuild the request via
+// prepareRequestForCredential (nextRetryCredential, used by the simulated
+// non-stream handlers' own internal retry; nextCrossTypeRetryCredential, used
+// by the main direct/cross-type retry loop), not just the first attempt's.
+// This is the exact class of bug the repo already had with
+// autoCacheControlDisabled (a field threaded through the first attempt but
+// forgotten on a retry path): a direct call, mirroring
+// TestSimulatedStreamRetryDoesNotSelectAIRForDirectSend's style, so it
+// exercises the rebuild itself rather than depending on a specific HTTP
+// failure actually routing through one of these functions end to end.
+func TestNextRetryCredential_HonoursForceStreamOptOut(t *testing.T) {
+	first := config.CredentialConfig{Name: "first", Type: config.ProviderTypeOpenAI, BaseURL: "http://first.invalid", APIKey: "k1", RPM: 100, TPM: 10000}
+	second := config.CredentialConfig{Name: "second", Type: config.ProviderTypeOpenAI, BaseURL: "http://second.invalid", APIKey: "k2", Priority: 1, RPM: 100, TPM: 10000}
+	body := []byte(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`)
+
+	for _, c := range []struct {
+		name     string
+		disabled bool
+		want     assert.BoolAssertionFunc
+	}{
+		{"opted out", true, assert.False},
+		{"not opted out", false, assert.True},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			prx := NewTestProxyBuilder().WithCredentials(first, second).WithForceStreamForTTFT(true).Build()
+			tried := map[string]bool{"first": true}
+
+			_, nextReq, ready, _ := prx.nextRetryCredential(
+				httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
+				&RequestLogContext{Scope: scope.PublicContext()}, "gpt-4", &first,
+				&orchestratedRequest{
+					baseBody: body, baseProxyBody: body, basePath: "/v1/chat/completions",
+					forceStreamForTTFTDisabled: c.disabled,
+				},
+				false, 1, tried, map[string]bool{"first": true},
+			)
+
+			require.True(t, ready)
+			streamed := strings.Contains(string(nextReq.body), `"stream":true`)
+			c.want(t, streamed, "nextRetryCredential's rebuilt body: stream:true present = %v, opted out = %v", streamed, c.disabled)
+		})
+	}
+}
+
+func TestNextCrossTypeRetryCredential_HonoursForceStreamOptOut(t *testing.T) {
+	first := config.CredentialConfig{Name: "first", Type: config.ProviderTypeOpenAI, BaseURL: "http://first.invalid", APIKey: "k1", RPM: 100, TPM: 10000}
+	second := config.CredentialConfig{Name: "second", Type: config.ProviderTypeOpenAI, BaseURL: "http://second.invalid", APIKey: "k2", Priority: 1, RPM: 100, TPM: 10000}
+	body := []byte(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`)
+
+	for _, c := range []struct {
+		name     string
+		disabled bool
+		want     assert.BoolAssertionFunc
+	}{
+		{"opted out", true, assert.False},
+		{"not opted out", false, assert.True},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			prx := NewTestProxyBuilder().WithCredentials(first, second).WithForceStreamForTTFT(true).Build()
+			tried := map[string]bool{"first": true}
+
+			_, nextReq, ready, _ := prx.nextCrossTypeRetryCredential(
+				httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
+				&orchestratedRequest{
+					modelID: "gpt-4", baseBody: body, baseProxyBody: body, basePath: "/v1/chat/completions",
+					forceStreamForTTFTDisabled: c.disabled,
+				},
+				&RequestLogContext{Scope: scope.PublicContext()}, &first, tried, map[string]bool{"first": true}, 1, true,
+			)
+
+			require.True(t, ready)
+			streamed := strings.Contains(string(nextReq.body), `"stream":true`)
+			c.want(t, streamed, "nextCrossTypeRetryCredential's rebuilt body: stream:true present = %v, opted out = %v", streamed, c.disabled)
+		})
+	}
 }

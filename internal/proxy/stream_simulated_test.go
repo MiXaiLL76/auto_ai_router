@@ -1334,6 +1334,81 @@ func TestApplyForceStream_TouchesChatPaths(t *testing.T) {
 	}
 }
 
+// TestApplyForceStream_OrganizationOptOut pins the forceStreamForTTFTDisabled
+// gate across every branch applyForceStream can take: an opted-out
+// organization's request must reach upstream exactly as the client sent it,
+// with none of the forced* markers set, on every one of them -- a future
+// branch added below the gate must opt into forcing explicitly, not inherit
+// it by accident.
+func TestApplyForceStream_OrganizationOptOut(t *testing.T) {
+	openaiCred := &config.CredentialConfig{Name: "openai", Type: config.ProviderTypeOpenAI, BaseURL: "http://upstream"}
+	anthropicCred := &config.CredentialConfig{Name: "anthropic", Type: config.ProviderTypeAnthropic, BaseURL: "http://upstream"}
+
+	cases := []struct {
+		name string
+		path string
+		cred *config.CredentialConfig
+		req  credentialPreparedRequest
+	}{
+		{
+			name: "native Responses",
+			path: "/v1/responses",
+			cred: anthropicCred,
+			req: credentialPreparedRequest{
+				path:            "/v1/responses",
+				nativeResponses: true,
+				body:            []byte(`{"model":"claude-haiku-4.5","input":"hi","stream":false}`),
+			},
+		},
+		{
+			name: "passthrough Responses",
+			path: "/v1/responses",
+			cred: openaiCred,
+			req: credentialPreparedRequest{
+				path:                 "/v1/responses",
+				passthroughResponses: true,
+				body:                 []byte(`{"model":"gpt-4o-mini","input":"hi","stream":false}`),
+			},
+		},
+		{
+			name: "chat completions",
+			path: "/v1/chat/completions",
+			cred: openaiCred,
+			req: credentialPreparedRequest{
+				path: "/v1/chat/completions",
+				body: []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"stream":false}`),
+			},
+		},
+		{
+			name: "messages",
+			path: "/v1/messages",
+			cred: anthropicCred,
+			req: credentialPreparedRequest{
+				path: "/v1/messages",
+				body: []byte(`{"model":"claude-haiku-4.5","messages":[{"role":"user","content":"hi"}],"stream":false}`),
+			},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			prx := NewTestProxyBuilder().WithForceStreamForTTFT(true).Build()
+			httpReq := httptest.NewRequest("POST", c.path, strings.NewReader(`{}`))
+
+			optedOut := prx.applyForceStream(c.req, false, c.cred, httpReq, true)
+			assert.NotContains(t, string(optedOut.body), `"stream":true`,
+				"%s: an opted-out organization's body must reach upstream unchanged", c.name)
+			assert.False(t, optedOut.forcedNativeNonStream, "%s: opt-out must not set forcedNativeNonStream", c.name)
+			assert.False(t, optedOut.forcedPassthroughNonStream, "%s: opt-out must not set forcedPassthroughNonStream", c.name)
+			assert.False(t, optedOut.forcedChatNonStream, "%s: opt-out must not set forcedChatNonStream", c.name)
+
+			forced := prx.applyForceStream(c.req, false, c.cred, httpReq, false)
+			assert.Contains(t, string(forced.body), `"stream":true`,
+				"%s: without the opt-out the global toggle must still force stream:true", c.name)
+		})
+	}
+}
+
 // TestSimulatedPassthrough_DataWithoutSpace covers upstreams that emit SSE
 // frames as "data:{...}" (no space after the colon, which the SSE spec allows
 // and e.g. Alibaba DashScope through a proxy does). The reassembly must still
