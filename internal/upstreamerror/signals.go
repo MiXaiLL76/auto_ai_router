@@ -160,6 +160,22 @@ func ClassifyProviderErrorSignals(signals []string) int {
 		}
 	}
 
+	// A provider's own code that says the REQUEST is at fault. Several
+	// providers answer with an HTTP 200 and put the failure in the body
+	// (Alibaba's dashscope does: {"error":{"code":"invalid_parameter_error",
+	// "message":"..."}}), so without this the failure classified as a generic
+	// 502 -- "Request failed" to the client, and the credential blamed for
+	// a fault that every credential would reproduce identically.
+	//
+	// The codes are the request-side ones a provider states, in its own
+	// spelling. They are checked AFTER the keyword pass above, so a rate
+	// limit or a timeout keeps its own status: those describe the
+	// account's state at that moment, and answering them 400 would tell the
+	// client "your prompt was refused" when the truth is "slow down".
+	if hasRequestSideProviderCode(signals) {
+		return http.StatusBadRequest
+	}
+
 	// Nothing in the signals says what went wrong, but a provider stated a
 	// status as a bare number ("code":400) -- that is the only thing it said,
 	// and it is the provider's own status for the request, so it is what the
@@ -169,6 +185,47 @@ func ClassifyProviderErrorSignals(signals []string) int {
 		return status
 	}
 	return http.StatusBadGateway
+}
+
+// requestSideProviderCodes are the provider codes that mean the request is
+// at fault, in the spellings providers use.
+//
+// They are the codes a provider puts in the body when it answers with an
+// HTTP 200 and the failure is in the body: the request asked for something
+// the provider would not do (a response_format the model cannot satisfy, an
+// input of the wrong length), and every credential would refuse it
+// identically.
+//
+// A code is not a message: the free text a provider writes next to it
+// varies ("Range of input length should be [1, 262144]" against "Model
+// output became abnormal..."), so only the code is matched.
+//
+// The codes are spelled as normalizeKeywordSignal leaves them, with the
+// underscores folded to spaces: that is the form the matching below sees.
+var requestSideProviderCodes = []string{
+	"invalid parameter error",
+	"invalid request error",
+	"invalid parameter",
+	"invalid request",
+	"parameter error",
+	"bad request",
+}
+
+// hasRequestSideProviderCode reports whether any signal is a provider code
+// that means the request itself is at fault.
+func hasRequestSideProviderCode(signals []string) bool {
+	for _, signal := range signals {
+		signal = normalizeKeywordSignal(signal)
+		if signal == "" {
+			continue
+		}
+		for _, code := range requestSideProviderCodes {
+			if signal == code {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // httpStatusFromNumericSignal returns the HTTP status a signal list states as
