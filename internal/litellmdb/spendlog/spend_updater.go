@@ -8,7 +8,6 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/queries"
@@ -59,6 +58,9 @@ type organizationMemberKey struct {
 	UserID         string
 }
 
+// spendUpdateExecer runs the transaction's statements after the insert: a pgx.Tx at once, a
+// spendBatch when they are queued. Callers must not read the returned tag: a queued statement has
+// not run yet, so its tag is empty and its error comes from flushSpendUpdates.
 type spendUpdateExecer interface {
 	Exec(context.Context, string, ...interface{}) (pgconn.CommandTag, error)
 }
@@ -170,7 +172,7 @@ func aggregateSpendUpdates(batch []*models.SpendLogEntry, includeTeamSpendInUser
 
 // executeSpendUpdates executes all UPDATE operations within the given transaction.
 // If any operation fails, the entire transaction rolls back (atomicity).
-func executeSpendUpdates(ctx context.Context, tx pgx.Tx, updates *SpendUpdates) error {
+func executeSpendUpdates(ctx context.Context, tx spendUpdateExecer, updates *SpendUpdates) error {
 	if updates == nil {
 		return nil
 	}

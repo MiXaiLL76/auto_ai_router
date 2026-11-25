@@ -36,6 +36,7 @@ litellm_db:
 | `log_batch_size`                   | int      | 100     | Spend log batch size                                                                       |
 | `log_flush_interval`               | duration | 5s      | Spend log flush interval                                                                   |
 | `log_workers`                      | int      | 4       | Parallel spend log writer workers                                                          |
+| `spend_updates_single_round_trip`  | bool     | false   | Send a batch's counter, budget window and daily updates in one round trip (a pgx batch)    |
 | `disable_spend_logs_write`         | bool     | false   | Skip spend writes to Postgres ([Kafka](kafka_spend_log.md) as the only sink)               |
 | `include_team_spend_in_user_spend` | bool     | true    | Include team-bound events in user spend (`LiteLLM_UserTable` and `LiteLLM_DailyUserSpend`) |
 | `daily_spend_timezone`             | string   | UTC     | Timezone the daily spend tables are grouped by                                             |

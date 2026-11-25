@@ -352,6 +352,9 @@ type atomicTestTx struct {
 	queries                    []string
 	queryArgs                  [][]any
 	attemptedSQL               []string
+	attemptedArgs              [][]any
+	batches                    int
+	batchedSQL                 []string
 	stagedSQL                  []string
 	committedSQL               []string
 	committed                  bool
@@ -386,15 +389,19 @@ func (tx *atomicTestTx) CopyFrom(context.Context, pgx.Identifier, []string, pgx.
 	return 0, errors.New("unexpected CopyFrom")
 }
 
-func (tx *atomicTestTx) SendBatch(context.Context, *pgx.Batch) pgx.BatchResults { return nil }
-func (tx *atomicTestTx) LargeObjects() pgx.LargeObjects                         { return pgx.LargeObjects{} }
+func (tx *atomicTestTx) SendBatch(ctx context.Context, batch *pgx.Batch) pgx.BatchResults {
+	tx.batches++
+	return &atomicTestBatchResults{tx: tx, ctx: ctx, batch: batch}
+}
+func (tx *atomicTestTx) LargeObjects() pgx.LargeObjects { return pgx.LargeObjects{} }
 
 func (tx *atomicTestTx) Prepare(context.Context, string, string) (*pgconn.StatementDescription, error) {
 	return nil, errors.New("unexpected Prepare")
 }
 
-func (tx *atomicTestTx) Exec(_ context.Context, sql string, _ ...any) (pgconn.CommandTag, error) {
+func (tx *atomicTestTx) Exec(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
 	tx.attemptedSQL = append(tx.attemptedSQL, sql)
+	tx.attemptedArgs = append(tx.attemptedArgs, append([]any(nil), args...))
 	if tx.failExecSubstring != "" && strings.Contains(sql, tx.failExecSubstring) {
 		if tx.failExecErr != nil {
 			return pgconn.CommandTag{}, tx.failExecErr
@@ -449,6 +456,40 @@ func (tx *atomicTestTx) QueryRow(_ context.Context, sql string, args ...any) pgx
 }
 
 func (tx *atomicTestTx) Conn() *pgx.Conn { return nil }
+
+// atomicTestBatchResults runs a batch's statements through the fake's Exec, in order.
+type atomicTestBatchResults struct {
+	tx    *atomicTestTx
+	ctx   context.Context
+	batch *pgx.Batch
+	next  int
+	err   error
+}
+
+func (r *atomicTestBatchResults) Exec() (pgconn.CommandTag, error) {
+	if r.err != nil {
+		return pgconn.CommandTag{}, r.err
+	}
+	statement := r.batch.QueuedQueries[r.next]
+	r.next++
+	r.tx.batchedSQL = append(r.tx.batchedSQL, statement.SQL)
+	var tag pgconn.CommandTag
+	tag, r.err = r.tx.Exec(r.ctx, statement.SQL, statement.Arguments...)
+	return tag, r.err
+}
+
+func (r *atomicTestBatchResults) Query() (pgx.Rows, error) {
+	return nil, errors.New("unexpected batch query")
+}
+
+func (r *atomicTestBatchResults) QueryRow() pgx.Row {
+	return atomicTestRow{err: errors.New("unexpected batch query row")}
+}
+
+func (r *atomicTestBatchResults) Close() error { return r.err }
+
+// Tx is nil: the batch is sent inside the caller's transaction and begins none of its own.
+func (r *atomicTestBatchResults) Tx() pgx.Tx { return nil }
 
 type atomicTestRow struct {
 	err   error
