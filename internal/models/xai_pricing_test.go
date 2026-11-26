@@ -282,7 +282,7 @@ func TestStrictOrganizationTariff_AcceptsGrokRow(t *testing.T) {
 	row, err := json.Marshal(fields)
 	require.NoError(t, err)
 
-	price, err := decodeStrictPriceRow("x-ai/grok-4.7", row)
+	price, err := decodeStrictPriceRow(organizationTariffSource, "x-ai/grok-4.7", row)
 
 	require.NoError(t, err)
 	assert.Equal(t, LongContextFullRequest200kInclusive, price.LongContextPricingMode)
@@ -305,12 +305,12 @@ func TestStrictOrganizationTariff_RejectsInvalidToolAndModeFields(t *testing.T) 
 	}
 	for name, row := range tests {
 		t.Run(name, func(t *testing.T) {
-			_, err := decodeStrictPriceRow("m", json.RawMessage(row))
+			_, err := decodeStrictPriceRow(organizationTariffSource, "m", json.RawMessage(row))
 			assert.Error(t, err)
 		})
 	}
 
-	_, err := decodeStrictPriceRow("m", json.RawMessage(`{"input_cost_per_token":1,"tool_cost_per_call":{"file_search":1,"collections_search":1}}`))
+	_, err := decodeStrictPriceRow(organizationTariffSource, "m", json.RawMessage(`{"input_cost_per_token":1,"tool_cost_per_call":{"file_search":1,"collections_search":1}}`))
 	assert.NoError(t, err, "an alias repeating the canonical price is not ambiguous")
 }
 

@@ -145,7 +145,7 @@ func TestLoadOrganizationPolicies_StrictTariffJSON(t *testing.T) {
 		{name: "duplicate key", body: `{"public/a":{"input_cost_per_token":0},"public/a":{"output_cost_per_token":0}}`, want: "duplicate JSON key"},
 		{name: "unknown field", body: `{"public/a":{"unexpected":1}}`, want: "unknown price field"},
 		{name: "null row", body: `{"public/a":null}`, want: "null price row"},
-		{name: "empty row", body: `{"public/a":{}}`, want: "empty price row"},
+		{name: "empty row", body: `{"public/a":{}}`, want: `organization tariff "public/a": empty price row`},
 		{name: "rate only, no price field", body: `{"public/a":{"rate":1.4}}`, want: "no recognized price field"},
 	}
 
@@ -184,6 +184,22 @@ func TestLoadOrganizationPolicies_AcceptsRateField(t *testing.T) {
 	assert.Equal(t, 1.4, price.Rate)
 	assert.Equal(t, 0.001, price.InputCostPerToken)
 	assert.Equal(t, 0.002, price.OutputCostPerToken)
+}
+
+// An organization tariff row may still set how a model is billed and hold a
+// null price, unlike a team model price row.
+func TestLoadOrganizationPolicies_AcceptsBillingFieldsAndNullPrice(t *testing.T) {
+	registry, err := LoadOrganizationPolicies([]config.OrganizationPolicyConfig{{
+		OrganizationID:  "org-1",
+		PriceProfileID:  "profile-1",
+		ModelPricesLink: writePolicyPrices(t, `{"public/a":{"input_cost_per_token":0.001,"output_cost_per_token":null,"litellm_provider":"openai"}}`),
+	}}, testPolicyManager(), validPolicyOptions())
+	require.NoError(t, err)
+	policy, ok := registry.Policy("org-1")
+	require.True(t, ok)
+	price, ok := policy.Price("public/a")
+	require.True(t, ok)
+	assert.Equal(t, "openai", price.LiteLLMProvider)
 }
 
 func TestLoadOrganizationPolicies_AllowlistRequiresExactPrice(t *testing.T) {

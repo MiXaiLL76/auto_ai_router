@@ -347,7 +347,7 @@ func TestNormalizeImageFormValue(t *testing.T) {
 // must fail the tariff instead of being silently dropped.
 func TestDecodeStrictPriceRow_ImagePricing(t *testing.T) {
 	valid := `{"output_cost_per_image":0.117,"input_cost_per_image":0.0039,"input_images_free_per_request":1,"image_request_defaults":{"resolution":"1k"},"output_cost_per_image_tiers":[{"operation":"edit","when":{"quality":"auto"},"max_pixels":2610000,"output_cost_per_image":0.0585}]}`
-	price, err := decodeStrictPriceRow("image-model", json.RawMessage(valid))
+	price, err := decodeStrictPriceRow(organizationTariffSource, "image-model", json.RawMessage(valid))
 	require.NoError(t, err)
 	require.Len(t, price.OutputCostPerImageTiers, 1)
 
@@ -361,7 +361,7 @@ func TestDecodeStrictPriceRow_ImagePricing(t *testing.T) {
 		"only non-price fields": `{"image_request_defaults":{"resolution":"1k"},"input_images_free_per_request":1}`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := decodeStrictPriceRow("image-model", json.RawMessage(row))
+			_, err := decodeStrictPriceRow(organizationTariffSource, "image-model", json.RawMessage(row))
 			assert.Error(t, err)
 		})
 	}
@@ -485,12 +485,12 @@ func TestDecodeStrictPriceRow_RejectsUnreachableTiers(t *testing.T) {
 		"duplicate conditions": `{"output_cost_per_image":0.117,"output_cost_per_image_tiers":[{"when":{"quality":"low"},"output_cost_per_image":0.1},{"when":{"quality":"Low"},"output_cost_per_image":0.05}]}`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := decodeStrictPriceRow("image-model", json.RawMessage(row))
+			_, err := decodeStrictPriceRow(organizationTariffSource, "image-model", json.RawMessage(row))
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "output_cost_per_image_tiers[1]")
 		})
 	}
 
-	_, err := decodeStrictPriceRow("image-model", json.RawMessage(`{"output_cost_per_image":0.117,"output_cost_per_image_tiers":[{"max_pixels":2000000,"output_cost_per_image":0.0585},{"output_cost_per_image":0.117}]}`))
+	_, err := decodeStrictPriceRow(organizationTariffSource, "image-model", json.RawMessage(`{"output_cost_per_image":0.117,"output_cost_per_image_tiers":[{"max_pixels":2000000,"output_cost_per_image":0.0585},{"output_cost_per_image":0.117}]}`))
 	assert.NoError(t, err)
 }

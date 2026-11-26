@@ -309,6 +309,14 @@ func (r *ModelPriceRegistry) MoonshotToolPrices() (*ToolPricesProvider, bool) {
 	return &prices, true
 }
 
+// moonshotToolPrices are the router's own Moonshot tools and their prices in
+// the tool price document, which prices them rather than a model's row.
+var moonshotToolPrices = map[string]func(*ToolPricesProvider) float64{
+	ToolMoonshotSearch:    func(p *ToolPricesProvider) float64 { return p.SearchCostPerCall },
+	ToolMoonshotSearchPro: func(p *ToolPricesProvider) float64 { return p.SearchProCostPerCall },
+	ToolMoonshotFetch:     func(p *ToolPricesProvider) float64 { return p.FetchCostPerCall },
+}
+
 // applyMoonshotToolPrices copies the registry's Moonshot tool prices into
 // the model's own row, so the ordinary cost calculation prices the router's
 // tool calls like any other tool charge.
@@ -331,11 +339,11 @@ func (r *ModelPriceRegistry) applyMoonshotToolPrices(modelName string, price *Mo
 	// built-in tools' prices live: one map, one lookup, and the next
 	// provider's billable tool is a key rather than a new field.
 	if price.ToolCostPerCall == nil {
-		price.ToolCostPerCall = make(map[string]float64, 3)
+		price.ToolCostPerCall = make(map[string]float64, len(moonshotToolPrices))
 	}
-	price.ToolCostPerCall[ToolMoonshotSearch] = prices.SearchCostPerCall
-	price.ToolCostPerCall[ToolMoonshotSearchPro] = prices.SearchProCostPerCall
-	price.ToolCostPerCall[ToolMoonshotFetch] = prices.FetchCostPerCall
+	for tool, cost := range moonshotToolPrices {
+		price.ToolCostPerCall[tool] = cost(prices)
+	}
 }
 
 // isMoonshotModelName reports whether the model is one of Moonshot's own

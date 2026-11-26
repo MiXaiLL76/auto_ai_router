@@ -562,7 +562,7 @@ func loadStrictOrganizationPriceProfile(profileID, link string) (map[string]*Mod
 
 	prices := make(map[string]*ModelPrice, len(raw))
 	for modelID, row := range raw {
-		price, err := decodeStrictPriceRow(modelID, row)
+		price, err := decodeStrictPriceRow(organizationTariffSource, modelID, row)
 		if err != nil {
 			return nil, profileIdentity{}, err
 		}
@@ -585,34 +585,39 @@ func ensureJSONEOF(decoder *json.Decoder) error {
 	return nil
 }
 
-func decodeStrictPriceRow(modelID string, row json.RawMessage) (*ModelPrice, error) {
+// organizationTariffSource names an organization tariff in price row errors.
+const organizationTariffSource = "organization tariff"
+
+// decodeStrictPriceRow decodes one price row of a strict price document;
+// source names the document in errors.
+func decodeStrictPriceRow(source, modelID string, row json.RawMessage) (*ModelPrice, error) {
 	if bytes.Equal(bytes.TrimSpace(row), []byte("null")) {
-		return nil, fmt.Errorf("organization tariff %q: null price row", modelID)
+		return nil, fmt.Errorf("%s %q: null price row", source, modelID)
 	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(row, &fields); err != nil {
-		return nil, fmt.Errorf("organization tariff %q: price row must be an object: %w", modelID, err)
+		return nil, fmt.Errorf("%s %q: price row must be an object: %w", source, modelID, err)
 	}
 	if len(fields) == 0 {
-		return nil, fmt.Errorf("organization tariff %q: empty price row", modelID)
+		return nil, fmt.Errorf("%s %q: empty price row", source, modelID)
 	}
 	known := modelPriceJSONFields()
 	for field := range fields {
 		if _, ok := known[field]; !ok {
-			return nil, fmt.Errorf("organization tariff %q: unknown price field %q", modelID, field)
+			return nil, fmt.Errorf("%s %q: unknown price field %q", source, modelID, field)
 		}
 	}
 	var price ModelPrice
 	decoder := json.NewDecoder(bytes.NewReader(row))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&price); err != nil {
-		return nil, fmt.Errorf("organization tariff %q: %w", modelID, err)
+		return nil, fmt.Errorf("%s %q: %w", source, modelID, err)
 	}
 	if err := validateStrictImagePricing(fields, &price); err != nil {
-		return nil, fmt.Errorf("organization tariff %q: %w", modelID, err)
+		return nil, fmt.Errorf("%s %q: %w", source, modelID, err)
 	}
 	if err := validateStrictToolAndModePricing(&price); err != nil {
-		return nil, fmt.Errorf("organization tariff %q: %w", modelID, err)
+		return nil, fmt.Errorf("%s %q: %w", source, modelID, err)
 	}
 	hasPriceField := false
 	for field := range fields {
@@ -622,7 +627,7 @@ func decodeStrictPriceRow(modelID string, row json.RawMessage) (*ModelPrice, err
 		}
 	}
 	if !hasPriceField {
-		return nil, fmt.Errorf("organization tariff %q: no recognized price field", modelID)
+		return nil, fmt.Errorf("%s %q: no recognized price field", source, modelID)
 	}
 	return &price, nil
 }
