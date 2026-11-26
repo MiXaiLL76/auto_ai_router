@@ -340,8 +340,8 @@ func hasMeaningfulError(value any) bool {
 // errorStatus maps a provider's error value to the HTTP status the client
 // should see.
 //
-// It delegates to upstreamerror.ExtractErrorSignals and
-// ClassifyProviderErrorSignals -- the same two functions the native (non-compat)
+// It delegates to upstreamerror.ExtractProviderErrorInfo and
+// ClassifyProviderErrorInfo -- the same two functions the native (non-compat)
 // path's own classification uses (statusCodeFromProviderBodyError /
 // statusCodeFromProviderStreamError). The compatibility layer used to
 // re-implement this independently: a narrower content-policy-only check (see
@@ -351,8 +351,8 @@ func hasMeaningfulError(value any) bool {
 // implementation, shared, cannot drift from itself.
 //
 // value is not necessarily a map: a provider may answer {"error":"boom"} or
-// {"error":400} too, which ExtractErrorSignals also reads. Re-marshaling it
-// to JSON is the one conversion needed to hand it to ExtractErrorSignals,
+// {"error":400} too, which ExtractProviderErrorInfo also reads. Re-marshaling it
+// to JSON is the one conversion needed to hand it to ExtractProviderErrorInfo,
 // which the proxy's own callers reach more directly (they already hold
 // json.RawMessage).
 func errorStatus(value any) int {
@@ -360,11 +360,11 @@ func errorStatus(value any) int {
 	if err != nil {
 		return http.StatusUnprocessableEntity
 	}
-	signals, ok := upstreamerror.ExtractErrorSignals(raw)
+	info, ok := upstreamerror.ExtractProviderErrorInfo(raw)
 	if !ok {
 		return http.StatusUnprocessableEntity
 	}
-	return upstreamerror.ClassifyProviderErrorSignals(signals)
+	return upstreamerror.ClassifyProviderErrorInfo(info)
 }
 
 // normalizeError builds the LiteLLM-compatible error body for a non-2xx
@@ -373,18 +373,12 @@ func normalizeError(status int, body []byte) []byte {
 	message := "Request failed"
 	code := fmt.Sprintf("%d", status)
 	var param *string
-	switch status {
-	case http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound:
-		if classified, ok := upstreamerror.ClassifyStatus(status, body); ok {
-			message = classified.Message
-			code = classified.Code
-			param = classified.Param
-		}
-	case http.StatusTooManyRequests:
+	switch {
+	case status == http.StatusTooManyRequests:
 		message = "Rate limit exceeded"
-	case http.StatusRequestTimeout, http.StatusGatewayTimeout:
+	case status == http.StatusRequestTimeout || status == http.StatusGatewayTimeout:
 		message = "Request timed out"
-	case http.StatusRequestEntityTooLarge:
+	case status == http.StatusRequestEntityTooLarge:
 		// The router's own classification is preserved when it is present:
 		// an oversized image attachment is reported as "Image is too large"
 		// with a code that says so, which is more actionable than the
@@ -400,6 +394,16 @@ func normalizeError(status int, body []byte) []byte {
 		// keeps the generic wording.
 		message = "Request entity too large"
 		if classified, ok := upstreamerror.ExtractRouterClassification(body); ok {
+			message = classified.Message
+			code = classified.Code
+			param = classified.Param
+		}
+	case status >= http.StatusBadRequest && status < http.StatusInternalServerError:
+		// Any other 4xx is classified, not just the three the router used to
+		// name: a provider_messages rule may ask for any 4xx (the config
+		// says so), and the rule's own message is what the client is told.
+		// ClassifyStatus answers with it whenever a rule matched.
+		if classified, ok := upstreamerror.ClassifyStatus(status, body); ok {
 			message = classified.Message
 			code = classified.Code
 			param = classified.Param

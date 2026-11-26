@@ -46,8 +46,25 @@ func ClassifyBadRequest(rawBody []byte) BadRequest {
 		return classified
 	}
 
-	signals, providerParam := providerErrorSignalsFromBody(rawBody)
+	info := providerErrorInfoFromBody(rawBody)
+	signals := info.Signals
+	providerParam := info.Param
 	joined := strings.ToLower(strings.Join(signals, " "))
+
+	// A provider message the router has a rule for is answered with the
+	// router's own wording: the provider's words are matched, and the
+	// router's answer is what reaches the client (see
+	// ClassifyProviderMessage in provider_messages.go).
+	//
+	// The status, the code and the message all come from ONE rule, so they
+	// cannot disagree about which rule answered. It used to be two
+	// independent lookups -- one for the status, one for the message -- and
+	// the two could answer from different rules: the client was answered
+	// with a status its message did not belong to, or with a message whose
+	// status it never got.
+	if classified, ok := ClassifyProviderMessage(info); ok {
+		return BadRequest{Message: classified.Message, Code: classified.Code}
+	}
 
 	// An unknown model is checked FIRST, before the keyword branches below.
 	//
@@ -411,114 +428,35 @@ func firstNumber(re *regexp.Regexp, text string) string {
 
 const maxProviderErrorSignalBytes = 8 * 1024
 
-func providerErrorSignalsFromBody(body []byte) ([]string, *string) {
-	signals, param, _ := providerErrorSignalsAndReason(body)
-	return signals, param
-}
-
-// providerErrorSignalsAndReason extracts the text signals a provider's error
-// body carries, the structured param name if it has one, and the
-// machine-readable REASON name if it has one.
+// providerErrorInfoFromBody reads what a provider's error body carries: the
+// provider's own words about the failure, the codes it states them by, and
+// the parameter it rejected.
 //
-// The reason name ("error_type") is kept apart from the free-text signals on
-// purpose. It is a code the provider chose for the failure, not prose, and
-// mixing it into the same joined string let a generic reason code outrank a
-// specific message: a body carrying error_type="invalid_value" next to
-// "Received Model Group=..." was classified as an invalid value and the
-// model-group diagnosis was lost. A reason name that does not name any
-// known failure is simply ignored, and the message keeps deciding.
-func providerErrorSignalsAndReason(body []byte) ([]string, *string, string) {
+// It is the classifier's own reader of a body, and it reads the body the
+// same way every other reader does (see ExtractProviderErrorInfo). The
+// classifier used to have a reader of its own, and the two disagreed: the
+// classifier's reader descended into a nested "detail" and read a
+// machine-readable reason out of "error_type", while the readers on the
+// status path read neither. The same body was therefore a content refusal
+// on one path and an unclassified failure on another, and a rule that named
+// it applied on one path and not on the other.
+func providerErrorInfoFromBody(body []byte) ProviderErrorInfo {
 	if len(body) > maxProviderErrorSignalBytes {
 		body = body[:maxProviderErrorSignalBytes]
 	}
 	trimmed := bytes.TrimSpace(body)
 	if len(trimmed) == 0 {
-		return nil, nil, ""
+		return ProviderErrorInfo{}
 	}
 
-	signals := make([]string, 0, 8)
-	var param *string
-	var reason string
 	var value any
-	if err := json.Unmarshal(trimmed, &value); err == nil {
-		collectProviderErrorSignals(value, 0, &signals, &param, &reason)
-	} else {
-		signals = append(signals, string(trimmed))
+	if err := json.Unmarshal(trimmed, &value); err != nil {
+		return ProviderErrorInfo{Signals: []string{string(trimmed)}}
 	}
-	return signals, param, reason
-}
 
-func collectProviderErrorSignals(value any, depth int, signals *[]string, param **string, reason *string) {
-	if depth > 5 || len(*signals) >= 32 {
-		return
-	}
-	switch v := value.(type) {
-	case map[string]any:
-		for _, key := range []string{"message", "type", "code", "status", "reason", "error", "error_type"} {
-			raw, exists := mapValueFold(v, key)
-			if !exists {
-				continue
-			}
-			text, ok := raw.(string)
-			if ok {
-				if s := cleanProviderErrorSignal(text); s != "" {
-					*signals = append(*signals, s)
-				}
-			}
-		}
-		// "error_type" is a machine-readable reason name some providers put
-		// where a "code" would normally go -- notably nested under "detail":
-		// {"detail":{"error_type":"max_tokens_exceeded"}}. Without it the
-		// body decoded to no signal at all, so the classifier fell through
-		// to the generic "Invalid request" and the client learned nothing
-		// -- the largest single loss of classification in production (71.8k
-		// requests in one fortnight against a single provider).
-		//
-		// It is collected into its own field rather than into the free-text
-		// signals: it is a code the provider chose, not prose, and joined
-		// into the same string a generic reason code ("invalid_value") would
-		// outrank a specific message ("Received Model Group=...") and lose
-		// the model-group diagnosis. Only the FIRST reason name is kept --
-		// the outermost one -- so a nested "detail" cannot override a
-		// top-level one.
-		if *reason == "" {
-			if raw, exists := mapValueFold(v, "error_type"); exists {
-				if text, ok := raw.(string); ok {
-					if r := cleanProviderErrorSignal(text); r != "" {
-						*reason = r
-					}
-				}
-			}
-		}
-		if *param == nil {
-			for _, key := range []string{"param", "parameter", "field"} {
-				raw, exists := mapValueFold(v, key)
-				if !exists {
-					continue
-				}
-				if text, ok := raw.(string); ok {
-					if p := cleanProviderErrorParam(text); p != "" {
-						*param = &p
-						break
-					}
-				}
-			}
-		}
-		for _, key := range []string{"error", "response", "details", "detail", "violations"} {
-			raw, exists := mapValueFold(v, key)
-			if exists {
-				collectProviderErrorSignals(raw, depth+1, signals, param, reason)
-			}
-		}
-	case []any:
-		for _, item := range v {
-			collectProviderErrorSignals(item, depth+1, signals, param, reason)
-		}
-	case string:
-		if s := cleanProviderErrorSignal(v); s != "" {
-			*signals = append(*signals, s)
-		}
-	}
+	info := ProviderErrorInfo{}
+	collectProviderErrorInfoValue(value, 0, &info)
+	return info
 }
 
 func mapValueFold(values map[string]any, key string) (any, bool) {

@@ -157,6 +157,14 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 		"error_code_rules_count", len(cfg.Fail2Ban.ErrorCodeRules),
 	)
 
+	// Provider messages: the provider's own words the router may relay to a
+	// client, and the router's answer to them. The count is what an
+	// operator checks after adding a rule: the router's own built-in rules
+	// are separate and always in force.
+	logger.Info("provider_messages",
+		"configured_count", len(cfg.ProviderMessages.Messages),
+	)
+
 	// Credentials
 	logger.Info("credentials",
 		"total_count", len(cfg.Credentials),

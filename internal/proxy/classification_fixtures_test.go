@@ -16,7 +16,7 @@ import (
 //
 // The LiteLLM compatibility layer (internal/responsecompat/litellm) runs the
 // exact same table through its own entry point, errorStatus. Both packages
-// now delegate to upstreamerror.ExtractErrorSignals/ClassifyProviderErrorSignals,
+// now delegate to upstreamerror.ExtractProviderErrorInfo/ClassifyProviderErrorInfo,
 // so a mismatch here would mean one of them stopped doing that -- see
 // upstreamerror.ClassificationFixtures' own doc comment for why this
 // shared-table test exists.

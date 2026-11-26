@@ -114,6 +114,29 @@ func (rp *retryPolicy) statusCodesFor(cred *config.CredentialConfig) map[int]str
 // shouldRetry reports whether an upstream response from cred should be replayed on
 // another credential, and why. cred may be nil (global status codes only).
 func (rp *retryPolicy) shouldRetry(cred *config.CredentialConfig, statusCode int, respBody []byte) (bool, RetryReason) {
+	// A provider message the router has a rule for may say whether the
+	// failure may be replayed on another credential, and that answer comes
+	// first.
+	//
+	// The rule knows what the failure IS, which the status alone does not: a
+	// 400 is retryable by default -- a provider account may lack a model
+	// another account serves -- but a rule about the REQUEST's own fault
+	// (the model cannot do what was asked of it) is not, because every
+	// credential refuses it identically and replaying it only multiplies
+	// the attempts. Production measured it: 441 requests, 1 236 attempts
+	// across the pool, not one attempt succeeded.
+	//
+	// It is checked BEFORE the markers below, because the rule is the more
+	// specific of the two: an operator who wrote a rule for this failure
+	// knows whether another credential answers it, and the marker lists are
+	// a general guess about the wording.
+	if retryable, said := providerMessageRetryable(respBody); said {
+		if !retryable {
+			return false, ""
+		}
+		return true, retryReasonForStatus(statusCode)
+	}
+
 	if _, ok := rp.statusCodesFor(cred)[statusCode]; !ok {
 		return false, ""
 	}
@@ -144,6 +167,27 @@ func (rp *retryPolicy) shouldRetry(cred *config.CredentialConfig, statusCode int
 	}
 
 	return true, retryReasonForStatus(statusCode)
+}
+
+// providerMessageRetryable asks the provider message rules whether a failure
+// may be replayed on another credential, and whether a rule said at all.
+//
+// The body is read through the same reader every other path uses, so the
+// rule is matched against the provider's own words and codes exactly as the
+// status and the message were. A failure that no rule names leaves the
+// decision to the router's own retry policy.
+func providerMessageRetryable(respBody []byte) (retryable bool, said bool) {
+	if len(respBody) == 0 {
+		return false, false
+	}
+	if len(respBody) > maxRetryBodyScan {
+		respBody = respBody[:maxRetryBodyScan]
+	}
+	info, ok := upstreamerror.ExtractProviderErrorInfo(respBody)
+	if !ok {
+		return false, false
+	}
+	return upstreamerror.ProviderMessageRetryable(info)
 }
 
 func containsAnyMarker(bodyLower []byte, markers [][]byte) bool {

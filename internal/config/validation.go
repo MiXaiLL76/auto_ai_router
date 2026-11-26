@@ -41,6 +41,9 @@ func (c *Config) validateFeatures() error {
 	if err := c.VisionFallback.Validate(); err != nil {
 		return err
 	}
+	if err := c.ProviderMessages.Validate(); err != nil {
+		return err
+	}
 	if err := c.validateLoopGate(); err != nil {
 		return err
 	}

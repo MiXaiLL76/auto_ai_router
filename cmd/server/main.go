@@ -42,6 +42,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/router"
 	"github.com/mixaill76/auto_ai_router/internal/startup"
 	"github.com/mixaill76/auto_ai_router/internal/telemetry"
+	"github.com/mixaill76/auto_ai_router/internal/upstreamerror"
 
 	// Register native Responses API converters for Vertex AI, Anthropic, and Bedrock.
 	anthropicconv "github.com/mixaill76/auto_ai_router/internal/converter/anthropic"
@@ -334,6 +335,15 @@ func main() {
 	// (a client whose images live on its own storage).
 	converterutil.SetBlockedCIDRs(cfg.ImageDownload.BlockedCIDRs)
 	converterutil.SetAllowedHosts(cfg.ImageDownload.AllowedHosts)
+
+	// The provider messages this deployment may relay to a client: the
+	// provider's own words, and the router's answer to them. They are set
+	// here, before the proxy starts serving, because the rules are read on
+	// the request path.
+	if rules := cfg.ProviderMessages.Rules(); len(rules) > 0 {
+		upstreamerror.SetProviderMessageRules(rules)
+		log.Info("Provider message rules loaded", "count", len(rules))
+	}
 
 	prx := proxy.New(&proxy.Config{
 		Balancer:                     bal,

@@ -164,7 +164,19 @@ func extractRouterClassification(body []byte, expectedType string) (BadRequest, 
 		expectedType = "invalid_request_error"
 	}
 	if typ != expectedType {
-		return BadRequest{}, false
+		// A provider_messages rule may carry a reserved code, and the type
+		// beside it is the one the STATUS implies ("invalid_request_error" for
+		// a 400) rather than the one the code implies ("permission_denied" for
+		// an account_blocked). The rule's body is the router's own body, so it
+		// must be recognized as one -- otherwise the operator's message is
+		// lost on the second classification pass.
+		//
+		// The reserved codes keep their own expectation above; this is the
+		// other direction: a rule that reuses one, with the type its status
+		// implies.
+		if !isRouterProviderMessage(code, message) {
+			return BadRequest{}, false
+		}
 	}
 	var param *string
 	if e.Param != nil {
@@ -175,6 +187,18 @@ func extractRouterClassification(body []byte, expectedType string) (BadRequest, 
 		param = &cleaned
 	}
 	if !isRouterMessage(code, message, param) {
+		return BadRequest{}, false
+	}
+
+	// A provider_messages rule's body carries the type its STATUS implies,
+	// and that is what identifies it as the router's own: a provider body
+	// that happens to carry the same code and message by coincidence is
+	// classified from scratch instead.
+	//
+	// The check runs only for the codes a rule may carry -- the router's own
+	// fixed codes have their own messages, and their bodies are recognized
+	// by the message alone.
+	if isRouterProviderMessage(code, message) && !isRouterProviderMessageWithType(code, message, typ) {
 		return BadRequest{}, false
 	}
 
@@ -190,6 +214,21 @@ func extractRouterClassification(body []byte, expectedType string) (BadRequest, 
 // appends free text to the message is rejected and classified from scratch
 // like any other provider body.
 func isRouterMessage(code, message string, param *string) bool {
+	// The router's answer to a provider explanation is the router's own
+	// message, even though the wording came from the provider. It is
+	// recognized here for the same reason the fixed messages are: a body
+	// carrying it must survive a second classification pass as itself.
+	//
+	// Checked BEFORE the fixed messages, because the two can share a code:
+	// the router's answer to a provider explanation carries the same
+	// "invalid_request" code as the generic one, and the fixed-message check
+	// would answer for that code and never reach this one.
+	//
+	// No parameter is accepted beside it: the router writes these messages
+	// without one, so a body that carries one was not written by the router.
+	if param == nil && isRouterProviderMessage(code, message) {
+		return true
+	}
 	if fixed, ok := fixedErrorMessages[code]; ok {
 		return message == fixed
 	}
