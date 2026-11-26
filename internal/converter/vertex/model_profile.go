@@ -53,9 +53,11 @@ type geminiModelProfile struct {
 	// second run with the same text too; without it a response's queries count once
 	// per text.
 	billsRepeatedSearches bool
-	// prefixBoundSignatures: sign the first call only and discard a mismatched
-	// signature upstream when the client edits the prefix.
+	// prefixBoundSignatures preserves signed text and keeps the signature
+	// only on the first function call of each model turn.
 	prefixBoundSignatures bool
+	// prefixMismatchBehavior is sent only for models that support it.
+	prefixMismatchBehavior string
 }
 
 var geminiModelProfiles = []geminiModelProfile{
@@ -118,6 +120,25 @@ var geminiModelProfiles = []geminiModelProfile{
 			genai.ThinkingLevelLow, genai.ThinkingLevelMedium, genai.ThinkingLevelHigh,
 			genai.ThinkingLevelXhigh,
 		},
+		defaultThinkingLevel:   genai.ThinkingLevelHigh,
+		thinkingLevelsOnly:     true,
+		ignoresSamplingParams:  true,
+		singleCandidate:        true,
+		noModelPrefill:         true,
+		tokenLimit:             1048576,
+		longDecode:             true,
+		functionCallIDs:        true,
+		billsRepeatedSearches:  true,
+		unbilledSearchContext:  true,
+		prefixBoundSignatures:  true,
+		prefixMismatchBehavior: "DROP",
+	},
+	{
+		id: "gemini-4-neon",
+		thinkingLevels: []genai.ThinkingLevel{
+			genai.ThinkingLevelLow, genai.ThinkingLevelMedium, genai.ThinkingLevelHigh,
+			genai.ThinkingLevelXhigh,
+		},
 		defaultThinkingLevel:  genai.ThinkingLevelHigh,
 		thinkingLevelsOnly:    true,
 		ignoresSamplingParams: true,
@@ -127,7 +148,6 @@ var geminiModelProfiles = []geminiModelProfile{
 		longDecode:            true,
 		functionCallIDs:       true,
 		billsRepeatedSearches: true,
-		unbilledSearchContext: true,
 		prefixBoundSignatures: true,
 	},
 }

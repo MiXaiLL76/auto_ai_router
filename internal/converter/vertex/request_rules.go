@@ -2,6 +2,7 @@ package vertex
 
 import (
 	"fmt"
+	"strings"
 
 	converterutil "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
@@ -33,10 +34,10 @@ func validateChatRequest(req *openai.OpenAIRequest, model string) error {
 		return nil
 	}
 	if profile.prefixBoundSignatures && req.ThinkingBudgetCamel != nil {
-		return thinkingBudgetError()
+		return thinkingBudgetError(profile)
 	}
 	if profile.thinkingLevelsOnly {
-		if err := validateNativeThinking(req); err != nil {
+		if err := validateNativeThinking(req, profile); err != nil {
 			return err
 		}
 	}
@@ -63,43 +64,55 @@ func validateChatRequest(req *openai.OpenAIRequest, model string) error {
 // The OpenAI- and Anthropic-style ways to ask for little or no thinking
 // (reasoning_effort minimal/none, thinking disabled) stay accepted and get the
 // lowest level, see geminiModelProfile.thinkingLevel.
-func validateNativeThinking(req *openai.OpenAIRequest) error {
+func validateNativeThinking(req *openai.OpenAIRequest, profile *geminiModelProfile) error {
 	for _, tcMap := range nativeThinkingConfigs(req) {
 		if thinkingConfigField(tcMap, "thinking_budget", "thinkingBudget") != nil {
-			return thinkingBudgetError()
+			return thinkingBudgetError(profile)
 		}
 		level, _ := thinkingConfigField(tcMap, "thinking_level", "thinkingLevel").(string)
 		if thinkingName(level) == "minimal" {
-			return minimalThinkingError()
+			return minimalThinkingError(profile)
 		}
 	}
 	for _, budget := range []interface{}{req.ThinkingBudget, req.ExtraBody["thinking_budget"], req.ExtraBody["thinkingBudget"]} {
 		if budget != nil {
-			return thinkingBudgetError()
+			return thinkingBudgetError(profile)
 		}
 	}
 	for _, level := range []string{req.ThinkingLevel, req.ThinkingLevelCamel,
 		extraBodyString(req.ExtraBody, "thinking_level"), extraBodyString(req.ExtraBody, "thinkingLevel")} {
 		if thinkingName(level) == "minimal" {
-			return minimalThinkingError()
+			return minimalThinkingError(profile)
 		}
 	}
 	return nil
 }
 
-func thinkingBudgetError() error {
+func (p *geminiModelProfile) thinkingLevelChoices() string {
+	levels := make([]string, 0, len(p.thinkingLevels))
+	for _, level := range p.thinkingLevels {
+		levels = append(levels, strings.ToLower(string(level)))
+	}
+	if len(levels) < 2 {
+		return strings.Join(levels, ", ")
+	}
+	last := len(levels) - 1
+	return strings.Join(levels[:last], ", ") + " or " + levels[last]
+}
+
+func thinkingBudgetError(profile *geminiModelProfile) error {
 	return &converterutil.RequestValidationError{
 		Param:   "thinking_budget",
 		Code:    "unsupported_parameter",
-		Message: "thinking_budget is not supported by this model; set reasoning_effort or thinking_level to low, medium or high",
+		Message: "thinking_budget is not supported by this model; set reasoning_effort or thinking_level to " + profile.thinkingLevelChoices(),
 	}
 }
 
-func minimalThinkingError() error {
+func minimalThinkingError(profile *geminiModelProfile) error {
 	return &converterutil.RequestValidationError{
 		Param:   "thinking_level",
 		Code:    "unsupported_value",
-		Message: "Thinking level minimal is not supported by this model; use low, medium or high (thinking cannot be turned off, low is the lowest level)",
+		Message: "Thinking level minimal is not supported by this model; use " + profile.thinkingLevelChoices() + " (thinking cannot be turned off, low is the lowest level)",
 	}
 }
 
