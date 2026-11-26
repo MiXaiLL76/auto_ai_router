@@ -31,7 +31,7 @@ func (p *Proxy) bindPromptSession(logCtx *RequestLogContext, body []byte) {
 		(logCtx.CacheMarkersIn.Total() == 0 && req.CacheControl["type"] != "ephemeral") {
 		return
 	}
-	turn := append(firstUserTurn(req.Messages), firstUserTurn(req.Input)...)
+	turn := append(firstUserTurn(req.Messages, false), firstUserTurn(req.Input, true)...)
 	if len(turn) == 0 {
 		return
 	}
@@ -47,7 +47,7 @@ func (p *Proxy) bindPromptSession(logCtx *RequestLogContext, body []byte) {
 }
 
 // firstUserTurn decodes conversation items up to and including the first user message.
-func firstUserTurn(raw []byte) []any {
+func firstUserTurn(raw []byte, responsesInput bool) []any {
 	if len(raw) > 0 && raw[0] == '"' {
 		raw = slices.Concat([]byte(`[{"role":"user","content":`), raw, []byte(`}]`))
 	}
@@ -60,6 +60,10 @@ func firstUserTurn(raw []byte) []any {
 		var item map[string]any
 		if dec.Decode(&item) != nil {
 			return nil
+		}
+		// Responses accepts message items with or without an explicit type.
+		if responsesInput && item["type"] == "message" {
+			delete(item, "type")
 		}
 		items = append(items, item)
 		if item["role"] == "user" {

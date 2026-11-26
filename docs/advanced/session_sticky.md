@@ -301,7 +301,7 @@ Later turns of the same conversation keep the key, so they land on the credentia
 
 The key becomes the request's session ID: it is routed, forwarded to a `type: air` hop as `Session-Id`, and logged like any session, so the request is also eligible for [automatic cache_control injection](#automatic-anthropic-prompt-caching).
 
-`auto_ai_router_prompt_hash_requests_total{model, cache}` counts completed prompt-hash requests by prompt cache outcome: `read`, `write` (written, nothing read), `none`.
+`auto_ai_router_prompt_hash_requests_total{model, cache}` counts completed prompt-hash requests. The outcome is `read`, `write` (written, nothing read), `none` (reported usage with no cache activity), or `unknown` (no provider usage or cache activity reported).
 
 ### Full Example
 

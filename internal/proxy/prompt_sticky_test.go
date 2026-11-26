@@ -90,7 +90,7 @@ func TestBindPromptSession_Turns(t *testing.T) {
 		{
 			"responses: string input, then history",
 			`{"model":"m","cache_control":{"type":"ephemeral"},"instructions":"rules","input":"hello"}`,
-			`{"model":"m","cache_control":{"type":"ephemeral"},"instructions":"rules","input":[{"role":"user","content":"hello"},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]},{"role":"user","content":"more"}]}`,
+			`{"model":"m","cache_control":{"type":"ephemeral"},"instructions":"rules","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]},{"role":"user","content":"more"}]}`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -188,8 +188,13 @@ func TestProxyRequest_PromptHashStickyForwardedToAIRHop(t *testing.T) {
 }
 
 func TestProxyRequest_PromptHashStickyMetric(t *testing.T) {
+	var hits atomic.Int32
 	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if hits.Add(1) > 1 {
+			_, _ = w.Write([]byte(`{"id":"c","object":"chat.completion","model":"gpt-4","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+			return
+		}
 		_, _ = w.Write([]byte(`{"id":"c","object":"chat.completion","model":"gpt-4","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":1,"total_tokens":11,"prompt_tokens_details":{"cached_tokens":8}}}`))
 	}))
 	defer upstream.Close()
@@ -199,14 +204,17 @@ func TestProxyRequest_PromptHashStickyMetric(t *testing.T) {
 	prx.stickyPromptHash = true
 	prx.metrics = monitoring.New(true)
 	read := monitoring.PromptHashRequestsTotal.WithLabelValues("gpt-4", "read")
-	before := testutil.ToFloat64(read)
+	unknown := monitoring.PromptHashRequestsTotal.WithLabelValues("gpt-4", "unknown")
+	readBefore := testutil.ToFloat64(read)
+	unknownBefore := testutil.ToFloat64(unknown)
 
-	for _, body := range []string{stickyChatCached, stickyChatNoCache} {
+	for _, body := range []string{stickyChatCached, stickyChatCached, stickyChatNoCache} {
 		w := postChat(t, prx, body)
 		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 	}
 
-	assert.Equal(t, before+1, testutil.ToFloat64(read))
+	assert.Equal(t, readBefore+1, testutil.ToFloat64(read))
+	assert.Equal(t, unknownBefore+1, testutil.ToFloat64(unknown))
 }
 
 func TestProxyRequest_PromptHashStickyKeepsKeyAcrossPreviousResponseID(t *testing.T) {

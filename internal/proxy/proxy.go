@@ -2202,8 +2202,16 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		if !logCtx.RequestCompleted && shouldClearSessionBindingOnFailure(r.Context(), logCtx) {
 			p.clearSessionBinding(p.stickySessionKey(logCtx), logCtx.ModelID)
 		}
-		if logCtx.RequestCompleted && logCtx.CacheEligibilitySource == "prompt_hash" && logCtx.TokenUsage != nil {
-			p.metrics.RecordPromptHashRequest(logCtx.ModelID, logCtx.TokenUsage.CachedInputTokens, logCtx.TokenUsage.CacheCreationTokens)
+		if logCtx.RequestCompleted && logCtx.CacheEligibilitySource == "prompt_hash" {
+			var cachedTokens, cacheWriteTokens int
+			usageReported := logCtx.UsageSource == "provider"
+			if usage := logCtx.TokenUsage; usage != nil {
+				cachedTokens, cacheWriteTokens = usage.CachedInputTokens, usage.CacheCreationTokens
+				// Buffered responses may leave UsageSource unset. A zero-value
+				// usage can be synthesized for spend logging.
+				usageReported = usageReported || (logCtx.UsageSource == "" && usage.Total() > 0)
+			}
+			p.metrics.RecordPromptHashRequest(logCtx.ModelID, cachedTokens, cacheWriteTokens, usageReported)
 		}
 		annotateRequestSpan(logCtx)
 	}()

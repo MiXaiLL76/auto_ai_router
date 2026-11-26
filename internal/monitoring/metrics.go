@@ -283,7 +283,7 @@ var (
 	PromptHashRequestsTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "auto_ai_router_prompt_hash_requests_total",
-			Help: "Completed requests routed by a prompt-hash session ID, by prompt cache outcome (read, write, none)",
+			Help: "Completed requests routed by a prompt-hash session ID, by prompt cache outcome (read, write, none, unknown)",
 		},
 		[]string{"model", "cache"},
 	)
@@ -803,15 +803,17 @@ func (m *Metrics) RecordTokenUsage(credential, model string, inputTokens, output
 }
 
 // RecordPromptHashRequest counts a completed prompt-hash request by its prompt cache outcome.
-func (m *Metrics) RecordPromptHashRequest(model string, cachedTokens, cacheWriteTokens int) {
+func (m *Metrics) RecordPromptHashRequest(model string, cachedTokens, cacheWriteTokens int, usageReported bool) {
 	if !m.isEnabled() {
 		return
 	}
-	cache := "none"
+	cache := "unknown"
 	if cachedTokens > 0 {
 		cache = "read"
 	} else if cacheWriteTokens > 0 {
 		cache = "write"
+	} else if usageReported {
+		cache = "none"
 	}
 	PromptHashRequestsTotal.WithLabelValues(model, cache).Inc()
 }

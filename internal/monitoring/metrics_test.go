@@ -533,12 +533,13 @@ func TestMetrics_AllPrometheusRegistration(t *testing.T) {
 func TestRecordPromptHashRequest(t *testing.T) {
 	PromptHashRequestsTotal.Reset()
 
-	New(true).RecordPromptHashRequest("m", 10, 5)
-	New(true).RecordPromptHashRequest("m", 0, 5)
-	New(true).RecordPromptHashRequest("m", 0, 0)
-	New(false).RecordPromptHashRequest("m", 10, 0)
+	New(true).RecordPromptHashRequest("m", 10, 5, true)
+	New(true).RecordPromptHashRequest("m", 0, 5, true)
+	New(true).RecordPromptHashRequest("m", 0, 0, true)
+	New(true).RecordPromptHashRequest("m", 0, 0, false)
+	New(false).RecordPromptHashRequest("m", 10, 0, true)
 
-	for _, cache := range []string{"read", "write", "none"} {
+	for _, cache := range []string{"read", "write", "none", "unknown"} {
 		assert.Equal(t, 1.0, testutil.ToFloat64(PromptHashRequestsTotal.WithLabelValues("m", cache)), cache)
 	}
 }
