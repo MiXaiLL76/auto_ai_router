@@ -17,7 +17,7 @@ import (
 
 const hydrogen = "gemini-4-hydrogen"
 
-func hydrogenWire(t *testing.T, api, model string, request map[string]any) ([]byte, error) {
+func geminiWire(t *testing.T, api, model string, request map[string]any) ([]byte, error) {
 	t.Helper()
 	body, err := json.Marshal(request)
 	require.NoError(t, err)
@@ -27,13 +27,16 @@ func hydrogenWire(t *testing.T, api, model string, request map[string]any) ([]by
 	return vertex.OpenAIToVertex(body, false, false, model, "application/json")
 }
 
-func TestHydrogenWireThinking(t *testing.T) {
+func TestGemini4WireThinking(t *testing.T) {
 	for _, test := range []struct {
 		model, effort, level string
 		budget               int
 	}{
 		{hydrogen, "", "HIGH", 0}, {hydrogen, "low", "LOW", 0}, {hydrogen, "medium", "MEDIUM", 0},
 		{hydrogen, "high", "HIGH", 0}, {"google/" + hydrogen, "xhigh", "XHIGH", 0}, {hydrogen, "max", "XHIGH", 0},
+		{neon, "", "HIGH", 0}, {neon, "low", "LOW", 0}, {neon, "medium", "MEDIUM", 0},
+		{neon, "high", "HIGH", 0}, {"google/" + neon, "xhigh", "XHIGH", 0}, {neon, "max", "XHIGH", 0},
+		{neon, "none", "LOW", 0}, {neon, "minimal", "LOW", 0},
 		{"gemini-4-argon", "max", "HIGH", 0}, {"gemini-4-carbon", "xhigh", "HIGH", 0},
 		{"gemini-3.8-flash", "xhigh", "HIGH", 0}, {"gemini-2.5-pro", "max", "", 24576},
 	} {
@@ -48,7 +51,7 @@ func TestHydrogenWireThinking(t *testing.T) {
 					req["input"] = []any{msg}
 					req["reasoning"] = map[string]any{"effort": test.effort}
 				}
-				wire, err := hydrogenWire(t, api, test.model, req)
+				wire, err := geminiWire(t, api, test.model, req)
 				require.NoError(t, err)
 				var out struct {
 					Generation map[string]any `json:"generationConfig"`
@@ -62,8 +65,10 @@ func TestHydrogenWireThinking(t *testing.T) {
 					require.Equal(t, float64(test.budget), tc["thinkingBudget"])
 				}
 				if vertex.UsesPrefixBoundSignatures(test.model) {
-					require.Equal(t, "DROP", tc["prefixMismatchBehavior"])
 					require.NotContains(t, out.Generation, "temperature")
+				}
+				if strings.HasSuffix(test.model, hydrogen) {
+					require.Equal(t, "DROP", tc["prefixMismatchBehavior"])
 				} else {
 					require.NotContains(t, tc, "prefixMismatchBehavior")
 				}
@@ -72,7 +77,13 @@ func TestHydrogenWireThinking(t *testing.T) {
 	}
 }
 
-func TestHydrogenNativeOptions(t *testing.T) {
+func TestGemini4NativeOptions(t *testing.T) {
+	for _, model := range []string{hydrogen, neon} {
+		t.Run(model, func(t *testing.T) { testGemini4NativeOptions(t, model) })
+	}
+}
+
+func testGemini4NativeOptions(t *testing.T, model string) {
 	for _, api := range []string{"chat", "responses"} {
 		for _, test := range []struct {
 			key         string
@@ -86,11 +97,14 @@ func TestHydrogenNativeOptions(t *testing.T) {
 			{"n", 2, "n", "unsupported_value"},
 		} {
 			t.Run(api+"/"+test.key, func(t *testing.T) {
-				_, err := hydrogenWire(t, api, hydrogen, map[string]any{"input": "hello", "messages": []any{map[string]string{"role": "user", "content": "hello"}}, test.key: test.value})
+				_, err := geminiWire(t, api, model, map[string]any{"input": "hello", "messages": []any{map[string]string{"role": "user", "content": "hello"}}, test.key: test.value})
 				testhelpers.RequireValidationError(t, err, test.param, test.code)
+				if test.param == "thinking_budget" || test.param == "thinking_level" {
+					require.ErrorContains(t, err, "xhigh")
+				}
 			})
 		}
-		wire, err := hydrogenWire(t, api, hydrogen, map[string]any{"input": "hi", "messages": []any{map[string]string{"role": "user", "content": "hi"}},
+		wire, err := geminiWire(t, api, model, map[string]any{"input": "hi", "messages": []any{map[string]string{"role": "user", "content": "hi"}},
 			"thinking_config": map[string]any{"thinking_level": "xhigh", "include_thoughts": true}})
 		require.NoError(t, err)
 		require.Contains(t, string(wire), `"thinkingLevel":"XHIGH"`)
@@ -144,7 +158,7 @@ func TestHydrogenParallelCallsAfterHistoryEdit(t *testing.T) {
 			} else {
 				req["input"] = history
 			}
-			wire, err := hydrogenWire(t, api, hydrogen, req)
+			wire, err := geminiWire(t, api, hydrogen, req)
 			require.NoError(t, err)
 			var out vertex.VertexRequest
 			require.NoError(t, json.Unmarshal(wire, &out))
@@ -230,7 +244,7 @@ func TestHydrogenSignedTextReplay(t *testing.T) {
 				require.NoError(t, json.Unmarshal(data, &chat))
 				message = chat.Choices[0].Message
 			}
-			request, err := hydrogenWire(t, "chat", hydrogen, map[string]any{"messages": []any{user, message, map[string]string{"role": "user", "content": "continue"}}})
+			request, err := geminiWire(t, "chat", hydrogen, map[string]any{"messages": []any{user, message, map[string]string{"role": "user", "content": "continue"}}})
 			require.NoError(t, err)
 			checkWire(t, request)
 		})
@@ -251,7 +265,7 @@ func TestHydrogenSignedTextReplay(t *testing.T) {
 			request, err := ResponsesRequestToVertex(stored, hydrogen)
 			require.NoError(t, err)
 			checkWire(t, request)
-			request, err = hydrogenWire(t, "responses", hydrogen, map[string]any{"input": []any{user, resp.Output[0], map[string]string{"role": "user", "content": "continue"}}})
+			request, err = geminiWire(t, "responses", hydrogen, map[string]any{"input": []any{user, resp.Output[0], map[string]string{"role": "user", "content": "continue"}}})
 			require.NoError(t, err)
 			checkWire(t, request)
 		})

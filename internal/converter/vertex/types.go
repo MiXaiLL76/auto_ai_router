@@ -36,14 +36,15 @@ type VertexRequest struct {
 // MarshalForModel applies the signature rules to the final model turns shared
 // by Chat and Responses. Continuation requests reuse these serialized bytes.
 func (r *VertexRequest) MarshalForModel(model string) ([]byte, error) {
-	if !UsesPrefixBoundSignatures(model) {
+	profile := lookupGeminiModelProfile(model)
+	if profile == nil || !profile.prefixBoundSignatures {
 		return json.Marshal(r)
 	}
-	// Overlay the missing SDK field without re-encoding large media parts
-	// or discarding the other generation and thinking settings.
+	// The optional prefix-mismatch setting is missing from the SDK.
+	// Overlay it without discarding other generation or thinking settings.
 	type thinking struct {
 		*genai.ThinkingConfig
-		PrefixMismatchBehavior string `json:"prefixMismatchBehavior"`
+		PrefixMismatchBehavior string `json:"prefixMismatchBehavior,omitempty"`
 	}
 	type generation struct {
 		*VertexGenerationConfig
@@ -51,16 +52,16 @@ func (r *VertexRequest) MarshalForModel(model string) ([]byte, error) {
 	}
 	config := generation{
 		VertexGenerationConfig: r.GenerationConfig,
-		Thinking:               thinking{ThinkingConfig: r.GenerationConfig.ThinkingConfig, PrefixMismatchBehavior: "DROP"},
+		Thinking:               thinking{ThinkingConfig: r.GenerationConfig.ThinkingConfig, PrefixMismatchBehavior: profile.prefixMismatchBehavior},
 	}
 	return json.Marshal(struct {
 		*VertexRequest
 		Contents   []any      `json:"contents"`
 		Generation generation `json:"generationConfig"`
-	}{r, hydrogenContents(r.Contents), config})
+	}{r, prefixBoundContents(r.Contents), config})
 }
 
-func hydrogenContents(turns []*genai.Content) []any {
+func prefixBoundContents(turns []*genai.Content) []any {
 	wire := make([]any, len(turns))
 	for i, turn := range turns {
 		wire[i] = turn

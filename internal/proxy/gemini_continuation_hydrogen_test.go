@@ -11,22 +11,38 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// A shortened history is sent on both segments. The mock accepts only Hydrogen's
-// wire format. Its usage includes search context, a repeated search and cached
-// input on the continuation; all four entry points must log the same charge.
-func TestHydrogenContinuesAndBills(t *testing.T) {
-	const model = "gemini-4-hydrogen"
-	const firstCandidate = `"modelVersion":"gemini-4-hydrogen","candidates":[{"content":{"role":"model","parts":[{"text":"plan","thought":true}]},"finishReason":"CONTINUATION","continuationToken":"dG9r","groundingMetadata":{"webSearchQueries":["one"]}}]`
+// The mock checks each model's thinking configuration and continuation request.
+// Its usage includes search context, a repeated search and cached input on the
+// continuation; all four entry points must log a consistent charge.
+func TestGemini4ContinuesAndBills(t *testing.T) {
+	for _, test := range []struct {
+		model, prefixMismatchBehavior string
+		promptTokens                  int
+	}{
+		{"gemini-4-hydrogen", "DROP", 65736},
+		{"gemini-4-neon", "", 65762},
+	} {
+		t.Run(test.model, func(t *testing.T) {
+			testGemini4ContinuesAndBills(t, test.model, test.prefixMismatchBehavior, test.promptTokens)
+		})
+	}
+}
+
+func testGemini4ContinuesAndBills(t *testing.T, model, prefixMismatchBehavior string, promptTokens int) {
+	t.Helper()
+	modelVersion := fmt.Sprintf(`"modelVersion":%q,`, model)
+	firstCandidate := modelVersion + `"candidates":[{"content":{"role":"model","parts":[{"text":"plan","thought":true}]},"finishReason":"CONTINUATION","continuationToken":"dG9r","groundingMetadata":{"webSearchQueries":["one"]}}]`
 	const firstUsage = `"usageMetadata":{"promptTokenCount":100,"thoughtsTokenCount":65536,"toolUsePromptTokenCount":11,"totalTokenCount":65647}`
-	const first = "{" + firstCandidate + "," + firstUsage + "}"
-	const last = `{"modelVersion":"gemini-4-hydrogen","candidates":[{"content":{"role":"model","parts":[{"text":"done"}]},"finishReason":"STOP","groundingMetadata":{"webSearchQueries":["one"]}}],"usageMetadata":{"promptTokenCount":65636,"cachedContentTokenCount":65000,"candidatesTokenCount":8,"toolUsePromptTokenCount":15,"totalTokenCount":65659}}`
+	first := "{" + firstCandidate + "," + firstUsage + "}"
+	last := "{" + modelVersion + `"candidates":[{"content":{"role":"model","parts":[{"text":"done"}]},"finishReason":"STOP","groundingMetadata":{"webSearchQueries":["one"]}}],"usageMetadata":{"promptTokenCount":65636,"cachedContentTokenCount":65000,"candidatesTokenCount":8,"toolUsePromptTokenCount":15,"totalTokenCount":65659}}`
 	for _, endpoint := range []string{"/v1/chat/completions", "/v1/responses"} {
 		for _, stream := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/stream=%t", endpoint, stream), func(t *testing.T) {
 				u := newLongDecodeUpstream(t, func(n int, req map[string]any, w http.ResponseWriter) {
 					cfg := req["generationConfig"].(map[string]any)
 					tc := cfg["thinkingConfig"].(map[string]any)
-					if tc["prefixMismatchBehavior"] != "DROP" || tc["thinkingLevel"] != "XHIGH" {
+					mismatch, _ := tc["prefixMismatchBehavior"].(string)
+					if mismatch != prefixMismatchBehavior || tc["thinkingLevel"] != "XHIGH" {
 						http.Error(w, "incorrect thinking config", http.StatusBadRequest)
 						return
 					}
@@ -80,9 +96,9 @@ func TestHydrogenContinuesAndBills(t *testing.T) {
 				require.Equal(t, u.requests[0], u.requests[1])
 				require.Len(t, db.loggedEntries, 1)
 				entry := db.loggedEntries[0]
-				assert.Equal(t, 65736, entry.PromptTokens)
+				assert.Equal(t, promptTokens, entry.PromptTokens)
 				assert.Equal(t, 65544, entry.CompletionTokens)
-				assert.InDelta(t, 736*2e-6+65000*0.5e-6+65544*8e-6+2*0.01, entry.Spend, 1e-10)
+				assert.InDelta(t, float64(promptTokens-65000)*2e-6+65000*0.5e-6+65544*8e-6+2*0.01, entry.Spend, 1e-10)
 			})
 		}
 	}
