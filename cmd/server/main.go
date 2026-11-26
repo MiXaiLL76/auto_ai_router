@@ -380,6 +380,7 @@ func main() {
 		ResponseStore:                respStore,
 		SessionStickyEnabled:         cfg.Server.SessionStickyEnabled,
 		SessionStickyAutoCacheCtrl:   cfg.Server.SessionStickyAutoCacheCtrl,
+		SessionStickyPromptHash:      cfg.Server.SessionStickyPromptHash,
 		SessionStoreTTL:              time.Duration(cfg.Server.SessionStickyTTL) * time.Minute,
 		SessionStoreRedis:            sessionStoreRedis,
 		SessionStoreKeyPrefix:        cfg.Redis.KeyPrefix,

@@ -162,6 +162,7 @@
                 {{ fmtBool .Config.Server.SessionStickyEnabled }}
                 {{- if .Config.Server.SessionStickyEnabled }}
                 · auto cache ctrl: {{ fmtBool .Config.Server.SessionStickyAutoCacheCtrl }}
+                · prompt hash: {{ fmtBool .Config.Server.SessionStickyPromptHash }}
                 · ttl: {{ if .Config.Server.SessionStickyTTL }}{{ .Config.Server.SessionStickyTTL }} min{{ else
                 }}default (6 min){{ end }}
                 {{- end }}

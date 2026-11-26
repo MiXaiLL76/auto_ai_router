@@ -490,7 +490,8 @@ type RequestLogContext struct {
 	// "safety_identifier", "user_field" (the two fallbacks kept apart --
 	// safety_identifier is a deliberate client/session marker, user is
 	// routinely just an application-level end-user id with no session
-	// intent at all), "previous_response_id", or "" when the client gave no
+	// intent at all), "previous_response_id", "prompt_hash" (see
+	// prompt_sticky.go), or "" when the client gave no
 	// such signal at all. This is independent of whether
 	// stickyAutoCacheCtrl/org policy ultimately allowed the injection --
 	// it answers "did the client try", not "did caching happen".
@@ -712,6 +713,7 @@ type Config struct {
 	ResponseStore              responsestore.Store // Optional: Responses API store (bbolt or Redis)
 	SessionStickyEnabled       bool
 	SessionStickyAutoCacheCtrl bool // Auto-inject Anthropic cache_control markers when session is active (default: true)
+	SessionStickyPromptHash    bool // Bind requests with explicit cache_control and no session marker by a hash of the prompt prefix
 	SessionStoreTTL            time.Duration
 	SessionStoreRedis          valkey.Client // Optional: share session bindings between replicas (nil = replica-local)
 	SessionStoreKeyPrefix      string        // Redis key prefix for session bindings (the deployment's redis.key_prefix)
@@ -825,6 +827,7 @@ type Proxy struct {
 	responseStore                    responsestore.Store // Optional: Responses API store (bbolt or Redis)
 	sessionStore                     sessionBindingStore // Optional: session-sticky credential routing
 	stickyAutoCacheCtrl              bool                // Auto-inject Anthropic cache_control when session is active
+	stickyPromptHash                 bool                // Bind cache_control requests without a session marker by prompt prefix hash
 	drainUpstreamOnAbort             bool                // Keep reading upstream after client disconnect to get real usage chunk
 	forceStreamForTTFT               bool                // Force stream:true upstream for non-streaming chat requests and reassemble the response back to non-stream JSON (TTFT on every request)
 	tiktokenEnabled                  bool                // Local tiktoken-based prompt/completion token fallback estimation
@@ -963,6 +966,7 @@ func New(cfg *Config) *Proxy {
 		responseStore:                    cfg.ResponseStore,
 		sessionStore:                     sessionStore,
 		stickyAutoCacheCtrl:              cfg.SessionStickyAutoCacheCtrl,
+		stickyPromptHash:                 cfg.SessionStickyPromptHash,
 		drainUpstreamOnAbort:             cfg.DrainUpstreamOnAbort,
 		forceStreamForTTFT:               cfg.ForceStreamForTTFT,
 		tiktokenEnabled:                  cfg.TiktokenEnabled,
@@ -2257,6 +2261,17 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		p.reconcileBudgetAndRateLimits(logCtx, 0)
 		if !logCtx.RequestCompleted && shouldClearSessionBindingOnFailure(r.Context(), logCtx) {
 			p.clearSessionBinding(p.stickySessionKey(logCtx), logCtx.ModelID)
+		}
+		if logCtx.RequestCompleted && logCtx.CacheEligibilitySource == "prompt_hash" {
+			var cachedTokens, cacheWriteTokens int
+			usageReported := logCtx.UsageSource == "provider"
+			if usage := logCtx.TokenUsage; usage != nil {
+				cachedTokens, cacheWriteTokens = usage.CachedInputTokens, usage.CacheCreationTokens
+				// Buffered responses may leave UsageSource unset. A zero-value
+				// usage can be synthesized for spend logging.
+				usageReported = usageReported || (logCtx.UsageSource == "" && usage.Total() > 0)
+			}
+			p.metrics.RecordPromptHashRequest(logCtx.ModelID, cachedTokens, cacheWriteTokens, usageReported)
 		}
 		annotateRequestSpan(logCtx)
 	}()

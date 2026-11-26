@@ -295,6 +295,7 @@ func (p *Proxy) orchestrateRequest(
 		// "input", and before the vision fallback: the stored history keeps the images.
 		responsesMetadata.AccumulatedInput = responses.ExtractInputArray(baseBody)
 	}
+	p.bindPromptSession(logCtx, baseBody)
 
 	// Images sent to a model configured with supports_vision: false are handled once
 	// per request on the base body, before a credential is picked, so a rejected

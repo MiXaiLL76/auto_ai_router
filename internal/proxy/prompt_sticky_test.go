@@ -1,0 +1,255 @@
+package proxy
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/mixaill76/auto_ai_router/internal/config"
+	anthropicconv "github.com/mixaill76/auto_ai_router/internal/converter/anthropic"
+	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
+	"github.com/mixaill76/auto_ai_router/internal/monitoring"
+	"github.com/mixaill76/auto_ai_router/internal/responsestore"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+const (
+	stickyChatCached   = `{"model":"gpt-4","tools":[{"type":"function","function":{"name":"f","parameters":{"type":"object"}}}],"messages":[{"role":"system","content":[{"type":"text","text":"rules","cache_control":{"type":"ephemeral"}}]},{"role":"user","content":"hello"}]}`
+	stickyChatMovedBP  = `{"model":"gpt-4","tools":[{"type":"function","function":{"name":"f","parameters":{"type":"object"}}}],"messages":[{"role":"system","content":[{"type":"text","text":"rules"}]},{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":[{"type":"text","text":"next","cache_control":{"type":"ephemeral","ttl":"1h"}}]}]}`
+	stickyChatNoCache  = `{"model":"gpt-4","messages":[{"role":"system","content":"rules"},{"role":"user","content":"hello"}]}`
+	stickyChatOtherMsg = `{"model":"gpt-4","tools":[{"type":"function","function":{"name":"f","parameters":{"type":"object"}}}],"messages":[{"role":"system","content":[{"type":"text","text":"rules","cache_control":{"type":"ephemeral"}}]},{"role":"user","content":"bye"}]}`
+)
+
+func promptSessionIDFor(body, token string) string {
+	prx := &Proxy{stickyPromptHash: true, sessionStore: NewSessionStore(time.Minute)}
+	logCtx := &RequestLogContext{Token: token, CacheMarkersIn: anthropicconv.CountCacheMarkers([]byte(body))}
+	prx.bindPromptSession(logCtx, []byte(body))
+	return logCtx.SessionID
+}
+
+func TestBindPromptSession(t *testing.T) {
+	base := promptSessionIDFor(stickyChatCached, "sk-a")
+	assert.Regexp(t, promptSessionIDPattern, base)
+
+	assert.Equal(t, base, promptSessionIDFor(stickyChatMovedBP, "sk-a"), "later turns and a moved breakpoint keep the key")
+	assert.NotEqual(t, base, promptSessionIDFor(stickyChatCached, "sk-b"), "client key")
+	assert.NotEqual(t, base, promptSessionIDFor(stickyChatOtherMsg, "sk-a"), "first user message")
+	assert.Empty(t, promptSessionIDFor(stickyChatNoCache, "sk-a"), "no cache_control")
+	assert.Empty(t, promptSessionIDFor(`not json "cache_control"`, "sk-a"))
+	assert.Empty(t, promptSessionIDFor(`{"model":"claude","cache_control":{"type":"other"},"messages":[{"role":"user","content":"hello"}]}`, "sk-a"))
+	assert.Empty(t, promptSessionIDFor(`{"model":"claude","cache_control":{"type":"ephemeral"},"input":{"role":"user","content":"hello"}}`, "sk-a"), "no readable user turn")
+	assert.Empty(t, promptSessionIDFor(`{"model":"claude","cache_control":{"type":"ephemeral"},"system":"rules","messages":[{"role":"assistant","content":"hi"}]}`, "sk-a"), "no user message")
+
+	logCtx := &RequestLogContext{SessionID: "sess-1", CacheMarkersIn: anthropicconv.CountCacheMarkers([]byte(stickyChatCached))}
+	(&Proxy{stickyPromptHash: true, sessionStore: NewSessionStore(time.Minute)}).bindPromptSession(logCtx, []byte(stickyChatCached))
+	assert.Equal(t, "sess-1", logCtx.SessionID, "client session wins")
+}
+
+func TestBindPromptSession_Turns(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		first, next string
+	}{
+		{
+			"messages: markers on system and tools, then on the tail",
+			`{"model":"claude","system":[{"type":"text","text":"rules","cache_control":{"type":"ephemeral"}}],"tools":[{"name":"f","input_schema":{"type":"object"},"cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"hello"}]}`,
+			`{"model":"claude","system":[{"type":"text","text":"rules"}],"tools":[{"name":"f","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":[{"type":"text","text":"more","cache_control":{"type":"ephemeral"}}]}]}`,
+		},
+		{
+			"messages: system string, then blocks",
+			`{"model":"claude","cache_control":{"type":"ephemeral"},"system":"rules","messages":[{"role":"user","content":"hello"}]}`,
+			`{"model":"claude","system":[{"type":"text","text":"rules","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":"more"}]}`,
+		},
+		{
+			"messages: top-level cache_control",
+			`{"model":"claude","cache_control":{"type":"ephemeral"},"system":"rules","messages":[{"role":"user","content":"hello"}]}`,
+			`{"model":"claude","cache_control":{"type":"ephemeral"},"system":"rules","messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":"more"}]}`,
+		},
+		{
+			"chat: marker on the first message, then on the tail",
+			`{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"hello","cache_control":{"type":"ephemeral"}}]}]}`,
+			`{"model":"m","messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":[{"type":"text","text":"more","cache_control":{"type":"ephemeral"}}]}]}`,
+		},
+		{
+			"responses: marker on the first input, then on a tool output",
+			`{"model":"claude","instructions":"rules","input":[{"role":"user","content":[{"type":"input_text","text":"hello","cache_control":{"type":"ephemeral"}}]}]}`,
+			`{"model":"claude","instructions":"rules","input":[{"role":"user","content":[{"type":"input_text","text":"hello"}]},{"type":"function_call","call_id":"c1","name":"f","arguments":"{}"},{"type":"function_call_output","call_id":"c1","output":"x","cache_control":{"type":"ephemeral"}}]}`,
+		},
+		{
+			"responses: marker on the first input_text, then a string",
+			`{"model":"claude","input":[{"role":"user","content":[{"type":"input_text","text":"hello","cache_control":{"type":"ephemeral"}}]}]}`,
+			`{"model":"claude","input":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":[{"type":"input_text","text":"more","cache_control":{"type":"ephemeral"}}]}]}`,
+		},
+		{
+			"responses: string input, then history",
+			`{"model":"m","cache_control":{"type":"ephemeral"},"instructions":"rules","input":"hello"}`,
+			`{"model":"m","cache_control":{"type":"ephemeral"},"instructions":"rules","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]},{"role":"user","content":"more"}]}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			first := promptSessionIDFor(tc.first, "sk")
+			require.NotEmpty(t, first)
+			assert.Equal(t, first, promptSessionIDFor(tc.next, "sk"))
+		})
+	}
+
+	assert.NotEqual(t,
+		promptSessionIDFor(`{"model":"m","cache_control":{"type":"ephemeral"},"input":"hello"}`, "sk"),
+		promptSessionIDFor(`{"model":"m","cache_control":{"type":"ephemeral"},"input":"bye"}`, "sk"))
+}
+
+func TestBindPromptSession_KeepsSchemaPropertyNamedCacheControl(t *testing.T) {
+	tool := func(propType string) string {
+		return `{"model":"m","tools":[{"name":"f","input_schema":{"type":"object","properties":{"cache_control":{"type":"` + propType + `"}}}}],"system":[{"type":"text","text":"rules","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"hello"}]}`
+	}
+	assert.NotEqual(t, promptSessionIDFor(tool("string"), "sk"), promptSessionIDFor(tool("integer"), "sk"))
+}
+
+const promptSessionIDPattern = `^p:[0-9a-f]{32}$`
+
+func TestProxyRequest_PromptHashSticky(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		enabled  bool
+		spendLog bool
+		body     string
+		wantUsed int
+	}{
+		{"cache_control binds", true, false, stickyChatCached, 1},
+		{"cache_control binds on direct credentials with spend log", true, true, stickyChatCached, 1},
+		{"no cache_control balances", true, false, stickyChatNoCache, 3},
+		{"flag off balances", false, false, stickyChatCached, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hits := make([]atomic.Int32, 3)
+			var creds []config.CredentialConfig
+			for i := range hits {
+				upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					hits[i].Add(1)
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(chatCompletionOKBody("id", "ok")))
+				}))
+				t.Cleanup(upstream.Close)
+				cred := testProxyCredential(fmt.Sprint("cred", i), upstream.URL, false)
+				if tc.spendLog {
+					cred.Type = config.ProviderTypeOpenAI
+				}
+				creds = append(creds, cred)
+			}
+			builder := NewTestProxyBuilder().WithCredentials(creds...).WithMasterKey("master-key").
+				WithSessionSticky(5 * time.Minute)
+			if tc.spendLog {
+				builder = builder.WithRouterResponseLog(&collectingRouterResponseManager{}, true)
+			}
+			prx := builder.Build()
+			prx.stickyPromptHash = tc.enabled
+
+			for range 5 {
+				w := postChat(t, prx, tc.body)
+				require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+			}
+			used := 0
+			for i := range hits {
+				if hits[i].Load() > 0 {
+					used++
+				}
+			}
+			assert.Equal(t, tc.wantUsed, used)
+		})
+	}
+}
+
+func TestProxyRequest_PromptHashStickyForwardedToAIRHop(t *testing.T) {
+	var gotSession string
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotSession = r.Header.Get(HeaderSessionID)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(createMockChatCompletionResponse("chatcmpl-1", "gpt-4", "ok"))
+	}))
+	defer upstream.Close()
+
+	cred := proxyCred("downstream", upstream.URL, 1)
+	cred.Type = config.ProviderTypeAIR
+	prx := NewTestProxyBuilder().WithCredentials(cred).WithMasterKey("master-key").WithSessionSticky(5 * time.Minute).Build()
+	prx.stickyPromptHash = true
+	registerTestModel(prx, cred.Name, "gpt-4")
+
+	w := postChat(t, prx, stickyChatCached)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	assert.Regexp(t, promptSessionIDPattern, gotSession)
+}
+
+func TestProxyRequest_PromptHashStickyMetric(t *testing.T) {
+	var hits atomic.Int32
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if hits.Add(1) > 1 {
+			_, _ = w.Write([]byte(`{"id":"c","object":"chat.completion","model":"gpt-4","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"c","object":"chat.completion","model":"gpt-4","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":1,"total_tokens":11,"prompt_tokens_details":{"cached_tokens":8}}}`))
+	}))
+	defer upstream.Close()
+
+	prx := NewTestProxyBuilder().WithCredentials(testProxyCredential("cred", upstream.URL, false)).
+		WithMasterKey("master-key").WithSessionSticky(5 * time.Minute).Build()
+	prx.stickyPromptHash = true
+	prx.metrics = monitoring.New(true)
+	read := monitoring.PromptHashRequestsTotal.WithLabelValues("gpt-4", "read")
+	unknown := monitoring.PromptHashRequestsTotal.WithLabelValues("gpt-4", "unknown")
+	readBefore := testutil.ToFloat64(read)
+	unknownBefore := testutil.ToFloat64(unknown)
+
+	for _, body := range []string{stickyChatCached, stickyChatCached, stickyChatNoCache} {
+		w := postChat(t, prx, body)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	}
+
+	assert.Equal(t, readBefore+1, testutil.ToFloat64(read))
+	assert.Equal(t, unknownBefore+1, testutil.ToFloat64(unknown))
+}
+
+func TestProxyRequest_PromptHashStickyKeepsKeyAcrossPreviousResponseID(t *testing.T) {
+	var sessions []string
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sessions = append(sessions, r.Header.Get(HeaderSessionID))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp-1","object":"response","model":"gpt-4","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`))
+	}))
+	defer upstream.Close()
+
+	cred := proxyCred("downstream", upstream.URL, 1)
+	cred.Type = config.ProviderTypeAIR
+	prx := NewTestProxyBuilder().WithCredentials(cred).WithMasterKey("master-key").WithSessionSticky(5 * time.Minute).Build()
+	prx.stickyPromptHash = true
+	registerTestModel(prx, cred.Name, "gpt-4")
+	prx.responseStore = &fakeResponseStore{entry: &responsestore.StoredEntry{
+		ResponseID:       "resp-prev",
+		CredentialName:   cred.Name,
+		AccumulatedInput: json.RawMessage(`[{"role":"user","content":"hello"}]`),
+		ResponseJSON:     &responses.Response{ID: "resp-prev", Model: "gpt-4"},
+	}}
+
+	for _, body := range []string{
+		`{"model":"gpt-4","cache_control":{"type":"ephemeral"},"instructions":"rules","input":"hello"}`,
+		`{"model":"gpt-4","cache_control":{"type":"ephemeral"},"instructions":"rules","input":"more","previous_response_id":"resp-prev"}`,
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer master-key")
+		w := httptest.NewRecorder()
+		prx.ProxyRequest(w, req)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	}
+
+	require.Len(t, sessions, 2)
+	assert.NotEmpty(t, sessions[0])
+	assert.Equal(t, sessions[0], sessions[1])
+}
