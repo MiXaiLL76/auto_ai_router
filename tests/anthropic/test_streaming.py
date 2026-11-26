@@ -206,10 +206,13 @@ class TestAnthropicStreaming:
             stream=True
         )
 
-        full_content, chunk_count = StreamingValidator.collect_streaming_content(stream)
-        assert chunk_count > 0
-        # Response should be relatively short due to max_tokens limit
-        assert len(full_content) > 0
+        finish_reasons = [
+            choice.finish_reason
+            for chunk in stream
+            for choice in chunk.choices
+            if choice.finish_reason is not None
+        ]
+        assert finish_reasons == ["length"]
 
 
 class TestAnthropicStreamingEdgeCases:

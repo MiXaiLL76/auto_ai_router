@@ -7,13 +7,7 @@ import pytest
 from test_helpers import TestModels, ContentValidator
 
 
-# Claude 4.x models that support extended thinking via Responses API
 ANTHROPIC_RESPONSES_MODELS = TestModels.ANTHROPIC_MODELS
-
-# Models known to support reasoning/thinking
-ANTHROPIC_THINKING_MODELS = [
-    "anthropic/claude-sonnet-4.5",
-]
 
 
 def _collect_responses_output_text(response) -> str:
@@ -85,11 +79,9 @@ class TestAnthropicResponsesAPIBasic:
             max_output_tokens=20,
         )
 
-        assert response is not None
-        text = _collect_responses_output_text(response)
-        assert len(text) > 0
-        # With 20 output tokens the text should be short
-        assert len(text) < 300, f"Response unexpectedly long for max_output_tokens=20: {len(text)} chars"
+        assert response.status == "incomplete"
+        assert response.incomplete_details.reason == "max_output_tokens"
+        assert 0 < response.usage.output_tokens <= 20
 
     @pytest.mark.parametrize("model", ANTHROPIC_RESPONSES_MODELS)
     def test_system_instructions(self, openai_client, model):
@@ -109,7 +101,7 @@ class TestAnthropicResponsesAPIBasic:
 class TestAnthropicResponsesAPIReasoning:
     """Responses API with extended thinking / reasoning."""
 
-    @pytest.mark.parametrize("model", ANTHROPIC_THINKING_MODELS)
+    @pytest.mark.parametrize("model", ANTHROPIC_RESPONSES_MODELS)
     def test_reasoning_returns_answer(self, openai_client, model):
         """Responses API with reasoning returns correct factual answer."""
         response = openai_client.responses.create(
@@ -129,7 +121,7 @@ class TestAnthropicResponsesAPIReasoning:
         )
         ContentValidator.assert_contains_any(text.lower(), ["yes"])
 
-    @pytest.mark.parametrize("model", ANTHROPIC_THINKING_MODELS)
+    @pytest.mark.parametrize("model", ANTHROPIC_RESPONSES_MODELS)
     def test_reasoning_usage_non_zero(self, openai_client, model):
         """Reasoning requests report non-zero usage."""
         response = openai_client.responses.create(
@@ -144,7 +136,7 @@ class TestAnthropicResponsesAPIReasoning:
         assert response.usage.output_tokens > 0, "output_tokens must be > 0 for reasoning request"
 
     @pytest.mark.parametrize("effort", ["low", "medium"])
-    @pytest.mark.parametrize("model", ANTHROPIC_THINKING_MODELS)
+    @pytest.mark.parametrize("model", ANTHROPIC_RESPONSES_MODELS)
     def test_reasoning_effort_levels(self, openai_client, model, effort):
         """Both low and medium reasoning effort produce valid responses."""
         response = openai_client.responses.create(
@@ -191,7 +183,7 @@ class TestAnthropicResponsesAPIStreaming:
         assert chunk_count > 0
         ContentValidator.assert_contains_any(text.lower(), ["berlin"])
 
-    @pytest.mark.parametrize("model", ANTHROPIC_THINKING_MODELS)
+    @pytest.mark.parametrize("model", ANTHROPIC_RESPONSES_MODELS)
     def test_streaming_with_reasoning(self, openai_client, model):
         """Streaming Responses API with reasoning returns correct answer."""
         stream = openai_client.responses.create(

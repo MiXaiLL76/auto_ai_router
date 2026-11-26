@@ -4,6 +4,7 @@ Tests OpenAI -> Anthropic tool definition conversion and handling
 """
 
 import pytest
+from openai import BadRequestError
 from test_helpers import (
     TestModels, ResponseValidator, ToolDefinitions
 )
@@ -72,7 +73,7 @@ class TestAnthropicBasicToolCalling:
 
     @pytest.mark.parametrize("model", TestModels.ANTHROPIC_MODELS)
     def test_tool_choice_required(self, openai_client, model):
-        """Test forcing tool usage with tool_choice='required'"""
+        """Sonnet 5.5 rejects forced tool use."""
         tools = [
             {
                 "type": "function",
@@ -91,17 +92,14 @@ class TestAnthropicBasicToolCalling:
             }
         ]
 
-        response = openai_client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "user", "content": "Please add 5 and 3"}
-            ],
-            tools=tools,
-            tool_choice="required",
-            max_tokens=100
-        )
-
-        ResponseValidator.validate_chat_response(response)
+        with pytest.raises(BadRequestError, match="does not support a forced tool_choice"):
+            openai_client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": "Please add 5 and 3"}],
+                tools=tools,
+                tool_choice="required",
+                max_tokens=100,
+            )
 
     @pytest.mark.parametrize("model", TestModels.ANTHROPIC_MODELS)
     def test_tool_choice_auto(self, openai_client, model):
@@ -514,7 +512,7 @@ class TestAnthropicAllowedTools:
             extra_body={
                 "tool_choice": {
                     "type": "allowed_tools",
-                    "mode": "any",
+                    "mode": "auto",
                     "tools": [
                         {"type": "tool", "name": "get_weather"},
                         {"type": "tool", "name": "calculate"},
