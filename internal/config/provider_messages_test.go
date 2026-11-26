@@ -314,3 +314,75 @@ func TestProviderMessagesConfig_StatusMustBeClientFault(t *testing.T) {
 	}}}
 	require.NoError(t, cfg.Validate())
 }
+
+// TestProviderMessagesConfig_Retryable checks that the retryable field is
+// read and carried into the rule.
+//
+// It is the answer to a question the status alone cannot answer: a 400 is
+// retryable by default (a provider account may lack a model another account
+// serves), but a rule about the request's own fault is not -- every
+// credential refuses it identically.
+func TestProviderMessagesConfig_Retryable(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		yaml string
+		want *bool
+	}{
+		{
+			name: "not retryable",
+			yaml: `
+provider_messages:
+  messages:
+    - match: unsupported model
+      message: Invalid model
+      code: invalid_model
+      status: 400
+      retryable: false
+`,
+			want: boolPtr(false),
+		},
+		{
+			name: "retryable",
+			yaml: `
+provider_messages:
+  messages:
+    - match: the model is not served by this account
+      message: Invalid model
+      code: invalid_model
+      status: 400
+      retryable: true
+`,
+			want: boolPtr(true),
+		},
+		{
+			name: "unset",
+			yaml: `
+provider_messages:
+  messages:
+    - match: unsupported model
+      message: Invalid model
+      code: invalid_model
+      status: 400
+`,
+			want: nil,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := loadConfigFromString(t, providerMessagesTestConfigBase+tt.yaml)
+			require.NoError(t, err)
+			require.Len(t, cfg.ProviderMessages.Messages, 1)
+
+			rules := cfg.ProviderMessages.Rules()
+			require.Len(t, rules, 1)
+
+			if tt.want == nil {
+				assert.Nil(t, rules[0].Retryable, "an unset retryable must stay unset")
+				return
+			}
+			require.NotNil(t, rules[0].Retryable)
+			assert.Equal(t, *tt.want, *rules[0].Retryable)
+		})
+	}
+}
+
+func boolPtr(v bool) *bool { return &v }

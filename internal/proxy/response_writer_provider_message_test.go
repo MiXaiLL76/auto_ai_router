@@ -131,3 +131,79 @@ func TestMaskedUpstreamErrorBody_RuleForANon400Status(t *testing.T) {
 	assert.Contains(t, string(masked), "Caller lacks permission",
 		"the rule's message must reach the client")
 }
+
+// TestShouldRetry_RuleForbidsTheRetry checks that a rule saying the failure
+// must not be replayed keeps the router from replaying it.
+//
+// The status alone does not say this: a 400 is in the router's retryable set
+// (a provider account may lack a model another account serves), so without
+// the rule's own answer the request is asked of every credential in the
+// pool. Production measured it: 441 requests, 1 236 attempts, not one
+// attempt succeeded.
+func TestShouldRetry_RuleForbidsTheRetry(t *testing.T) {
+	t.Cleanup(func() { upstreamerror.SetProviderMessageRules(nil) })
+
+	notRetryable := false
+	upstreamerror.SetProviderMessageRules([]upstreamerror.ProviderMessageRule{{
+		ProviderCode: "InvalidParameter",
+		Match:        "agent capabilities are not enabled for the current model",
+		Code:         "invalid_request",
+		Message:      "Agent capabilities are not enabled for the current model.",
+		Status:       http.StatusBadRequest,
+		Retryable:    &notRetryable,
+	}})
+
+	body := []byte(`{"error":{"code":"InvalidParameter",` +
+		`"message":"<400> InternalError.Algo.InvalidParameter: Agent capabilities are not enabled for the current model."}}`)
+
+	retry, _ := ShouldRetryWithFallback(http.StatusBadRequest, body)
+	assert.False(t, retry, "the rule forbids the replay")
+}
+
+// TestShouldRetry_RuleAllowsTheRetry checks the other direction: a rule that
+// says the failure MAY be replayed keeps it replayable even when the status
+// alone would not say so.
+func TestShouldRetry_RuleAllowsTheRetry(t *testing.T) {
+	t.Cleanup(func() { upstreamerror.SetProviderMessageRules(nil) })
+
+	retryable := true
+	upstreamerror.SetProviderMessageRules([]upstreamerror.ProviderMessageRule{{
+		ProviderCode: "InvalidParameter",
+		Match:        "the model is not served by this account",
+		Code:         "invalid_model",
+		Message:      "Invalid model",
+		Status:       http.StatusBadRequest,
+		Retryable:    &retryable,
+	}})
+
+	body := []byte(`{"error":{"code":"InvalidParameter","message":"the model is not served by this account"}}`)
+
+	retry, _ := ShouldRetryWithFallback(http.StatusBadRequest, body)
+	assert.True(t, retry, "the rule allows the replay")
+}
+
+// TestShouldRetry_RuleForbidsTheRetryOnTheStreamingPath checks the same on
+// the streaming path: a terminal error event is classified the same way, and
+// the rule's answer must reach that path too.
+func TestShouldRetry_RuleForbidsTheRetryOnTheStreamingPath(t *testing.T) {
+	t.Cleanup(func() { upstreamerror.SetProviderMessageRules(nil) })
+
+	notRetryable := false
+	upstreamerror.SetProviderMessageRules([]upstreamerror.ProviderMessageRule{{
+		ProviderCode: "InvalidParameter",
+		Match:        "agent capabilities are not enabled for the current model",
+		Code:         "invalid_request",
+		Message:      "Agent capabilities are not enabled for the current model.",
+		Status:       http.StatusBadRequest,
+		Retryable:    &notRetryable,
+	}})
+
+	payload := `{"type":"response.failed","response":{"status":"failed","error":{"code":"InvalidParameter",` +
+		`"message":"<400> InternalError.Algo.InvalidParameter: Agent capabilities are not enabled for the current model."}}}`
+
+	status := statusCodeFromProviderStreamError(payload)
+	require.Equal(t, http.StatusBadRequest, status)
+
+	retry, _ := ShouldRetryWithFallback(status, []byte(payload))
+	assert.False(t, retry, "the rule forbids the replay on the streaming path too")
+}

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // #1: правило со статусом 404 — статус и сообщение должны оба доехать
@@ -166,4 +167,103 @@ func TestProviderMessageReview_ReplacesABuiltinRuleWithoutItsPunctuation(t *test
 				"the operator's rule must replace the built-in one")
 		})
 	}
+}
+
+// TestProviderMessageReview_RetryableIsCarried checks that a rule's own
+// retryable answer reaches the classification.
+//
+// The rule knows what the failure IS, which the status alone does not: a 400
+// is retryable by default -- a provider account may lack a model another
+// account serves -- but a rule about the REQUEST's own fault is not, because
+// every credential refuses it identically.
+func TestProviderMessageReview_RetryableIsCarried(t *testing.T) {
+	t.Cleanup(func() { SetProviderMessageRules(nil) })
+
+	notRetryable := false
+	retryable := true
+
+	for _, tt := range []struct {
+		name      string
+		retryable *bool
+		want      bool
+		said      bool
+	}{
+		{"not retryable", &notRetryable, false, true},
+		{"retryable", &retryable, true, true},
+		{"unset", nil, false, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			SetProviderMessageRules([]ProviderMessageRule{{
+				ProviderCode: "InvalidParameter",
+				Match:        "unsupported model",
+				Code:         "invalid_model",
+				Message:      "Invalid model",
+				Status:       http.StatusBadRequest,
+				Retryable:    tt.retryable,
+			}})
+
+			body := []byte(`{"error":{"code":"InvalidParameter","message":"Unsupported model: 'kimi-k2.7-code'"}}`)
+			info, ok := ExtractProviderErrorInfo([]byte(body))
+			require.True(t, ok)
+
+			got, said := ProviderMessageRetryable(info)
+			assert.Equal(t, tt.want, got)
+			assert.Equal(t, tt.said, said, "whether a rule said must be reported")
+
+			classified, ok := ClassifyProviderMessage(info)
+			require.True(t, ok)
+			assert.Equal(t, tt.retryable, classified.Retryable)
+		})
+	}
+}
+
+// TestProviderMessageReview_BuiltinRulesAreNotRetryable checks that the
+// rules the router ships with are not retryable.
+//
+// They describe the request's own fault -- the model cannot do what was
+// asked of it -- so every credential refuses them identically. Production
+// measured it: 441 requests, 1 236 attempts across the pool, not one
+// attempt succeeded.
+func TestProviderMessageReview_BuiltinRulesAreNotRetryable(t *testing.T) {
+	for _, builtin := range builtinProviderMessages() {
+		t.Run(builtin.Match, func(t *testing.T) {
+			require.NotNil(t, builtin.Retryable, "a built-in rule must say")
+			assert.False(t, *builtin.Retryable)
+		})
+	}
+}
+
+// TestProviderMessageReview_DeploymentRuleWinsOverTheBuiltinOne checks that
+// a deployment's rule wins over the built-in one it names -- including a
+// rule whose wording is SHORTER, which is what an operator writes.
+//
+// The order the rules are tried in is the order they are set in, and the
+// deployment's rules come first: a rule behind the built-in one could never
+// say anything different about a failure the router already knows -- not
+// its wording, and not whether the failure may be replayed.
+func TestProviderMessageReview_DeploymentRuleWinsOverTheBuiltinOne(t *testing.T) {
+	t.Cleanup(func() { SetProviderMessageRules(nil) })
+
+	notRetryable := false
+	SetProviderMessageRules([]ProviderMessageRule{{
+		ProviderCode: "InvalidParameter",
+		Match:        "agent capabilities are not enabled",
+		Code:         "invalid_request",
+		Message:      "Reworded by the operator",
+		Status:       http.StatusBadRequest,
+		Retryable:    &notRetryable,
+	}})
+
+	body := []byte(`{"error":{"code":"InvalidParameter",` +
+		`"message":"<400> InternalError.Algo.InvalidParameter: Agent capabilities are not enabled for the current model."}}`)
+	info, ok := ExtractProviderErrorInfo([]byte(body))
+	require.True(t, ok)
+
+	classified, ok := ClassifyProviderMessage(info)
+	require.True(t, ok)
+	assert.Equal(t, "Reworded by the operator", classified.Message)
+
+	retryable, said := ProviderMessageRetryable(info)
+	assert.True(t, said)
+	assert.False(t, retryable)
 }

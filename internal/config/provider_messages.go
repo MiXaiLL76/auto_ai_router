@@ -70,6 +70,17 @@ type ProviderMessageConfig struct {
 	// 4xx status: a 5xx would say the provider is broken, which is the
 	// opposite of what a rule like this describes.
 	Status int `yaml:"status"`
+	// Retryable says whether a failure that matched this rule may be
+	// replayed on another credential. Unset: the router's own retry policy
+	// decides, and the status alone decides (a 400 is retryable by default
+	// -- a provider account may lack a model another account serves).
+	//
+	// false is the answer for a rule about the REQUEST's own fault: the
+	// model cannot do what was asked of it, every credential refuses it
+	// identically, and replaying it only multiplies the attempts.
+	//
+	// true is the answer for a rule about something a CREDENTIAL owns.
+	Retryable *bool `yaml:"retryable,omitempty"`
 }
 
 // ProviderMessagesConfig is the top-level provider_messages section: the
@@ -122,6 +133,7 @@ func (c *ProviderMessagesConfig) Rules() []upstreamerror.ProviderMessageRule {
 			Code:         entry.Code,
 			Message:      entry.Message,
 			Status:       entry.Status,
+			Retryable:    entry.Retryable,
 		})
 	}
 	return rules

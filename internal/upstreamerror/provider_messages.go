@@ -3,6 +3,7 @@ package upstreamerror
 import (
 	"net/http"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -152,6 +153,23 @@ type ProviderMessageRule struct {
 	Message string
 	// Status is the HTTP status the client is answered with.
 	Status int
+	// Retryable says whether a failure that matched this rule may be
+	// replayed on another credential.
+	//
+	// It is nil when the rule does not say: the router's own policy decides
+	// then, and the status alone decides -- a 400 is in the router's
+	// retryable set (a provider account may refuse a model another account
+	// serves), and a 5xx is in it too.
+	//
+	// False is the answer for a rule about the REQUEST's own fault: the
+	// model cannot do what was asked of it, every credential refuses it
+	// identically, and replaying it only multiplies the attempts. Production
+	// measured it: 441 requests, 1 236 attempts across the pool, not one
+	// attempt succeeded.
+	//
+	// True is the answer for a rule about something a CREDENTIAL owns: the
+	// model is missing from this account but another account serves it.
+	Retryable *bool
 }
 
 // builtinProviderMessages are the provider messages the router relays out of
@@ -167,25 +185,35 @@ type ProviderMessageRule struct {
 // matching and the client gets the generic wording again -- the status stays
 // the 400 the provider stated, so the request is still reported as the
 // provider's own refusal of it.
-var builtinProviderMessages = []ProviderMessageRule{
-	{
-		Match:   "agent capabilities are not enabled for the current model.",
-		Code:    "invalid_request",
-		Message: "Agent capabilities are not enabled for the current model.",
-		Status:  http.StatusBadRequest,
-	},
-	{
-		Match:   "the current model does not support pdf file input.",
-		Code:    "invalid_request",
-		Message: "The current model does not support PDF file input.",
-		Status:  http.StatusBadRequest,
-	},
-	{
-		Match:   "the thinking_budget parameter must be a positive integer and not greater than 131072",
-		Code:    "invalid_request",
-		Message: "The thinking_budget parameter must be a positive integer and not greater than 131072",
-		Status:  http.StatusBadRequest,
-	},
+//
+// All three are about the REQUEST's own fault -- the model cannot do what
+// was asked of it -- so they are not retryable: every credential refuses
+// them identically, and replaying them only multiplies the attempts.
+func builtinProviderMessages() []ProviderMessageRule {
+	notRetryable := false
+	return []ProviderMessageRule{
+		{
+			Match:     "agent capabilities are not enabled for the current model.",
+			Code:      "invalid_request",
+			Message:   "Agent capabilities are not enabled for the current model.",
+			Status:    http.StatusBadRequest,
+			Retryable: &notRetryable,
+		},
+		{
+			Match:     "the current model does not support pdf file input.",
+			Code:      "invalid_request",
+			Message:   "The current model does not support PDF file input.",
+			Status:    http.StatusBadRequest,
+			Retryable: &notRetryable,
+		},
+		{
+			Match:     "the thinking_budget parameter must be a positive integer and not greater than 131072",
+			Code:      "invalid_request",
+			Message:   "The thinking_budget parameter must be a positive integer and not greater than 131072",
+			Status:    http.StatusBadRequest,
+			Retryable: &notRetryable,
+		},
+	}
 }
 
 // compiledProviderMessageRule is a rule with its match text normalized once,
@@ -196,6 +224,10 @@ type compiledProviderMessageRule struct {
 	// normalizedMatch is the rule's Match folded for comparison, computed
 	// once when the rules are set.
 	normalizedMatch string
+	// position is the rule's place in the set, which is the order the rules
+	// are tried in. The lookup keeps the order while still skipping the
+	// rules a failure cannot match (see lookupProviderMessageRule).
+	position int
 }
 
 // providerMessageRuleSet is the rules in force, indexed for lookup.
@@ -225,7 +257,7 @@ type providerMessageRuleSet struct {
 // (SetProviderMessageRules), which happens once.
 var (
 	providerMessageRulesMu sync.RWMutex
-	providerMessageRules   = buildProviderMessageRuleSet(builtinProviderMessages)
+	providerMessageRules   = buildProviderMessageRuleSet(builtinProviderMessages())
 )
 
 // buildProviderMessageRuleSet compiles and indexes a rule list.
@@ -235,10 +267,11 @@ func buildProviderMessageRuleSet(rules []ProviderMessageRule) providerMessageRul
 		byCode:      make(map[string][]compiledProviderMessageRule),
 		withoutCode: make([]compiledProviderMessageRule, 0, len(rules)),
 	}
-	for _, rule := range rules {
+	for position, rule := range rules {
 		compiled := compiledProviderMessageRule{
 			rule:            rule,
 			normalizedMatch: normalizeProviderMessageText(rule.Match),
+			position:        position,
 		}
 		set.all = append(set.all, compiled)
 		if rule.ProviderCode == "" {
@@ -270,39 +303,54 @@ func buildProviderMessageRuleSet(rules []ProviderMessageRule) providerMessageRul
 // config validation refuses that outright, so this is the belt to that
 // braces.
 func SetProviderMessageRules(rules []ProviderMessageRule) {
-	merged := make([]ProviderMessageRule, 0, len(builtinProviderMessages)+len(rules))
-	merged = append(merged, builtinProviderMessages...)
+	// The deployment's own rules come FIRST.
+	//
+	// The order is the order the rules are tried in, and a rule that comes
+	// first wins. A deployment's rule has to be able to say something
+	// DIFFERENT about a failure the router already knows -- reword it, or
+	// (the case this exists for) say that it must not be replayed on another
+	// credential. A rule behind the built-in one could never do either: the
+	// built-in rule matched first, and the operator's wording and its
+	// retryable answer were both lost -- the operator saw their rule in the
+	// config and a different answer on the wire.
+	//
+	// A rule that names the same text as a built-in one still REPLACES it
+	// rather than sitting beside it: the same text is the same rule, and
+	// two rules for one failure would be one of them dead.
+	merged := make([]ProviderMessageRule, 0, len(rules)+len(builtinProviderMessages()))
+	merged = append(merged, rules...)
 
-	for _, rule := range rules {
-		replaced := false
+	for _, builtin := range builtinProviderMessages() {
+		// A built-in rule whose text a deployment rule already names is NOT
+		// added: the deployment's rule is the same rule, and the
+		// deployment's wording (and its retryable answer) is the one that
+		// must stand.
+		alreadyNamed := false
 		for i := range merged {
-			if merged[i].Match == "" || rule.Match == "" {
+			if merged[i].Match == "" || builtin.Match == "" {
 				continue
 			}
-			if normalizeProviderMessageText(merged[i].Match) == normalizeProviderMessageText(rule.Match) {
-				merged[i] = rule
-				replaced = true
+			if normalizeProviderMessageText(merged[i].Match) == normalizeProviderMessageText(builtin.Match) {
+				alreadyNamed = true
 				break
 			}
 		}
-		if replaced {
+		if !alreadyNamed {
+			merged = append(merged, builtin)
+		}
+	}
+
+	// A rule without a text matches every failure carrying its code:
+	// another such rule with the same code is the same rule twice.
+	for i := 0; i < len(merged); i++ {
+		if merged[i].Match != "" || merged[i].ProviderCode == "" {
 			continue
 		}
-
-		// A rule without a text matches every failure carrying its code:
-		// another such rule with the same code is the same rule twice.
-		shadowed := false
-		if rule.Match == "" && rule.ProviderCode != "" {
-			for i := range merged {
-				if merged[i].Match == "" && merged[i].ProviderCode == rule.ProviderCode {
-					merged[i] = rule
-					shadowed = true
-					break
-				}
+		for j := i + 1; j < len(merged); j++ {
+			if merged[j].Match == "" && merged[j].ProviderCode == merged[i].ProviderCode {
+				merged = append(merged[:j], merged[j+1:]...)
+				j--
 			}
-		}
-		if !shadowed {
-			merged = append(merged, rule)
 		}
 	}
 
@@ -409,11 +457,19 @@ func lookupProviderMessageRule(info ProviderErrorInfo) (providerMessageMatch, bo
 		normalized[i] = normalizeProviderMessageText(signal)
 	}
 
+	// The candidates are the rules a failure could match: the ones that name
+	// no code, plus the ones that name a code the failure carries. They are
+	// then put back in the set's order, which is the order the rules are
+	// tried in -- a deployment's rule comes before a built-in one, so a
+	// rule that matches the same failure in a shorter wording still wins.
 	candidates := make([]compiledProviderMessageRule, 0, len(rules.withoutCode)+4)
 	candidates = append(candidates, rules.withoutCode...)
 	for _, code := range info.Codes {
 		candidates = append(candidates, rules.byCode[strings.ToLower(code)]...)
 	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return candidates[i].position < candidates[j].position
+	})
 
 	for _, candidate := range candidates {
 		matched, ok := providerMessageMatches(candidate, info, normalized)
@@ -481,6 +537,9 @@ type ProviderMessageClassification struct {
 	Code string
 	// Message is what the client is told.
 	Message string
+	// Retryable says whether the failure may be replayed on another
+	// credential. Nil when no rule said.
+	Retryable *bool
 }
 
 // ClassifyProviderMessage classifies a provider's failure into the router's
@@ -516,10 +575,26 @@ func ClassifyProviderMessage(info ProviderErrorInfo) (ProviderMessageClassificat
 		return ProviderMessageClassification{}, false
 	}
 	return ProviderMessageClassification{
-		Status:  match.rule.Status,
-		Code:    match.rule.Code,
-		Message: match.rule.Message,
+		Status:    match.rule.Status,
+		Code:      match.rule.Code,
+		Message:   match.rule.Message,
+		Retryable: match.rule.Retryable,
 	}, true
+}
+
+// ProviderMessageRetryable reports whether a failure that matched a rule
+// may be replayed on another credential, and whether a rule said at all.
+//
+// It is the rule's own answer, not the router's policy: a rule about the
+// request's own fault says "no", and a rule about something a credential
+// owns says "yes". A failure that matched no rule leaves the decision to
+// the router's own retry policy.
+func ProviderMessageRetryable(info ProviderErrorInfo) (retryable bool, said bool) {
+	match, ok := lookupProviderMessageRule(info)
+	if !ok || match.rule.Retryable == nil {
+		return false, false
+	}
+	return *match.rule.Retryable, true
 }
 
 // isContentPolicyRefusal reports whether the failure is a content-policy
