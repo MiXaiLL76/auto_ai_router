@@ -2202,6 +2202,9 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		if !logCtx.RequestCompleted && shouldClearSessionBindingOnFailure(r.Context(), logCtx) {
 			p.clearSessionBinding(p.stickySessionKey(logCtx), logCtx.ModelID)
 		}
+		if logCtx.RequestCompleted && logCtx.CacheEligibilitySource == "prompt_hash" && logCtx.TokenUsage != nil {
+			p.metrics.RecordPromptHashRequest(logCtx.ModelID, logCtx.TokenUsage.CachedInputTokens, logCtx.TokenUsage.CacheCreationTokens)
+		}
 		annotateRequestSpan(logCtx)
 	}()
 

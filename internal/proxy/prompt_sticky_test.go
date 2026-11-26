@@ -13,7 +13,9 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	anthropicconv "github.com/mixaill76/auto_ai_router/internal/converter/anthropic"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
+	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/responsestore"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -183,6 +185,28 @@ func TestProxyRequest_PromptHashStickyForwardedToAIRHop(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 
 	assert.Regexp(t, promptSessionIDPattern, gotSession)
+}
+
+func TestProxyRequest_PromptHashStickyMetric(t *testing.T) {
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"c","object":"chat.completion","model":"gpt-4","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":1,"total_tokens":11,"prompt_tokens_details":{"cached_tokens":8}}}`))
+	}))
+	defer upstream.Close()
+
+	prx := NewTestProxyBuilder().WithCredentials(testProxyCredential("cred", upstream.URL, false)).
+		WithMasterKey("master-key").WithSessionSticky(5 * time.Minute).Build()
+	prx.stickyPromptHash = true
+	prx.metrics = monitoring.New(true)
+	read := monitoring.PromptHashRequestsTotal.WithLabelValues("gpt-4", "read")
+	before := testutil.ToFloat64(read)
+
+	for _, body := range []string{stickyChatCached, stickyChatNoCache} {
+		w := postChat(t, prx, body)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	}
+
+	assert.Equal(t, before+1, testutil.ToFloat64(read))
 }
 
 func TestProxyRequest_PromptHashStickyKeepsKeyAcrossPreviousResponseID(t *testing.T) {

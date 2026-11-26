@@ -529,3 +529,16 @@ func TestMetrics_AllPrometheusRegistration(t *testing.T) {
 		assert.NotNil(t, metric)
 	}
 }
+
+func TestRecordPromptHashRequest(t *testing.T) {
+	PromptHashRequestsTotal.Reset()
+
+	New(true).RecordPromptHashRequest("m", 10, 5)
+	New(true).RecordPromptHashRequest("m", 0, 5)
+	New(true).RecordPromptHashRequest("m", 0, 0)
+	New(false).RecordPromptHashRequest("m", 10, 0)
+
+	for _, cache := range []string{"read", "write", "none"} {
+		assert.Equal(t, 1.0, testutil.ToFloat64(PromptHashRequestsTotal.WithLabelValues("m", cache)), cache)
+	}
+}

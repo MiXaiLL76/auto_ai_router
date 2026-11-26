@@ -2085,6 +2085,7 @@ monitoring:
 	cfg, err := Load(configPath)
 	require.NoError(t, err)
 	assert.True(t, cfg.Server.SessionStickyEnabled)
+	assert.True(t, cfg.Server.SessionStickyPromptHash)
 	assert.Equal(t, 0, cfg.Server.SessionStickyTTL)
 }
 
@@ -2100,6 +2101,7 @@ server:
   master_key: "sk-test"
   session_sticky_enabled: false
   session_sticky_ttl_minutes: 15
+  session_sticky_prompt_hash: false
 
 fail2ban:
   max_attempts: 3
@@ -2122,6 +2124,7 @@ monitoring:
 	cfg, err := Load(configPath)
 	require.NoError(t, err)
 	assert.False(t, cfg.Server.SessionStickyEnabled)
+	assert.False(t, cfg.Server.SessionStickyPromptHash)
 	assert.Equal(t, 15, cfg.Server.SessionStickyTTL)
 }
 
