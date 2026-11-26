@@ -395,3 +395,27 @@ func TestSetProviderMessageRules_MatchIsASubstring(t *testing.T) {
 	assert.NotContains(t, classified.Message, "021795058711799a81c77d48bc6ef475723297888da3",
 		"the provider's request id must not reach the client")
 }
+
+// TestSetProviderMessageRules_NestedProviderCode checks that a rule's
+// provider code is found in the shape a Responses-shaped body carries it in:
+// the code sits under "response", beside the message, and the router reads
+// both out of the body it was given.
+func TestSetProviderMessageRules_NestedProviderCode(t *testing.T) {
+	t.Cleanup(func() { SetProviderMessageRules(nil) })
+
+	SetProviderMessageRules([]ProviderMessageRule{
+		{
+			ProviderCode: "InvalidParameter",
+			Match:        "unsupported model",
+			Code:         "invalid_model",
+			Message:      "Invalid model",
+			Status:       http.StatusBadRequest,
+		},
+	})
+
+	body := `{"response":{"id":"resp_1","error":{"code":"InvalidParameter","message":"Unsupported model: 'kimi-k2.7-code'"}}}`
+	classified := ClassifyBadRequest([]byte(body))
+
+	assert.Equal(t, "invalid_model", classified.Code)
+	assert.Equal(t, "Invalid model", classified.Message)
+}

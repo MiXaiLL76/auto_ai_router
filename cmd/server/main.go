@@ -340,8 +340,8 @@ func main() {
 	// provider's own words, and the router's answer to them. They are set
 	// here, before the proxy starts serving, because the rules are read on
 	// the request path.
-	upstreamerror.SetProviderMessageRules(cfg.ProviderMessages.Rules())
 	if rules := cfg.ProviderMessages.Rules(); len(rules) > 0 {
+		upstreamerror.SetProviderMessageRules(rules)
 		log.Info("Provider message rules loaded", "count", len(rules))
 	}
 
