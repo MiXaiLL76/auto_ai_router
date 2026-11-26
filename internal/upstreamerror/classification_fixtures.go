@@ -133,4 +133,19 @@ var ClassificationFixtures = []ClassificationFixture{
 		Body:       `{"message":"This request was blocked by the provider due to an IP/region restriction."}`,
 		WantStatus: http.StatusBadGateway,
 	},
+	{
+		// A provider that states the failure's status in its own message,
+		// and answers HTTP 200 with the failure in the body. The status in
+		// the prefix is the one the client should see -- without it the
+		// request was answered 500 ("InternalError" reads as an internal
+		// error) and was retried on every credential in the pool, when
+		// every credential refuses it identically.
+		//
+		// The prefix also outranks the keyword pass for a reason: the very
+		// same message contains "internal", which the keyword pass reads as
+		// a 500.
+		Name:       "provider states the status in its own message",
+		Body:       `{"code":"InvalidParameter","message":"<400> InternalError.Algo.InvalidParameter: Agent capabilities are not enabled for the current model."}`,
+		WantStatus: http.StatusBadRequest,
+	},
 }

@@ -144,6 +144,22 @@ func ClassifyProviderErrorSignals(signals []string) int {
 		return http.StatusBadRequest
 	}
 
+	// A provider that states the failure's status in its own message is
+	// taken at its word: Alibaba's DashScope writes "<400>
+	// InternalError.Algo.X: <explanation>", and the status in that prefix
+	// is the one the client should see. Without it the request was
+	// answered 502 or 500 -- "Request failed", which reads like the
+	// provider being down and invites a retry on another credential when
+	// every credential would refuse it identically.
+	//
+	// The prefix is looked for before the keyword pass below, because a
+	// provider's own status is more precise than anything its wording
+	// suggests: the same message may contain "internal" (which the keyword
+	// pass reads as a 500) while stating "<400>".
+	if status, ok := providerPrefixedStatus(signals); ok {
+		return status
+	}
+
 	for _, signal := range signals {
 		signal = normalizeKeywordSignal(signal)
 		switch {

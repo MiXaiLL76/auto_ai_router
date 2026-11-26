@@ -190,6 +190,21 @@ func extractRouterClassification(body []byte, expectedType string) (BadRequest, 
 // appends free text to the message is rejected and classified from scratch
 // like any other provider body.
 func isRouterMessage(code, message string, param *string) bool {
+	// The router's answer to a provider explanation is the router's own
+	// message, even though the wording came from the provider. It is
+	// recognized here for the same reason the fixed messages are: a body
+	// carrying it must survive a second classification pass as itself.
+	//
+	// Checked BEFORE the fixed messages, because the two can share a code:
+	// the router's answer to a provider explanation carries the same
+	// "invalid_request" code as the generic one, and the fixed-message check
+	// would answer for that code and never reach this one.
+	//
+	// No parameter is accepted beside it: the router writes these messages
+	// without one, so a body that carries one was not written by the router.
+	if param == nil && isRouterProviderMessage(code, message) {
+		return true
+	}
 	if fixed, ok := fixedErrorMessages[code]; ok {
 		return message == fixed
 	}

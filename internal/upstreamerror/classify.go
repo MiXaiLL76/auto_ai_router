@@ -49,6 +49,22 @@ func ClassifyBadRequest(rawBody []byte) BadRequest {
 	signals, providerParam := providerErrorSignalsFromBody(rawBody)
 	joined := strings.ToLower(strings.Join(signals, " "))
 
+	// A provider that states the failure's status in its own message is taken
+	// at its word: Alibaba's DashScope writes "<400> InternalError.Algo.X:
+	// <explanation>", and neither the status nor the code was recognizable,
+	// so the request was answered 500 or 502 -- "Request failed", which
+	// reads like the provider being down and invites a retry on another
+	// credential when every credential would refuse it identically.
+	//
+	// The explanation after the colon is the provider's own words, and this
+	// package does not hand those over as they are: it relays an explanation
+	// only when it is on the vetted list in provider_messages.go (see
+	// classifyProviderPrefixedMessage), and otherwise falls back to the fixed
+	// message. The status the provider stated is taken either way.
+	if classified, ok := classifyProviderPrefixedMessage(signals); ok {
+		return classified
+	}
+
 	// An unknown model is checked FIRST, before the keyword branches below.
 	//
 	// The message names the model explicitly ("Received Model Group=x",
