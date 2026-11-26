@@ -5,9 +5,10 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 )
 
-// A provider that packs the status of the failure, its own error class and
+// A provider may pack the status of the failure, its own error class and
 // code, and the explanation meant for the client into ONE message.
 //
 // Alibaba's DashScope writes its errors this way:
@@ -42,34 +43,27 @@ import (
 // 021795058711799a81c77d48bc6ef475723297888da3", and a request id is the
 // upstream's own bookkeeping, not the client's.
 //
-// So the explanations that may be relayed are listed in
-// providerRequestMessages -- each one read, checked and vetted by hand -- and
-// the relay is an EXACT match against that list. A provider explanation that
-// is not on the list is not relayed at all: the router's own generic wording
-// stands, and the status the provider stated still reaches the client. A new
-// provider message is therefore added by adding one line to the list, and
-// nothing else in the router has to change.
+// So the explanations that may be relayed are the ones a rule names, and a
+// rule is a MATCH against the provider's words, never a pass-through: a
+// provider explanation that no rule names is not relayed at all, and the
+// router's own generic wording stands. The status the provider stated still
+// reaches the client either way.
+//
+// The rules come from two places: the ones the router ships with
+// (builtinProviderMessages) and the ones a deployment configures (the
+// router's provider_messages config section, see SetProviderMessageRules).
+// Adding a provider message is therefore a configuration change, not a change
+// to the router.
 
 // providerStatusPrefixRe matches a status a provider states at the start of
 // its own message: "<400> ...".
 //
-// It is deliberately looser than providerPrefixedMessage below, which
-// additionally requires the provider's own code and the explanation after a
-// colon. The STATUS is worth taking even when the rest of the shape is not
-// there: a provider that writes "<400> Request rejected" states the same
-// thing as one that writes "<400> InternalError.Algo.InvalidParameter:
-// ...". Requiring the full shape would throw the diagnosis away for a
-// wording the provider changed.
+// It is deliberately loose. The STATUS is worth taking even when the rest of
+// the provider's shape is not there: a provider that writes "<400> Request
+// rejected" states the same thing as one that writes "<400>
+// InternalError.Algo.InvalidParameter: ...". Requiring the full shape would
+// throw the diagnosis away for a wording the provider changed.
 var providerStatusPrefixRe = regexp.MustCompile(`^<(\d{3})>`)
-
-// providerPrefixedMessage matches the full shape: the status the provider
-// states, its error class and code, and the explanation after the colon.
-//
-// The code is a plain dotted path ("InternalError.Algo.InvalidParameter"), so
-// a message that merely happens to contain a colon -- prose, a URL, a
-// timestamp -- is not mistaken for one. The explanation is a single line: a
-// message that carries a newline is not a prefixed message either.
-var providerPrefixedMessage = regexp.MustCompile(`^<(\d{3})>\s*[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)*\s*:\s*(.+)$`)
 
 // providerRelayedStatuses are the statuses a provider's prefix may state.
 //
@@ -94,41 +88,126 @@ var providerRelayedStatuses = map[int]struct{}{
 	http.StatusGatewayTimeout:        {},
 }
 
-// providerPrefixedError is what a provider's own prefixed message says.
-type providerPrefixedError struct {
-	// Status is the status the provider states the failure carries (400).
+// ProviderMessageRule is one provider message the router may relay to a
+// client.
+//
+// A rule names the provider's own words and the router's own answer to them.
+// The provider's words are matched; the router's answer is what reaches the
+// client.
+type ProviderMessageRule struct {
+	// ProviderCode is the provider's own error code ("code" in the error
+	// object). When set, the failure must carry exactly this code.
+	//
+	// It is what makes one rule cover a whole family of failures: every
+	// "InvalidParameter" from any provider, whatever the model and the
+	// request, is the same kind of refusal.
+	ProviderCode string
+	// Match is text the provider's message must contain. When set, the
+	// failure's message must contain it.
+	//
+	// It is what makes one rule cover the failures that share a wording
+	// whatever the provider calls them ("Unsupported model: 'kimi-k2.7-code'"
+	// and "Unsupported model: 'other-model'" are one failure).
+	Match string
+	// Code is the router's error code for the failure (the "code" field of
+	// the client's error object).
+	Code string
+	// Message is what the client is told. It is the router's own wording,
+	// not the provider's: this is the text that goes on the wire.
+	Message string
+	// Status is the HTTP status the client is answered with. Zero means the
+	// router decides (the status the provider stated, or its own default).
 	Status int
-	// Explanation is the text after the colon, as the provider wrote it.
-	Explanation string
 }
 
-// parseProviderPrefixedMessage reads a provider's prefixed message: the
-// status it states and the explanation after the colon.
+// builtinProviderMessages are the provider messages the router relays out of
+// the box -- the ones production produced, in the shape "<400>
+// InternalError.Algo.InvalidParameter: <explanation>".
 //
-// It returns nil for a message that is not in that shape, for one whose
-// status the router does not relay, and for one with no explanation.
-func parseProviderPrefixedMessage(message string) *providerPrefixedError {
-	message = strings.TrimSpace(message)
-	if message == "" {
-		return nil
+// They match on the explanation only, and not on the provider's code: the
+// same refusal is worth reporting whether the provider calls it
+// "InvalidParameter" or something else.
+//
+// A limit that belongs to a model (the thinking budget below) is written out
+// as it was observed. Should the provider change the limit, the rule stops
+// matching and the client gets the generic wording again -- the status stays
+// the 400 the provider stated, so the request is still reported as the
+// provider's own refusal of it.
+var builtinProviderMessages = []ProviderMessageRule{
+	{
+		Match:   "agent capabilities are not enabled for the current model.",
+		Code:    "invalid_request",
+		Message: "Agent capabilities are not enabled for the current model.",
+		Status:  http.StatusBadRequest,
+	},
+	{
+		Match:   "the current model does not support pdf file input.",
+		Code:    "invalid_request",
+		Message: "The current model does not support PDF file input.",
+		Status:  http.StatusBadRequest,
+	},
+	{
+		Match:   "the thinking_budget parameter must be a positive integer and not greater than 131072",
+		Code:    "invalid_request",
+		Message: "The thinking_budget parameter must be a positive integer and not greater than 131072",
+		Status:  http.StatusBadRequest,
+	},
+}
+
+// providerMessageRules holds the rules in force: the built-in ones and the
+// deployment's own.
+//
+// The rules are read at startup and never change while the router runs, so
+// the request path only takes a read lock; the lock is here for the write
+// (SetProviderMessageRules), which happens once.
+var (
+	providerMessageRulesMu sync.RWMutex
+	providerMessageRules   = builtinProviderMessages
+)
+
+// SetProviderMessageRules adds the deployment's own rules to the built-in
+// ones.
+//
+// It is called once, at startup, with the router's provider_messages config
+// section: from then on the rules are read on the request path, and a config
+// change needs a restart (the deployment rolls the pods when the config
+// changes).
+//
+// A configured rule that names the same text as a built-in one REPLACES it,
+// in place: the deployment may reword what the router says about a failure
+// the router already knows. A rule that names something else is added after
+// the built-in ones, so it cannot shadow one of them by being broader.
+func SetProviderMessageRules(rules []ProviderMessageRule) {
+	merged := make([]ProviderMessageRule, 0, len(builtinProviderMessages)+len(rules))
+	merged = append(merged, builtinProviderMessages...)
+
+	for _, rule := range rules {
+		replaced := false
+		for i := range merged {
+			if merged[i].Match == "" || rule.Match == "" {
+				continue
+			}
+			if normalizeProviderMessageText(merged[i].Match) == normalizeProviderMessageText(rule.Match) {
+				merged[i] = rule
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			merged = append(merged, rule)
+		}
 	}
 
-	match := providerPrefixedMessage.FindStringSubmatch(message)
-	if match == nil {
-		return nil
-	}
+	providerMessageRulesMu.Lock()
+	providerMessageRules = merged
+	providerMessageRulesMu.Unlock()
+}
 
-	status, ok := relayedProviderStatus(match[1])
-	if !ok {
-		return nil
-	}
-
-	explanation := strings.TrimSpace(match[2])
-	if explanation == "" {
-		return nil
-	}
-
-	return &providerPrefixedError{Status: status, Explanation: explanation}
+// activeProviderMessageRules returns the rules in force.
+func activeProviderMessageRules() []ProviderMessageRule {
+	providerMessageRulesMu.RLock()
+	defer providerMessageRulesMu.RUnlock()
+	return providerMessageRules
 }
 
 // relayedProviderStatus reads a status a provider states and reports whether
@@ -167,110 +246,119 @@ func providerPrefixedStatus(signals []string) (int, bool) {
 	return 0, false
 }
 
-// providerRequestMessage is the router's own answer to one provider
-// explanation.
-type providerRequestMessage struct {
-	// Code is the router's code for the failure.
-	Code string
-	// Message is what the client is told.
-	Message string
-}
-
-// providerRequestMessages lists the provider explanations that may be
-// relayed to a client, keyed by the explanation normalized for comparison.
+// normalizeProviderMessageText reduces a text to the form the rules are
+// matched against: lowercased, with runs of whitespace collapsed to a single
+// space.
 //
-// Each entry was read by hand and checked to carry nothing but the
-// diagnosis: no request id, no account name, no URL, no host, no path. An
-// explanation that is not on this list is not relayed -- the router's own
-// generic wording stands -- so a provider that starts writing an internal
-// identifier into its explanations cannot leak it into a client's response
-// just by being new.
-//
-// The key is the explanation lowercased with runs of whitespace collapsed to
-// one space, so a provider that changes only the spacing or the
-// capitalization still matches.
-//
-// The entries below are the ones production produced, in the shape
-// "<400> InternalError.Algo.InvalidParameter: <explanation>".
-//
-// A limit that belongs to a model (the thinking budget below) is written out
-// as it was observed. Should the provider change the limit, the entry stops
-// matching and the client gets the generic wording again -- the status
-// stays the 400 the provider stated, so the request is still reported as
-// the provider's own refusal of it.
-var providerRequestMessages = map[string]providerRequestMessage{
-	"agent capabilities are not enabled for the current model.": {
-		Code:    "invalid_request",
-		Message: "Agent capabilities are not enabled for the current model.",
-	},
-	"the current model does not support pdf file input.": {
-		Code:    "invalid_request",
-		Message: "The current model does not support PDF file input.",
-	},
-	"the thinking_budget parameter must be a positive integer and not greater than 131072": {
-		Code:    "invalid_request",
-		Message: "The thinking_budget parameter must be a positive integer and not greater than 131072",
-	},
-}
-
-// normalizeProviderExplanation reduces a provider's explanation to the form
-// providerRequestMessages is keyed by: lowercased, with runs of whitespace
-// collapsed to a single space.
-func normalizeProviderExplanation(text string) string {
+// The comparison ignores case and spacing on purpose: the provider is free
+// to capitalize its message differently or to break a line in it, and a rule
+// that stopped matching over that would be a rule the operator has to
+// rewrite every time the provider edits a sentence.
+func normalizeProviderMessageText(text string) string {
 	return strings.ToLower(strings.Join(strings.Fields(text), " "))
 }
 
-// lookupProviderRequestMessage returns the router's answer to a provider's
-// explanation, and whether the explanation is one that may be relayed.
-func lookupProviderRequestMessage(explanation string) (providerRequestMessage, bool) {
-	entry, ok := providerRequestMessages[normalizeProviderExplanation(explanation)]
-	return entry, ok
+// providerMessageMatches reports whether a rule matches a provider failure.
+//
+// The provider's own code and the provider's own message are both compared.
+// A rule that names a code must see that code; a rule that names text must
+// see that text in the message. A rule that names both must see both.
+//
+// The code is compared as one of the signals (the provider states it in a
+// field of its own, and the router does not know which field that was), and
+// the text is compared as a substring of a signal -- so a provider that
+// appends its own request id to the message still matches, and the request
+// id is not relayed with it.
+func providerMessageMatches(rule ProviderMessageRule, signals []string) bool {
+	if rule.ProviderCode == "" && rule.Match == "" {
+		return false
+	}
+	if rule.ProviderCode != "" {
+		found := false
+		for _, signal := range signals {
+			if strings.EqualFold(strings.TrimSpace(signal), rule.ProviderCode) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	if rule.Match != "" {
+		needle := normalizeProviderMessageText(rule.Match)
+		found := false
+		for _, signal := range signals {
+			if strings.Contains(normalizeProviderMessageText(signal), needle) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
-// classifyProviderPrefixedMessage classifies a provider's prefixed message
-// into the router's own answer, and reports whether it could.
+// lookupProviderMessageRule returns the rule that matches a provider
+// failure, and whether one matched.
 //
-// Only a request fault is answered here, and only with an explanation that is
-// on the relay list: another status has its own message (a rate limit, a
-// timeout), and those are the router's to state, not the provider's.
+// The rules are tried in order, and the first match wins.
+func lookupProviderMessageRule(signals []string) (ProviderMessageRule, bool) {
+	for _, rule := range activeProviderMessageRules() {
+		if providerMessageMatches(rule, signals) {
+			return rule, true
+		}
+	}
+	return ProviderMessageRule{}, false
+}
+
+// classifyProviderMessage classifies a provider's failure into the router's
+// own answer, and reports whether it could.
 //
-// A refusal is not relayed either. The content-policy branch already names a
+// A refusal is not answered here. The content-policy branch already names a
 // refusal, and its name is what the retry policy and the client's own
 // handling key off -- a second name for the same refusal would split them.
-func classifyProviderPrefixedMessage(signals []string) (BadRequest, bool) {
-	for _, signal := range signals {
-		parsed := parseProviderPrefixedMessage(signal)
-		if parsed == nil {
-			continue
-		}
-		if parsed.Status != http.StatusBadRequest {
-			return BadRequest{}, false
-		}
-		if IsContentPolicySignal(parsed.Explanation) {
-			return BadRequest{}, false
-		}
-		entry, ok := lookupProviderRequestMessage(parsed.Explanation)
-		if !ok {
-			return BadRequest{}, false
-		}
-		return BadRequest{Message: entry.Message, Code: entry.Code}, true
+func classifyProviderMessage(signals []string) (BadRequest, bool) {
+	if HasContentPolicySignal(signals) {
+		return BadRequest{}, false
 	}
-	return BadRequest{}, false
+	rule, ok := lookupProviderMessageRule(signals)
+	if !ok {
+		return BadRequest{}, false
+	}
+	return BadRequest{Message: rule.Message, Code: rule.Code}, true
+}
+
+// providerMessageStatus returns the status a matched rule asks for, and
+// whether a rule matched at all.
+//
+// A rule without a status leaves the decision to the router: the status the
+// provider stated, or the router's own default.
+func providerMessageStatus(signals []string) (int, bool) {
+	if HasContentPolicySignal(signals) {
+		return 0, false
+	}
+	rule, ok := lookupProviderMessageRule(signals)
+	if !ok || rule.Status == 0 {
+		return 0, false
+	}
+	return rule.Status, true
 }
 
 // isRouterProviderMessage reports whether message is the router's own answer
-// to a provider explanation.
+// to a provider message.
 //
-// It is the mirror of lookupProviderRequestMessage: the router writes the
-// explanation as its own message, so a body carrying it is the router's own
-// body -- and has to be recognized as one. Without that, a second
-// classification pass (the LiteLLM compatibility mode re-classifies the body
-// the router wrote, an AIR-to-AIR proxy chain hands one router the
-// classification another already made) would replace the explanation with
-// the generic "Invalid request".
+// It is the mirror of the rule lookup: the router writes the answer as its
+// own message, so a body carrying it is the router's own body -- and has to
+// be recognized as one. Without that, a second classification pass (the
+// LiteLLM compatibility mode re-classifies the body the router wrote, an
+// AIR-to-AIR proxy chain hands one router the classification another already
+// made) would replace the answer with the generic "Invalid request".
 func isRouterProviderMessage(code, message string) bool {
-	for _, entry := range providerRequestMessages {
-		if entry.Code == code && entry.Message == message {
+	for _, rule := range activeProviderMessageRules() {
+		if rule.Code == code && rule.Message == message {
 			return true
 		}
 	}

@@ -49,19 +49,17 @@ func ClassifyBadRequest(rawBody []byte) BadRequest {
 	signals, providerParam := providerErrorSignalsFromBody(rawBody)
 	joined := strings.ToLower(strings.Join(signals, " "))
 
-	// A provider that states the failure's status in its own message is taken
-	// at its word: Alibaba's DashScope writes "<400> InternalError.Algo.X:
-	// <explanation>", and neither the status nor the code was recognizable,
-	// so the request was answered 500 or 502 -- "Request failed", which
-	// reads like the provider being down and invites a retry on another
-	// credential when every credential would refuse it identically.
+	// A provider message the router has a rule for is answered with the
+	// router's own wording: the provider's words are matched, and the
+	// router's answer is what reaches the client (see
+	// classifyProviderMessage in provider_messages.go).
 	//
-	// The explanation after the colon is the provider's own words, and this
-	// package does not hand those over as they are: it relays an explanation
-	// only when it is on the vetted list in provider_messages.go (see
-	// classifyProviderPrefixedMessage), and otherwise falls back to the fixed
-	// message. The status the provider stated is taken either way.
-	if classified, ok := classifyProviderPrefixedMessage(signals); ok {
+	// The rule's own status is the one the client is answered with, so a
+	// rule may say what the failure is worth (a 400, a 404) even when the
+	// provider stated nothing. The status the provider stated in its own
+	// message is taken as well (see ClassifyProviderErrorSignals) -- a
+	// provider that says "<400>" has already said what it is.
+	if classified, ok := classifyProviderMessage(signals); ok {
 		return classified
 	}
 

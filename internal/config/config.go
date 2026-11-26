@@ -300,6 +300,10 @@ type Config struct {
 	VisionFallback VisionFallbackConfig `yaml:"vision_fallback,omitempty"`
 	ImageDownload  ImageDownloadConfig  `yaml:"image_download,omitempty"`
 	LoopGate       LoopGateConfig       `yaml:"loop_gate,omitempty"`
+	// ProviderMessages lists the provider messages the router may relay to a
+	// client: the provider's own words, and the router's answer to them.
+	// Without it the router relays the ones it ships with.
+	ProviderMessages ProviderMessagesConfig `yaml:"provider_messages,omitempty"`
 	// ModelTemplates stores x-model-templates entries as raw interface{} so that
 	// both single-model mappings and lists of models can be defined as YAML anchors
 	// without type errors. The actual model data is extracted via anchor expansion.
@@ -338,6 +342,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		VisionFallback       VisionFallbackConfig       `yaml:"vision_fallback,omitempty"`
 		ImageDownload        ImageDownloadConfig        `yaml:"image_download,omitempty"`
 		LoopGate             LoopGateConfig             `yaml:"loop_gate,omitempty"`
+		ProviderMessages     ProviderMessagesConfig     `yaml:"provider_messages,omitempty"`
 		ModelTemplates       map[string]interface{}     `yaml:"x-model-templates,omitempty"`
 	}
 
@@ -368,6 +373,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.VisionFallback = raw.VisionFallback
 	c.ImageDownload = raw.ImageDownload
 	c.LoopGate = raw.LoopGate
+	c.ProviderMessages = raw.ProviderMessages
 	c.ModelTemplates = raw.ModelTemplates
 
 	return nil

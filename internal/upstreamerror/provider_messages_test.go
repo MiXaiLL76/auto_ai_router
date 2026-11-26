@@ -11,14 +11,16 @@ import (
 )
 
 // A provider that packs the status of the failure, its own error class and
-// code, and the explanation meant for the client into ONE message:
+// code, and the explanation meant for the client into ONE message, and
+// answers HTTP 200 with the failure in the body:
 //
-//	{"error":{"code":"InvalidParameter","message":"<400> InternalError.Algo.InvalidParameter: Agent capabilities are not enabled for the current model."}}
+//	{"error":{"code":"InvalidParameter",
+//	          "message":"<400> InternalError.Algo.InvalidParameter: Agent capabilities are not enabled for the current model."}}
 //
 // The router read neither the status nor a code it knew, so the request was
 // answered 500 or 502 -- "Request failed", which reads like the provider
 // being down and invites a retry on another credential when every credential
-// would refuse it identically.
+// refuses it identically.
 //
 // These are the cases as production produced them.
 func TestClassifyBadRequest_ProviderPrefixedMessage(t *testing.T) {
@@ -103,22 +105,16 @@ func TestClassifyBadRequest_ProviderPrefixedMessageIsIdempotent(t *testing.T) {
 	assert.Equal(t, first.Code, second.Code, "the code must survive a second pass")
 }
 
-// TestProviderPrefixedMessage_OnlyVettedExplanationsAreRelayed is the safety
-// guard. The explanation after the colon is the provider's own text, and
-// this package never hands a provider's words to the client as they are --
-// only the explanations that were read and vetted one by one. Everything else
-// falls back to the router's own wording.
+// TestProviderMessageRule_OnlyAMatchIsRelayed is the safety guard. The
+// router never hands a provider's words to the client as they are -- the
+// provider's text is MATCHED, and the router's own answer is what reaches
+// the client. An explanation that no rule names is not relayed at all.
 //
 // The texts below are the ones production carried: a request id, a URL, a
 // host and a port, a path. A provider that starts writing an internal
 // identifier into its explanations must not leak it into a client's response
 // just by being new.
-//
-// The fallback is whatever the ordinary classification makes of the body --
-// here "Invalid request parameter", because the provider's own code says
-// "InvalidParameter". What matters is that none of the provider's own
-// wording reaches the client.
-func TestProviderPrefixedMessage_OnlyVettedExplanationsAreRelayed(t *testing.T) {
+func TestProviderMessageRule_OnlyAMatchIsRelayed(t *testing.T) {
 	for _, tt := range []struct {
 		name string
 		text string
@@ -138,18 +134,18 @@ func TestProviderPrefixedMessage_OnlyVettedExplanationsAreRelayed(t *testing.T) 
 
 			assert.NotEqual(t, "Agent capabilities are not enabled for the current model.", classified.Message)
 			assert.NotContains(t, classified.Message, tt.text,
-				"an explanation that is not vetted must not reach the client")
+				"an explanation that is not matched must not reach the client")
 			assert.NotContains(t, classified.Message, "InternalError")
 			assert.NotContains(t, classified.Message, "<400>")
 		})
 	}
 }
 
-// TestProviderPrefixedMessage_UnknownExplanationStillGetsTheStatus checks that
+// TestProviderMessageRule_UnknownExplanationStillGetsTheStatus checks that
 // an explanation the router does not know does not cost the client the
 // diagnosis the provider DID state: the status is still the 400 the provider
 // wrote, and only the wording falls back to the router's own.
-func TestProviderPrefixedMessage_UnknownExplanationStillGetsTheStatus(t *testing.T) {
+func TestProviderMessageRule_UnknownExplanationStillGetsTheStatus(t *testing.T) {
 	body := `{"error":{"code":"InvalidParameter","message":"<400> InternalError.Algo.InvalidParameter: Something new the provider says about the request."}}`
 	signals, _ := providerErrorSignalsFromBody([]byte(body))
 	require.NotEmpty(t, signals)
@@ -157,10 +153,10 @@ func TestProviderPrefixedMessage_UnknownExplanationStillGetsTheStatus(t *testing
 	assert.Equal(t, http.StatusBadRequest, ClassifyProviderErrorSignals(signals))
 }
 
-// TestProviderPrefixedMessage_OtherStatuses checks that the status a
-// provider states is the one the client is answered with, for the statuses a
-// provider states as a request's fault.
-func TestProviderPrefixedMessage_OtherStatuses(t *testing.T) {
+// TestProviderMessageRule_OtherStatuses checks that the status a provider
+// states is the one the client is answered with, for the statuses a provider
+// states as a request's fault.
+func TestProviderMessageRule_OtherStatuses(t *testing.T) {
 	for _, tt := range []struct {
 		status   string
 		expected int
@@ -182,9 +178,10 @@ func TestProviderPrefixedMessage_OtherStatuses(t *testing.T) {
 	}
 }
 
-// TestProviderPrefixedMessage_NotPrefixed checks that a message without the
-// provider's prefix is left alone: the ordinary keyword branches own those.
-func TestProviderPrefixedMessage_NotPrefixed(t *testing.T) {
+// TestProviderMessageRule_NotPrefixed checks that a message without the
+// provider's prefix states no status of its own: the ordinary keyword
+// branches own those.
+func TestProviderMessageRule_NotPrefixed(t *testing.T) {
 	for _, message := range []string{
 		"Rate limit exceeded",
 		"Received Model Group=gpt-5 does not exist",
@@ -198,67 +195,21 @@ func TestProviderPrefixedMessage_NotPrefixed(t *testing.T) {
 	}
 }
 
-// TestProviderPrefixedMessage_UnknownStatusIsNotTaken checks that a status
-// the router does not relay is not taken as one: a provider's own numbering
-// may differ from HTTP's.
-func TestProviderPrefixedMessage_UnknownStatusIsNotTaken(t *testing.T) {
+// TestProviderMessageRule_UnknownStatusIsNotTaken checks that a status the
+// router does not relay is not taken as one: a provider's own numbering may
+// differ from HTTP's.
+func TestProviderMessageRule_UnknownStatusIsNotTaken(t *testing.T) {
 	body := `{"error":{"code":"SomeError","message":"<799> SomeError.Class: Something happened."}}`
 	signals, _ := providerErrorSignalsFromBody([]byte(body))
 	_, ok := providerPrefixedStatus(signals)
 	assert.False(t, ok, "a status the router does not relay must not be taken")
 }
 
-// TestProviderPrefixedMessage_StatusWithoutTheFullShape checks that the
-// status is taken even when the rest of the provider's shape is missing: a
-// provider that writes "<400> Request rejected" states the same thing as one
-// that writes "<400> InternalError.Algo.InvalidParameter: ...", and the
-// diagnosis must not be lost for a wording the provider changed.
-func TestProviderPrefixedMessage_StatusWithoutTheFullShape(t *testing.T) {
-	for _, tt := range []struct {
-		name string
-		body string
-	}{
-		{
-			name: "no explanation at all",
-			body: `{"error":{"code":"SomeError","message":"<400> Request rejected"}}`,
-		},
-		{
-			name: "a code but no colon",
-			body: `{"error":{"code":"<400> InvalidParameter","message":"Agent capabilities are not enabled for the current model."}}`,
-		},
-		{
-			name: "the prefix in the code field",
-			body: `{"error":{"code":"<400> InvalidParameter","message":"Agent capabilities are not enabled for the current model."}}`,
-		},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			signals, _ := providerErrorSignalsFromBody([]byte(tt.body))
-			require.NotEmpty(t, signals)
-
-			status, ok := providerPrefixedStatus(signals)
-			require.True(t, ok, "the status the provider stated must be taken")
-			assert.Equal(t, http.StatusBadRequest, status)
-		})
-	}
-}
-
-// TestProviderPrefixedMessage_StatusWithoutTheFullShapeIsNotRelayed checks
-// that a status taken without the full shape is not also RELAYED: the
-// explanation that accompanies it was never vetted, so it does not reach the
-// client.
-func TestProviderPrefixedMessage_StatusWithoutTheFullShapeIsNotRelayed(t *testing.T) {
-	body := `{"error":{"code":"<400> InvalidParameter","message":"Agent capabilities are not enabled for the current model."}}`
-	classified := ClassifyBadRequest([]byte(body))
-
-	assert.NotEqual(t, "Agent capabilities are not enabled for the current model.", classified.Message,
-		"an explanation outside the full shape was never vetted")
-}
-
-// TestProviderPrefixedMessage_ProseIsNotAPrefixedMessage checks that a
-// message that merely contains a colon is not read as a prefixed one: prose
-// with a time in it ("failed at 12:30") and a URL must both be left to the
-// ordinary keyword branches.
-func TestProviderPrefixedMessage_ProseIsNotAPrefixedMessage(t *testing.T) {
+// TestProviderMessageRule_ProseIsNotAPrefixedMessage checks that a message
+// that merely contains a colon is not read as a prefixed one: prose with a
+// time in it ("failed at 12:30") and a URL must both be left to the ordinary
+// keyword branches.
+func TestProviderMessageRule_ProseIsNotAPrefixedMessage(t *testing.T) {
 	for _, message := range []string{
 		"failed at 12:30 while reading the request",
 		"see https://example.com/docs: the request was refused",
@@ -271,19 +222,19 @@ func TestProviderPrefixedMessage_ProseIsNotAPrefixedMessage(t *testing.T) {
 	}
 }
 
-// TestProviderPrefixedMessage_ExplanationIsMatchedLoosely checks that a
-// provider that changes only the capitalization or the spacing of an
-// explanation it already wrote still gets the same answer.
-func TestProviderPrefixedMessage_ExplanationIsMatchedLoosely(t *testing.T) {
+// TestProviderMessageRule_TextIsMatchedLoosely checks that a provider that
+// changes only the capitalization or the spacing of an explanation it
+// already wrote still gets the same answer.
+func TestProviderMessageRule_TextIsMatchedLoosely(t *testing.T) {
 	body := `{"error":{"code":"InvalidParameter","message":"<400> InternalError.Algo.InvalidParameter: AGENT CAPABILITIES ARE NOT ENABLED FOR THE CURRENT MODEL."}}`
 	classified := ClassifyBadRequest([]byte(body))
 
 	assert.Equal(t, "Agent capabilities are not enabled for the current model.", classified.Message)
 }
 
-// TestProviderPrefixedMessage_LongTextIsDropped checks that a provider's
-// stack trace or a dump does not become the client's message.
-func TestProviderPrefixedMessage_LongTextIsDropped(t *testing.T) {
+// TestProviderMessageRule_LongTextIsDropped checks that a provider's stack
+// trace or a dump does not become the client's message.
+func TestProviderMessageRule_LongTextIsDropped(t *testing.T) {
 	long := strings.Repeat("a very long explanation ", 40)
 	body := `{"error":{"code":"InvalidParameter","message":"<400> InternalError.Algo.InvalidParameter: ` + long + `"}}`
 	classified := ClassifyBadRequest([]byte(body))
@@ -291,11 +242,11 @@ func TestProviderPrefixedMessage_LongTextIsDropped(t *testing.T) {
 		"a provider's dump must not become the client's message")
 }
 
-// TestProviderPrefixedMessage_ContentPolicyIsNotRelayed checks that a refusal
-// is not relayed a second time under the provider's own wording: the
-// content-policy branch already names a refusal, and its name is what the
-// retry policy and the client's own handling key off.
-func TestProviderPrefixedMessage_ContentPolicyIsNotRelayed(t *testing.T) {
+// TestProviderMessageRule_ContentPolicyIsNotRelayed checks that a refusal
+// is not relayed under the provider's own wording: the content-policy branch
+// already names a refusal, and its name is what the retry policy and the
+// client's own handling key off.
+func TestProviderMessageRule_ContentPolicyIsNotRelayed(t *testing.T) {
 	body := `{"error":{"code":"server_error","message":"<400> InternalError.Algo.DataInspectionFailed: Input text data may contain inappropriate content."}}`
 	classified := ClassifyBadRequest([]byte(body))
 
@@ -304,14 +255,143 @@ func TestProviderPrefixedMessage_ContentPolicyIsNotRelayed(t *testing.T) {
 	assert.NotContains(t, classified.Message, "Input text data may contain inappropriate content.")
 }
 
-// TestProviderPrefixedMessage_NonRequestStatusIsNotRelayed checks that only
-// a request's own fault is answered with the provider's explanation: a
-// status the router has a message of its own for (a rate limit, a timeout)
-// keeps that message.
-func TestProviderPrefixedMessage_NonRequestStatusIsNotRelayed(t *testing.T) {
-	body := `{"error":{"code":"SomeError","message":"<429> SomeError.Class: Agent capabilities are not enabled for the current model."}}`
+// TestSetProviderMessageRules_AddsARule checks that a deployment's own rule
+// works: the provider's words are matched and the router's answer is what
+// the client is told.
+//
+// The rules are global state, so the test puts the built-in ones back when
+// it is done.
+func TestSetProviderMessageRules_AddsARule(t *testing.T) {
+	t.Cleanup(func() { SetProviderMessageRules(nil) })
+
+	SetProviderMessageRules([]ProviderMessageRule{
+		{
+			ProviderCode: "InvalidParameter",
+			Match:        "unsupported model",
+			Code:         "invalid_model",
+			Message:      "Invalid model",
+			Status:       http.StatusBadRequest,
+		},
+	})
+
+	body := `{"error":{"code":"InvalidParameter","message":"Unsupported model: 'kimi-k2.7-code'"}}`
 	classified := ClassifyBadRequest([]byte(body))
 
-	assert.NotEqual(t, "Agent capabilities are not enabled for the current model.", classified.Message,
-		"a non-400 status keeps the router's own wording")
+	assert.Equal(t, "invalid_model", classified.Code)
+	assert.Equal(t, "Invalid model", classified.Message)
+	assert.NotContains(t, classified.Message, "kimi-k2.7-code",
+		"the provider's own text must not reach the client")
+}
+
+// TestSetProviderMessageRules_RuleStatusIsTheStatus checks that a rule's own
+// status is the one the client is answered with -- including when the
+// provider stated nothing. A provider that answers 200 with a failure in the
+// body would otherwise be a 502.
+func TestSetProviderMessageRules_RuleStatusIsTheStatus(t *testing.T) {
+	t.Cleanup(func() { SetProviderMessageRules(nil) })
+
+	SetProviderMessageRules([]ProviderMessageRule{
+		{
+			ProviderCode: "InvalidParameter",
+			Match:        "unsupported model",
+			Code:         "invalid_model",
+			Message:      "Invalid model",
+			Status:       http.StatusBadRequest,
+		},
+	})
+
+	body := `{"error":{"code":"InvalidParameter","message":"Unsupported model: 'kimi-k2.7-code'"}}`
+	signals, _ := providerErrorSignalsFromBody([]byte(body))
+	require.NotEmpty(t, signals)
+
+	assert.Equal(t, http.StatusBadRequest, ClassifyProviderErrorSignals(signals),
+		"the rule's status is the status the client is answered with")
+}
+
+// TestSetProviderMessageRules_ReplacesABuiltinRule checks that a deployment
+// may reword what the router says about a failure it already knows: the
+// rule with the same text replaces the built-in one instead of adding a
+// second answer for the same failure.
+func TestSetProviderMessageRules_ReplacesABuiltinRule(t *testing.T) {
+	t.Cleanup(func() { SetProviderMessageRules(nil) })
+
+	SetProviderMessageRules([]ProviderMessageRule{
+		{
+			Match:   "agent capabilities are not enabled for the current model.",
+			Code:    "invalid_request",
+			Message: "This model does not support agent capabilities.",
+			Status:  http.StatusBadRequest,
+		},
+	})
+
+	body := `{"error":{"code":"InvalidParameter","message":"<400> InternalError.Algo.InvalidParameter: Agent capabilities are not enabled for the current model."}}`
+	classified := ClassifyBadRequest([]byte(body))
+
+	assert.Equal(t, "This model does not support agent capabilities.", classified.Message)
+}
+
+// TestSetProviderMessageRules_RuleWithoutAMatchDoesNotMatchEverything checks
+// that a rule that names a code alone matches only that code: a failure
+// with another code is not the failure the rule describes.
+func TestSetProviderMessageRules_RuleWithoutAMatchDoesNotMatchEverything(t *testing.T) {
+	t.Cleanup(func() { SetProviderMessageRules(nil) })
+
+	SetProviderMessageRules([]ProviderMessageRule{
+		{
+			ProviderCode: "InvalidParameter",
+			Code:         "invalid_request",
+			Message:      "Invalid request parameter",
+			Status:       http.StatusBadRequest,
+		},
+	})
+
+	body := `{"error":{"code":"SomeOtherError","message":"Something went wrong"}}`
+	classified := ClassifyBadRequest([]byte(body))
+
+	assert.NotEqual(t, "Invalid request parameter", classified.Message,
+		"a rule for one code must not answer for another")
+}
+
+// TestSetProviderMessageRules_RuleWithTextOnlyMatchesThatText checks that a
+// rule that names text alone matches only that text, whatever the code.
+func TestSetProviderMessageRules_RuleWithTextOnlyMatchesThatText(t *testing.T) {
+	t.Cleanup(func() { SetProviderMessageRules(nil) })
+
+	SetProviderMessageRules([]ProviderMessageRule{
+		{
+			Match:   "unsupported model",
+			Code:    "invalid_model",
+			Message: "Invalid model",
+			Status:  http.StatusBadRequest,
+		},
+	})
+
+	body := `{"error":{"code":"SomeOtherError","message":"Unsupported model: 'kimi-k2.7-code'"}}`
+	classified := ClassifyBadRequest([]byte(body))
+
+	assert.Equal(t, "Invalid model", classified.Message)
+}
+
+// TestSetProviderMessageRules_MatchIsASubstring checks that a rule matches a
+// provider's message that carries more than the rule's text: a provider
+// that appends its own request id to the message still matches, and the
+// request id is not relayed with it.
+func TestSetProviderMessageRules_MatchIsASubstring(t *testing.T) {
+	t.Cleanup(func() { SetProviderMessageRules(nil) })
+
+	SetProviderMessageRules([]ProviderMessageRule{
+		{
+			Match:   "unsupported model",
+			Code:    "invalid_model",
+			Message: "Invalid model",
+			Status:  http.StatusBadRequest,
+		},
+	})
+
+	body := `{"error":{"code":"InvalidParameter","message":"Unsupported model: 'kimi-k2.7-code'. Request id: 021795058711799a81c77d48bc6ef475723297888da3"}}`
+	classified := ClassifyBadRequest([]byte(body))
+
+	assert.Equal(t, "Invalid model", classified.Message)
+	assert.NotContains(t, classified.Message, "021795058711799a81c77d48bc6ef475723297888da3",
+		"the provider's request id must not reach the client")
 }

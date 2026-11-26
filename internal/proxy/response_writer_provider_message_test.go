@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/mixaill76/auto_ai_router/internal/upstreamerror"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -61,4 +62,36 @@ func TestStatusCodeFromProviderStreamError_ProviderPrefixedMessage(t *testing.T)
 	require.NotEmpty(t, extracted, "the terminal error event must be extracted")
 
 	assert.Equal(t, http.StatusBadRequest, statusCodeFromProviderStreamError(extracted))
+}
+
+// TestStatusCodeFromProviderBodyError_ConfiguredRule checks that a rule a
+// deployment configures works end to end: the provider's words are matched,
+// the router's answer is what the client is told, and the provider's own
+// text does not reach it.
+//
+// This is the path a provider message takes when it has no status prefix at
+// all -- the provider answers 200 with the failure in the body, and only the
+// rule says what the failure is worth.
+func TestStatusCodeFromProviderBodyError_ConfiguredRule(t *testing.T) {
+	t.Cleanup(func() { upstreamerror.SetProviderMessageRules(nil) })
+
+	upstreamerror.SetProviderMessageRules([]upstreamerror.ProviderMessageRule{{
+		ProviderCode: "InvalidParameter",
+		Match:        "unsupported model",
+		Code:         "invalid_model",
+		Message:      "Invalid model",
+		Status:       http.StatusBadRequest,
+	}})
+
+	body := []byte(`{"error":{"code":"InvalidParameter","message":"Unsupported model: 'kimi-k2.7-code'"}}`)
+
+	status, ok := statusCodeFromProviderBodyError(http.StatusOK, body)
+	require.True(t, ok)
+	assert.Equal(t, http.StatusBadRequest, status,
+		"the rule's status is the status the client is answered with")
+
+	masked := maskedUpstreamErrorBody(status, "req-1", body)
+	assert.Contains(t, string(masked), "Invalid model")
+	assert.NotContains(t, string(masked), "kimi-k2.7-code",
+		"the provider's own text must not reach the client")
 }

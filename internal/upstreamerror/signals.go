@@ -144,6 +144,18 @@ func ClassifyProviderErrorSignals(signals []string) int {
 		return http.StatusBadRequest
 	}
 
+	// A provider message the router has a rule for is answered with the
+	// status the rule asks for: the router knows what the failure is worth
+	// (a request's own fault, a 400), and the provider's wording alone would
+	// not say so.
+	//
+	// It is checked BEFORE the provider's own status prefix below, because
+	// the rule is the more precise of the two: it names the failure, while
+	// the prefix only says what the provider considers the failure to be.
+	if status, ok := providerMessageStatus(signals); ok {
+		return status
+	}
+
 	// A provider that states the failure's status in its own message is
 	// taken at its word: Alibaba's DashScope writes "<400>
 	// InternalError.Algo.X: <explanation>", and the status in that prefix
