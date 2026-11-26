@@ -152,6 +152,10 @@ func (c *ProviderMessagesConfig) Validate() error {
 		case entry.Status < 400 || entry.Status > 499:
 			return fmt.Errorf("provider_messages.messages[%d]: status must be a 4xx status, got %d", i, entry.Status)
 		}
+		if upstreamerror.IsReservedProviderMessageCode(entry.Code) {
+			return fmt.Errorf("provider_messages.messages[%d]: code %q is reserved by the router and cannot be reused "+
+				"(a rule reusing it loses its message on a second classification pass)", i, entry.Code)
+		}
 		if len(entry.Match) > maxProviderMessageTextBytes {
 			return fmt.Errorf("provider_messages.messages[%d]: match is longer than %d bytes", i, maxProviderMessageTextBytes)
 		}
@@ -170,6 +174,35 @@ func (c *ProviderMessagesConfig) Validate() error {
 			return fmt.Errorf("provider_messages.messages[%d]: duplicate rule for match %q / provider_code %q", i, entry.Match, entry.ProviderCode)
 		}
 		seen[key] = struct{}{}
+
+		// A rule that names no TEXT matches every failure carrying its code,
+		// so two such rules with the same code are the same rule twice: the
+		// first one matched wins and the second one never fires. The
+		// operator would see a rule that loads cleanly and never applies.
+		//
+		// A rule that names no CODE matches every failure carrying its text,
+		// so two of those with the same text are the same rule twice for the
+		// same reason.
+		//
+		// Both are refused here rather than left to the lookup: a config
+		// that carries a dead rule is a config the operator believes in and
+		// that does nothing.
+		if entry.Match == "" {
+			shadowKey := "code\x00" + entry.ProviderCode
+			if _, duplicate := seen[shadowKey]; duplicate {
+				return fmt.Errorf("provider_messages.messages[%d]: another rule already matches every failure with provider_code %q "+
+					"(a rule without a match cannot be told apart from it)", i, entry.ProviderCode)
+			}
+			seen[shadowKey] = struct{}{}
+		}
+		if entry.ProviderCode == "" {
+			shadowKey := "match\x00" + strings.ToLower(entry.Match)
+			if _, duplicate := seen[shadowKey]; duplicate {
+				return fmt.Errorf("provider_messages.messages[%d]: another rule already matches every failure with match %q "+
+					"(a rule without a provider_code cannot be told apart from it)", i, entry.Match)
+			}
+			seen[shadowKey] = struct{}{}
+		}
 	}
 	return nil
 }

@@ -16,7 +16,7 @@ type ClassificationFixture struct {
 // classification (statusCodeFromProviderBodyError / statusCodeFromProviderStreamError)
 // and the LiteLLM compatibility layer's (errorStatus) are tested against.
 //
-// Before ExtractErrorSignals/ClassifyProviderErrorSignals were shared, the
+// Before ExtractProviderErrorInfo/ClassifyProviderErrorInfo were shared, the
 // two layers re-implemented this independently and drifted more than once:
 // first the content-policy marker list (four separate copies, three gained a
 // wording and one did not), then the field set a refusal could be phrased in

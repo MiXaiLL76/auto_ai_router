@@ -75,10 +75,11 @@ func TestClassifyBadRequest_ProviderPrefixedMessage(t *testing.T) {
 // keyword pass reads as a 500) while stating "<400>".
 func TestClassifyProviderErrorSignals_ProviderPrefixedStatus(t *testing.T) {
 	body := `{"error":{"code":"InvalidParameter","message":"<400> InternalError.Algo.InvalidParameter: Agent capabilities are not enabled for the current model."}}`
-	signals, _ := providerErrorSignalsFromBody([]byte(body))
-	require.NotEmpty(t, signals)
+	info, ok := ExtractProviderErrorInfo([]byte(body))
+	require.True(t, ok)
+	require.NotEmpty(t, info.Signals)
 
-	assert.Equal(t, http.StatusBadRequest, ClassifyProviderErrorSignals(signals),
+	assert.Equal(t, http.StatusBadRequest, ClassifyProviderErrorInfo(info),
 		"the status the provider stated is the status the client is answered with")
 }
 
@@ -147,10 +148,11 @@ func TestProviderMessageRule_OnlyAMatchIsRelayed(t *testing.T) {
 // wrote, and only the wording falls back to the router's own.
 func TestProviderMessageRule_UnknownExplanationStillGetsTheStatus(t *testing.T) {
 	body := `{"error":{"code":"InvalidParameter","message":"<400> InternalError.Algo.InvalidParameter: Something new the provider says about the request."}}`
-	signals, _ := providerErrorSignalsFromBody([]byte(body))
-	require.NotEmpty(t, signals)
+	info, ok := ExtractProviderErrorInfo([]byte(body))
+	require.True(t, ok)
+	require.NotEmpty(t, info.Signals)
 
-	assert.Equal(t, http.StatusBadRequest, ClassifyProviderErrorSignals(signals))
+	assert.Equal(t, http.StatusBadRequest, ClassifyProviderErrorInfo(info))
 }
 
 // TestProviderMessageRule_OtherStatuses checks that the status a provider
@@ -170,8 +172,9 @@ func TestProviderMessageRule_OtherStatuses(t *testing.T) {
 	} {
 		t.Run(tt.status, func(t *testing.T) {
 			body := `{"error":{"code":"SomeError","message":"<` + tt.status + `> SomeError.Class: The request was refused."}}`
-			signals, _ := providerErrorSignalsFromBody([]byte(body))
-			status, ok := providerPrefixedStatus(signals)
+			info, ok := ExtractProviderErrorInfo([]byte(body))
+			require.True(t, ok)
+			status, ok := providerPrefixedStatus(info.Signals)
 			require.True(t, ok)
 			assert.Equal(t, tt.expected, status)
 		})
@@ -200,8 +203,9 @@ func TestProviderMessageRule_NotPrefixed(t *testing.T) {
 // differ from HTTP's.
 func TestProviderMessageRule_UnknownStatusIsNotTaken(t *testing.T) {
 	body := `{"error":{"code":"SomeError","message":"<799> SomeError.Class: Something happened."}}`
-	signals, _ := providerErrorSignalsFromBody([]byte(body))
-	_, ok := providerPrefixedStatus(signals)
+	info, ok := ExtractProviderErrorInfo([]byte(body))
+	require.True(t, ok)
+	_, ok = providerPrefixedStatus(info.Signals)
 	assert.False(t, ok, "a status the router does not relay must not be taken")
 }
 
@@ -301,10 +305,11 @@ func TestSetProviderMessageRules_RuleStatusIsTheStatus(t *testing.T) {
 	})
 
 	body := `{"error":{"code":"InvalidParameter","message":"Unsupported model: 'kimi-k2.7-code'"}}`
-	signals, _ := providerErrorSignalsFromBody([]byte(body))
-	require.NotEmpty(t, signals)
+	info, ok := ExtractProviderErrorInfo([]byte(body))
+	require.True(t, ok)
+	require.NotEmpty(t, info.Signals)
 
-	assert.Equal(t, http.StatusBadRequest, ClassifyProviderErrorSignals(signals),
+	assert.Equal(t, http.StatusBadRequest, ClassifyProviderErrorInfo(info),
 		"the rule's status is the status the client is answered with")
 }
 

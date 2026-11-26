@@ -164,7 +164,19 @@ func extractRouterClassification(body []byte, expectedType string) (BadRequest, 
 		expectedType = "invalid_request_error"
 	}
 	if typ != expectedType {
-		return BadRequest{}, false
+		// A provider_messages rule may carry a reserved code, and the type
+		// beside it is the one the STATUS implies ("invalid_request_error" for
+		// a 400) rather than the one the code implies ("permission_denied" for
+		// an account_blocked). The rule's body is the router's own body, so it
+		// must be recognized as one -- otherwise the operator's message is
+		// lost on the second classification pass.
+		//
+		// The reserved codes keep their own expectation above; this is the
+		// other direction: a rule that reuses one, with the type its status
+		// implies.
+		if !isRouterProviderMessage(code, message) {
+			return BadRequest{}, false
+		}
 	}
 	var param *string
 	if e.Param != nil {
@@ -175,6 +187,18 @@ func extractRouterClassification(body []byte, expectedType string) (BadRequest, 
 		param = &cleaned
 	}
 	if !isRouterMessage(code, message, param) {
+		return BadRequest{}, false
+	}
+
+	// A provider_messages rule's body carries the type its STATUS implies,
+	// and that is what identifies it as the router's own: a provider body
+	// that happens to carry the same code and message by coincidence is
+	// classified from scratch instead.
+	//
+	// The check runs only for the codes a rule may carry -- the router's own
+	// fixed codes have their own messages, and their bodies are recognized
+	// by the message alone.
+	if isRouterProviderMessage(code, message) && !isRouterProviderMessageWithType(code, message, typ) {
 		return BadRequest{}, false
 	}
 

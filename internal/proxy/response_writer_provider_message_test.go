@@ -95,3 +95,39 @@ func TestStatusCodeFromProviderBodyError_ConfiguredRule(t *testing.T) {
 	assert.NotContains(t, string(masked), "kimi-k2.7-code",
 		"the provider's own text must not reach the client")
 }
+
+// TestStatusCodeFromProviderBodyError_NestedProviderError checks that a
+// provider's error nested one level down is read: production carried the
+// shape {"error":{"detail":{...}}}, and a reader that stopped at the first
+// level found no code, no message and no status in it -- so the failure fell
+// through to the generic 502 and the rule that names it went unused.
+func TestStatusCodeFromProviderBodyError_NestedProviderError(t *testing.T) {
+	body := []byte(`{"error":{"detail":{"code":"InvalidParameter",` +
+		`"message":"<400> InternalError.Algo.InvalidParameter: Agent capabilities are not enabled for the current model."}}}`)
+
+	status, ok := statusCodeFromProviderBodyError(http.StatusOK, body)
+	require.True(t, ok, "the nested error must be recognized")
+	assert.Equal(t, http.StatusBadRequest, status)
+}
+
+// TestMaskedUpstreamErrorBody_RuleForANon400Status checks that a rule
+// asking for a 404 is honored with its own message: the status and the
+// message come from ONE rule, so a rule that sets a status cannot lose the
+// message that goes with it.
+func TestMaskedUpstreamErrorBody_RuleForANon400Status(t *testing.T) {
+	t.Cleanup(func() { upstreamerror.SetProviderMessageRules(nil) })
+
+	upstreamerror.SetProviderMessageRules([]upstreamerror.ProviderMessageRule{{
+		ProviderCode: "InvalidParameter",
+		Match:        "insufficient permission",
+		Code:         "invalid_request",
+		Message:      "Caller lacks permission",
+		Status:       http.StatusNotFound,
+	}})
+
+	body := []byte(`{"error":{"code":"InvalidParameter","message":"insufficient permission to call this resource"}}`)
+
+	masked := maskedUpstreamErrorBody(http.StatusNotFound, "req-1", body)
+	assert.Contains(t, string(masked), "Caller lacks permission",
+		"the rule's message must reach the client")
+}

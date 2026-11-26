@@ -202,6 +202,61 @@ provider_messages:
 `,
 			wantErr: "longer than",
 		},
+		{
+			// A reserved code carries a meaning of its own, and the router's
+			// own bodies are recognized by it -- so a rule reusing one
+			// produces a body the router cannot recognize as its own, and
+			// the operator's message is lost on the second classification
+			// pass. The config must not load.
+			name: "a reserved router code",
+			yaml: `
+provider_messages:
+  messages:
+    - match: insufficient permission to call this resource
+      message: Caller lacks permission for this resource
+      code: account_blocked
+      status: 400
+`,
+			wantErr: "is reserved by the router",
+		},
+		{
+			// Two rules that name no text match every failure carrying their
+			// code -- the same rule twice. The second would never fire, and
+			// the operator would see a rule that loads cleanly and does
+			// nothing.
+			name: "two rules with the same provider code and no text",
+			yaml: `
+provider_messages:
+  messages:
+    - provider_code: InvalidParameter
+      message: First
+      code: invalid_request
+      status: 400
+    - provider_code: InvalidParameter
+      message: Second
+      code: invalid_parameter
+      status: 400
+`,
+			wantErr: "another rule already matches every failure with provider_code",
+		},
+		{
+			// The same, the other way round: two rules that name no code
+			// match every failure carrying their text.
+			name: "two rules with the same text and no provider code",
+			yaml: `
+provider_messages:
+  messages:
+    - match: unsupported model
+      message: First
+      code: invalid_request
+      status: 400
+    - match: unsupported model
+      message: Second
+      code: invalid_model
+      status: 400
+`,
+			wantErr: "another rule already matches every failure with match",
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			// The section is validated with the rest of the config, so a

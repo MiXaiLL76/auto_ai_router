@@ -35,7 +35,7 @@ func clientResponseBodyForCredential(statusCode int, body []byte, _ *config.Cred
 // provider's own code verbatim), and a struct decode then fails with
 // "cannot unmarshal number into Go struct field" -- taking the WHOLE
 // document with it, including the "error" object nested beside it. That is
-// the same principle upstreamerror.ExtractErrorSignals follows for the
+// the same principle upstreamerror.ExtractProviderErrorInfo follows for the
 // nested error object itself: one mistyped field must not cost us the
 // fields around it.
 //
@@ -77,7 +77,6 @@ func statusCodeFromProviderBodyError(statusCode int, body []byte) (int, bool) {
 		return encoded
 	}
 
-	evtType := text("type")
 	evtStatus := text("status")
 	evtCode := text("code")
 	evtMessage := text("message")
@@ -93,11 +92,33 @@ func statusCodeFromProviderBodyError(statusCode int, body []byte) (int, bool) {
 		}
 	}
 
-	signals := []string{evtType, evtStatus, evtCode, evtMessage, responseStatus}
-	topErrorSignals, hasTopError := upstreamerror.ExtractErrorSignals(raw("error"))
-	responseErrorSignals, hasResponseError := upstreamerror.ExtractErrorSignals(responseError)
-	signals = append(signals, topErrorSignals...)
-	signals = append(signals, responseErrorSignals...)
+	// The provider's own words, codes and parameter are read ONCE, by the
+	// reader every path shares (upstreamerror.ExtractProviderErrorInfo), so
+	// that the status this function computes and the message the client is
+	// given are read out of the same body in the same way. The paths used to
+	// read it differently -- one of them descended into a nested "detail"
+	// and read a machine-readable reason out of "metadata", the others did
+	// not -- so the same body was a content refusal on one path and an
+	// unclassified failure on another.
+	info := upstreamerror.ProviderErrorInfo{}
+	hasTopError := false
+	hasResponseError := false
+	for _, key := range []string{"type", "status", "code", "message"} {
+		if text, ok := doc[key].(string); ok && text != "" {
+			info.AddSignal(text)
+		}
+	}
+	if responseStatus != "" {
+		info.AddSignal(responseStatus)
+	}
+	if topError, ok := upstreamerror.ExtractProviderErrorInfo(raw("error")); ok {
+		info.Merge(topError)
+		hasTopError = true
+	}
+	if responseErr, ok := upstreamerror.ExtractProviderErrorInfo(responseError); ok {
+		info.Merge(responseErr)
+		hasResponseError = true
+	}
 
 	hasFailedStatus := strings.EqualFold(evtStatus, "failed") || strings.EqualFold(responseStatus, "failed")
 	hasTopLevelError := strings.TrimSpace(evtCode) != "" || strings.TrimSpace(evtMessage) != ""
@@ -106,14 +127,14 @@ func statusCodeFromProviderBodyError(statusCode int, body []byte) (int, bool) {
 		if !hasTopError && !hasResponseError && !hasFailedStatus {
 			return 0, false
 		}
-		return upstreamerror.ClassifyProviderErrorSignals(signals), true
+		return upstreamerror.ClassifyProviderErrorInfo(info), true
 	}
 
 	if statusCode >= http.StatusBadRequest {
 		if !hasTopError && !hasResponseError && !hasTopLevelError && !hasFailedStatus {
 			return 0, false
 		}
-		mappedStatus := upstreamerror.ClassifyProviderErrorSignals(signals)
+		mappedStatus := upstreamerror.ClassifyProviderErrorInfo(info)
 		if mappedStatus == http.StatusTooManyRequests && statusCode != http.StatusTooManyRequests {
 			return mappedStatus, true
 		}
@@ -252,7 +273,7 @@ func markProxyProviderStreamError(logCtx *RequestLogContext, statusCode int, pay
 // statusCodeFromProviderStreamError classifies a provider's terminal stream
 // error event into the status the client should see.
 //
-// The decode goes through upstreamerror.ExtractErrorSignals (a map decode)
+// The decode goes through upstreamerror.ExtractProviderErrorInfo (a map decode)
 // rather than a struct with string fields, for the same reason: a provider
 // may send a NUMBER in "code", and a struct decode would then fail the whole
 // object and lose the message that says what actually went wrong.
@@ -269,14 +290,24 @@ func statusCodeFromProviderStreamError(payload string) int {
 		return http.StatusBadGateway
 	}
 
-	signals := []string{evt.Type}
-	if topSignals, ok := upstreamerror.ExtractErrorSignals(evt.Error); ok {
-		signals = append(signals, topSignals...)
+	// The same single reader the other paths use, so a terminal stream event
+	// is read exactly like the body of a failed request: a nested "detail"
+	// and a machine-readable reason are read here too, and a rule that names
+	// the failure's code is matched against the provider's own code field.
+	info := upstreamerror.ProviderErrorInfo{}
+	if evt.Type != "" {
+		info.AddSignal(evt.Type)
 	}
-	if responseSignals, ok := upstreamerror.ExtractErrorSignals(evt.Response.Error); ok {
-		signals = append(signals, responseSignals...)
+	if evt.Response.Status != "" {
+		info.AddSignal(evt.Response.Status)
 	}
-	return upstreamerror.ClassifyProviderErrorSignals(signals)
+	if top, ok := upstreamerror.ExtractProviderErrorInfo(evt.Error); ok {
+		info.Merge(top)
+	}
+	if response, ok := upstreamerror.ExtractProviderErrorInfo(evt.Response.Error); ok {
+		info.Merge(response)
+	}
+	return upstreamerror.ClassifyProviderErrorInfo(info)
 }
 
 // writeProviderStreamErrorBeforeCommit writes the client-facing error for a

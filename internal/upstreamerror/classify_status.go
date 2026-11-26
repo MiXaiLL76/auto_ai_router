@@ -45,7 +45,13 @@ func ClassifyStatus(statusCode int, rawBody []byte) (StatusError, bool) {
 		return ClassifyBadRequest(rawBody), true
 	case http.StatusForbidden, http.StatusNotFound:
 	default:
-		return StatusError{}, false
+		// Any other 4xx is still classified: a provider_messages rule may
+		// ask for one of them, and the rule's message is what the client
+		// is told. The statuses the router has a message of its own for
+		// (403, 404) keep their own branches below.
+		if statusCode < http.StatusBadRequest || statusCode >= http.StatusInternalServerError {
+			return StatusError{}, false
+		}
 	}
 
 	if classified, ok := ExtractRouterClassification(rawBody); ok && classified.Param == nil {
@@ -61,8 +67,28 @@ func ClassifyStatus(statusCode int, rawBody []byte) (StatusError, bool) {
 		}
 	}
 
-	signals, _ := providerErrorSignalsFromBody(rawBody)
-	joined := strings.ToLower(strings.Join(signals, " "))
+	// A provider message the router has a rule for is answered with the
+	// router's own wording, whatever the status the upstream used.
+	//
+	// The rules may ask for ANY 4xx (the config says so, and the operator
+	// wrote them), and the status the rule asks for is the one the client is
+	// answered with (see ClassifyProviderErrorInfo). So a rule that says
+	// "404" must be honored on a 404, and a rule that says "400" must be
+	// honored even when the upstream answered 403 or 404 -- the upstream's
+	// status says how it refused the request, and the rule says what the
+	// refusal is.
+	//
+	// Before this, a rule was only consulted for a 400: the status path and
+	// the message path were two independent lookups, and the message path
+	// only ran for a 400. A rule asking for a 404 therefore set the STATUS
+	// correctly and lost its MESSAGE -- the client was answered with a
+	// status it had no message for, and got the generic "Request failed".
+	info := providerErrorInfoFromBody(rawBody)
+	if classified, ok := ClassifyProviderMessage(info); ok {
+		return StatusError{Message: classified.Message, Code: classified.Code}, true
+	}
+
+	joined := strings.ToLower(strings.Join(info.Signals, " "))
 
 	switch statusCode {
 	case http.StatusForbidden:
