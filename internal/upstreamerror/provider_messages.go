@@ -542,15 +542,20 @@ type ProviderMessageClassification struct {
 	Retryable *bool
 }
 
-// ClassifyProviderMessage classifies a provider's failure into the router's
-// own answer: the status, the code and the message, all from ONE rule.
+// matchProviderMessageRule finds the rule that answers a provider's failure,
+// and reports whether one did.
 //
-// It reports false when no rule matched, or when the failure is a
-// content-policy refusal.
+// It is the ONE place a rule is matched and judged. The status, the code, the
+// message and the retryable answer all come from the rule it returns, so
+// they cannot disagree about which rule answered -- and the content-policy
+// guard is applied HERE, once, rather than in each of the callers.
 //
-// A refusal is not answered here. The content-policy branch already names a
-// refusal, and its name is what the retry policy and the client's own
-// handling key off -- a second name for the same refusal would split them.
+// The guard has to be here and not in the callers: a caller that looked the
+// rule up for itself would skip it, and a content-policy refusal would then
+// take the rule's retryable answer -- "yes, try another credential" -- and
+// the request would be replayed across the whole credential pool on a
+// prompt the provider refused on policy grounds. Every credential refuses
+// that identically, which is exactly why a refusal is not retryable.
 //
 // The refusal is judged by the signals that did NOT produce the match. A
 // rule whose own wording contains a content-policy marker ("content
@@ -561,13 +566,29 @@ type ProviderMessageClassification struct {
 // "metadata", the type) still wins: the operator's rule was written for one
 // wording, and a body that names a refusal in a different field is a
 // refusal.
-func ClassifyProviderMessage(info ProviderErrorInfo) (ProviderMessageClassification, bool) {
+func matchProviderMessageRule(info ProviderErrorInfo) (providerMessageMatch, bool) {
 	match, ok := lookupProviderMessageRule(info)
 	if !ok {
-		return ProviderMessageClassification{}, false
+		return providerMessageMatch{}, false
 	}
-
 	if isContentPolicyRefusal(info, match.matchedByText) {
+		return providerMessageMatch{}, false
+	}
+	return match, true
+}
+
+// ClassifyProviderMessage classifies a provider's failure into the router's
+// own answer: the status, the code and the message, all from ONE rule.
+//
+// It reports false when no rule matched, or when the failure is a
+// content-policy refusal.
+//
+// A refusal is not answered here. The content-policy branch already names a
+// refusal, and its name is what the retry policy and the client's own
+// handling key off -- a second name for the same refusal would split them.
+func ClassifyProviderMessage(info ProviderErrorInfo) (ProviderMessageClassification, bool) {
+	match, ok := matchProviderMessageRule(info)
+	if !ok {
 		return ProviderMessageClassification{}, false
 	}
 
@@ -589,8 +610,15 @@ func ClassifyProviderMessage(info ProviderErrorInfo) (ProviderMessageClassificat
 // request's own fault says "no", and a rule about something a credential
 // owns says "yes". A failure that matched no rule leaves the decision to
 // the router's own retry policy.
+//
+// The rule is found through the SAME path the client's message is found
+// through (matchProviderMessageRule), so the two cannot disagree: a
+// content-policy refusal is answered by neither. It used to look the rule up
+// for itself and skipped that guard -- so a refusal took the rule's
+// "yes, try another credential" and was replayed across the whole
+// credential pool, on a prompt every credential refuses identically.
 func ProviderMessageRetryable(info ProviderErrorInfo) (retryable bool, said bool) {
-	match, ok := lookupProviderMessageRule(info)
+	match, ok := matchProviderMessageRule(info)
 	if !ok || match.rule.Retryable == nil {
 		return false, false
 	}

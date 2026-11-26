@@ -267,3 +267,133 @@ func TestProviderMessageReview_DeploymentRuleWinsOverTheBuiltinOne(t *testing.T)
 	assert.True(t, said)
 	assert.False(t, retryable)
 }
+
+// TestProviderMessageReview_ContentPolicyRefusalTakesNoRetryAnswer checks
+// that a content-policy refusal takes no retryable answer from a rule.
+//
+// The retryable answer and the client's message are found through the SAME
+// path, so they cannot disagree. It used to be otherwise: the retryable
+// answer looked the rule up for itself and skipped the content-policy
+// guard -- so a refusal took the rule's "yes, try another credential" and
+// was replayed across the whole credential pool, on a prompt every
+// credential refuses identically.
+//
+// A refusal is not retryable precisely because of that: every credential
+// refuses it the same way.
+func TestProviderMessageReview_ContentPolicyRefusalTakesNoRetryAnswer(t *testing.T) {
+	t.Cleanup(func() { SetProviderMessageRules(nil) })
+
+	retryable := true
+	SetProviderMessageRules([]ProviderMessageRule{{
+		Match:     "quota exceeded for this account",
+		Code:      "invalid_request",
+		Message:   "Quota exceeded",
+		Status:    http.StatusBadRequest,
+		Retryable: &retryable,
+	}})
+
+	// The message matches the rule, and the body names a refusal in a
+	// different field -- the machine-readable reason under "metadata".
+	body := []byte(`{"error":{"code":"SomeError","message":"quota exceeded for this account",` +
+		`"metadata":{"error_type":"content_filter"}}}`)
+	info, ok := ExtractProviderErrorInfo([]byte(body))
+	require.True(t, ok)
+
+	classified, ok := ClassifyProviderMessage(info)
+	assert.False(t, ok, "a refusal is not the rule's failure")
+	assert.Empty(t, classified.Message)
+
+	got, said := ProviderMessageRetryable(info)
+	assert.False(t, said, "a refusal takes no retryable answer from a rule")
+	assert.False(t, got)
+}
+
+// TestProviderMessageReview_ContentPolicyRefusalIsNotRetryable checks the
+// same through the retry policy: the failure is not replayed.
+func TestProviderMessageReview_ContentPolicyRefusalIsNotRetryable(t *testing.T) {
+	t.Cleanup(func() { SetProviderMessageRules(nil) })
+
+	retryable := true
+	SetProviderMessageRules([]ProviderMessageRule{{
+		Match:     "quota exceeded for this account",
+		Code:      "invalid_request",
+		Message:   "Quota exceeded",
+		Status:    http.StatusBadRequest,
+		Retryable: &retryable,
+	}})
+
+	body := []byte(`{"error":{"code":"SomeError","message":"quota exceeded for this account",` +
+		`"metadata":{"error_type":"content_filter"}}}`)
+
+	got, said := ProviderMessageRetryable(mustProviderErrorInfo(t, body))
+	assert.False(t, said)
+	assert.False(t, got, "a refusal must not be replayed on the rule's answer")
+}
+
+// mustProviderErrorInfo reads a body into the info the classifier works on,
+// failing the test when the body carries no signal at all.
+func mustProviderErrorInfo(t *testing.T, body []byte) ProviderErrorInfo {
+	t.Helper()
+	info, ok := ExtractProviderErrorInfo(body)
+	require.True(t, ok, "the body must carry a signal")
+	return info
+}
+
+// TestProviderMessageReview_RuleTextOverlappingAMarkerStillAnswers checks
+// the other direction of the guard: a rule whose OWN wording contains a
+// content-policy marker is a rule about a parameter, and it must answer.
+//
+// The guard judges the failure by the signals that did NOT produce the
+// match, so the marker inside the rule's own wording says nothing about the
+// failure. Without that, such a rule would be permanently unreachable --
+// with nothing in the config to say so.
+func TestProviderMessageReview_RuleTextOverlappingAMarkerStillAnswers(t *testing.T) {
+	t.Cleanup(func() { SetProviderMessageRules(nil) })
+
+	retryable := true
+	SetProviderMessageRules([]ProviderMessageRule{{
+		Match:     "model requires content moderation metadata",
+		Code:      "invalid_request",
+		Message:   "This model requires content moderation metadata.",
+		Status:    http.StatusBadRequest,
+		Retryable: &retryable,
+	}})
+
+	body := []byte(`{"error":{"code":"SomeError","message":"model requires content moderation metadata"}}`)
+	info := mustProviderErrorInfo(t, body)
+
+	classified, ok := ClassifyProviderMessage(info)
+	require.True(t, ok, "the rule must answer")
+	assert.Equal(t, "This model requires content moderation metadata.", classified.Message)
+
+	got, said := ProviderMessageRetryable(info)
+	assert.True(t, said)
+	assert.True(t, got)
+}
+
+// TestProviderMessageReview_RefusalNamedInTheTypeTakesNoRetryAnswer checks
+// the guard's other reading of the body: a refusal named in the provider's
+// own "type" field is a refusal, and it takes no retryable answer from a
+// rule.
+func TestProviderMessageReview_RefusalNamedInTheTypeTakesNoRetryAnswer(t *testing.T) {
+	t.Cleanup(func() { SetProviderMessageRules(nil) })
+
+	retryable := true
+	SetProviderMessageRules([]ProviderMessageRule{{
+		Match:     "quota exceeded for this account",
+		Code:      "invalid_request",
+		Message:   "Quota exceeded",
+		Status:    http.StatusBadRequest,
+		Retryable: &retryable,
+	}})
+
+	body := []byte(`{"error":{"code":"SomeError","type":"content_filter","message":"quota exceeded for this account"}}`)
+	info := mustProviderErrorInfo(t, body)
+
+	_, ok := ClassifyProviderMessage(info)
+	assert.False(t, ok, "a refusal is not the rule's failure")
+
+	got, said := ProviderMessageRetryable(info)
+	assert.False(t, said, "a refusal takes no retryable answer from a rule")
+	assert.False(t, got)
+}

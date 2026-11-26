@@ -207,3 +207,31 @@ func TestShouldRetry_RuleForbidsTheRetryOnTheStreamingPath(t *testing.T) {
 	retry, _ := ShouldRetryWithFallback(status, []byte(payload))
 	assert.False(t, retry, "the rule forbids the replay on the streaming path too")
 }
+
+// TestShouldRetry_ContentPolicyRefusalIsNotReplayed checks that a
+// content-policy refusal is not replayed, even when a rule matched the
+// message and said the failure MAY be replayed.
+//
+// The rule's answer and the client's message are found through the same
+// path, so they cannot disagree. It used to be otherwise: the retryable
+// answer skipped the content-policy guard -- so a refusal took the rule's
+// "yes" and was replayed across the whole credential pool, on a prompt every
+// credential refuses identically.
+func TestShouldRetry_ContentPolicyRefusalIsNotReplayed(t *testing.T) {
+	t.Cleanup(func() { upstreamerror.SetProviderMessageRules(nil) })
+
+	retryable := true
+	upstreamerror.SetProviderMessageRules([]upstreamerror.ProviderMessageRule{{
+		Match:     "quota exceeded for this account",
+		Code:      "invalid_request",
+		Message:   "Quota exceeded",
+		Status:    http.StatusBadRequest,
+		Retryable: &retryable,
+	}})
+
+	body := []byte(`{"error":{"code":"SomeError","message":"quota exceeded for this account",` +
+		`"metadata":{"error_type":"content_filter"}}}`)
+
+	retry, _ := ShouldRetryWithFallback(http.StatusBadRequest, body)
+	assert.False(t, retry, "a refusal must not be replayed")
+}
