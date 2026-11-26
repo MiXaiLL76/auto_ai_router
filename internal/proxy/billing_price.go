@@ -1,10 +1,15 @@
 package proxy
 
 import (
+	"net/http"
 	"sync"
 
 	"github.com/mixaill76/auto_ai_router/internal/models"
 )
+
+// teamModelPriceSource is the spend log's billing_price_source of a request
+// billed at its team's model price.
+const teamModelPriceSource = "team_model_prices"
 
 // lookupBillingModelPrice resolves the price row to bill a request against.
 // Candidates are tried strictly in the order publicModelID, modelID,
@@ -23,19 +28,27 @@ import (
 // "google/gemini-3-flash-preview-highlimits" still win over the normalised
 // fallback for that same candidate.
 func lookupBillingModelPrice(registry *models.ModelPriceRegistry, publicModelID, modelID, realModelID string) (string, *models.ModelPrice) {
+	matchedID, modelPrice, _ := lookupBillingModelPriceWithImageToolRow(registry, publicModelID, modelID, realModelID)
+	return matchedID, modelPrice
+}
+
+// lookupBillingModelPriceWithImageToolRow is lookupBillingModelPrice that also
+// returns the row the found row names as its image tool's price, from the
+// same generation of the price list.
+func lookupBillingModelPriceWithImageToolRow(registry *models.ModelPriceRegistry, publicModelID, modelID, realModelID string) (string, *models.ModelPrice, *models.ModelPrice) {
 	if registry == nil {
-		return modelID, nil
+		return modelID, nil, nil
 	}
 
 	if realModelID == modelID {
 		realModelID = ""
 	}
 
-	if matchedID, modelPrice := registry.GetPriceAny(publicModelID, modelID, realModelID); modelPrice != nil {
-		return matchedID, modelPrice
+	if matchedID, modelPrice, imageToolRow := registry.GetPriceAnyWithImageToolRow(publicModelID, modelID, realModelID); modelPrice != nil {
+		return matchedID, modelPrice, imageToolRow
 	}
 
-	return modelID, nil
+	return modelID, nil, nil
 }
 
 // missingPriceReferenceWarnings holds the price source and referenced model
@@ -78,13 +91,64 @@ func (p *Proxy) billingPriceResolver(logCtx *RequestLogContext) models.PriceReso
 // the exact same price row instead of independently re-querying the price
 // registry — which could otherwise straddle a concurrent registry reload and
 // bill the reservation and the final spend log against different prices.
+// With a team model price pinned (admitTeamModelPrice) the cached row is the
+// price list row with the team's prices (models.TeamModelPrice).
 func (p *Proxy) resolveBillingPrice(logCtx *RequestLogContext, publicModelID, modelID, realModelID string) (string, *models.ModelPrice) {
 	if logCtx.billingPriceResolved {
 		return logCtx.billingPriceModelID, logCtx.billingPrice
 	}
-	priceModelID, modelPrice := lookupBillingModelPrice(p.priceRegistry, publicModelID, modelID, realModelID)
+	priceModelID, modelPrice, imageToolRow := lookupBillingModelPriceWithImageToolRow(p.priceRegistry, publicModelID, modelID, realModelID)
+	if modelPrice != nil && logCtx.teamModelPrice != nil {
+		logCtx.billedAtTeamModelPrice = true
+		teamPrice := models.TeamModelPrice(modelPrice, logCtx.teamModelPrice)
+		// A row naming itself (under another name) as its image tool's price
+		// is not charged for those images. The team row is a new row, so
+		// settle that here, against the generation of the price list the row
+		// came from.
+		if imageToolRow == modelPrice {
+			teamPrice.ImageGenerationToolModel = ""
+		}
+		modelPrice = teamPrice
+	}
 	logCtx.billingPriceResolved = true
 	logCtx.billingPriceModelID = priceModelID
 	logCtx.billingPrice = modelPrice
 	return priceModelID, modelPrice
+}
+
+// admitTeamModelPrice pins the team's ready price for the requested model
+// (TokenInfo.TeamModelPrices) on logCtx, keyed by the model name the client
+// requested. A field AIR cannot use refuses every request of the team instead
+// of billing it at the default price, and so does a team price next to an
+// organization tariff: one request never mixes two tariffs.
+func (p *Proxy) admitTeamModelPrice(w http.ResponseWriter, r *http.Request, publicModelID string, logCtx *RequestLogContext) bool {
+	if logCtx.TokenInfo == nil || logCtx.TokenInfo.TeamModelPrices == nil {
+		return true
+	}
+	prices, err := models.DecodeTeamModelPrices(logCtx.TokenInfo.TeamModelPrices)
+	price := prices[publicModelID]
+	if err == nil && price == nil {
+		return true
+	}
+	if err == nil && !logCtx.OrganizationPolicy.HasCustomPricing() {
+		logCtx.teamModelPrice = price
+		return true
+	}
+	args := []any{
+		"error_code", http.StatusServiceUnavailable,
+		"team_id", logCtx.TokenInfo.TeamID,
+		"model", publicModelID,
+		"request_id", logCtx.RequestID,
+	}
+	if err != nil {
+		p.logger.ErrorContext(r.Context(), "Team model prices unusable; request rejected", append(args, "error", err)...)
+	} else {
+		p.logger.ErrorContext(r.Context(), "Team model price conflicts with the organization tariff; request rejected", args...)
+	}
+	logCtx.Status = "failure"
+	logCtx.HTTPStatus = http.StatusServiceUnavailable
+	logCtx.ErrorMsg = "model pricing unavailable"
+	logCtx.Logged = true
+	WriteErrorServiceUnavailable(w, "Model pricing unavailable")
+	return false
 }

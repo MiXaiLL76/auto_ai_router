@@ -53,6 +53,8 @@ The organization tariff JSON is strict. Duplicate exact keys, unknown row fields
 
 When `model_allowlist` is omitted, the organization sees the global callable surface plus organization mapping keys, subject to exact profile prices in `/v1/models`. A callable request without an exact profile row returns `503` before provider selection. When `model_allowlist` is present and empty, the organization surface is empty. When present and non-empty, every listed ID must be routable and have an exact profile row at startup.
 
+A team in an organization with a tariff profile cannot also have a [team model price](#team-model-prices) for the requested model: such a request returns `503`.
+
 ### Provider credential exclusion
 
 Omit both `price_profile_id` and `model_prices_link` to use global AIR pricing and models with an organization credential denylist.
@@ -125,6 +127,26 @@ The effective interval is printed at startup:
 ```
 
 Each successful refresh is logged at `debug` level (`Model prices updated`), so raise `server.logging_level` to `debug` when verifying that a new price file is actually picked up.
+
+## Team Model Prices
+
+The operator can give a team its own ready model prices in the team's `metadata.air_model_prices`. The feature is off by default: enable it with `litellm_db.enable_team_model_prices: true`, otherwise AIR does not read the field.
+
+```json
+{"air_model_prices": {"gpt-5.5": {"input_cost_per_token": 2e-6, "output_cost_per_token": 8e-6, "cache_read_input_token_cost": 2e-7}}}
+```
+
+- The key is the model name from the client request, exact and case-sensitive: an alias of the model needs its own row. Only keys of the team use the prices.
+- A row holds [price fields](#available-fields) only: non-negative numbers, no `null`, Web Search prices under the `search_context_size_low`, `_medium` and `_high` keys. The other fields of the model (`litellm_provider`, `image_request_defaults`, ...) come from its row in the price list. A model without a price list row stays unavailable.
+- The row replaces every price of the model, so list every price the model is billed by. A price the row does not list is absent, and the [calculation](#cost-calculation) rules for an absent price apply: cached input and image tokens at the input and output prices, Web Search and per-image prices free. A token price of `0` is absent too, not free: cache reads then use another cache read price of the row, then the input price. Free cache reads need `cache_read_input_tokens_free`. In an image price tier, `0` is a free image.
+- No [cost margin](#cost-margin) is added: the row is the final price. A row the billed row refers to (`image_generation_tool_model`) is billed at the price list, also without margin. The router's own Moonshot tool prices still apply.
+- AIR chooses the price once per request: the budget reservation, retries, the client cost and the spend use the same row.
+- Every request of the team gets `503 Model pricing unavailable` before any provider call when the field is not an object, a model name is empty or a row is invalid. A request to a model with a team row also gets `503` when an organization tariff applies to it: one request never mixes two tariffs.
+- The spend log marks such requests with `billing_price_source: "team_model_prices"` in `spend_logs_metadata` and in the [Kafka event](kafka_spend_log.md#event-schema). The reference ClickHouse schema does not store it.
+- `{}` means no rows, `null` is an error. To remove the prices, delete the key or write `{}`.
+- Video (`/v1/videos`) does not read the field: it is admitted and billed as before.
+
+Before writing the field, enable the flag on every ingress that accepts the team's keys. Changes apply once the auth cache entry expires. Only operators may assign, replace or remove `air_model_prices`: protect it on every LiteLLM and admin management API and database writer, and preserve it when a customer replaces their ordinary metadata.
 
 ## Price File Format
 
@@ -335,7 +357,7 @@ The first layer that has the provider or `global` wins; missing entities are ski
 | Organization | key → organization               |
 | Personal     | key → user                       |
 
-The marked-up cost goes to `spend`, budgets and Kafka `total_cost`; `cost_breakdown` keeps `original_cost` and the `margin_*` fields. Failed requests with no usage are not charged `fixed_amount`. Changes apply once the auth cache entry expires.
+The marked-up cost goes to `spend`, budgets and Kafka `total_cost`; `cost_breakdown` keeps `original_cost` and the `margin_*` fields. Failed requests with no usage are not charged `fixed_amount`. Changes apply once the auth cache entry expires. A request billed at a [team model price](#team-model-prices) gets no margin.
 
 ### Regular input tokens
 

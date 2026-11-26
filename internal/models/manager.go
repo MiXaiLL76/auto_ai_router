@@ -217,6 +217,10 @@ func NewModelPriceRegistry() *ModelPriceRegistry {
 func (r *ModelPriceRegistry) GetPrice(modelName string) *ModelPrice {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	return r.getPriceLocked(modelName)
+}
+
+func (r *ModelPriceRegistry) getPriceLocked(modelName string) *ModelPrice {
 	raw := strings.ToLower(strings.TrimSpace(modelName))
 	if price := r.prices[raw]; price != nil {
 		return price
@@ -244,16 +248,31 @@ func (r *ModelPriceRegistry) GetPrice(modelName string) *ModelPrice {
 func (r *ModelPriceRegistry) GetPriceAny(modelNames ...string) (string, *ModelPrice) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	return r.getPriceAnyLocked(modelNames)
+}
 
+// GetPriceAnyWithImageToolRow is GetPriceAny that also returns the row the
+// found row names as its image tool's price (ImageGenerationToolModel), nil
+// without one. Both come from the same generation of the prices.
+func (r *ModelPriceRegistry) GetPriceAnyWithImageToolRow(modelNames ...string) (string, *ModelPrice, *ModelPrice) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	matched, price := r.getPriceAnyLocked(modelNames)
+	if price == nil {
+		return matched, nil, nil
+	}
+	if imageTool := strings.TrimSpace(price.ImageGenerationToolModel); imageTool != "" {
+		return matched, price, r.getPriceLocked(imageTool)
+	}
+	return matched, price, nil
+}
+
+func (r *ModelPriceRegistry) getPriceAnyLocked(modelNames []string) (string, *ModelPrice) {
 	for _, modelName := range modelNames {
 		if modelName == "" {
 			continue
 		}
-		raw := strings.ToLower(strings.TrimSpace(modelName))
-		if price := r.prices[raw]; price != nil {
-			return modelName, price
-		}
-		if price := r.prices[NormalizeModelName(modelName)]; price != nil {
+		if price := r.getPriceLocked(modelName); price != nil {
 			return modelName, price
 		}
 	}

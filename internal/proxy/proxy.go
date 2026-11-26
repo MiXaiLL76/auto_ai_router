@@ -599,6 +599,12 @@ type RequestLogContext struct {
 	billingPriceResolved bool
 	billingPriceModelID  string
 	billingPrice         *models.ModelPrice
+	// teamModelPrice is the team's ready price row for the requested model,
+	// pinned at admission (admitTeamModelPrice); nil when the request is
+	// billed at the price list. billedAtTeamModelPrice is set once
+	// resolveBillingPrice has built billingPrice from it.
+	teamModelPrice         *models.ModelPrice
+	billedAtTeamModelPrice bool
 
 	// promptTokensEstimateFn lazily computes the local tiktoken-based prompt-token
 	// estimate (full body JSON decode + BPE tokenization) for this request. It is armed

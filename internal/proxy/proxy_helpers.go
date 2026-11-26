@@ -769,7 +769,11 @@ func (logCtx *RequestLogContext) applyWebSearchUsageDefaults(status string) {
 // applyCostMargin adds the cost_margin_config markup of the key's hierarchy
 // (see TokenInfo.CostMargin) for the selected credential's provider on top of
 // already calculated costs, the same way litellm.cost_calculator._apply_cost_margin does.
+// A request billed at its team's model price gets none: that is the final price.
 func (logCtx *RequestLogContext) applyCostMargin(costs *converter.TokenCosts) {
+	if logCtx.billedAtTeamModelPrice {
+		return
+	}
 	var provider config.ProviderType
 	if logCtx.Credential != nil {
 		provider = logCtx.Credential.Type
@@ -782,6 +786,15 @@ func (logCtx *RequestLogContext) applyCostMargin(costs *converter.TokenCosts) {
 	costs.MarginFixedAmount = margin.FixedAmount
 	costs.MarginTotalAmount = costs.TotalCost*margin.Percentage + margin.FixedAmount
 	costs.TotalCost += costs.MarginTotalAmount
+}
+
+// billingPriceSource is the spend log's billing_price_source:
+// teamModelPriceSource for a team model price, empty otherwise.
+func (logCtx *RequestLogContext) billingPriceSource() string {
+	if logCtx.billedAtTeamModelPrice {
+		return teamModelPriceSource
+	}
+	return ""
 }
 
 // costBreakdownMap is the per-component cost breakdown, shared by the spend-log
@@ -1110,6 +1123,9 @@ func addRequestSpendMetadata(metadata string, logCtx *RequestLogContext) string 
 	}
 	if logCtx.RequestEndpoint != "" {
 		spendMetadata["request_endpoint"] = logCtx.RequestEndpoint
+	}
+	if source := logCtx.billingPriceSource(); source != "" {
+		spendMetadata["billing_price_source"] = source
 	}
 	if logCtx.keptEmbeddings > 0 {
 		// The request failed, yet these inputs were embedded (and paid for)
