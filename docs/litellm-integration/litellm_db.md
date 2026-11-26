@@ -45,6 +45,7 @@ litellm_db:
 | `budget_timezone`                  | string   | UTC     | Calendar of the key budget windows (`budget_limits`)                                       |
 | `budget_reset_time`                | string   | 00:00   | Time of day the day, week and month key budget windows reset at                            |
 | `enable_cost_margin`               | bool     | false   | Apply `metadata.cost_margin_config` markup ([pricing](pricing.md#cost-margin))             |
+| `enable_team_model_prices`         | bool     | false   | Bill teams at their `metadata.air_model_prices` ([pricing](pricing.md#team-model-prices))  |
 
 ### Budget window timezone
 

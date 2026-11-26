@@ -30,6 +30,8 @@ type Authenticator struct {
 	// costMarginEnabled gates loading cost_margin_config (see costMarginConfigs)
 	costMarginEnabled    bool
 	budgetWindowsEnabled bool
+	// teamModelPricesEnabled gates loading air_model_prices (see TokenInfo.TeamModelPrices)
+	teamModelPricesEnabled bool
 
 	// budgetCalendar is where the key budget windows start
 	budgetCalendar models.BudgetCalendar
@@ -48,6 +50,13 @@ func NewAuthenticator(pool *connection.ConnectionPool, cache *Cache, logger *slo
 // TokenInfo.CostMarginConfigs stays empty, so no margin is ever added.
 func (a *Authenticator) WithCostMargin(enabled bool) *Authenticator {
 	a.costMarginEnabled = enabled
+	return a
+}
+
+// WithTeamModelPrices enables loading the team's metadata.air_model_prices.
+// When disabled TokenInfo.TeamModelPrices stays empty, so no team price applies.
+func (a *Authenticator) WithTeamModelPrices(enabled bool) *Authenticator {
+	a.teamModelPricesEnabled = enabled
 	return a
 }
 
@@ -453,6 +462,9 @@ func (a *Authenticator) tokenFromRow(row pgx.Row, hashedToken string) (*models.T
 
 	// Set cost margin layers (key -> team -> org, or key -> user for a personal key)
 	info.CostMarginConfigs = a.costMarginConfigs(&info, tokenMetadata, userMetadata, teamMetadata, orgMetadata)
+	if a.teamModelPricesEnabled && info.TeamID != "" {
+		info.TeamModelPrices = metadataTeamModelPrices(teamMetadata)
+	}
 
 	a.logger.Debug("Token loaded with full hierarchy",
 		"token_prefix", security.MaskToken(hashedToken),
@@ -607,6 +619,18 @@ func metadataCostMarginConfig(raw []byte) []byte {
 		return nil
 	}
 	return metadata.CostMarginConfig
+}
+
+// metadataTeamModelPrices extracts air_model_prices from a team's metadata
+// column as stored, a JSON null included, so the proxy can tell it from a
+// missing field. The key matches exactly: a struct field would also take
+// AIR_MODEL_PRICES.
+func metadataTeamModelPrices(raw []byte) json.RawMessage {
+	var metadata map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &metadata); err != nil {
+		return nil
+	}
+	return metadata["air_model_prices"]
 }
 
 func decodeMetadata(raw []byte) map[string]interface{} {
