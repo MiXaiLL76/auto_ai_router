@@ -103,13 +103,18 @@ func injectCacheControl(body []byte) ([]byte, CacheControlOutcome) {
 	return result, CacheControlRouterInjected
 }
 
-// hasAnyCacheControl reports whether any content block in messages already carries
-// a cache_control field.
+// hasAnyCacheControl reports whether a message's content or a tool result
+// message already carries a cache marker.
 func hasAnyCacheControl(messages []interface{}) bool {
 	for _, msg := range messages {
 		m, ok := msg.(map[string]interface{})
 		if !ok {
 			continue
+		}
+		if m["role"] == "tool" {
+			if _, ok := asEphemeralCacheControl(m["cache_control"]); ok {
+				return true
+			}
 		}
 		if contentHasCacheControl(m["content"]) {
 			return true
