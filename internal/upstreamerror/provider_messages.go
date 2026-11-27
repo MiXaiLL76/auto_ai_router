@@ -497,19 +497,27 @@ func lookupProviderMessageRule(info ProviderErrorInfo) (providerMessageMatch, bo
 	return providerMessageMatch{}, false
 }
 
-// matchedProviderMessage returns the provider's own text that carried the
-// rule's match -- the signal the rule matched on.
+// matchedProviderMessage returns the provider's own message that the rule
+// matched on -- the whole of it, as the provider wrote it.
 //
-// It is the FIRST such signal: a rule matches on one wording, and that
-// wording is what the {verbatim} placeholder relays. The others are the
-// provider's other words about the same failure (its type, its code), and
-// relaying those would put more of the provider's body in front of the
-// client than the rule asked for.
+// It is the provider's MESSAGE and not one of the signals: the signals are
+// trimmed to the bound they carry, and a rule that relays the message as it
+// is must relay the whole thing -- a message trimmed to 512 bytes would
+// reach the client as a different, cut-off text.
+//
+// The rule must have matched ON the message for this to be it: a rule that
+// matched on the provider's code or its type says nothing about the
+// message, and relaying it would put more of the provider's body in front of
+// the client than the rule asked for.
 func matchedProviderMessage(info ProviderErrorInfo, matched []int) string {
 	for _, index := range matched {
-		if index >= 0 && index < len(info.Signals) {
-			return info.Signals[index]
+		if index < 0 || index >= len(info.Signals) {
+			continue
 		}
+		if !strings.EqualFold(strings.TrimSpace(info.Signals[index]), strings.TrimSpace(info.ProviderMessage)) {
+			continue
+		}
+		return info.ProviderMessage
 	}
 	return ""
 }

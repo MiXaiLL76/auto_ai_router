@@ -3,6 +3,7 @@ package upstreamerror
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -668,4 +669,104 @@ func TestProviderMessageReview_ParameterRuleIsIdempotentWithoutAParameter(t *tes
 			assert.Equal(t, first.Param, second.Param)
 		})
 	}
+}
+
+// TestProviderMessageReview_VerbatimRelaysTheProviderMessage checks that a
+// rule may relay the provider's own message as it is.
+//
+// Some provider messages say exactly what is wrong -- "Invalid schema for
+// response_format 'X': In context=(), 'additionalProperties' is required to
+// be supplied and to be false." names the schema and the field the provider
+// objected to, and no wording of the router's own says it as precisely.
+func TestProviderMessageReview_VerbatimRelaysTheProviderMessage(t *testing.T) {
+	t.Cleanup(func() { SetProviderMessageRules(nil) })
+
+	notRetryable := false
+	SetProviderMessageRules([]ProviderMessageRule{{
+		Match:     "invalid schema for response_format",
+		Code:      "invalid_field",
+		Message:   "{verbatim}",
+		Status:    http.StatusBadRequest,
+		Retryable: &notRetryable,
+	}})
+
+	providerMessage := "Invalid schema for response_format 'ProfiledExtractedEntities': " +
+		"In context=(), 'additionalProperties' is required to be supplied and to be false."
+	body := []byte(`{"error":{"message":"` + providerMessage + `","param":"response_format"}}`)
+
+	classified := ClassifyBadRequest(body)
+	assert.Equal(t, providerMessage, classified.Message,
+		"the provider's message must be relayed as it is")
+	assert.Equal(t, "invalid_field", classified.Code)
+}
+
+// TestProviderMessageReview_VerbatimRefusesUnsafeText checks that the
+// provider's message is relayed only where it is safe to.
+//
+// A control character would go into the client's JSON body as it is, and a
+// dump is not something the client has any business seeing. Either way the
+// router's own wording stands -- the placeholder is left for the operator to
+// see, rather than the client receiving something unprintable.
+func TestProviderMessageReview_VerbatimRefusesUnsafeText(t *testing.T) {
+	t.Cleanup(func() { SetProviderMessageRules(nil) })
+
+	notRetryable := false
+	SetProviderMessageRules([]ProviderMessageRule{{
+		Match:     "provider said",
+		Code:      "invalid_field",
+		Message:   "{verbatim}",
+		Status:    http.StatusBadRequest,
+		Retryable: &notRetryable,
+	}})
+
+	t.Run("a control character", func(t *testing.T) {
+		body := []byte(`{"error":{"message":"provider said \u0007 something"}}`)
+		classified := ClassifyBadRequest(body)
+
+		assert.NotContains(t, classified.Message, "\x07",
+			"a control character must not reach the client")
+		assert.NotContains(t, classified.Message, "{verbatim}",
+			"the placeholder must not reach the client either")
+	})
+
+	t.Run("a dump", func(t *testing.T) {
+		long := strings.Repeat("a very long explanation ", 40)
+		body := []byte(`{"error":{"message":"provider said ` + long + `"}}`)
+		classified := ClassifyBadRequest(body)
+
+		assert.NotContains(t, classified.Message, "a very long explanation")
+		assert.NotContains(t, classified.Message, "{verbatim}")
+	})
+}
+
+// TestProviderMessageReview_VerbatimIsIdempotent checks that the provider's
+// message in the router's own body survives a second classification pass.
+func TestProviderMessageReview_VerbatimIsIdempotent(t *testing.T) {
+	t.Cleanup(func() { SetProviderMessageRules(nil) })
+
+	notRetryable := false
+	SetProviderMessageRules([]ProviderMessageRule{{
+		Match:     "invalid schema for response_format",
+		Code:      "invalid_field",
+		Message:   "{verbatim}",
+		Status:    http.StatusBadRequest,
+		Retryable: &notRetryable,
+	}})
+
+	providerMessage := "Invalid schema for response_format 'X': In context=(), 'additionalProperties' is required to be supplied and to be false."
+	first := ClassifyBadRequest([]byte(`{"error":{"message":"` + providerMessage + `"}}`))
+
+	routerBody, err := json.Marshal(map[string]any{
+		"error": map[string]any{
+			"message": first.Message,
+			"type":    "invalid_request_error",
+			"param":   first.Param,
+			"code":    first.Code,
+		},
+	})
+	require.NoError(t, err)
+
+	second := ClassifyBadRequest(routerBody)
+	assert.Equal(t, first.Message, second.Message, "the message must survive a second pass")
+	assert.Equal(t, first.Code, second.Code)
 }
