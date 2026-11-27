@@ -386,3 +386,35 @@ provider_messages:
 }
 
 func boolPtr(v bool) *bool { return &v }
+
+// TestProviderMessagesConfig_ParamPlaceholder checks that a rule's message
+// may name the parameter the provider rejected, and that a message carrying
+// the placeholder more than once is refused.
+func TestProviderMessagesConfig_ParamPlaceholder(t *testing.T) {
+	t.Run("one placeholder is allowed", func(t *testing.T) {
+		cfg, err := loadConfigFromString(t, providerMessagesTestConfigBase+`
+provider_messages:
+  messages:
+    - match: "unknown parameter:"
+      message: "Unsupported parameter: {param}"
+      code: unsupported_parameter
+      status: 400
+`)
+		require.NoError(t, err)
+		require.Len(t, cfg.ProviderMessages.Messages, 1)
+		assert.Contains(t, cfg.ProviderMessages.Messages[0].Message, "{param}")
+	})
+
+	t.Run("two placeholders are refused", func(t *testing.T) {
+		_, err := loadConfigFromString(t, providerMessagesTestConfigBase+`
+provider_messages:
+  messages:
+    - match: "unknown parameter:"
+      message: "Unsupported parameter: {param} (and {param} again)"
+      code: unsupported_parameter
+      status: 400
+`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "placeholder")
+	})
+}

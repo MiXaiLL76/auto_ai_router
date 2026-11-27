@@ -1,6 +1,7 @@
 package upstreamerror
 
 import (
+	"encoding/json"
 	"net/http"
 	"testing"
 
@@ -396,4 +397,148 @@ func TestProviderMessageReview_RefusalNamedInTheTypeTakesNoRetryAnswer(t *testin
 	got, said := ProviderMessageRetryable(info)
 	assert.False(t, said, "a refusal takes no retryable answer from a rule")
 	assert.False(t, got)
+}
+
+// TestProviderMessageReview_RuleNamesTheParameter checks that a rule whose
+// message names the parameter tells the client WHICH parameter the request
+// carried.
+//
+// The provider names it ("Unknown parameter: 'reasoning'"), and the client
+// can act on that only if it is told: "a parameter this model does not
+// support" leaves it guessing which field to drop.
+func TestProviderMessageReview_RuleNamesTheParameter(t *testing.T) {
+	t.Cleanup(func() { SetProviderMessageRules(nil) })
+
+	notRetryable := false
+	SetProviderMessageRules([]ProviderMessageRule{{
+		Match:     "unknown parameter:",
+		Code:      "unsupported_parameter",
+		Message:   "The request contains a parameter this model does not support: {param}",
+		Status:    http.StatusBadRequest,
+		Retryable: &notRetryable,
+	}})
+
+	for _, tt := range []struct {
+		name       string
+		body       string
+		wantParam  string
+		wantInBody bool
+	}{
+		{
+			name:       "the parameter is named",
+			body:       `{"error":{"message":"Unknown parameter: 'reasoning'.","type":"invalid_request_error","param":"reasoning","code":"unknown_parameter"}}`,
+			wantParam:  "reasoning",
+			wantInBody: true,
+		},
+		{
+			name:       "another parameter",
+			body:       `{"error":{"message":"Unknown parameter: 'thinking'.","type":"invalid_request_error","param":"thinking","code":"unknown_parameter"}}`,
+			wantParam:  "thinking",
+			wantInBody: true,
+		},
+		{
+			name:      "the provider named none",
+			body:      `{"error":{"message":"Unknown parameter: 'x'.","type":"invalid_request_error","param":null,"code":"unknown_parameter"}}`,
+			wantParam: "",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			classified := ClassifyBadRequest([]byte(tt.body))
+
+			assert.Equal(t, "unsupported_parameter", classified.Code)
+			if tt.wantParam == "" {
+				assert.NotContains(t, classified.Message, "{param}",
+					"the placeholder must never reach the client")
+				return
+			}
+			assert.Contains(t, classified.Message, tt.wantParam,
+				"the message must name the parameter")
+			assert.NotContains(t, classified.Message, "{param}")
+			if tt.wantInBody {
+				require.NotNil(t, classified.Param)
+				assert.Equal(t, tt.wantParam, *classified.Param,
+					"the parameter must reach the client's param field")
+			}
+		})
+	}
+}
+
+// TestProviderMessageReview_ParameterFromTheProviderIsNotFreeText checks
+// that a provider cannot put free text into the client's "param" field
+// through the placeholder.
+//
+// The router substitutes only what survives cleanProviderErrorParam (letters,
+// digits and _.-[] only, up to 80 bytes). A provider that put anything else
+// there gets a wording that names no parameter -- not its text.
+func TestProviderMessageReview_ParameterFromTheProviderIsNotFreeText(t *testing.T) {
+	t.Cleanup(func() { SetProviderMessageRules(nil) })
+
+	notRetryable := false
+	SetProviderMessageRules([]ProviderMessageRule{{
+		Match:     "unknown parameter:",
+		Code:      "unsupported_parameter",
+		Message:   "Unsupported parameter: {param}",
+		Status:    http.StatusBadRequest,
+		Retryable: &notRetryable,
+	}})
+
+	for _, tt := range []struct {
+		name  string
+		param string
+	}{
+		{"a path", "/etc/passwd"},
+		{"a url", "https://evil.example.com/x"},
+		{"a sentence", "your api key is leaked"},
+		{"a space", "two words"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			body := []byte(`{"error":{"message":"Unknown parameter: 'x'.","type":"invalid_request_error","param":"` + tt.param + `","code":"unknown_parameter"}}`)
+			classified := ClassifyBadRequest(body)
+
+			assert.NotContains(t, classified.Message, tt.param,
+				"the provider's free text must not reach the client")
+			assert.NotContains(t, classified.Message, "{param}")
+		})
+	}
+}
+
+// TestProviderMessageReview_ParameterRuleIsIdempotent checks that the
+// router's own answer survives a second classification pass with the
+// parameter in it.
+//
+// A rule that names the parameter writes a DIFFERENT message for every
+// parameter, and the second pass has to recognize each of them as the
+// router's own -- otherwise the operator's message is lost on the second
+// pass and replaced by the generic one.
+func TestProviderMessageReview_ParameterRuleIsIdempotent(t *testing.T) {
+	t.Cleanup(func() { SetProviderMessageRules(nil) })
+
+	notRetryable := false
+	SetProviderMessageRules([]ProviderMessageRule{{
+		Match:     "unknown parameter:",
+		Code:      "unsupported_parameter",
+		Message:   "The request contains a parameter this model does not support: {param}",
+		Status:    http.StatusBadRequest,
+		Retryable: &notRetryable,
+	}})
+
+	for _, param := range []string{"reasoning", "thinking", "timeout"} {
+		t.Run(param, func(t *testing.T) {
+			first := ClassifyBadRequest([]byte(`{"error":{"message":"Unknown parameter: '` + param + `'.","type":"invalid_request_error","param":"` + param + `","code":"unknown_parameter"}}`))
+
+			routerBody, err := json.Marshal(map[string]any{
+				"error": map[string]any{
+					"message": first.Message,
+					"type":    "invalid_request_error",
+					"param":   first.Param,
+					"code":    first.Code,
+				},
+			})
+			require.NoError(t, err)
+
+			second := ClassifyBadRequest(routerBody)
+			assert.Equal(t, first.Message, second.Message, "the message must survive a second pass")
+			assert.Equal(t, first.Code, second.Code)
+		})
+	}
 }

@@ -224,9 +224,11 @@ func isRouterMessage(code, message string, param *string) bool {
 	// "invalid_request" code as the generic one, and the fixed-message check
 	// would answer for that code and never reach this one.
 	//
-	// No parameter is accepted beside it: the router writes these messages
-	// without one, so a body that carries one was not written by the router.
-	if param == nil && isRouterProviderMessage(code, message) {
+	// A rule that names the parameter writes it into the message AND into
+	// the body's "param" field, so a body carrying that parameter is the
+	// router's own. A rule that names no parameter writes no parameter, so a
+	// body carrying one was not written by the router.
+	if isRouterProviderMessageWithParam(code, message, param) {
 		return true
 	}
 	if fixed, ok := fixedErrorMessages[code]; ok {

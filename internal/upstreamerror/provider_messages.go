@@ -150,6 +150,12 @@ type ProviderMessageRule struct {
 	Code string
 	// Message is what the client is told. It is the router's own wording,
 	// not the provider's: this is the text that goes on the wire.
+	//
+	// The {param} placeholder is replaced with the parameter the provider
+	// named, so a rule can say WHICH parameter the request carried. The
+	// replacement is the sanitized parameter name and nothing else (see
+	// cleanProviderErrorParam): a provider that put free text in its
+	// "param" field gets nothing substituted.
 	Message string
 	// Status is the HTTP status the client is answered with.
 	Status int
@@ -537,6 +543,11 @@ type ProviderMessageClassification struct {
 	Code string
 	// Message is what the client is told.
 	Message string
+	// Param is the parameter the provider rejected, when it named one. It is
+	// the provider's own name, sanitized (see cleanProviderErrorParam), and
+	// it is what the client's "param" field carries -- so a client can act on
+	// WHICH field the request carried, not just that some field was wrong.
+	Param *string
 	// Retryable says whether the failure may be replayed on another
 	// credential. Nil when no rule said.
 	Retryable *bool
@@ -598,10 +609,52 @@ func ClassifyProviderMessage(info ProviderErrorInfo) (ProviderMessageClassificat
 	return ProviderMessageClassification{
 		Status:    match.rule.Status,
 		Code:      match.rule.Code,
-		Message:   match.rule.Message,
+		Message:   renderProviderMessage(match.rule.Message, info.Param),
 		Retryable: match.rule.Retryable,
+		Param:     info.Param,
 	}, true
 }
+
+// ProviderParamPlaceholder is the placeholder a rule's message uses to name
+// the parameter the provider rejected.
+//
+// The router replaces it with the sanitized parameter name, so a rule can
+// tell the client WHICH parameter the request carried. It is exported so the
+// config package can validate a message that carries it.
+const ProviderParamPlaceholder = "{param}"
+
+// providerParamPlaceholder is the placeholder a rule's message uses to name
+// the parameter the provider rejected.
+const providerParamPlaceholder = ProviderParamPlaceholder
+
+// renderProviderMessage puts the parameter the provider named into a rule's
+// message.
+//
+// The parameter is the provider's own, so it is sanitized first (see
+// cleanProviderErrorParam: letters, digits and _.-[] only, up to 80 bytes).
+// A parameter that does not survive that is not substituted: the placeholder
+// is replaced by a wording that names no parameter, rather than free text
+// from a provider reaching the client.
+//
+// A rule whose message has no placeholder is returned as it is, so a rule
+// that does not care about the parameter is unaffected.
+func renderProviderMessage(message string, param *string) string {
+	if !strings.Contains(message, providerParamPlaceholder) {
+		return message
+	}
+	cleaned := ""
+	if param != nil {
+		cleaned = cleanProviderErrorParam(*param)
+	}
+	if cleaned == "" {
+		return strings.ReplaceAll(message, providerParamPlaceholder, unnamedProviderParam)
+	}
+	return strings.ReplaceAll(message, providerParamPlaceholder, cleaned)
+}
+
+// unnamedProviderParam is what a rule's message says when the provider named
+// no parameter (or named one the router would not repeat).
+const unnamedProviderParam = "the parameter"
 
 // ProviderMessageRetryable reports whether a failure that matched a rule
 // may be replayed on another credential, and whether a rule said at all.
@@ -679,12 +732,80 @@ func isRouterProviderMessage(code, message string) bool {
 	return isRouterProviderMessageWithType(code, message, "")
 }
 
+// isRouterProviderMessageWithParam is isRouterProviderMessage with the
+// parameter the body carries.
+//
+// A rule that names the parameter (its message carries the {param}
+// placeholder) writes that parameter into the body's "param" field, so a
+// body carrying it is the router's own. A rule that names no parameter writes
+// no parameter, so a body carrying one was not written by the router.
+func isRouterProviderMessageWithParam(code, message string, param *string) bool {
+	rules := activeProviderMessageRules()
+	for _, rule := range rules.all {
+		if rule.rule.Code != code {
+			continue
+		}
+		if rule.rule.Message != message && !providerMessageTemplateMatches(rule.rule.Message, message) {
+			continue
+		}
+		if ruleNamesParameter(rule.rule.Message) {
+			// The rule names the parameter, so the body must carry one --
+			// and it must be the one the message names.
+			if param == nil {
+				continue
+			}
+			if !providerMessageTemplateNames(rule.rule.Message, message, *param) {
+				continue
+			}
+			return true
+		}
+		// The rule names no parameter, so the body must carry none.
+		if param != nil {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// ruleNamesParameter reports whether a rule's message names the parameter.
+func ruleNamesParameter(message string) bool {
+	return strings.Contains(message, providerParamPlaceholder)
+}
+
+// providerMessageTemplateNames reports whether a rendered message names the
+// given parameter -- that is, whether the parameter is what the router
+// substituted into the template.
+func providerMessageTemplateNames(template, message, param string) bool {
+	parts := strings.Split(template, providerParamPlaceholder)
+	if len(parts) != 2 {
+		return false
+	}
+	prefix, suffix := parts[0], parts[1]
+	if !strings.HasPrefix(message, prefix) || !strings.HasSuffix(message, suffix) {
+		return false
+	}
+	if len(message) < len(prefix)+len(suffix) {
+		return false
+	}
+	return message[len(prefix):len(message)-len(suffix)] == param
+}
+
 // isRouterProviderMessageWithType is isRouterProviderMessage with the type
 // the body carries. An empty typ accepts any type.
 func isRouterProviderMessageWithType(code, message, typ string) bool {
 	rules := activeProviderMessageRules()
 	for _, rule := range rules.all {
-		if rule.rule.Code != code || rule.rule.Message != message {
+		if rule.rule.Code != code {
+			continue
+		}
+		// The rule's message is a TEMPLATE: it may carry the {param}
+		// placeholder, which the router replaced with the parameter the
+		// provider named. So the body's message is compared against the
+		// template with the placeholder matched by whatever the parameter
+		// turned out to be -- and against the template itself, for a rule
+		// that names no parameter.
+		if rule.rule.Message != message && !providerMessageTemplateMatches(rule.rule.Message, message) {
 			continue
 		}
 		if typ != "" && rule.rule.Status != 0 && routerErrorTypeForStatus(rule.rule.Status) != typ {
@@ -693,6 +814,54 @@ func isRouterProviderMessageWithType(code, message, typ string) bool {
 		return true
 	}
 	return false
+}
+
+// providerMessageTemplateMatches reports whether a rendered message is what
+// a rule's template produces, with the {param} placeholder filled by
+// something.
+//
+// The placeholder is matched by whatever the parameter turned out to be: a
+// rule that names the parameter produces a different message for every
+// parameter, and all of them are the router's own.
+//
+// The substituted text is compared as a WHOLE word and must be
+// parameter-shaped (letters, digits and _.-[] only) -- the same shape
+// cleanProviderErrorParam accepts, because that is what the router put
+// there in the first place. So a provider's free text cannot pass for a
+// parameter name: it would not survive the sanitization the substitution
+// went through, and it is not a single word.
+func providerMessageTemplateMatches(template, message string) bool {
+	if !strings.Contains(template, providerParamPlaceholder) {
+		return false
+	}
+
+	parts := strings.Split(template, providerParamPlaceholder)
+	if len(parts) != 2 {
+		// More than one placeholder: the template is not one the router
+		// can render unambiguously.
+		return false
+	}
+
+	prefix, suffix := parts[0], parts[1]
+	if !strings.HasPrefix(message, prefix) || !strings.HasSuffix(message, suffix) {
+		return false
+	}
+	if len(message) < len(prefix)+len(suffix) {
+		return false
+	}
+
+	substituted := message[len(prefix) : len(message)-len(suffix)]
+	if substituted == "" {
+		return false
+	}
+	if substituted == unnamedProviderParam {
+		// The provider named no parameter, so the router said so in its own
+		// words.
+		return true
+	}
+	// The substituted text must be exactly what the router would have
+	// substituted: a parameter name, and nothing else.
+	return cleanProviderErrorParam(substituted) == substituted
 }
 
 // routerErrorTypeForStatus is the "type" the router writes beside a status

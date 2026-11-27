@@ -60,6 +60,13 @@ type ProviderMessageConfig struct {
 	Match string `yaml:"match,omitempty"`
 	// Message is what the client is told. It is the router's own wording,
 	// not the provider's: this is the text that goes on the wire.
+	//
+	// The {param} placeholder is replaced with the parameter the provider
+	// named, so a rule can say WHICH parameter the request carried -- a
+	// client told only that "a parameter" is wrong cannot act on it. The
+	// replacement is the sanitized parameter name and nothing else: a
+	// provider that put free text in its "param" field gets nothing
+	// substituted, and the client is told the parameter was not named.
 	Message string `yaml:"message"`
 	// Code is the router's error code for the failure (the "code" field of
 	// the client's error object). It must be one of the router's own codes:
@@ -179,6 +186,10 @@ func (c *ProviderMessagesConfig) Validate() error {
 		}
 		if !isPrintableText(entry.Match) {
 			return fmt.Errorf("provider_messages.messages[%d]: match contains a control character", i)
+		}
+		if count := strings.Count(entry.Message, upstreamerror.ProviderParamPlaceholder); count > 1 {
+			return fmt.Errorf("provider_messages.messages[%d]: message carries the %s placeholder %d times, it can be named only once",
+				i, upstreamerror.ProviderParamPlaceholder, count)
 		}
 
 		key := strings.ToLower(entry.Match) + "\x00" + entry.ProviderCode + "\x00" + entry.Code
