@@ -63,7 +63,10 @@ func ClassifyBadRequest(rawBody []byte) BadRequest {
 	// with a status its message did not belong to, or with a message whose
 	// status it never got.
 	if classified, ok := ClassifyProviderMessage(info); ok {
-		return BadRequest{Message: classified.Message, Code: classified.Code}
+		// The parameter the provider named comes with the answer: a client
+		// told "the request carries a parameter this model does not support"
+		// can act on it only if it is also told WHICH parameter.
+		return BadRequest{Message: classified.Message, Code: classified.Code, Param: classified.Param}
 	}
 
 	// An unknown model is checked FIRST, before the keyword branches below.

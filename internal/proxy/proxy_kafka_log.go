@@ -392,9 +392,10 @@ func (p *Proxy) buildRawBodyEvent(logCtx *RequestLogContext, status string, endT
 	// differ from what the provider said?"). The router already masked this
 	// body before writing it to the client (maskedUpstreamErrorBody ->
 	// classifiedBadRequestError -> upstreamerror.ClassifyBadRequest), so what
-	// lands here is a classified message from a fixed list ("Invalid
+	// lands here is the router's own classified message ("Invalid
 	// tool_choice", "Invalid request", "The prompt was blocked by the
-	// provider's content policy"), a code, and a param -- never the
+	// provider's content policy", and the messages a deployment's
+	// provider_messages rules name), a code, and a param -- never the
 	// provider's free text. Publishing it verbatim therefore adds the
 	// client's view of the failure without adding provider internals.
 	//

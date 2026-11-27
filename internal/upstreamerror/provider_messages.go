@@ -150,6 +150,12 @@ type ProviderMessageRule struct {
 	Code string
 	// Message is what the client is told. It is the router's own wording,
 	// not the provider's: this is the text that goes on the wire.
+	//
+	// The {param} placeholder is replaced with the parameter the provider
+	// named, so a rule can say WHICH parameter the request carried. The
+	// replacement is the sanitized parameter name and nothing else (see
+	// cleanProviderErrorParam): a provider that put free text in its
+	// "param" field gets nothing substituted.
 	Message string
 	// Status is the HTTP status the client is answered with.
 	Status int
@@ -537,6 +543,11 @@ type ProviderMessageClassification struct {
 	Code string
 	// Message is what the client is told.
 	Message string
+	// Param is the parameter the provider rejected, when it named one. It is
+	// the provider's own name, sanitized (see cleanProviderErrorParam), and
+	// it is what the client's "param" field carries -- so a client can act on
+	// WHICH field the request carried, not just that some field was wrong.
+	Param *string
 	// Retryable says whether the failure may be replayed on another
 	// credential. Nil when no rule said.
 	Retryable *bool
@@ -595,12 +606,192 @@ func ClassifyProviderMessage(info ProviderErrorInfo) (ProviderMessageClassificat
 	if match.rule.Status == 0 {
 		return ProviderMessageClassification{}, false
 	}
+
+	// The parameter reaches the client ONLY when the rule's message asks for
+	// it by name.
+	//
+	// The provider's "param" field says what the provider was complaining
+	// about, and the rule matched on its own wording -- not necessarily on
+	// the provider's parameter. A rule that names no parameter did not ask
+	// for it to be repeated, so it is not repeated: the client's "param"
+	// field would otherwise carry a field the rule never mentioned.
+	//
+	// And when the rule DOES name it, the parameter is repeated only if it
+	// is one of the router's own request fields (see
+	// providerParamNameAccepted): a provider that put free text there must
+	// not get it into the client's body.
+	param := (*string)(nil)
+	if _, names := providerRuleParam(match.rule); names {
+		if info.Param != nil && providerParamNameAccepted(*info.Param) {
+			param = info.Param
+		}
+	}
+
 	return ProviderMessageClassification{
 		Status:    match.rule.Status,
 		Code:      match.rule.Code,
-		Message:   match.rule.Message,
+		Message:   renderProviderMessage(match.rule.Message, param),
 		Retryable: match.rule.Retryable,
+		Param:     param,
 	}, true
+}
+
+// ProviderParamPlaceholder is the placeholder a rule's message uses to name
+// the parameter the provider rejected.
+//
+// The router replaces it with the sanitized parameter name, so a rule can
+// tell the client WHICH parameter the request carried. It is exported so the
+// config package can validate a message that carries it.
+const ProviderParamPlaceholder = "{param}"
+
+// unnamedProviderParam is what a rule's message says when the provider named
+// no parameter (or named one the router would not repeat).
+const unnamedProviderParam = "the parameter"
+
+// providerParamNames are the request fields a rule's message may name.
+//
+// It is a CLOSED list, and it has to be: the name comes out of the
+// provider's own body, so without a list a provider could put an arbitrary
+// string into the client's "param" field -- "exactly the channel for
+// provider text that this package exists to close" (the same reason
+// requestParameterNames exists for the router's own verdict).
+//
+// The list is the router's own set of request fields (requestParameterNames)
+// plus the nested paths a provider may name for a field inside a body
+// ("messages[0].content[1]"). A name outside it is not substituted: the rule's
+// message says the parameter was not named, and the client's "param" field
+// stays empty.
+//
+// A name is matched against the list in its NORMALIZED form (the case and
+// the whitespace folded), so a provider that spells a field differently --
+// "maxTokens" for "max_tokens" -- is still recognized as naming it.
+var providerParamNames = buildProviderParamNames()
+
+// buildProviderParamNames assembles the list of names a rule may repeat.
+//
+// It is a list of its own rather than requestParameterNames itself, so that
+// adding a field here does not change what the router's own verdict accepts
+// as an offending parameter.
+func buildProviderParamNames() map[string]struct{} {
+	names := make(map[string]struct{}, len(requestParameterNames)+8)
+	for name := range requestParameterNames {
+		names[name] = struct{}{}
+	}
+	// The body-shaped fields a provider names a path into: the offending
+	// item inside the body ("messages[0].content[1].image_url.url").
+	//
+	// The names of the STRUCTURE are here too, not only the names of the
+	// fields: a path names both ("content" is where the item sits, and
+	// "image_url" is what is wrong with it), and a provider that names a
+	// path names the structure on the way.
+	for _, name := range []string{
+		"messages", "input", "model", "stream", "prompt", "image", "file",
+		"url", "contents", "system", "content", "image_url", "file_url",
+		"text", "role", "part",
+	} {
+		names[name] = struct{}{}
+	}
+	return names
+}
+
+// providerParamNameAccepted reports whether a parameter name may be
+// repeated to the client.
+//
+// The name must be one of the router's own request fields. The comparison is
+// on the normalized form, so a provider that spells a field in another case
+// is still recognized -- and a provider that puts anything else there is
+// not.
+func providerParamNameAccepted(name string) bool {
+	if name == "" {
+		return false
+	}
+	normalized := normalizeProviderMessageText(name)
+	if _, known := providerParamNames[normalized]; known {
+		return true
+	}
+	// A nested path: "messages[0].content[1]" -- the router's own
+	// verdict names such paths too (extractQuotedInvalidField).
+	if !strings.ContainsAny(name, "[]") {
+		return false
+	}
+	// The path must start with a known field, and every step after it must
+	// be an index or a known field.
+	head := normalized
+	if idx := strings.IndexAny(head, "["); idx >= 0 {
+		head = head[:idx]
+	}
+	if _, known := providerParamNames[head]; !known {
+		return false
+	}
+	rest := normalized[len(head):]
+	for rest != "" {
+		// A path step is an index, a field, or both: "messages[0].content[1]".
+		if strings.HasPrefix(rest, "[") {
+			end := strings.Index(rest, "]")
+			if end < 0 {
+				return false
+			}
+			index := rest[1:end]
+			if index == "" {
+				return false
+			}
+			for _, r := range index {
+				if r < '0' || r > '9' {
+					return false
+				}
+			}
+			rest = rest[end+1:]
+			continue
+		}
+		if strings.HasPrefix(rest, ".") {
+			rest = rest[1:]
+			end := strings.IndexAny(rest, ".[")
+			if end < 0 {
+				end = len(rest)
+			}
+			if _, known := providerParamNames[rest[:end]]; !known {
+				return false
+			}
+			rest = rest[end:]
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// providerRuleParam reports the parameter a rule's message names, and
+// whether the rule names one at all.
+//
+// A rule that names no parameter says nothing about the parameter, so the
+// client's "param" field stays empty: the provider's own "param" field is
+// about whatever the provider was complaining about, and a rule that did not
+// ask for it did not mean to repeat it.
+func providerRuleParam(rule ProviderMessageRule) (*string, bool) {
+	if !strings.Contains(rule.Message, ProviderParamPlaceholder) {
+		return nil, false
+	}
+	return nil, true
+}
+
+// renderProviderMessage puts the parameter the provider named into a rule's
+// message.
+//
+// The parameter is the provider's own, so it is checked against the router's
+// list of request fields first (see providerParamNameAccepted): a provider
+// that put free text in its "param" field gets a wording that names no
+// parameter -- not its text.
+//
+// A rule whose message has no placeholder is returned as it is, so a rule
+// that does not care about the parameter is unaffected.
+func renderProviderMessage(message string, param *string) string {
+	if !strings.Contains(message, ProviderParamPlaceholder) {
+		return message
+	}
+	if param != nil && providerParamNameAccepted(*param) {
+		return strings.ReplaceAll(message, ProviderParamPlaceholder, *param)
+	}
+	return strings.ReplaceAll(message, ProviderParamPlaceholder, unnamedProviderParam)
 }
 
 // ProviderMessageRetryable reports whether a failure that matched a rule
@@ -675,19 +866,55 @@ func providerMessageStatus(info ProviderErrorInfo) (int, bool) {
 // A coincidence that does pass is harmless: the strings that matched ARE the
 // router's own strings, so the client is answered with the same words and
 // the same code either way.
-func isRouterProviderMessage(code, message string) bool {
-	return isRouterProviderMessageWithType(code, message, "")
-}
-
-// isRouterProviderMessageWithType is isRouterProviderMessage with the type
-// the body carries. An empty typ accepts any type.
-func isRouterProviderMessageWithType(code, message, typ string) bool {
+// isRouterProviderMessageWithParam reports whether a body is the router's
+// own answer for a provider message.
+//
+// The parameter the body carries and the type it carries are both checked
+// here, in ONE pass over the rules: the body must carry the parameter the
+// rule's message names (and only when the rule names one), and its type
+// must be the one that goes with the rule's status.
+//
+// The type is what identifies a body as the router's own: the router writes
+// the type that goes with the status, so a provider body that happens to
+// carry the same code and message by coincidence is not taken for the
+// router's own unless it also carries that type.
+//
+// An empty typ accepts any type.
+func isRouterProviderMessageWithParam(code, message, typ string, param *string) bool {
 	rules := activeProviderMessageRules()
 	for _, rule := range rules.all {
-		if rule.rule.Code != code || rule.rule.Message != message {
+		if rule.rule.Code != code {
 			continue
 		}
 		if typ != "" && rule.rule.Status != 0 && routerErrorTypeForStatus(rule.rule.Status) != typ {
+			continue
+		}
+		if _, names := providerRuleParam(rule.rule); names {
+			// The rule names the parameter, so the body's message is
+			// compared against the rule's template RENDERED with the
+			// parameter the body carries: the same rendering the router did
+			// when it wrote the body. So the two cannot disagree, and the
+			// reverse-parsing (reconstructing the template and the
+			// substitution from the message) is not needed.
+			//
+			// A body that carries NO parameter is compared against the
+			// rendering with none either: the router wrote it that way
+			// when the provider named no parameter (or named one the
+			// router would not repeat), and it is still the router's own.
+			rendered := renderProviderMessage(rule.rule.Message, param)
+			if param == nil {
+				rendered = renderProviderMessage(rule.rule.Message, nil)
+			}
+			if rendered != message {
+				continue
+			}
+			return true
+		}
+		// The rule names no parameter, so the body must carry none.
+		if param != nil {
+			continue
+		}
+		if rule.rule.Message != message {
 			continue
 		}
 		return true

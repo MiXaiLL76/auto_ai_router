@@ -23,6 +23,11 @@ const (
 	maxProviderMessageTextBytes = 512
 )
 
+// wrongCaseParamPlaceholder is the placeholder as an operator may well type
+// it -- the placeholder is matched EXACTLY, so this spelling would pass the
+// validation and reach the client spelled out.
+const wrongCaseParamPlaceholder = "{Param}"
+
 // ProviderMessageConfig is one provider message the router may relay to a
 // client.
 //
@@ -60,6 +65,13 @@ type ProviderMessageConfig struct {
 	Match string `yaml:"match,omitempty"`
 	// Message is what the client is told. It is the router's own wording,
 	// not the provider's: this is the text that goes on the wire.
+	//
+	// The {param} placeholder is replaced with the parameter the provider
+	// named, so a rule can say WHICH parameter the request carried -- a
+	// client told only that "a parameter" is wrong cannot act on it. The
+	// replacement is the sanitized parameter name and nothing else: a
+	// provider that put free text in its "param" field gets nothing
+	// substituted, and the client is told the parameter was not named.
 	Message string `yaml:"message"`
 	// Code is the router's error code for the failure (the "code" field of
 	// the client's error object). It must be one of the router's own codes:
@@ -179,6 +191,18 @@ func (c *ProviderMessagesConfig) Validate() error {
 		}
 		if !isPrintableText(entry.Match) {
 			return fmt.Errorf("provider_messages.messages[%d]: match contains a control character", i)
+		}
+		if count := strings.Count(entry.Message, upstreamerror.ProviderParamPlaceholder); count > 1 {
+			return fmt.Errorf("provider_messages.messages[%d]: message carries the %s placeholder %d times, it can be named only once",
+				i, upstreamerror.ProviderParamPlaceholder, count)
+		}
+		if count := strings.Count(entry.Message, wrongCaseParamPlaceholder); count > 0 {
+			// The placeholder is matched EXACTLY, so a message carrying
+			// "{Param}" would pass the validation and reach the client with
+			// the placeholder spelled out in it. The operator would see a
+			// rule that loaded cleanly and a client that got a typo.
+			return fmt.Errorf("provider_messages.messages[%d]: message carries %q, but the placeholder is %q (lower case)",
+				i, wrongCaseParamPlaceholder, upstreamerror.ProviderParamPlaceholder)
 		}
 
 		key := strings.ToLower(entry.Match) + "\x00" + entry.ProviderCode + "\x00" + entry.Code

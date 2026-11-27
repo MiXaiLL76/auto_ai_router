@@ -85,7 +85,7 @@ func ClassifyStatus(statusCode int, rawBody []byte) (StatusError, bool) {
 	// status it had no message for, and got the generic "Request failed".
 	info := providerErrorInfoFromBody(rawBody)
 	if classified, ok := ClassifyProviderMessage(info); ok {
-		return StatusError{Message: classified.Message, Code: classified.Code}, true
+		return StatusError{Message: classified.Message, Code: classified.Code, Param: classified.Param}, true
 	}
 
 	joined := strings.ToLower(strings.Join(info.Signals, " "))
