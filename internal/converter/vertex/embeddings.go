@@ -2,7 +2,6 @@ package vertex
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -431,10 +430,10 @@ func embeddingPart(block map[string]interface{}, param string) (*genai.Part, err
 		return &genai.Part{Text: text}, nil
 	case "image_url", "input_image":
 		ref, obj := mediaReference(block, "image_url", "url")
-		return embeddingMediaPart(ref, mimeOverride(obj, block), "", param+".image_url")
+		return mediaPart(ref, mimeOverride(obj, block), "", param+".image_url")
 	case "video_url", "input_video":
 		ref, obj := mediaReference(block, "video_url", "url")
-		return embeddingMediaPart(ref, mimeOverride(obj, block), "video/mp4", param+".video_url")
+		return mediaPart(ref, mimeOverride(obj, block), "video/mp4", param+".video_url")
 	case "input_audio":
 		audio, _ := block["input_audio"].(map[string]interface{})
 		if audio == nil {
@@ -451,7 +450,7 @@ func embeddingPart(block map[string]interface{}, param string) (*genai.Part, err
 			return inlineBase64Part(data, mimeType, param+".input_audio.data")
 		}
 		if ref, _ := audio["url"].(string); ref != "" {
-			return embeddingMediaPart(ref, mimeType, "", param+".input_audio.url")
+			return mediaPart(ref, mimeType, "", param+".input_audio.url")
 		}
 		return nil, converterutil.NewRequestValidationError(param+".input_audio", "input_audio requires base64 data")
 	case "file", "input_file":
@@ -465,20 +464,11 @@ func embeddingPart(block map[string]interface{}, param string) (*genai.Part, err
 			if ref == "" {
 				continue
 			}
-			if key == "file_data" && !strings.HasPrefix(ref, "data:") {
-				// OpenAI chat file_data may be bare base64; the MIME type then
-				// has to come from mime_type/format or the file name.
-				if override == "" {
-					if name, _ := file["filename"].(string); name != "" {
-						override = mimeTypeFromName(name)
-					}
-				}
-				if override == "" {
-					return nil, converterutil.NewRequestValidationError(param+".file.file_data", "bare base64 file_data requires mime_type (or a data: URL)")
-				}
-				return inlineBase64Part(ref, override, param+".file.file_data")
+			if key == "file_data" {
+				filename, _ := file["filename"].(string)
+				return FileDataPart(ref, override, filename, param+".file.file_data")
 			}
-			return embeddingMediaPart(ref, override, "", param+".file."+key)
+			return mediaPart(ref, override, "", param+".file."+key)
 		}
 		return nil, converterutil.NewRequestValidationError(param+".file", "file part requires file_data (data: URL or base64) or file_url (https:// or gs://)")
 	case "":
@@ -499,106 +489,6 @@ func mediaReference(block map[string]interface{}, field, urlKey string) (string,
 		return ref, v
 	}
 	return "", nil
-}
-
-// mimeOverride returns an explicit MIME type from mime_type or format on the
-// media object or the part itself. format may be a MIME type or an extension.
-func mimeOverride(objects ...map[string]interface{}) string {
-	for _, obj := range objects {
-		if obj == nil {
-			continue
-		}
-		for _, key := range []string{"mime_type", "mimeType", "format"} {
-			value, _ := obj[key].(string)
-			value = strings.TrimSpace(value)
-			if value == "" {
-				continue
-			}
-			if strings.Contains(value, "/") {
-				return value
-			}
-			if mimeType := mimeTypeFromName("file." + value); mimeType != "" {
-				return mimeType
-			}
-		}
-	}
-	return ""
-}
-
-// embeddingAudioExtensions extends mimeTypeMap with the audio containers
-// Gemini Embedding 2 accepts; kept local so chat URL handling is unchanged.
-var embeddingAudioExtensions = map[string]string{
-	"mp3": "audio/mpeg",
-	"wav": "audio/wav",
-}
-
-func mimeTypeFromName(name string) string {
-	if mimeType := getMimeTypeFromURL(name); mimeType != "" {
-		return mimeType
-	}
-	ext := ""
-	if idx := strings.LastIndex(name, "."); idx >= 0 {
-		ext = strings.ToLower(name[idx+1:])
-	}
-	return embeddingAudioExtensions[ext]
-}
-
-func embeddingMediaPart(ref, override, defaultMIME, param string) (*genai.Part, error) {
-	if ref == "" {
-		return nil, converterutil.NewRequestValidationError(param, "media part requires a url")
-	}
-	if strings.HasPrefix(ref, "data:") {
-		part, err := parseDataURLToPart(ref)
-		if err != nil {
-			return nil, err
-		}
-		if part == nil {
-			return nil, converterutil.NewRequestValidationError(param, "invalid or empty base64 data URL")
-		}
-		if override != "" {
-			part.InlineData.MIMEType = override
-		}
-		return part, nil
-	}
-	mimeType := override
-	if mimeType == "" {
-		mimeType = mimeTypeFromName(stripURLQuery(ref))
-	}
-	if mimeType == "" {
-		mimeType = defaultMIME
-	}
-	if mimeType == "" {
-		return nil, converterutil.NewRequestValidationError(param, "cannot determine the MIME type of the file; set mime_type")
-	}
-	part, err := parseURLToPart(ref, map[string]interface{}{"format": mimeType}, param)
-	if err != nil {
-		return nil, err
-	}
-	if part == nil {
-		return nil, converterutil.NewRequestValidationError(param, "unsupported URL: use a data: URL, a public https:// URL or a gs:// URI")
-	}
-	return part, nil
-}
-
-func stripURLQuery(ref string) string {
-	if idx := strings.IndexAny(ref, "?#"); idx >= 0 {
-		return ref[:idx]
-	}
-	return ref
-}
-
-func inlineBase64Part(data, mimeType, param string) (*genai.Part, error) {
-	if len(data) > maxBase64Size {
-		return nil, converterutil.NewRequestEntityTooLargeError(param, fmt.Sprintf("inline payload exceeds %dMB limit", maxBase64Size/(1024*1024)))
-	}
-	decoded, err := base64.StdEncoding.DecodeString(data)
-	if err != nil {
-		return nil, converterutil.NewRequestValidationError(param, "data is not valid base64")
-	}
-	if len(decoded) == 0 {
-		return nil, converterutil.NewRequestValidationError(param, "data is empty")
-	}
-	return &genai.Part{InlineData: &genai.Blob{MIMEType: mimeType, Data: decoded}}, nil
 }
 
 // VertexEmbeddingToOpenAI converts a Vertex AI embedding response to OpenAI format.
