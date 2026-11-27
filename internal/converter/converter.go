@@ -343,6 +343,7 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 		if c.shouldStripOpenRouterOnlyFields() {
 			body = openaiconv.StripOpenRouterOnlyFields(body)
 		}
+		body = openaiconv.ConvertDocumentParts(body)
 		// No shouldStripVLLMOnlySamplingParams call here: providerType is
 		// always ProviderTypeBedrock in this branch, never ProviderTypeOpenAI,
 		// so it would always be a no-op (see that method's doc comment).
@@ -355,6 +356,11 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 		if !c.mode.IsResponsesAPI {
 			body = openaiconv.ConvertWebSearchTools(body)
 			body = openaiconv.ForceWebSearchResults(body)
+			// An AIR or proxy peer gets the router's own document part and
+			// converts it for its own provider.
+			if !c.providerType.IsProxyLike() {
+				body = openaiconv.ConvertDocumentParts(body)
+			}
 		}
 
 		// See shouldStripCacheSalt: strip for everyone in this default bucket

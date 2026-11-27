@@ -124,6 +124,15 @@ func convertInputFilePart(partMap map[string]interface{}) ([]*genai.Part, error)
 		}}, nil
 	}
 
+	if fileData, _ := partMap["file_data"].(string); fileData != "" {
+		filename, _ := partMap["filename"].(string)
+		part, err := vertex.FileDataPart(fileData, "", filename, "input_file.file_data")
+		if err != nil {
+			return nil, err
+		}
+		return []*genai.Part{part}, nil
+	}
+
 	if fileID, _ := partMap["file_id"].(string); fileID != "" {
 		return nil, converterutil.NewRequestValidationError("input_file.file_id", "file_id is not supported for this route")
 	}

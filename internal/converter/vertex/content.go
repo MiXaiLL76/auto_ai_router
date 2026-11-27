@@ -142,6 +142,10 @@ func convertContentToParts(content interface{}) ([]*genai.Part, error) {
 				if !ok {
 					return nil, nil
 				}
+				if fileData, _ := fileObj["file_data"].(string); fileData != "" {
+					filename, _ := fileObj["filename"].(string)
+					return FileDataPart(fileData, mimeOverride(fileObj, block), filename, "file.file_data")
+				}
 				fileID, ok := fileObj["file_id"].(string)
 				if !ok {
 					return nil, nil
@@ -160,6 +164,31 @@ func convertContentToParts(content interface{}) ([]*genai.Part, error) {
 					}
 				}
 				return part, nil
+			},
+			// The router's PDF part (docs/getting-started/api.md, "PDF documents").
+			"document": func(block map[string]interface{}) (*genai.Part, error) {
+				source, _ := block["source"].(map[string]interface{})
+				switch source["type"] {
+				case "base64":
+					mediaType, _ := source["media_type"].(string)
+					if mediaType == "" {
+						return nil, converterutil.NewRequestValidationError("document.source.media_type", "missing document media_type")
+					}
+					data, _ := source["data"].(string)
+					return inlineBase64Part(data, mediaType, "document.source.data")
+				case "url":
+					url, _ := source["url"].(string)
+					part, err := parseURLToPart(url, map[string]interface{}{"format": "application/pdf"}, "document.source.url")
+					if err != nil {
+						return nil, err
+					}
+					if part == nil {
+						return nil, converterutil.NewRequestValidationError("document.source.url", "unsupported URL: use a public https:// URL or a gs:// URI")
+					}
+					return part, nil
+				default:
+					return nil, converterutil.NewRequestValidationError("document.source.type", "unsupported document source type")
+				}
 			},
 		}
 

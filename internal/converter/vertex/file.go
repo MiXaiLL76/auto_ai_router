@@ -3,6 +3,7 @@ package vertex
 import (
 	"encoding/base64"
 	"fmt"
+	"mime"
 	"strings"
 
 	converterutil "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
@@ -114,14 +115,35 @@ func inlineBase64Part(data, mimeType, param string) (*genai.Part, error) {
 // URL, or bare base64 whose MIME type then has to come from mimeType or the
 // file name. An explicit mimeType wins over the one in the data: URL.
 func FileDataPart(fileData, mimeType, filename, param string) (*genai.Part, error) {
+	var part *genai.Part
+	var err error
 	if strings.HasPrefix(fileData, "data:") {
-		return mediaPart(fileData, mimeType, "", param)
+		part, err = mediaPart(fileData, mimeType, "", param)
+	} else {
+		if mimeType == "" && filename != "" {
+			mimeType = mimeTypeFromName(filename)
+		}
+		if mimeType == "" {
+			return nil, converterutil.NewRequestValidationError(param, "bare base64 file_data requires mime_type (or a data: URL)")
+		}
+		part, err = inlineBase64Part(fileData, mimeType, param)
 	}
-	if mimeType == "" && filename != "" {
-		mimeType = mimeTypeFromName(filename)
+	if err != nil {
+		return nil, err
 	}
-	if mimeType == "" {
-		return nil, converterutil.NewRequestValidationError(param, "bare base64 file_data requires mime_type (or a data: URL)")
+	// "data:;base64,..." parses with ";base64" as its MIME type.
+	if !isMediaType(part.InlineData.MIMEType) {
+		return nil, converterutil.NewRequestValidationError(param, "file_data has no valid MIME type; set mime_type")
 	}
-	return inlineBase64Part(fileData, mimeType, param)
+	return part, nil
+}
+
+// isMediaType reports whether value is a type/subtype MIME type.
+func isMediaType(value string) bool {
+	mediaType, _, err := mime.ParseMediaType(value)
+	if err != nil {
+		return false
+	}
+	typ, subtype, ok := strings.Cut(mediaType, "/")
+	return ok && typ != "" && subtype != ""
 }

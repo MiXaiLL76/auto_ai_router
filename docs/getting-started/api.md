@@ -64,6 +64,18 @@ curl -X POST http://localhost:8080/v1/messages \
 
 Set `"stream": true` to receive Anthropic-compatible `message_start`, content block, `message_delta`, and `message_stop` SSE events. Both `x-api-key` and `Authorization: Bearer ...` authentication are supported.
 
+### PDF documents
+
+A `document` block with a PDF is converted for the provider of the credential serving the request. The same block is accepted in `/v1/chat/completions` content.
+
+| Provider format                                    | `source.type: "base64"`                                                                     | `source.type: "url"`                                                                                                                                                                       |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Anthropic                                          | `document`                                                                                  | `document`                                                                                                                                                                                 |
+| Gemini, Vertex AI                                  | `inlineData`                                                                                | `fileData` with `application/pdf`                                                                                                                                                          |
+| OpenAI Chat Completions (OpenAI, Azure, vLLM, ...) | `file` part; `filename` is `document.pdf`, or the block's `title` in `/v1/chat/completions` | Not supported: Chat Completions has no file URL. The provider answers 400; whether the request moves on to the model's other credentials follows the [retry policy](../advanced/retry.md). |
+
+The model still has to read PDFs. A `document` inside a `tool_result` is not converted.
+
 ### Classifier refusals
 
 An Anthropic `stop_reason: "refusal"` remains a refusal, including on Bedrock

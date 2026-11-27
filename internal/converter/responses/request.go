@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
@@ -1124,10 +1125,30 @@ func convertContentParts(parts []interface{}) ([]interface{}, error) {
 			result = append(result, entry)
 
 		case "input_file":
-			if fileID, _ := partMap["file_id"].(string); fileID != "" {
+			fileData, _ := partMap["file_data"].(string)
+			fileURL, _ := partMap["file_url"].(string)
+			fileID, _ := partMap["file_id"].(string)
+			switch {
+			case fileData != "":
+				file := map[string]interface{}{"file_data": fileData}
+				if filename, _ := partMap["filename"].(string); filename != "" {
+					file["filename"] = filename
+				}
+				result = append(result, map[string]interface{}{"type": "file", "file": file})
+			case isPDFURL(fileURL):
+				// Chat Completions has no file URL. A PDF goes on as the router's
+				// document part, which each provider converts or refuses.
+				result = append(result, map[string]interface{}{
+					"type":   "document",
+					"source": map[string]interface{}{"type": "url", "url": fileURL},
+				})
+			case fileURL != "":
+				return nil, converterutil.NewRequestValidationError("input_file.file_url", "file_url is not supported for this route")
+			case fileID != "":
 				return nil, converterutil.NewRequestValidationError("input_file.file_id", "file_id is not supported for this route")
+			default:
+				return nil, converterutil.NewRequestValidationError("input_file", "missing supported file source")
 			}
-			return nil, converterutil.NewRequestValidationError("input_file", "input_file is not supported in chat completions")
 
 		case "input_audio":
 			entry := map[string]interface{}{
@@ -1146,6 +1167,15 @@ func convertContentParts(parts []interface{}) ([]interface{}, error) {
 		}
 	}
 	return result, nil
+}
+
+// isPDFURL reports whether a file URL names a PDF by the extension of its path.
+func isPDFURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Scheme == "" {
+		return false
+	}
+	return strings.HasSuffix(strings.ToLower(u.Path), ".pdf")
 }
 
 // convertFunctionCallOutput converts a function_call_output input item to a tool message.
