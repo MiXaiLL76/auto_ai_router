@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode"
 )
 
 // A provider may pack the status of the failure, its own error class and
@@ -442,6 +443,11 @@ type providerMessageMatch struct {
 	// matchedByText are the indexes of the signals that carried the rule's
 	// match text.
 	matchedByText []int
+	// providerMessage is the provider's own text that the rule matched on --
+	// the one signal that carried it. It is what the {verbatim} placeholder
+	// relays: the wording that says exactly what is wrong, not a paraphrase
+	// of it.
+	providerMessage string
 }
 
 // lookupProviderMessageRule returns the rule that matches a provider
@@ -482,9 +488,30 @@ func lookupProviderMessageRule(info ProviderErrorInfo) (providerMessageMatch, bo
 		if !ok {
 			continue
 		}
-		return providerMessageMatch{rule: candidate.rule, matchedByText: matched}, true
+		return providerMessageMatch{
+			rule:            candidate.rule,
+			matchedByText:   matched,
+			providerMessage: matchedProviderMessage(info, matched),
+		}, true
 	}
 	return providerMessageMatch{}, false
+}
+
+// matchedProviderMessage returns the provider's own text that carried the
+// rule's match -- the signal the rule matched on.
+//
+// It is the FIRST such signal: a rule matches on one wording, and that
+// wording is what the {verbatim} placeholder relays. The others are the
+// provider's other words about the same failure (its type, its code), and
+// relaying those would put more of the provider's body in front of the
+// client than the rule asked for.
+func matchedProviderMessage(info ProviderErrorInfo, matched []int) string {
+	for _, index := range matched {
+		if index >= 0 && index < len(info.Signals) {
+			return info.Signals[index]
+		}
+	}
+	return ""
 }
 
 // providerMessageMatches reports whether a rule matches a provider failure,
@@ -630,7 +657,7 @@ func ClassifyProviderMessage(info ProviderErrorInfo) (ProviderMessageClassificat
 	return ProviderMessageClassification{
 		Status:    match.rule.Status,
 		Code:      match.rule.Code,
-		Message:   renderProviderMessage(match.rule.Message, param),
+		Message:   renderProviderMessageWithVerbatim(match.rule.Message, param, match.providerMessage),
 		Retryable: match.rule.Retryable,
 		Param:     param,
 	}, true
@@ -644,9 +671,27 @@ func ClassifyProviderMessage(info ProviderErrorInfo) (ProviderMessageClassificat
 // config package can validate a message that carries it.
 const ProviderParamPlaceholder = "{param}"
 
+// ProviderVerbatimPlaceholder is the placeholder a rule's message uses to
+// relay the provider's own message as it is.
+//
+// It is for the failures whose whole point is the provider's wording: "Invalid
+// schema for response_format 'X': In context=(), 'additionalProperties' is
+// required to be supplied and to be false." says exactly what is wrong with
+// the schema, and no paraphrase of it does.
+//
+// It is exported so the config package can validate a message that carries it.
+const ProviderVerbatimPlaceholder = "{verbatim}"
+
 // unnamedProviderParam is what a rule's message says when the provider named
 // no parameter (or named one the router would not repeat).
 const unnamedProviderParam = "the parameter"
+
+// maxVerbatimMessageLen bounds the provider's message that a rule may relay
+// as it is.
+//
+// A provider's message about a request is a sentence or two; anything much
+// longer is a dump of something the client has no business seeing.
+const maxVerbatimMessageLen = 512
 
 // providerParamNames are the request fields a rule's message may name.
 //
@@ -785,6 +830,25 @@ func providerRuleParam(rule ProviderMessageRule) (*string, bool) {
 // A rule whose message has no placeholder is returned as it is, so a rule
 // that does not care about the parameter is unaffected.
 func renderProviderMessage(message string, param *string) string {
+	return renderProviderMessageWithVerbatim(message, param, "")
+}
+
+// renderProviderMessageWithVerbatim is renderProviderMessage with the
+// provider's own message available for the {verbatim} placeholder.
+//
+// The provider's message is relayed as it is ONLY when it is safe to: short
+// enough, and carrying nothing but printable text. A provider that answered
+// with a dump, or with a control character, gets the router's own wording
+// instead -- the placeholder is left for the operator to see, rather than
+// the client receiving something unprintable.
+func renderProviderMessageWithVerbatim(message string, param *string, providerMessage string) string {
+	if strings.Contains(message, ProviderVerbatimPlaceholder) {
+		if verbatim, ok := verbatimProviderMessage(providerMessage); ok {
+			message = strings.ReplaceAll(message, ProviderVerbatimPlaceholder, verbatim)
+		} else {
+			message = strings.ReplaceAll(message, ProviderVerbatimPlaceholder, unnamedProviderMessage)
+		}
+	}
 	if !strings.Contains(message, ProviderParamPlaceholder) {
 		return message
 	}
@@ -792,6 +856,33 @@ func renderProviderMessage(message string, param *string) string {
 		return strings.ReplaceAll(message, ProviderParamPlaceholder, *param)
 	}
 	return strings.ReplaceAll(message, ProviderParamPlaceholder, unnamedProviderParam)
+}
+
+// unnamedProviderMessage is what a rule's message says when the provider's own
+// message may not be relayed as it is.
+const unnamedProviderMessage = "the provider's message"
+
+// verbatimProviderMessage reports whether the provider's message may be
+// relayed to the client as it is, and returns it when it may.
+//
+// The checks are the ones the rest of this package applies to provider text:
+// it must be short enough to be a sentence about the request, and it must
+// carry nothing but printable text -- a control character would go into the
+// client's JSON body as it is.
+func verbatimProviderMessage(message string) (string, bool) {
+	trimmed := strings.TrimSpace(message)
+	if trimmed == "" || len(trimmed) > maxVerbatimMessageLen {
+		return "", false
+	}
+	for _, r := range trimmed {
+		if r == '\n' || r == '\r' || r == '\t' {
+			continue
+		}
+		if unicode.IsControl(r) {
+			return "", false
+		}
+	}
+	return trimmed, true
 }
 
 // ProviderMessageRetryable reports whether a failure that matched a rule
