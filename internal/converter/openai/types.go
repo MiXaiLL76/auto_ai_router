@@ -62,6 +62,7 @@ type OpenAIMessage struct {
 	ThinkingBlocks   []OpenAIThinkingBlock `json:"thinking_blocks,omitempty"`
 	Refusal          string                `json:"refusal,omitempty"`
 	ReasoningContent string                `json:"reasoning_content,omitempty"`
+	CacheControl     interface{}           `json:"cache_control,omitempty"` // Anthropic cache marker on a tool result.
 
 	ProviderSpecificFields *MessageProviderFields `json:"provider_specific_fields,omitempty"`
 }

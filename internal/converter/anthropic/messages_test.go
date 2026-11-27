@@ -11,6 +11,60 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestOpenAIToAnthropic_ToolResultCacheControl(t *testing.T) {
+	tests := []struct {
+		name    string
+		message string
+		want    string
+	}{
+		{
+			name:    "message marker",
+			message: `{"role":"tool","tool_call_id":"call_1","content":"result","cache_control":{"type":"ephemeral","ttl":"1h"}}`,
+			want:    `{"type":"tool_result","tool_use_id":"call_1","content":[{"type":"text","text":"result"}],"cache_control":{"type":"ephemeral","ttl":"1h"}}`,
+		},
+		{
+			name:    "last part marker",
+			message: `{"role":"tool","tool_call_id":"call_1","content":[{"type":"text","text":"start"},{"type":"text","text":"end","cache_control":{"type":"ephemeral","ttl":"5m"}}],"cache_control":{}}`,
+			want:    `{"type":"tool_result","tool_use_id":"call_1","content":[{"type":"text","text":"start"},{"type":"text","text":"end"}],"cache_control":{"type":"ephemeral","ttl":"5m"}}`,
+		},
+		{
+			name:    "message marker takes precedence",
+			message: `{"role":"tool","tool_call_id":"call_1","content":[{"type":"text","text":"result","cache_control":{"type":"ephemeral","ttl":"1h"}}],"cache_control":{"type":"ephemeral"}}`,
+			want:    `{"type":"tool_result","tool_use_id":"call_1","content":[{"type":"text","text":"result"}],"cache_control":{"type":"ephemeral"}}`,
+		},
+		{
+			name:    "earlier marker must not cover the suffix",
+			message: `{"role":"tool","tool_call_id":"call_1","content":[{"type":"text","text":"cached","cache_control":{"type":"ephemeral"}},{"type":"text","text":"suffix"}]}`,
+			want:    `{"type":"tool_result","tool_use_id":"call_1","content":[{"type":"text","text":"cached","cache_control":{"type":"ephemeral"}},{"type":"text","text":"suffix"}]}`,
+		},
+		{
+			name:    "no valid marker",
+			message: `{"role":"tool","tool_call_id":"call_1","content":"result","cache_control":{"type":"persistent"}}`,
+			want:    `{"type":"tool_result","tool_use_id":"call_1","content":[{"type":"text","text":"result"}]}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := []byte(`{"model":"claude-opus-5-5","messages":[` + tt.message +
+				`,{"role":"tool","tool_call_id":"call_2","content":"other result"}]}`)
+			converted, err := OpenAIToAnthropic(body, "", true, nil)
+			require.NoError(t, err)
+
+			messages := parseBody(t, converted)["messages"].([]interface{})
+			require.Len(t, messages, 1)
+			results := messages[0].(map[string]interface{})["content"].([]interface{})
+			require.Len(t, results, 2)
+			first, err := json.Marshal(results[0])
+			require.NoError(t, err)
+			assert.JSONEq(t, tt.want, string(first))
+			second, err := json.Marshal(results[1])
+			require.NoError(t, err)
+			assert.JSONEq(t, `{"type":"tool_result","tool_use_id":"call_2","content":[{"type":"text","text":"other result"}]}`, string(second))
+		})
+	}
+}
+
 func TestOpenAIToAnthropic_AdaptiveThinkingDisplay(t *testing.T) {
 	tests := []struct {
 		name string

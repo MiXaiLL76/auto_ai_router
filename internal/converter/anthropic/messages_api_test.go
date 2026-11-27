@@ -14,6 +14,28 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestMessagesToChat_ToolResultCacheControlRoundTrip(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-opus-5-5","max_tokens":1024,
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","id":"toolu_test","name":"test","input":{}}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_test","content":"result","cache_control":{"type":"ephemeral","ttl":"1h"}}]}
+		]
+	}`)
+	chat, _, err := MessagesToChat(body)
+	require.NoError(t, err)
+	converted, err := OpenAIToAnthropic(chat, "", true, nil)
+	require.NoError(t, err)
+
+	messages := parseBody(t, converted)["messages"].([]interface{})
+	require.Len(t, messages, 2)
+	results := messages[1].(map[string]interface{})["content"].([]interface{})
+	require.Len(t, results, 1)
+	result, err := json.Marshal(results[0])
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"type":"tool_result","tool_use_id":"toolu_test","content":[{"type":"text","text":"result"}],"cache_control":{"type":"ephemeral","ttl":"1h"}}`, string(result))
+}
+
 func TestTruncateToolNamePreservesUTF8(t *testing.T) {
 	// A multi-byte-rune name whose byte length exceeds maxOpenAIToolNameLength must
 	// not be sliced mid-rune, which would produce invalid UTF-8.

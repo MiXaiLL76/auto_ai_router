@@ -467,6 +467,17 @@ func convertOpenAIMessagesToAnthropic(openAIMessages []openai.OpenAIMessage, bud
 				ToolUseID: toolUseID,
 				Content:   resultContent,
 			}
+			if marker, ok := asEphemeralCacheControl(msg.CacheControl); ok {
+				toolResult.CacheControl = marker
+			}
+			// Only the last part marks the same boundary as the whole tool result.
+			last := &resultContent[len(resultContent)-1]
+			if marker, ok := asEphemeralCacheControl(last.CacheControl); ok {
+				if toolResult.CacheControl == nil {
+					toolResult.CacheControl = marker
+				}
+				last.CacheControl = nil
+			}
 			messages = append(messages, AnthropicMessage{
 				Role:    "user",
 				Content: []ContentBlock{toolResult},

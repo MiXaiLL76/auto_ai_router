@@ -15,6 +15,19 @@ func parseBody(t *testing.T, body []byte) map[string]interface{} {
 	return m
 }
 
+func TestInjectCacheControlOutcome_ToolMessageMarker(t *testing.T) {
+	body := []byte(`{
+		"messages": [
+			{"role": "system", "content": "Be concise."},
+			{"role": "tool", "tool_call_id": "call_1", "content": "result", "cache_control": {"type": "ephemeral", "ttl": "1h"}}
+		]
+	}`)
+
+	result, outcome := InjectCacheControlOutcome(body)
+	assert.Equal(t, CacheControlClientSupplied, outcome)
+	assert.Equal(t, body, result)
+}
+
 func TestInjectCacheControl_SingleTurn(t *testing.T) {
 	// Only one user message → no history to mark; system gets marked.
 	body := []byte(`{
