@@ -29,6 +29,15 @@ type ProviderErrorInfo struct {
 	Codes []string
 	// Param is the parameter the provider rejected, when it names one.
 	Param *string
+	// ProviderMessage is the provider's own message, WHOLE -- the one it
+	// wrote, before the signals above were trimmed to fit the bound they
+	// carry.
+	//
+	// It is kept apart because a rule may relay the provider's message as it
+	// is, and the check that it may be relayed (it must be short enough,
+	// and carry nothing but printable text) has to see it WHOLE: a message
+	// trimmed to the bound would pass a length check that a dump fails.
+	ProviderMessage string
 }
 
 // ExtractErrorSignals extracts the text signals a provider's error value
@@ -152,6 +161,9 @@ func collectProviderErrorInfo(fields map[string]any, depth int, info *ProviderEr
 		text, ok := raw.(string)
 		if !ok {
 			continue
+		}
+		if key == "message" && info.ProviderMessage == "" {
+			info.ProviderMessage = text
 		}
 		if s := cleanProviderErrorSignal(text); s != "" {
 			info.AddSignal(s)

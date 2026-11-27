@@ -3,6 +3,7 @@ package upstreamerror
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -668,4 +669,273 @@ func TestProviderMessageReview_ParameterRuleIsIdempotentWithoutAParameter(t *tes
 			assert.Equal(t, first.Param, second.Param)
 		})
 	}
+}
+
+// TestProviderMessageReview_VerbatimRelaysTheProviderMessage checks that a
+// rule may relay the provider's own message as it is.
+//
+// Some provider messages say exactly what is wrong -- "Invalid schema for
+// response_format 'X': In context=(), 'additionalProperties' is required to
+// be supplied and to be false." names the schema and the field the provider
+// objected to, and no wording of the router's own says it as precisely.
+func TestProviderMessageReview_VerbatimRelaysTheProviderMessage(t *testing.T) {
+	t.Cleanup(func() { SetProviderMessageRules(nil) })
+
+	notRetryable := false
+	SetProviderMessageRules([]ProviderMessageRule{{
+		Match:     "invalid schema for response_format",
+		Code:      "invalid_field",
+		Message:   "{verbatim}",
+		Status:    http.StatusBadRequest,
+		Retryable: &notRetryable,
+	}})
+
+	providerMessage := "Invalid schema for response_format 'ProfiledExtractedEntities': " +
+		"In context=(), 'additionalProperties' is required to be supplied and to be false."
+	body := []byte(`{"error":{"message":"` + providerMessage + `","param":"response_format"}}`)
+
+	classified := ClassifyBadRequest(body)
+	assert.Equal(t, providerMessage, classified.Message,
+		"the provider's message must be relayed as it is")
+	assert.Equal(t, "invalid_field", classified.Code)
+}
+
+// TestProviderMessageReview_VerbatimRefusesUnsafeText checks that the
+// provider's message is relayed only where it is safe to.
+//
+// A control character would go into the client's JSON body as it is, and a
+// dump is not something the client has any business seeing. Either way the
+// router's own wording stands -- the placeholder is left for the operator to
+// see, rather than the client receiving something unprintable.
+func TestProviderMessageReview_VerbatimRefusesUnsafeText(t *testing.T) {
+	t.Cleanup(func() { SetProviderMessageRules(nil) })
+
+	notRetryable := false
+	SetProviderMessageRules([]ProviderMessageRule{{
+		Match:     "provider said",
+		Code:      "invalid_field",
+		Message:   "{verbatim}",
+		Status:    http.StatusBadRequest,
+		Retryable: &notRetryable,
+	}})
+
+	t.Run("a control character", func(t *testing.T) {
+		body := []byte(`{"error":{"message":"provider said \u0007 something"}}`)
+		classified := ClassifyBadRequest(body)
+
+		assert.NotContains(t, classified.Message, "\x07",
+			"a control character must not reach the client")
+		assert.NotContains(t, classified.Message, "{verbatim}",
+			"the placeholder must not reach the client either")
+	})
+
+	t.Run("a dump", func(t *testing.T) {
+		long := strings.Repeat("a very long explanation ", 40)
+		body := []byte(`{"error":{"message":"provider said ` + long + `"}}`)
+		classified := ClassifyBadRequest(body)
+
+		assert.NotContains(t, classified.Message, "a very long explanation")
+		assert.NotContains(t, classified.Message, "{verbatim}")
+	})
+}
+
+// TestProviderMessageReview_VerbatimIsIdempotent checks that the provider's
+// message in the router's own body survives a second classification pass.
+func TestProviderMessageReview_VerbatimIsIdempotent(t *testing.T) {
+	t.Cleanup(func() { SetProviderMessageRules(nil) })
+
+	notRetryable := false
+	SetProviderMessageRules([]ProviderMessageRule{{
+		Match:     "invalid schema for response_format",
+		Code:      "invalid_field",
+		Message:   "{verbatim}",
+		Status:    http.StatusBadRequest,
+		Retryable: &notRetryable,
+	}})
+
+	providerMessage := "Invalid schema for response_format 'X': In context=(), 'additionalProperties' is required to be supplied and to be false."
+	first := ClassifyBadRequest([]byte(`{"error":{"message":"` + providerMessage + `"}}`))
+
+	routerBody, err := json.Marshal(map[string]any{
+		"error": map[string]any{
+			"message": first.Message,
+			"type":    "invalid_request_error",
+			"param":   first.Param,
+			"code":    first.Code,
+		},
+	})
+	require.NoError(t, err)
+
+	second := ClassifyBadRequest(routerBody)
+	assert.Equal(t, first.Message, second.Message, "the message must survive a second pass")
+	assert.Equal(t, first.Code, second.Code)
+}
+
+// TestProviderMessageVerbatimBodyIsRecognizedByItself checks the recognition
+// path directly: a body the router wrote through a {verbatim} rule must be
+// recognized as the router's own by isRouterProviderMessageWithParam.
+//
+// It is checked by CALLING the recognition, not by re-classifying with the
+// rule still active: ClassifyBadRequest would re-match the same rule from
+// scratch and reproduce the same answer whether the recognition works or
+// not, which is exactly how the original idempotency test missed this.
+func TestProviderMessageVerbatimBodyIsRecognizedByItself(t *testing.T) {
+	t.Cleanup(func() { SetProviderMessageRules(nil) })
+
+	notRetryable := false
+	SetProviderMessageRules([]ProviderMessageRule{{
+		Match:     "invalid schema for response_format",
+		Code:      "invalid_field",
+		Message:   "{verbatim}",
+		Status:    http.StatusBadRequest,
+		Retryable: &notRetryable,
+	}})
+
+	providerMessage := "Invalid schema for response_format 'X': In context=(), 'additionalProperties' is required to be supplied and to be false."
+	first := ClassifyBadRequest([]byte(`{"error":{"message":"` + providerMessage + `"}}`))
+	require.Equal(t, providerMessage, first.Message, "the rule must relay the provider's text")
+
+	typ := routerErrorTypeForStatus(http.StatusBadRequest)
+	recognized := isRouterProviderMessageWithParam(first.Code, first.Message, typ, first.Param)
+	assert.True(t, recognized,
+		"a body the router wrote through a {verbatim} rule must be recognized as its own")
+
+	var perr *string
+	recognized = isRouterProviderMessageWithParam(first.Code, first.Message, typ, perr)
+	assert.True(t, recognized, "the same body carries no param and must still be recognized")
+}
+
+// TestProviderMessageVerbatimBodyDegradesNoWorseThanAPlainRule checks the
+// one scenario recognition CANNOT cover, and pins the boundary.
+//
+// Recognition compares a body against the rules in force. A router whose
+// config does not include the rule that produced the body has nothing to
+// compare against -- and inventing a looser check (code and type alone)
+// would take an arbitrary provider body for the router's own and relay its
+// text to the client, which is the one thing this package exists to
+// prevent. So such a body is classified from scratch, and falls back to a
+// generic answer.
+//
+// That is not a {verbatim} regression: a PLAIN rule's body degrades exactly
+// the same way when its rule is absent, because the fallback is the
+// classifier's own keyword branches, not recognition. This test pins that
+// parity so the {verbatim} path cannot quietly become worse than the plain
+// one.
+func TestProviderMessageVerbatimBodyDegradesNoWorseThanAPlainRule(t *testing.T) {
+	t.Cleanup(func() { SetProviderMessageRules(nil) })
+
+	notRetryable := false
+	classify := func(rule ProviderMessageRule, providerMessage string) (BadRequest, []byte) {
+		SetProviderMessageRules([]ProviderMessageRule{rule})
+		first := ClassifyBadRequest([]byte(`{"error":{"message":"` + providerMessage + `"}}`))
+		body, err := json.Marshal(map[string]any{
+			"error": map[string]any{
+				"message": first.Message,
+				"type":    routerErrorTypeForStatus(rule.Status),
+				"param":   first.Param,
+				"code":    first.Code,
+			},
+		})
+		require.NoError(t, err)
+		return first, body
+	}
+
+	verbatimRule := ProviderMessageRule{
+		Match:     "invalid schema for response_format",
+		Code:      "invalid_field",
+		Message:   "{verbatim}",
+		Status:    http.StatusBadRequest,
+		Retryable: &notRetryable,
+	}
+	verbatimFirst, verbatimBody := classify(verbatimRule,
+		"Invalid schema for response_format 'X': In context=(), 'additionalProperties' is required to be supplied and to be false.")
+
+	plainRule := ProviderMessageRule{
+		Match:     "unknown parameter",
+		Code:      "unsupported_parameter",
+		Message:   "The request contains a parameter this model does not support.",
+		Status:    http.StatusBadRequest,
+		Retryable: &notRetryable,
+	}
+	plainFirst, plainBody := classify(plainRule, "Unknown parameter: 'reasoning'")
+
+	// Both were answered by their rule.
+	require.NotEqual(t, "Invalid request", verbatimFirst.Message)
+	require.Equal(t, "The request contains a parameter this model does not support.", plainFirst.Message)
+
+	// With the rules GONE, both bodies lose their rule-derived answer.
+	SetProviderMessageRules(nil)
+	verbatimSecond := ClassifyBadRequest(verbatimBody)
+	plainSecond := ClassifyBadRequest(plainBody)
+
+	// The plain rule falls back to a keyword branch ("Invalid request
+	// parameter"); the verbatim one has no keyword to fall back on and comes
+	// out generic. Neither is the rule's message any more -- and that is the
+	// shared, pre-existing boundary, not something {verbatim} introduced.
+	assert.NotEqual(t, plainFirst.Message, plainSecond.Message,
+		"a plain rule's body is not recognized either when its rule is absent")
+	assert.NotEqual(t, verbatimFirst.Message, verbatimSecond.Message,
+		"a {verbatim} body is not recognized when its rule is absent")
+	assert.Equal(t, "invalid_request", verbatimSecond.Code)
+	assert.Equal(t, "invalid_parameter", plainSecond.Code)
+}
+
+// TestProviderMessageVerbatimDoesNotRecognizeProviderBodies checks that the
+// recognition is NOT a hole: a provider body that merely resembles the
+// rule's output must be classified from scratch, not taken for ours.
+func TestProviderMessageVerbatimDoesNotRecognizeProviderBodies(t *testing.T) {
+	t.Cleanup(func() { SetProviderMessageRules(nil) })
+
+	notRetryable := false
+	SetProviderMessageRules([]ProviderMessageRule{{
+		Match:     "invalid schema for response_format",
+		Code:      "invalid_field",
+		Message:   "{verbatim}",
+		Status:    http.StatusBadRequest,
+		Retryable: &notRetryable,
+	}})
+
+	typ := routerErrorTypeForStatus(http.StatusBadRequest)
+
+	// A middle that does not carry the rule's match text is not this rule's
+	// output, even though the code and type are right.
+	borrowed := "your key is sk-secret and the schema is fine"
+	assert.False(t, isRouterProviderMessageWithParam("invalid_field", borrowed, typ, nil),
+		"a body whose text does not carry the rule's match must not be recognized")
+
+	// A middle that carries a control character is not a text the router
+	// would relay, so it cannot be a body the router wrote.
+	withControl := "invalid schema for response_format \x07 something"
+	assert.False(t, isRouterProviderMessageWithParam("invalid_field", withControl, typ, nil),
+		"a body carrying a control character must not be recognized")
+
+	// A middle that is a dump is not relayed either.
+	dump := "invalid schema for response_format " + strings.Repeat("x", 600)
+	assert.False(t, isRouterProviderMessageWithParam("invalid_field", dump, typ, nil),
+		"a body whose middle is a dump must not be recognized")
+}
+
+// TestProviderMessageVerbatimDoesNotRewriteLiteralParam checks that a
+// provider's own text carrying the literal "{param}" is relayed as it is.
+//
+// The fix is the order of substitution: {param} is filled in the rule's
+// template BEFORE the provider's text is spliced in, so the second
+// substitution can never reach the provider's wording.
+func TestProviderMessageVerbatimDoesNotRewriteLiteralParam(t *testing.T) {
+	t.Cleanup(func() { SetProviderMessageRules(nil) })
+
+	notRetryable := false
+	SetProviderMessageRules([]ProviderMessageRule{{
+		Match:     "invalid schema for response_format",
+		Code:      "invalid_field",
+		Message:   "{verbatim}",
+		Status:    http.StatusBadRequest,
+		Retryable: &notRetryable,
+	}})
+
+	providerMessage := "Invalid schema for response_format 'X': schema says: use {param} as the placeholder name in your template"
+	classified := ClassifyBadRequest([]byte(`{"error":{"message":"` + providerMessage + `"}}`))
+
+	assert.Equal(t, providerMessage, classified.Message,
+		"the provider's own text must be relayed as it is, literal {param} included")
 }

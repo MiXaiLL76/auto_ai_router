@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode"
 )
 
 // A provider may pack the status of the failure, its own error class and
@@ -442,6 +443,11 @@ type providerMessageMatch struct {
 	// matchedByText are the indexes of the signals that carried the rule's
 	// match text.
 	matchedByText []int
+	// providerMessage is the provider's own text that the rule matched on --
+	// the one signal that carried it. It is what the {verbatim} placeholder
+	// relays: the wording that says exactly what is wrong, not a paraphrase
+	// of it.
+	providerMessage string
 }
 
 // lookupProviderMessageRule returns the rule that matches a provider
@@ -482,9 +488,38 @@ func lookupProviderMessageRule(info ProviderErrorInfo) (providerMessageMatch, bo
 		if !ok {
 			continue
 		}
-		return providerMessageMatch{rule: candidate.rule, matchedByText: matched}, true
+		return providerMessageMatch{
+			rule:            candidate.rule,
+			matchedByText:   matched,
+			providerMessage: matchedProviderMessage(info, matched),
+		}, true
 	}
 	return providerMessageMatch{}, false
+}
+
+// matchedProviderMessage returns the provider's own message that the rule
+// matched on -- the whole of it, as the provider wrote it.
+//
+// It is the provider's MESSAGE and not one of the signals: the signals are
+// trimmed to the bound they carry, and a rule that relays the message as it
+// is must relay the whole thing -- a message trimmed to 512 bytes would
+// reach the client as a different, cut-off text.
+//
+// The rule must have matched ON the message for this to be it: a rule that
+// matched on the provider's code or its type says nothing about the
+// message, and relaying it would put more of the provider's body in front of
+// the client than the rule asked for.
+func matchedProviderMessage(info ProviderErrorInfo, matched []int) string {
+	for _, index := range matched {
+		if index < 0 || index >= len(info.Signals) {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(info.Signals[index]), strings.TrimSpace(info.ProviderMessage)) {
+			continue
+		}
+		return info.ProviderMessage
+	}
+	return ""
 }
 
 // providerMessageMatches reports whether a rule matches a provider failure,
@@ -630,7 +665,7 @@ func ClassifyProviderMessage(info ProviderErrorInfo) (ProviderMessageClassificat
 	return ProviderMessageClassification{
 		Status:    match.rule.Status,
 		Code:      match.rule.Code,
-		Message:   renderProviderMessage(match.rule.Message, param),
+		Message:   renderProviderMessageWithVerbatim(match.rule.Message, param, match.providerMessage),
 		Retryable: match.rule.Retryable,
 		Param:     param,
 	}, true
@@ -644,9 +679,27 @@ func ClassifyProviderMessage(info ProviderErrorInfo) (ProviderMessageClassificat
 // config package can validate a message that carries it.
 const ProviderParamPlaceholder = "{param}"
 
+// ProviderVerbatimPlaceholder is the placeholder a rule's message uses to
+// relay the provider's own message as it is.
+//
+// It is for the failures whose whole point is the provider's wording: "Invalid
+// schema for response_format 'X': In context=(), 'additionalProperties' is
+// required to be supplied and to be false." says exactly what is wrong with
+// the schema, and no paraphrase of it does.
+//
+// It is exported so the config package can validate a message that carries it.
+const ProviderVerbatimPlaceholder = "{verbatim}"
+
 // unnamedProviderParam is what a rule's message says when the provider named
 // no parameter (or named one the router would not repeat).
 const unnamedProviderParam = "the parameter"
+
+// maxVerbatimMessageLen bounds the provider's message that a rule may relay
+// as it is.
+//
+// A provider's message about a request is a sentence or two; anything much
+// longer is a dump of something the client has no business seeing.
+const maxVerbatimMessageLen = 512
 
 // providerParamNames are the request fields a rule's message may name.
 //
@@ -774,17 +827,45 @@ func providerRuleParam(rule ProviderMessageRule) (*string, bool) {
 	return nil, true
 }
 
-// renderProviderMessage puts the parameter the provider named into a rule's
-// message.
+// renderProviderMessageWithVerbatim puts the parameter the provider named
+// into a rule's message, and the provider's own message where the rule asks
+// for it.
+//
+// The provider's message is relayed as it is ONLY when it is safe to: short
+// enough, and carrying nothing but printable text. A provider that answered
+// with a dump, or with a control character, gets the router's own wording
+// instead -- the placeholder is left for the operator to see, rather than
+// the client receiving something unprintable.
+//
+// The {param} placeholder is substituted BEFORE the provider's text is
+// spliced in, and never after: a provider whose own message happens to carry
+// the literal "{param}" (quoting a schema template, say) would otherwise be
+// rewritten by the second pass, and the one thing this placeholder promises
+// is that the provider's wording is relayed as it is. A provider's text
+// carrying the literal "{verbatim}" is safe for the same reason --
+// strings.ReplaceAll does not rescan what it inserted.
+func renderProviderMessageWithVerbatim(message string, param *string, providerMessage string) string {
+	message = renderProviderParam(message, param)
+	if !strings.Contains(message, ProviderVerbatimPlaceholder) {
+		return message
+	}
+	if verbatim, ok := verbatimProviderMessage(providerMessage); ok {
+		return strings.ReplaceAll(message, ProviderVerbatimPlaceholder, verbatim)
+	}
+	return strings.ReplaceAll(message, ProviderVerbatimPlaceholder, unnamedProviderMessage)
+}
+
+// renderProviderParam substitutes the {param} placeholder in a rule's
+// message with the parameter the provider named.
 //
 // The parameter is the provider's own, so it is checked against the router's
 // list of request fields first (see providerParamNameAccepted): a provider
 // that put free text in its "param" field gets a wording that names no
 // parameter -- not its text.
 //
-// A rule whose message has no placeholder is returned as it is, so a rule
-// that does not care about the parameter is unaffected.
-func renderProviderMessage(message string, param *string) string {
+// A message with no placeholder is returned as it is, so a rule that does
+// not care about the parameter is unaffected.
+func renderProviderParam(message string, param *string) string {
 	if !strings.Contains(message, ProviderParamPlaceholder) {
 		return message
 	}
@@ -792,6 +873,33 @@ func renderProviderMessage(message string, param *string) string {
 		return strings.ReplaceAll(message, ProviderParamPlaceholder, *param)
 	}
 	return strings.ReplaceAll(message, ProviderParamPlaceholder, unnamedProviderParam)
+}
+
+// unnamedProviderMessage is what a rule's message says when the provider's own
+// message may not be relayed as it is.
+const unnamedProviderMessage = "the provider's message"
+
+// verbatimProviderMessage reports whether the provider's message may be
+// relayed to the client as it is, and returns it when it may.
+//
+// The checks are the ones the rest of this package applies to provider text:
+// it must be short enough to be a sentence about the request, and it must
+// carry nothing but printable text -- a control character would go into the
+// client's JSON body as it is.
+func verbatimProviderMessage(message string) (string, bool) {
+	trimmed := strings.TrimSpace(message)
+	if trimmed == "" || len(trimmed) > maxVerbatimMessageLen {
+		return "", false
+	}
+	for _, r := range trimmed {
+		if r == '\n' || r == '\r' || r == '\t' {
+			continue
+		}
+		if unicode.IsControl(r) {
+			return "", false
+		}
+	}
+	return trimmed, true
 }
 
 // ProviderMessageRetryable reports whether a failure that matched a rule
@@ -889,37 +997,82 @@ func isRouterProviderMessageWithParam(code, message, typ string, param *string) 
 		if typ != "" && rule.rule.Status != 0 && routerErrorTypeForStatus(rule.rule.Status) != typ {
 			continue
 		}
-		if _, names := providerRuleParam(rule.rule); names {
-			// The rule names the parameter, so the body's message is
-			// compared against the rule's template RENDERED with the
-			// parameter the body carries: the same rendering the router did
-			// when it wrote the body. So the two cannot disagree, and the
-			// reverse-parsing (reconstructing the template and the
-			// substitution from the message) is not needed.
-			//
-			// A body that carries NO parameter is compared against the
-			// rendering with none either: the router wrote it that way
-			// when the provider named no parameter (or named one the
-			// router would not repeat), and it is still the router's own.
-			rendered := renderProviderMessage(rule.rule.Message, param)
-			if param == nil {
-				rendered = renderProviderMessage(rule.rule.Message, nil)
-			}
-			if rendered != message {
-				continue
-			}
+		if isRouterRenderedProviderMessage(rule, message, param) {
 			return true
 		}
-		// The rule names no parameter, so the body must carry none.
-		if param != nil {
-			continue
-		}
-		if rule.rule.Message != message {
-			continue
-		}
-		return true
 	}
 	return false
+}
+
+// isRouterRenderedProviderMessage reports whether message is EXACTLY what
+// rendering this rule for a body carrying param produces.
+//
+// It is the recognition the second classification pass needs: the router
+// wrote the body by rendering the rule, so a body that renders the same way
+// is the router's own, and must survive as itself.
+//
+// A {verbatim} rule has no fixed message to compare against -- the router
+// spliced the provider's own text into it. Comparing the raw template
+// against the body can never match, which is why such a body used to be
+// re-classified from scratch and degraded to the generic answer. Instead the
+// fixed parts around the placeholder are matched, and the spliced text (the
+// middle) is re-checked against the same bounds the router applied when it
+// wrote it: it must be a text the router would relay, and it must carry the
+// rule's own match text -- which is what the rule matched on, and therefore
+// what the router spliced. Anything else is not a body this rule produced,
+// and is classified from scratch (a provider body must never be taken for
+// ours merely because it resembles one).
+func isRouterRenderedProviderMessage(rule compiledProviderMessageRule, message string, param *string) bool {
+	// A rule that names the parameter accepts a body with or without it: the
+	// router writes the unnamed wording when the provider named none (or one
+	// it would not repeat). A rule that names no parameter accepts only a
+	// body that carries none.
+	if _, names := providerRuleParam(rule.rule); !names && param != nil {
+		return false
+	}
+
+	template := renderProviderParam(rule.rule.Message, param)
+	placeholderAt := strings.Index(template, ProviderVerbatimPlaceholder)
+	if placeholderAt < 0 {
+		return template == message
+	}
+	prefix := template[:placeholderAt]
+	suffix := template[placeholderAt+len(ProviderVerbatimPlaceholder):]
+	if strings.Contains(suffix, ProviderVerbatimPlaceholder) {
+		// A rule the renderer fills more than once is not one this check can
+		// reproduce; it is not recognized rather than half-recognized.
+		return false
+	}
+	if len(message) < len(prefix)+len(suffix) {
+		return false
+	}
+	if !strings.HasPrefix(message, prefix) || !strings.HasSuffix(message, suffix) {
+		return false
+	}
+	relayed := message[len(prefix) : len(message)-len(suffix)]
+
+	// The router refused to relay the provider's text, so the body carries
+	// the same refusal -- it is still a body this rule produced.
+	if relayed == unnamedProviderMessage {
+		return true
+	}
+
+	// A rule that matched on the provider's CODE alone carries no text to
+	// anchor the spliced message to. Accepting an arbitrary middle here
+	// would let a provider body pack its own wording into a body that
+	// resembles ours and have it relayed -- so only the refusal rendering
+	// above is recognized for such a rule.
+	if rule.normalizedMatch == "" {
+		return false
+	}
+	if _, ok := verbatimProviderMessage(relayed); !ok {
+		return false
+	}
+	// The spliced text is the provider's message the rule matched on, so it
+	// carries the rule's match text. Re-checking it keeps a body that merely
+	// has the right fixed parts but a different middle from being taken for
+	// this rule's output.
+	return strings.Contains(normalizeProviderMessageText(relayed), rule.normalizedMatch)
 }
 
 // routerErrorTypeForStatus is the "type" the router writes beside a status
