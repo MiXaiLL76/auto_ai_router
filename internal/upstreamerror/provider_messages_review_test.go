@@ -542,3 +542,130 @@ func TestProviderMessageReview_ParameterRuleIsIdempotent(t *testing.T) {
 		})
 	}
 }
+
+// TestProviderMessageReview_RuleWithoutThePlaceholderNamesNoParameter checks
+// that a rule which does not name the parameter does not repeat it.
+//
+// The provider's "param" field says what the provider was complaining about,
+// and the rule matched on its own wording -- not necessarily on the
+// provider's parameter. So a body that carries a parameter the rule never
+// mentioned must not put it into the client's "param" field: the client
+// would be told about a field the rule said nothing about.
+func TestProviderMessageReview_RuleWithoutThePlaceholderNamesNoParameter(t *testing.T) {
+	t.Cleanup(func() { SetProviderMessageRules(nil) })
+
+	notRetryable := false
+	SetProviderMessageRules([]ProviderMessageRule{{
+		Match:     "the provider is overloaded",
+		Code:      "invalid_request",
+		Message:   "The provider is overloaded",
+		Status:    http.StatusBadRequest,
+		Retryable: &notRetryable,
+	}})
+
+	classified := ClassifyBadRequest([]byte(`{"error":{"message":"The provider is overloaded","param":"some_other_field"}}`))
+
+	assert.Equal(t, "The provider is overloaded", classified.Message)
+	assert.Nil(t, classified.Param,
+		"a rule that names no parameter must not repeat one")
+}
+
+// TestProviderMessageReview_ParameterMustBeAKnownField checks that only the
+// router's own request fields are repeated to the client.
+//
+// It is a CLOSED list, and it has to be: the name comes out of the
+// provider's own body, so without a list a provider could put an arbitrary
+// string into the client's "param" field -- exactly the channel for
+// provider text that this package exists to close.
+func TestProviderMessageReview_ParameterMustBeAKnownField(t *testing.T) {
+	t.Cleanup(func() { SetProviderMessageRules(nil) })
+
+	notRetryable := false
+	SetProviderMessageRules([]ProviderMessageRule{{
+		Match:     "unknown parameter:",
+		Code:      "unsupported_parameter",
+		Message:   "Unsupported parameter: {param}",
+		Status:    http.StatusBadRequest,
+		Retryable: &notRetryable,
+	}})
+
+	for _, tt := range []struct {
+		name       string
+		param      string
+		wantInText bool
+	}{
+		{"a known field", "reasoning", true},
+		{"another known field", "max_tokens", true},
+		{"a nested path", "messages[0].content[1]", true},
+		{"an unknown field", "some_secret_field", false},
+		{"a sentence", "your api key is leaked", false},
+		{"a path", "/etc/passwd", false},
+		{"a url", "https://evil.example.com/x", false},
+		{"two words", "two words", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			body := []byte(`{"error":{"message":"Unknown parameter: 'x'.","param":"` + tt.param + `","code":"unknown_parameter"}}`)
+			classified := ClassifyBadRequest(body)
+
+			if tt.wantInText {
+				assert.Contains(t, classified.Message, tt.param)
+				require.NotNil(t, classified.Param)
+				assert.Equal(t, tt.param, *classified.Param)
+				return
+			}
+			assert.NotContains(t, classified.Message, tt.param,
+				"a name outside the router's own list must not be repeated")
+			assert.Nil(t, classified.Param)
+		})
+	}
+}
+
+// TestProviderMessageReview_ParameterRuleIsIdempotentWithoutAParameter
+// checks that the rule's answer survives a second classification pass when
+// the provider named no parameter -- or named one the router would not
+// repeat.
+//
+// The message the router wrote then is the one with no name in it, and the
+// second pass has to recognize THAT as the router's own -- otherwise the
+// operator's message is lost on the second pass and replaced by the generic
+// one, and the parameter turns up in the client's body where it was not.
+func TestProviderMessageReview_ParameterRuleIsIdempotentWithoutAParameter(t *testing.T) {
+	t.Cleanup(func() { SetProviderMessageRules(nil) })
+
+	notRetryable := false
+	SetProviderMessageRules([]ProviderMessageRule{{
+		Match:     "unknown parameter:",
+		Code:      "unsupported_parameter",
+		Message:   "Unsupported parameter: {param}",
+		Status:    http.StatusBadRequest,
+		Retryable: &notRetryable,
+	}})
+
+	for _, tt := range []struct {
+		name  string
+		param string
+	}{
+		{"no parameter", ""},
+		{"a parameter outside the router's list", "some_secret_field"},
+		{"a parameter with a space", "two words"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			first := ClassifyBadRequest([]byte(`{"error":{"message":"Unknown parameter: 'x'.","param":"` + tt.param + `","code":"unknown_parameter"}}`))
+
+			routerBody, err := json.Marshal(map[string]any{
+				"error": map[string]any{
+					"message": first.Message,
+					"type":    "invalid_request_error",
+					"param":   first.Param,
+					"code":    first.Code,
+				},
+			})
+			require.NoError(t, err)
+
+			second := ClassifyBadRequest(routerBody)
+			assert.Equal(t, first.Message, second.Message, "the message must survive a second pass")
+			assert.Equal(t, first.Code, second.Code)
+			assert.Equal(t, first.Param, second.Param)
+		})
+	}
+}

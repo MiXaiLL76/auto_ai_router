@@ -405,6 +405,21 @@ provider_messages:
 		assert.Contains(t, cfg.ProviderMessages.Messages[0].Message, "{param}")
 	})
 
+	t.Run("a misspelled placeholder is refused", func(t *testing.T) {
+		// The placeholder is matched EXACTLY, so "{Param}" would pass the
+		// validation and reach the client spelled out.
+		_, err := loadConfigFromString(t, providerMessagesTestConfigBase+`
+provider_messages:
+  messages:
+    - match: "unknown parameter:"
+      message: "Unsupported parameter: {Param}"
+      code: unsupported_parameter
+      status: 400
+`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "placeholder")
+	})
+
 	t.Run("two placeholders are refused", func(t *testing.T) {
 		_, err := loadConfigFromString(t, providerMessagesTestConfigBase+`
 provider_messages:

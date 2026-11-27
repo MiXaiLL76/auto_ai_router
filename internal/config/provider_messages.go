@@ -23,6 +23,11 @@ const (
 	maxProviderMessageTextBytes = 512
 )
 
+// wrongCaseParamPlaceholder is the placeholder as an operator may well type
+// it -- the placeholder is matched EXACTLY, so this spelling would pass the
+// validation and reach the client spelled out.
+const wrongCaseParamPlaceholder = "{Param}"
+
 // ProviderMessageConfig is one provider message the router may relay to a
 // client.
 //
@@ -190,6 +195,14 @@ func (c *ProviderMessagesConfig) Validate() error {
 		if count := strings.Count(entry.Message, upstreamerror.ProviderParamPlaceholder); count > 1 {
 			return fmt.Errorf("provider_messages.messages[%d]: message carries the %s placeholder %d times, it can be named only once",
 				i, upstreamerror.ProviderParamPlaceholder, count)
+		}
+		if count := strings.Count(entry.Message, wrongCaseParamPlaceholder); count > 0 {
+			// The placeholder is matched EXACTLY, so a message carrying
+			// "{Param}" would pass the validation and reach the client with
+			// the placeholder spelled out in it. The operator would see a
+			// rule that loaded cleanly and a client that got a typo.
+			return fmt.Errorf("provider_messages.messages[%d]: message carries %q, but the placeholder is %q (lower case)",
+				i, wrongCaseParamPlaceholder, upstreamerror.ProviderParamPlaceholder)
 		}
 
 		key := strings.ToLower(entry.Match) + "\x00" + entry.ProviderCode + "\x00" + entry.Code
