@@ -45,9 +45,13 @@ func TestRecordTTFT_Enabled(t *testing.T) {
 	TimeToFirstTokenSeconds.Reset()
 
 	m := New(true)
-	m.RecordTTFT("cred1", "/v1/chat/completions", 250*time.Millisecond)
+	m.RecordTTFT("cred1", "gpt-4o", "/v1/chat/completions", 250*time.Millisecond)
 
 	count := testutil.CollectAndCount(TimeToFirstTokenSeconds)
+	// The sample is read per model: one series per (credential, model, endpoint).
+	byModel, err := TimeToFirstTokenSeconds.CurryWith(prometheus.Labels{"model": "gpt-4o"})
+	assert.NoError(t, err)
+	assert.Equal(t, 1, testutil.CollectAndCount(byModel))
 	assert.Greater(t, count, 0)
 }
 
@@ -55,7 +59,7 @@ func TestRecordTTFT_Disabled(t *testing.T) {
 	TimeToFirstTokenSeconds.Reset()
 
 	m := New(false)
-	m.RecordTTFT("cred1", "/v1/chat/completions", 250*time.Millisecond)
+	m.RecordTTFT("cred1", "gpt-4o", "/v1/chat/completions", 250*time.Millisecond)
 
 	assert.Equal(t, 0, testutil.CollectAndCount(TimeToFirstTokenSeconds))
 }

@@ -93,13 +93,19 @@ var (
 	// that errored before any delta, or weren't streaming at all, don't emit a
 	// sample here, so this histogram's _count is its own "streamed successfully
 	// past first token" denominator.
+	//
+	// model is the name the client asked for (the alias), as on
+	// auto_ai_router_requests_total: one model served by several credentials
+	// (replicas of a self-hosted model) is read per model with
+	// sum by (le, model), next to the model server's and the gateway's own
+	// per-model TTFT.
 	TimeToFirstTokenSeconds = promauto.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:    "auto_ai_router_time_to_first_token_seconds",
 			Help:    "Time to first token (TTFT) for streaming responses, from request start to the first real content delta",
 			Buckets: []float64{0.05, 0.1, 0.25, 0.5, 0.75, 1, 1.5, 2, 2.5, 3, 4, 5, 7.5, 10, 15, 20, 30, 60},
 		},
-		[]string{"credential", "endpoint"},
+		[]string{"credential", "model", "endpoint"},
 	)
 
 	// TimeToUpstreamSendSeconds measures the router's own processing time
@@ -683,11 +689,11 @@ func (m *Metrics) RecordRequest(credential, endpoint, model string, statusCode i
 // stream, at the point the stream finishes (success or mid-stream failure
 // after content had already started) — ttft is the duration from request
 // start to that first delta, not to the first HTTP byte.
-func (m *Metrics) RecordTTFT(credential, endpoint string, ttft time.Duration) {
+func (m *Metrics) RecordTTFT(credential, model, endpoint string, ttft time.Duration) {
 	if !m.isEnabled() {
 		return
 	}
-	TimeToFirstTokenSeconds.WithLabelValues(credential, endpoint).Observe(ttft.Seconds())
+	TimeToFirstTokenSeconds.WithLabelValues(credential, model, endpoint).Observe(ttft.Seconds())
 }
 
 // RecordUpstreamSendDelay records the router's own processing time before

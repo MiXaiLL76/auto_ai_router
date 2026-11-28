@@ -25,8 +25,6 @@ import (
 	"io"
 	"math/rand/v2"
 	"net/http"
-	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -224,34 +222,15 @@ func (p *Proxy) attemptSimulatedNonStream(
 	)
 	var streamBuf bytes.Buffer
 	streamBuf.Grow(64 * 1024)
-	var ttftScan ttftScanState
-	ttftPending := logCtx != nil && logCtx.CompletionStartTime.IsZero()
-	readBuf := make([]byte, 8192)
-	overflow := false
-	var lastReadErr error
-	for {
-		n, readErr := clientReader.Read(readBuf)
-		if n > 0 {
-			chunk := readBuf[:n]
-			if int64(streamBuf.Len()+n) > p.maxResponseBodySize {
-				overflow = true
-				break
-			}
-			streamBuf.Write(chunk)
-			if ttftPending {
-				if ttftScan.observe(chunk) {
-					logCtx.markFirstToken()
-					ttftPending = false
-				}
-			}
-		}
-		if readErr != nil {
-			lastReadErr = readErr
-			break
-		}
-	}
+	// request_timeout bounds the read, as it bounds the body read of a
+	// non-streamed reply: a hung upstream fails the attempt.
+	deadline := startStreamReadDeadline(resp.Body, p.requestTimeout)
+	overflow, lastReadErr := p.drainForcedStream(clientReader, logCtx, func(chunk []byte) {
+		streamBuf.Write(chunk)
+	})
 	_ = pr.Close()
 	wg.Wait()
+	lastReadErr = deadline.stop(lastReadErr)
 
 	logTokens := totalTokens
 	if logTokens == 0 {
@@ -283,6 +262,7 @@ func (p *Proxy) attemptSimulatedNonStream(
 	var terminalStatus int
 	var terminalPayload string
 	var emptyStream bool
+	var truncated bool
 	// clientAborted records that this attempt's failure was the client going
 	// away (its request context canceled mid-stream), not the provider: the
 	// stream error it produces is context.Canceled, which markStreamFailure
@@ -310,19 +290,21 @@ func (p *Proxy) attemptSimulatedNonStream(
 		streamErr = ErrResponseBodyTooLarge
 		markStreamFailure(logCtx, streamErr)
 	} else {
-		if prepared.completionsPath {
-			// Legacy /v1/completions: the upstream stream is choices[].text, not
-			// choices[].delta.content, so it assembles into text_completion JSON.
-			reassembledBody = reassembleCompletions(streamBuf.Bytes())
-		} else {
-			reassembledBody = reassembleChatCompletion(streamBuf.Bytes())
-		}
-		if len(reassembledBody) == 0 {
-			streamErr = fmt.Errorf("simulated non-stream response: no reassemblable content in upstream stream")
+		// Legacy /v1/completions: the upstream stream is choices[].text, not
+		// choices[].delta.content, so it assembles into text_completion JSON.
+		var reassembleErr error
+		reassembledBody, reassembleErr = reassembleForcedStream(streamBuf.Bytes(), prepared.completionsPath)
+		if reassembleErr != nil {
+			reassembledBody = nil
+			streamErr = fmt.Errorf("simulated non-stream response: %w", reassembleErr)
 			markStreamFailure(logCtx, streamErr)
+			// The stream ended cleanly but before its answer was complete: the
+			// same failure as a connection dropped mid-stream, which reads as an
+			// error only when the transport notices it.
+			truncated = errors.Is(reassembleErr, errForcedStreamTruncated)
 			// No transport error and no terminal error event, yet nothing to
 			// reassemble: the provider closed a 2xx stream without content.
-			emptyStream = readErrForResolve == nil
+			emptyStream = !truncated && readErrForResolve == nil
 		}
 	}
 
@@ -344,7 +326,8 @@ func (p *Proxy) attemptSimulatedNonStream(
 		// A genuine transport break (readErrForResolve != nil, io.EOF excluded):
 		// the provider dropped the connection mid-stream. Overflow is the one
 		// failure that stays non-retryable (a retry would hit the same size).
-		transportFailure: readErrForResolve != nil,
+		// A stream that ended early without a transport error is the same break.
+		transportFailure: readErrForResolve != nil || truncated,
 		// A terminal error event the retry policy classifies as retryable (429,
 		// 5xx, ...) is replayed on the next credential too: nothing reached the
 		// client, so the retry is transparent, and surfacing a generic 502 for a
@@ -1061,36 +1044,11 @@ func (p *Proxy) attemptSimulatedNativeNonStream(
 		logCtx,
 		modelID,
 	)
-	var streamBuf bytes.Buffer
-	streamBuf.Grow(64 * 1024)
-	var ttftScan ttftScanState
-	ttftPending := logCtx != nil && logCtx.CompletionStartTime.IsZero()
-	readBuf := make([]byte, 8192)
-	overflow := false
-	var lastReadErr error
-	for {
-		n, readErr := clientReader.Read(readBuf)
-		if n > 0 {
-			chunk := readBuf[:n]
-			if int64(streamBuf.Len()+n) > p.maxResponseBodySize {
-				overflow = true
-				break
-			}
-			streamBuf.Write(chunk)
-			if ttftPending {
-				if ttftScan.observe(chunk) {
-					logCtx.markFirstToken()
-					ttftPending = false
-				}
-			}
-		}
-		if readErr != nil {
-			lastReadErr = readErr
-			break
-		}
-	}
+	deadline := startStreamReadDeadline(resp.Body, p.requestTimeout)
+	overflow, lastReadErr := p.drainForcedStream(clientReader, logCtx, nil)
 	_ = pr.Close()
 	wg.Wait()
+	lastReadErr = deadline.stop(lastReadErr)
 
 	logTokens := totalTokens
 	if logTokens == 0 {
@@ -1597,79 +1555,54 @@ func (p *Proxy) attemptSimulatedPassthroughNonStream(
 		finalBody      []byte
 		sawTerminal    bool
 		streamErr      error
-		streamBuf      strings.Builder
-		ttftScan       ttftScanState
-		ttftPending    = logCtx != nil && logCtx.CompletionStartTime.IsZero()
 		completedEvent []byte
 		// What finalizeStreamingLog reads from completedEvent.
 		completedEventParse *finalChunkParse
 	)
 
 	providerReader := io.TeeReader(resp.Body, proxyStreamErrorObserver{capture: rawProviderStreamError})
-	readBuf := make([]byte, 8192)
 	lines := newResponsesStreamLines()
-	overflow := false
-	var lastReadErr error
-	for {
-		n, readErr := providerReader.Read(readBuf)
-		if n > 0 {
-			chunk := readBuf[:n]
-			if int64(streamBuf.Len()+n) > p.maxResponseBodySize {
-				overflow = true
-				break
-			}
-			streamBuf.Write(chunk)
-			completion.AddChunk(chunk)
-			if tokens := extractTokensFromPayloads(splitSSEPayloads(chunk, nil)); tokens > 0 {
-				totalTokens = tokens
-			}
-			if usage := extractTokenUsageFromPayloads(splitSSEPayloads(chunk, nil), tokenUsageOptions); usage != nil {
-				if logCtx != nil {
-					if logCtx.TokenUsage == nil {
-						logCtx.TokenUsage = &converter.TokenUsage{}
-					}
-					logCtx.TokenUsage.MergeNonZero(usage)
-				}
-			}
-			rememberLastStreamDataChunk(&lastChunk, chunk)
-			if ttftPending {
-				if ttftScan.observe(chunk) {
-					logCtx.markFirstToken()
-					ttftPending = false
-				}
-			}
-			// Walk complete SSE lines for the terminal Responses event.
-			lines.Observe(chunk, func(line []byte) {
-				// Some Responses-compatible upstreams (e.g. Alibaba DashScope
-				// via a proxy) emit "data:{...}" without the space — requiring
-				// "data: " made every event invisible and the terminal event
-				// never seen.
-				jsonData := responsesStreamDataPayload(line)
-				if jsonData == nil {
-					return
-				}
-				// As in handlePassthroughResponsesStreaming, the event need
-				// not fit responses.Response (e.g. non-string metadata values):
-				// its response object is returned as sent, and decoded whole
-				// only best-effort, below.
-				event, ok := parseResponsesTerminalEvent(jsonData)
-				if !ok {
-					return
-				}
-				sawTerminal = true
-				completedEvent = bytes.Clone(jsonData) // line is only valid during this call
-				completedEventParse = event.finalChunkParse(completedEvent, true)
-				finalBody = terminalResponseJSON(completedEvent)
-			})
+	deadline := startStreamReadDeadline(resp.Body, p.requestTimeout)
+	overflow, lastReadErr := p.drainForcedStream(providerReader, logCtx, func(chunk []byte) {
+		completion.AddChunk(chunk)
+		if tokens := extractTokensFromPayloads(splitSSEPayloads(chunk, nil)); tokens > 0 {
+			totalTokens = tokens
 		}
-		if readErr != nil {
-			if !errors.Is(readErr, io.EOF) {
-				streamErr = readErr
-				lastReadErr = readErr
+		if usage := extractTokenUsageFromPayloads(splitSSEPayloads(chunk, nil), tokenUsageOptions); usage != nil {
+			if logCtx != nil {
+				if logCtx.TokenUsage == nil {
+					logCtx.TokenUsage = &converter.TokenUsage{}
+				}
+				logCtx.TokenUsage.MergeNonZero(usage)
 			}
-			break
 		}
-	}
+		rememberLastStreamDataChunk(&lastChunk, chunk)
+		// Walk complete SSE lines for the terminal Responses event.
+		lines.Observe(chunk, func(line []byte) {
+			// Some Responses-compatible upstreams (e.g. Alibaba DashScope
+			// via a proxy) emit "data:{...}" without the space — requiring
+			// "data: " made every event invisible and the terminal event
+			// never seen.
+			jsonData := responsesStreamDataPayload(line)
+			if jsonData == nil {
+				return
+			}
+			// As in handlePassthroughResponsesStreaming, the event need
+			// not fit responses.Response (e.g. non-string metadata values):
+			// its response object is returned as sent, and decoded whole
+			// only best-effort, below.
+			event, ok := parseResponsesTerminalEvent(jsonData)
+			if !ok {
+				return
+			}
+			sawTerminal = true
+			completedEvent = bytes.Clone(jsonData) // line is only valid during this call
+			completedEventParse = event.finalChunkParse(completedEvent, true)
+			finalBody = terminalResponseJSON(completedEvent)
+		})
+	})
+	lastReadErr = deadline.stop(lastReadErr)
+	streamErr = lastReadErr
 
 	logTokens := totalTokens
 	if logTokens == 0 {
@@ -2334,150 +2267,4 @@ func (p *Proxy) simulatedTransformer(
 	default:
 		return identity
 	}
-}
-
-// ---------------------------------------------------------------------------
-// Chat-Completions SSE → single non-stream JSON reassembly
-// ---------------------------------------------------------------------------
-
-// reassembleChatCompletion folds an OpenAI Chat-Completions SSE body (as
-// produced by the provider converters after conv.StreamTo) into a single
-// Chat-Completions non-stream JSON body with chatStreamAggregator, the
-// rebuild the loop gate's force_stream uses too. Returns nil when nothing
-// reassemblable was found or the stream carried an error event.
-func reassembleChatCompletion(stream []byte) []byte {
-	agg := newChatStreamAggregator()
-	if err := agg.consume(bytes.NewReader(stream), 0); err != nil || agg.errStatus != 0 || len(agg.choices) == 0 {
-		return nil
-	}
-	if agg.id == "" {
-		agg.id = "chatcmpl-simulated"
-	}
-	b, err := agg.completion()
-	if err != nil {
-		return nil
-	}
-	return b
-}
-
-// reassembleCompletions folds a legacy OpenAI Completions SSE body
-// (choices[].text, object "text_completion") into a single non-stream
-// text_completion JSON body — the /v1/completions mirror of
-// reassembleChatCompletion. The two shapes differ: Completions has no
-// message/delta/tool_calls, just concatenated choice text plus finish_reason.
-func reassembleCompletions(stream []byte) []byte {
-	type completionChoiceAcc struct {
-		index        int
-		text         strings.Builder
-		finishReason *string
-	}
-	choices := map[int]*completionChoiceAcc{}
-	var choiceOrder []int
-	var (
-		id                string
-		model             string
-		createdAt         int64
-		systemFingerprint string
-		usage             json.RawMessage
-	)
-
-	for _, line := range strings.Split(string(stream), "\n") {
-		line = strings.TrimRight(line, "\r")
-		if !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-		if payload == "" || payload == "[DONE]" {
-			continue
-		}
-		var chunk struct {
-			ID                string `json:"id"`
-			Model             string `json:"model"`
-			Created           int64  `json:"created"`
-			SystemFingerprint string `json:"system_fingerprint"`
-			Choices           []struct {
-				Index        int     `json:"index"`
-				Text         string  `json:"text"`
-				FinishReason *string `json:"finish_reason"`
-			} `json:"choices"`
-			Usage json.RawMessage `json:"usage"`
-		}
-		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
-			continue
-		}
-		if chunk.ID != "" {
-			id = chunk.ID
-		}
-		if chunk.Model != "" {
-			model = chunk.Model
-		}
-		if chunk.Created != 0 {
-			createdAt = chunk.Created
-		}
-		if chunk.SystemFingerprint != "" {
-			systemFingerprint = chunk.SystemFingerprint
-		}
-		for _, c := range chunk.Choices {
-			st := choices[c.Index]
-			if st == nil {
-				st = &completionChoiceAcc{index: c.Index}
-				choices[c.Index] = st
-				choiceOrder = append(choiceOrder, c.Index)
-			}
-			if c.Text != "" {
-				st.text.WriteString(c.Text)
-			}
-			if c.FinishReason != nil {
-				st.finishReason = c.FinishReason
-			}
-		}
-		if len(chunk.Usage) > 0 && string(chunk.Usage) != "null" {
-			usage = chunk.Usage
-		}
-	}
-
-	if len(choiceOrder) == 0 {
-		return nil
-	}
-	sort.Ints(choiceOrder)
-
-	type completionChoice struct {
-		Index        int     `json:"index"`
-		Text         string  `json:"text"`
-		FinishReason *string `json:"finish_reason,omitempty"`
-	}
-	type completionResponse struct {
-		ID                string             `json:"id"`
-		Object            string             `json:"object"`
-		Created           int64              `json:"created"`
-		Model             string             `json:"model"`
-		SystemFingerprint string             `json:"system_fingerprint,omitempty"`
-		Choices           []completionChoice `json:"choices"`
-		Usage             json.RawMessage    `json:"usage,omitempty"`
-	}
-
-	out := completionResponse{
-		ID:                id,
-		Object:            "text_completion",
-		Created:           createdAt,
-		Model:             model,
-		SystemFingerprint: systemFingerprint,
-		Usage:             usage,
-	}
-	if out.ID == "" {
-		out.ID = "cmpl-simulated"
-	}
-	for _, idx := range choiceOrder {
-		st := choices[idx]
-		out.Choices = append(out.Choices, completionChoice{
-			Index:        st.index,
-			Text:         st.text.String(),
-			FinishReason: st.finishReason,
-		})
-	}
-	b, err := json.Marshal(out)
-	if err != nil {
-		return nil
-	}
-	return b
 }

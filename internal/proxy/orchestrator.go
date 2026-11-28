@@ -702,14 +702,23 @@ func (p *Proxy) applyForceStream(req credentialPreparedRequest, streaming bool, 
 			"credential", cred.Name, "path", req.path, "model", req.realModelID)
 		return req
 	}
-	// Chat-shaped upstream bodies additionally ask for usage in the stream.
-	if req.path == "/v1/chat/completions" {
-		req.rewriteStreamBodies(func(body []byte) []byte {
-			return updateStreamRequest(body, true, true)
-		})
-	} else {
-		req.rewriteStreamBodies(setStreamTrue)
+	if blocker := forcedStreamBlocker(req.body); blocker != "" {
+		// The provider refuses this option with stream:true (or silently does
+		// not stream): the request worked non-streamed, so it goes as the
+		// client sent it and only misses the TTFT.
+		p.logger.DebugContext(r.Context(), "Request not forced to stream upstream",
+			"credential", cred.Name, "path", req.path, "model", req.realModelID, "option", blocker)
+		return req
 	}
+	// OpenAI-wire bodies (chat completions and the legacy completions)
+	// additionally ask for usage in the stream: without
+	// stream_options.include_usage the stream carries none, the rebuilt answer
+	// has no usage and billing falls back to an estimate.
+	includeUsage := req.path == "/v1/chat/completions" || req.path == "/v1/completions"
+	req.rewriteStreamBodies(func(body []byte) []byte {
+		out, _ := forcedStreamRequestBody(body, forcedStreamOptions{includeUsage: includeUsage})
+		return out
+	})
 	// Chat-shaped request forced to stream. Recorded so the converter mode can
 	// set IsStreaming=true: for Vertex/Gemini the streaming switch is the URL
 	// (streamGenerateContent?alt=sse), not a body field, so the body-level

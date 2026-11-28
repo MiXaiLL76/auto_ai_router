@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	json "github.com/goccy/go-json"
@@ -60,6 +59,12 @@ func (p *Proxy) loopGateUpstreamBody(ctx context.Context, logCtx *RequestLogCont
 	if !settings.ForceStreamEnabled() {
 		return body, nil
 	}
+	if blocker := forcedStreamBlocker(body); blocker != "" {
+		// The provider refuses this option with stream:true: the request goes
+		// as the client sent it and is only observed.
+		p.logger.DebugContext(ctx, "Loop gate: request not streamed upstream", "option", blocker)
+		return body, nil
+	}
 	streamBody, err := loopGateStreamBody(body, vllm)
 	if err != nil {
 		p.logger.DebugContext(ctx, "Loop gate: request not streamed upstream", "error", err)
@@ -75,20 +80,15 @@ func (p *Proxy) loopGateUpstreamBody(ctx context.Context, logCtx *RequestLogCont
 // continuousUsage asks vLLM for the running usage on every chunk, so an
 // attempt cut short still reports what the engine generated.
 func loopGateStreamBody(body []byte, continuousUsage bool) ([]byte, error) {
-	top, err := loopGateJSONObject(body)
-	if err != nil {
-		return nil, err
+	out, ok := forcedStreamRequestBody(body, forcedStreamOptions{
+		includeUsage:    true,
+		continuousUsage: continuousUsage,
+		replaceOptions:  true,
+	})
+	if !ok {
+		return nil, errors.New("request body is not a JSON object")
 	}
-	top["stream"] = rawJSONTrue
-	delete(top, "stream_options")
-	keys := []string{"include_usage"}
-	if continuousUsage {
-		keys = append(keys, "continuous_usage_stats")
-	}
-	if err := setStreamOptionsRaw(top, keys...); err != nil {
-		return nil, err
-	}
-	return json.Marshal(top)
+	return out, nil
 }
 
 // loopGateRunningUsageBody adds continuous_usage_stats to a streamed vLLM chat
@@ -163,6 +163,11 @@ func (p *Proxy) collectLoopGateStream(ctx context.Context, logCtx *RequestLogCon
 			// A 200 event stream that ended without a chunk (or was not SSE at
 			// all) is a failed attempt, not an empty answer.
 			err = fmt.Errorf("loop gate: upstream stream carried no chat completion chunk: %w", io.ErrUnexpectedEOF)
+		}
+		if err == nil && agg.errStatus == 0 && o.cut == nil && !agg.complete() {
+			// The stream ended on its own (the gate did not cut it) before the
+			// answer was complete: a failed attempt, not a short answer.
+			err = errForcedStreamTruncated
 		}
 
 		if err != nil || agg.errStatus != 0 {
@@ -250,22 +255,8 @@ func (p *Proxy) collectLoopGateStream(ctx context.Context, logCtx *RequestLogCon
 // read error (retried on another credential for the first attempt) instead
 // of holding the request until the client leaves.
 func (p *Proxy) consumeLoopGateAttempt(agg *chatStreamAggregator, o *loopGateObserver, body io.ReadCloser) error {
-	if p.requestTimeout <= 0 {
-		return drainLoopGateAttempt(agg, o.wrap(body), p.maxResponseBodySize)
-	}
-	// A body closed mid-read may read as a clean EOF: the flag, not the read
-	// error, tells a timed-out attempt.
-	var timedOut atomic.Bool
-	timer := time.AfterFunc(p.requestTimeout, func() {
-		timedOut.Store(true)
-		_ = body.Close()
-	})
-	err := drainLoopGateAttempt(agg, o.wrap(body), p.maxResponseBodySize)
-	timer.Stop()
-	if timedOut.Load() {
-		return fmt.Errorf("loop gate: upstream stream exceeded request_timeout %s: %w", p.requestTimeout, context.DeadlineExceeded)
-	}
-	return err
+	deadline := startStreamReadDeadline(body, p.requestTimeout)
+	return deadline.stop(drainLoopGateAttempt(agg, o.wrap(body), p.maxResponseBodySize))
 }
 
 // drainLoopGateAttempt reads r to the end, or to the error event agg kept. A

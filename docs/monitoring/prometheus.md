@@ -20,6 +20,7 @@ The same metrics can also be **pushed** to an OTLP collector instead of (or in a
 | `auto_ai_router_credential_banned`                  | Gauge     | Ban status per credential (1 = banned)                       |
 | `auto_ai_router_requests_total`                     | Counter   | Total requests processed                                     |
 | `auto_ai_router_requests_duration_seconds`          | Histogram | Request latency distribution                                 |
+| `auto_ai_router_time_to_first_token_seconds`        | Histogram | Time to first token, by credential, model and endpoint       |
 | `auto_ai_router_aborted_requests_total`             | Counter   | Client-aborted requests by credential, model, and endpoint   |
 | `auto_ai_router_requests_shed_total`                | Counter   | API requests refused at `server.max_in_flight_requests`      |
 | `auto_ai_router_loop_gate_streams_total`            | Counter   | Streams watched by the [loop gate](../advanced/loop_gate.md) |
@@ -29,6 +30,12 @@ The same metrics can also be **pushed** to an OTLP collector instead of (or in a
 | `auto_ai_router_loop_gate_recovered_total`          | Counter   | Restarted generations that finished without a cut            |
 | `auto_ai_router_loop_gate_cuts_total`               | Counter   | Streams the loop gate cut short (enforce)                    |
 | `auto_ai_router_spend_dropped_total`                | Counter   | Spend rows dropped before the Postgres queue, by `reason`    |
+
+`auto_ai_router_time_to_first_token_seconds` runs from the start of the request to the first content, reasoning or tool-call delta of the stream (not its first byte). It has a sample for every request that streamed one: a client's own stream, and, with `server.force_stream_for_ttft`, a non-streamed request AIR sent upstream as a stream. `model` is the name the client asked for, so a model served by several credentials (replicas of a self-hosted model) is read as one series, next to the per-model TTFT of the model server and of the gateway in front of AIR:
+
+```promql
+histogram_quantile(0.95, sum by (le, model) (rate(auto_ai_router_time_to_first_token_seconds_bucket[5m])))
+```
 
 The `reason` of `auto_ai_router_spend_dropped_total` is `queue_full_timeout` when the queue stayed full for `litellm_db.log_queue_full_timeout`, and `queue_full_no_wait` when that timeout is `0`.
 
