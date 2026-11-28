@@ -207,6 +207,19 @@ func (p *Proxy) copyResponseHeaders(w http.ResponseWriter, src http.Header, cred
 			w.Header().Add(canonicalKey, value)
 		}
 	}
+	applyCredentialResponseHeaders(w, cred)
+}
+
+func applyCredentialResponseHeaders(w http.ResponseWriter, cred *config.CredentialConfig) {
+	if cred == nil || len(cred.ResponseHeaders) == 0 {
+		return
+	}
+	for name, value := range cred.ResponseHeaders {
+		w.Header().Set(name, value)
+	}
+	if compat, ok := w.(*responseCompatibilityWriter); ok {
+		compat.credentialHeaders = cred.ResponseHeaders
+	}
 }
 
 func (p *Proxy) setCredentialResponseHeader(w http.ResponseWriter, logCtx *RequestLogContext, credentialName string) {

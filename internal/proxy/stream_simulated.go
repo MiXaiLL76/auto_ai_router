@@ -784,6 +784,7 @@ func (p *Proxy) finishSimulatedNonStream(
 		p.ensureRetryAfterOn429(w, result.httpStatus, nil, modelID, logCtx.Scope)
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(clientBody)))
+		applyCredentialResponseHeaders(w, cred)
 		w.WriteHeader(result.httpStatus)
 		_, _ = w.Write(clientBody)
 		logCtx.Status = "failure"
@@ -1433,6 +1434,7 @@ func (p *Proxy) finishSimulatedNativeNonStream(
 		p.ensureRetryAfterOn429(w, result.httpStatus, nil, modelID, logCtx.Scope)
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(clientBody)))
+		applyCredentialResponseHeaders(w, cred)
 		w.WriteHeader(result.httpStatus)
 		_, _ = w.Write(clientBody)
 		logCtx.Status = "failure"
@@ -1999,6 +2001,7 @@ func (p *Proxy) finishSimulatedPassthroughNonStream(
 		p.ensureRetryAfterOn429(w, result.httpStatus, nil, modelID, logCtx.Scope)
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(clientBody)))
+		applyCredentialResponseHeaders(w, cred)
 		w.WriteHeader(result.httpStatus)
 		_, _ = w.Write(clientBody)
 		logCtx.Status = "failure"

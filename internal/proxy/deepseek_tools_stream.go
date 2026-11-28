@@ -276,6 +276,9 @@ func (p *Proxy) replayToolStream(w http.ResponseWriter, resp *http.Response, r *
 	header.Set("Cache-Control", "no-cache")
 	header.Set("Connection", "keep-alive")
 	header.Del("Content-Length")
+	if logCtx != nil {
+		applyCredentialResponseHeaders(w, logCtx.Credential)
+	}
 	finishFilter := p.newChatPostFinishFilter(r.Context(), header, endpointFromRequest(r), http.StatusOK, modelID, logCtx)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(finishFilter.filter(raw, true)) //nolint:gosec // G705: proxied SSE

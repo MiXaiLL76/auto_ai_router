@@ -231,11 +231,11 @@ func TestProxyRequestRetryDoesNotCarryCredentialRequestHeaders(t *testing.T) {
 	prx := NewTestProxyBuilder().WithCredentials(
 		config.CredentialConfig{
 			Name: "novita", Type: config.ProviderTypeOpenAI, BaseURL: primary.URL, APIKey: "primary-key",
-			RPM: 100, TPM: 10000, RequestHeaders: novitaLikeRequestHeaders,
+			RPM: 100, TPM: 10000, RequestHeaders: novitaLikeRequestHeaders, ResponseHeaders: map[string]string{"X-First-Only": "first"},
 		},
 		config.CredentialConfig{
 			Name: "secondary", Type: config.ProviderTypeOpenAI, BaseURL: secondary.URL, APIKey: "secondary-key",
-			Priority: 1, RPM: 100, TPM: 10000,
+			Priority: 1, RPM: 100, TPM: 10000, ResponseHeaders: map[string]string{"X-Pool": "second"},
 		},
 	).WithMaxProviderRetries(3).Build()
 	w := httptest.NewRecorder()
@@ -243,6 +243,8 @@ func TestProxyRequestRetryDoesNotCarryCredentialRequestHeaders(t *testing.T) {
 	prx.ProxyRequest(w, newRequestHeadersClientRequest("/v1/chat/completions", requestHeadersCases[0].body))
 
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	require.Empty(t, w.Result().Header.Values("X-First-Only"))
+	require.Equal(t, []string{"second"}, w.Result().Header.Values("X-Pool"))
 	first := <-primaryHeaders
 	assert.Equal(t, "auto-ai-router/1.0", first.Get("User-Agent"))
 	assert.Equal(t, "extra", first.Get("X-Extra"))

@@ -2953,6 +2953,7 @@ dispatch:
 		// is masked for the client like any other provider error.
 		providerRequestRejected     int
 		providerRequestRejectedBody []byte
+		providerRequestRejectedCred *config.CredentialConfig
 		// Replies of a fanned-out embeddings request kept across attempts, so
 		// a retry only re-sends the inputs that did not get one.
 		embedFanOutReplies embedContentFanOutReplies
@@ -3219,6 +3220,7 @@ dispatch:
 		if isRequestScopedStatus(resp.StatusCode) {
 			providerRequestRejected = resp.StatusCode
 			providerRequestRejectedBody = responseBody
+			providerRequestRejectedCred = cred
 		}
 
 		p.recordProviderResponse(r.Context(), cred, modelID, realModelID, resp.StatusCode, resp.Header, responseBody)
@@ -3442,7 +3444,8 @@ dispatch:
 				// classification does, so a content-policy refusal arrives as
 				// the content-policy message and not as a bare "Bad Request".
 				clientBody, _, _ := clientResponseBodyForCredential(
-					statusCode, providerRequestRejectedBody, cred, modelID, logCtx.RequestID)
+					statusCode, providerRequestRejectedBody, providerRequestRejectedCred, modelID, logCtx.RequestID)
+				applyCredentialResponseHeaders(w, providerRequestRejectedCred)
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("Content-Length", fmt.Sprintf("%d", len(clientBody)))
 				w.WriteHeader(statusCode)

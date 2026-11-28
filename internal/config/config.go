@@ -1278,6 +1278,9 @@ type CredentialConfig struct {
 	// client User-Agents (Novita's Cloudflare answers Python-urllib with 403/1010).
 	RequestHeaders map[string]string `yaml:"request_headers,omitempty"`
 
+	// ResponseHeaders are public literal values returned with this provider's final HTTP response.
+	ResponseHeaders map[string]string `yaml:"response_headers,omitempty"`
+
 	// LoopGate overrides the loop_gate settings for every model of this
 	// credential. A model's own loop_gate block wins over it.
 	LoopGate *LoopGateOverride `yaml:"loop_gate,omitempty"`
@@ -1416,8 +1419,9 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 		IsFallback            string           `yaml:"is_fallback,omitempty"`
 		Models                []ModelRPMConfig `yaml:"models,omitempty"`
 
-		RequestHeaders map[string]string `yaml:"request_headers,omitempty"`
-		LoopGate       *LoopGateOverride `yaml:"loop_gate,omitempty"`
+		RequestHeaders  map[string]string `yaml:"request_headers,omitempty"`
+		ResponseHeaders map[string]string `yaml:"response_headers,omitempty"`
+		LoopGate        *LoopGateOverride `yaml:"loop_gate,omitempty"`
 	}
 
 	var temp tempConfig
@@ -1500,6 +1504,11 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 	c.LoopGate = temp.LoopGate
 
 	if c.RequestHeaders, err = parseCredentialRequestHeaders(c.Name, c.Type, temp.RequestHeaders); err != nil {
+		return err
+	}
+
+	c.ResponseHeaders = temp.ResponseHeaders
+	if err := validateCredentialResponseHeaders(c.Name, c.Type, c.ResponseHeaders); err != nil {
 		return err
 	}
 

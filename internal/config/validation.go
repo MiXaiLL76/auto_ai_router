@@ -310,6 +310,9 @@ func (cred *CredentialConfig) validate(i int) error {
 	if err := validateCredentialRequestHeaders(cred.Name, cred.Type, cred.RequestHeaders); err != nil {
 		return err
 	}
+	if err := validateCredentialResponseHeaders(cred.Name, cred.Type, cred.ResponseHeaders); err != nil {
+		return err
+	}
 	if err := cred.validateProviderSettings(); err != nil {
 		return err
 	}
