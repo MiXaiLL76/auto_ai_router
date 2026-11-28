@@ -89,6 +89,70 @@ func TestToolUsageExtensions_WebSearchRequests(t *testing.T) {
 	}
 }
 
+func TestToolUsageExtensions_XDetailsCacheType(t *testing.T) {
+	tests := []struct {
+		name  string
+		usage string
+		want  string
+	}{
+		{
+			name:  "no x_details",
+			usage: `{"input_tokens":10}`,
+			want:  "",
+		},
+		{
+			name:  "Alibaba explicit cache read",
+			usage: `{"x_details":[{"x_billing_type":"response_api","prompt_tokens_details":{"cached_tokens":7082,"cache_type":"ephemeral","cache_write_tokens":0}}]}`,
+			want:  "ephemeral",
+		},
+		{
+			name:  "Alibaba explicit cache write without a read",
+			usage: `{"x_details":[{"prompt_tokens_details":{"cached_tokens":0,"cache_type":"ephemeral","cache_write_tokens":7082}}]}`,
+			want:  "ephemeral",
+		},
+		{
+			name:  "lines agree",
+			usage: `{"x_details":[{"prompt_tokens_details":{"cached_tokens":60,"cache_type":"ephemeral"}},{"prompt_tokens_details":{"cached_tokens":40,"cache_type":"ephemeral"}}]}`,
+			want:  "ephemeral",
+		},
+		{
+			name:  "a tool line without prompt details is ignored",
+			usage: `{"x_details":[{"prompt_tokens_details":{"cached_tokens":60,"cache_type":"ephemeral"}},{"plugins":{"web_search":{"count":1}}}]}`,
+			want:  "ephemeral",
+		},
+		{
+			name:  "a cached read without a mode is a conflict",
+			usage: `{"x_details":[{"prompt_tokens_details":{"cached_tokens":500}},{"prompt_tokens_details":{"cached_tokens":100,"cache_type":"ephemeral"}}]}`,
+			want:  "",
+		},
+		{
+			name:  "different modes are a conflict",
+			usage: `{"x_details":[{"prompt_tokens_details":{"cached_tokens":60,"cache_type":"ephemeral"}},{"prompt_tokens_details":{"cached_tokens":40,"cache_type":"persistent"}}]}`,
+			want:  "",
+		},
+		{
+			name:  "unexpected shape is ignored",
+			usage: `{"x_details":{"prompt_tokens_details":{"cache_type":"ephemeral"}}}`,
+			want:  "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var usage struct {
+				InputTokens int `json:"input_tokens"`
+				ToolUsageExtensions
+			}
+			if err := json.Unmarshal([]byte(tt.usage), &usage); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if got := usage.XDetailsCacheType(); got != tt.want {
+				t.Fatalf("XDetailsCacheType() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestToolUsageExtensions_RoundTrip(t *testing.T) {
 	const usage = `{"input_tokens":10,"x_tools":{"web_search":{"count":1}},"x_details":[{"plugins":{"web_search":{"count":1}},"x_billing_type":"response_api"}]}`
 

@@ -1674,6 +1674,16 @@ func TestExtractTokenUsage_CacheType(t *testing.T) {
 			body:     `{"type":"response.completed","response":{"usage":{"input_tokens":100,"output_tokens":10,"input_tokens_details":{"cached_tokens":60,"cache_type":"ephemeral"}}}}`,
 			wantType: "ephemeral",
 		},
+		{
+			name:     "Alibaba responses API x_details carries cache_type",
+			body:     `{"usage":{"input_tokens":100,"output_tokens":10,"input_tokens_details":{"cached_tokens":60},"x_details":[{"x_billing_type":"response_api","prompt_tokens_details":{"cached_tokens":60,"cache_type":"ephemeral"}}]}}`,
+			wantType: "ephemeral",
+		},
+		{
+			name:     "Alibaba nested streaming response.completed x_details carries cache_type",
+			body:     `{"type":"response.completed","response":{"usage":{"input_tokens":100,"output_tokens":10,"input_tokens_details":{"cached_tokens":60},"x_details":[{"x_billing_type":"response_api","prompt_tokens_details":{"cached_tokens":60,"cache_type":"ephemeral"}}]}}}`,
+			wantType: "ephemeral",
+		},
 	}
 
 	for _, tt := range tests {

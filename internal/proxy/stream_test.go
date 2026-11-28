@@ -601,6 +601,14 @@ func TestOpenAIStreamUsageExtractor(t *testing.T) {
 			},
 		},
 		{
+			name:      "responses API - Alibaba explicit cache read named in x_details",
+			chunk:     []byte(`{"type":"response.completed","response":{"usage":{"input_tokens":200,"output_tokens":50,"input_tokens_details":{"cached_tokens":80},"x_details":[{"x_billing_type":"response_api","prompt_tokens_details":{"cached_tokens":80,"cache_type":"ephemeral"}}]}}}`),
+			expectNil: false,
+			expectUsage: func(u *StreamUsageInfo) bool {
+				return u.CachedTokens == 80 && u.CacheType == "ephemeral"
+			},
+		},
+		{
 			name:      "responses API - response.incomplete event carries usage",
 			chunk:     []byte(`{"type":"response.incomplete","response":{"id":"resp_456","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":5000,"output_tokens":30,"total_tokens":5030,"output_tokens_details":{"reasoning_tokens":30}}}}`),
 			expectNil: false,

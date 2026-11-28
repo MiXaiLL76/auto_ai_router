@@ -16,6 +16,9 @@ import (
 //   - xAI (chat and Responses): usage.server_side_tool_usage_details, one
 //     counter per server-side tool category (see ServerSideToolUsage).
 //
+// Alibaba's Responses API also reports its prompt cache mode only per billing
+// line, in usage.x_details[].prompt_tokens_details (see XDetailsCacheType).
+//
 // The fields stay raw and are decoded only on demand, so an unexpected shape
 // under one of these keys never fails the decode of the surrounding usage
 // object (which would drop the token counters along with it). Embedding the
@@ -157,4 +160,37 @@ func (u ToolUsageExtensions) WebSearchRequests() int {
 	}
 
 	return 0
+}
+
+// XDetailsCacheType returns the prompt cache mode Alibaba's Responses API
+// reports in usage.x_details[].prompt_tokens_details.cache_type ("ephemeral"
+// for its explicit cache), or "". The lines that read the cache or name a mode
+// must all name the same one: a cached read without a mode, or two different
+// modes, yield "", so the explicit tariff never applies without an unambiguous
+// marker.
+func (u ToolUsageExtensions) XDetailsCacheType() string {
+	if len(u.XDetails) == 0 {
+		return ""
+	}
+	var details []struct {
+		PromptTokensDetails struct {
+			CachedTokens int    `json:"cached_tokens"`
+			CacheType    string `json:"cache_type"`
+		} `json:"prompt_tokens_details"`
+	}
+	if json.Unmarshal(u.XDetails, &details) != nil {
+		return ""
+	}
+	cacheType := ""
+	for _, detail := range details {
+		prompt := detail.PromptTokensDetails
+		if prompt.CachedTokens == 0 && prompt.CacheType == "" {
+			continue
+		}
+		if prompt.CacheType == "" || (cacheType != "" && prompt.CacheType != cacheType) {
+			return ""
+		}
+		cacheType = prompt.CacheType
+	}
+	return cacheType
 }
