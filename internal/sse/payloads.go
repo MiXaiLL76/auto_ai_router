@@ -77,6 +77,13 @@ func LinePayload(line []byte) ([]byte, bool) {
 	return payload, true
 }
 
+// IsDone reports whether line is the "data: [DONE]" sentinel that ends an
+// OpenAI-style stream.
+func IsDone(line []byte) bool {
+	payload, ok := bytes.CutPrefix(bytes.TrimSpace(line), dataPrefix)
+	return ok && bytes.Equal(bytes.TrimSpace(payload), doneSentinel)
+}
+
 // LastPayload returns the last data payload of a buffered stream, which the
 // streaming log reads its figures from.
 func LastPayload(raw []byte) []byte {

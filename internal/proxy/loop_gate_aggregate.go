@@ -32,7 +32,8 @@ import (
 //     non-streamed vLLM returns;
 //   - usage comes from the final chunk, web_search (search citations, in a
 //     chunk of its own) and service_tier from the last chunk carrying them;
-//   - finish_reason is left out of a choice whose stream never carried one;
+//   - finish_reason is left out of a choice whose stream never carried one
+//     (a stream that ended without its [DONE] too is not complete);
 //   - an error event inside the stream becomes the response: its status and
 //     body, not a 200. Nothing after it is aggregated.
 type chatStreamAggregator struct {
@@ -49,6 +50,7 @@ type chatStreamAggregator struct {
 	errStatus int
 	errBody   []byte
 	sawChunk  bool // a chunk (not an error event) was aggregated
+	sawDone   bool // the stream carried its "data: [DONE]"
 }
 
 type aggChoice struct {
@@ -137,7 +139,9 @@ func (a *chatStreamAggregator) consume(r io.Reader, limit int64) error {
 		if limit > 0 && read > limit {
 			return ErrResponseBodyTooLarge
 		}
-		if payload, ok := sse.LinePayload(line); ok {
+		if sse.IsDone(line) {
+			a.sawDone = true
+		} else if payload, ok := sse.LinePayload(line); ok {
 			a.add(payload)
 			if a.errStatus != 0 {
 				return nil
@@ -340,6 +344,21 @@ func chatStreamErrorStatus(chunk *aggStreamChunk, payload []byte) (int, bool) {
 		}
 	}
 	return statusCodeFromProviderStreamError(string(payload)), true
+}
+
+// complete reports whether the stream carried the whole answer: its [DONE],
+// or a finish_reason for every choice. A stream that ended without either
+// was cut short on its way (see errForcedStreamTruncated).
+func (a *chatStreamAggregator) complete() bool {
+	if a.sawDone {
+		return true
+	}
+	for _, c := range a.choices {
+		if c.finishReason == nil {
+			return false
+		}
+	}
+	return len(a.choices) > 0
 }
 
 // choice0 returns choice 0, the one the loop gate watches; nil when the

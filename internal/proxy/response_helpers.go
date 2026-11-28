@@ -943,62 +943,106 @@ func injectStreamOptions(body []byte) []byte {
 }
 
 func updateStreamRequest(body []byte, forceStream, includeUsage bool) []byte {
+	out, _ := editStreamRequest(body, streamRequestEdit{forceStream: forceStream, includeUsage: includeUsage})
+	return out
+}
+
+func updateStreamRequestLegacy(body []byte, forceStream, includeUsage bool) []byte {
+	out, _ := editStreamRequestLegacy(body, streamRequestEdit{forceStream: forceStream, includeUsage: includeUsage})
+	return out
+}
+
+// streamRequestEdit is a change to the stream switch of a request body.
+type streamRequestEdit struct {
+	forceStream     bool // set "stream": true
+	includeUsage    bool // set stream_options.include_usage
+	continuousUsage bool // set stream_options.continuous_usage_stats (vLLM)
+	replaceOptions  bool // drop the stream_options the client sent first
+}
+
+// optionKeys returns the stream_options keys the edit sets to true.
+func (e streamRequestEdit) optionKeys() []string {
+	var keys []string
+	if e.includeUsage {
+		keys = append(keys, "include_usage")
+	}
+	if e.continuousUsage {
+		keys = append(keys, "continuous_usage_stats")
+	}
+	return keys
+}
+
+// editStreamRequest applies e to body, the one place a request body's stream
+// and stream_options are rewritten. Every other field keeps its bytes (large
+// integers included). ok is false, and body is returned as is, when body is
+// not a JSON object.
+func editStreamRequest(body []byte, e streamRequestEdit) (out []byte, ok bool) {
 	var fields map[string]jsontext.Value
 	if err := jsonv2.Unmarshal(body, &fields); err != nil {
-		return updateStreamRequestLegacy(body, forceStream, includeUsage)
+		return editStreamRequestLegacy(body, e)
 	}
 	if fields == nil {
-		return body
+		return body, false
 	}
-	if forceStream {
+	if e.forceStream {
 		fields["stream"] = jsontext.Value("true")
 	}
-	if includeUsage {
+	if e.replaceOptions {
+		delete(fields, "stream_options")
+	}
+	if keys := e.optionKeys(); len(keys) > 0 {
 		var options map[string]jsontext.Value
 		if raw := fields["stream_options"]; raw.Kind() == '{' {
 			if err := jsonv2.Unmarshal(raw, &options); err != nil {
-				return updateStreamRequestLegacy(body, forceStream, includeUsage)
+				return editStreamRequestLegacy(body, e)
 			}
 		} else {
-			options = make(map[string]jsontext.Value, 1)
+			options = make(map[string]jsontext.Value, len(keys))
 		}
-		options["include_usage"] = jsontext.Value("true")
+		for _, key := range keys {
+			options[key] = jsontext.Value("true")
+		}
 		raw, err := jsonv2.Marshal(options, json.DefaultOptionsV1())
 		if err != nil {
-			return updateStreamRequestLegacy(body, forceStream, includeUsage)
+			return editStreamRequestLegacy(body, e)
 		}
 		fields["stream_options"] = raw
 	}
 	modified, err := jsonv2.Marshal(fields, json.DefaultOptionsV1())
 	if err != nil {
-		return updateStreamRequestLegacy(body, forceStream, includeUsage)
+		return editStreamRequestLegacy(body, e)
 	}
-	return modified
+	return modified, true
 }
 
 // Preserve legacy handling of duplicate keys, invalid UTF-8 and suffixes
 // accepted by the original single-value decoder.
-func updateStreamRequestLegacy(body []byte, forceStream, includeUsage bool) []byte {
+func editStreamRequestLegacy(body []byte, e streamRequestEdit) (out []byte, ok bool) {
 	var fields map[string]any
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()
 	if err := dec.Decode(&fields); err != nil || fields == nil {
-		return body
+		return body, false
 	}
-	if forceStream {
+	if e.forceStream {
 		fields["stream"] = true
 	}
-	if includeUsage {
-		options, ok := fields["stream_options"].(map[string]any)
-		if !ok {
-			options = make(map[string]any, 1)
+	if e.replaceOptions {
+		delete(fields, "stream_options")
+	}
+	if keys := e.optionKeys(); len(keys) > 0 {
+		options, isObject := fields["stream_options"].(map[string]any)
+		if !isObject {
+			options = make(map[string]any, len(keys))
 			fields["stream_options"] = options
 		}
-		options["include_usage"] = true
+		for _, key := range keys {
+			options[key] = true
+		}
 	}
 	modified, err := json.Marshal(fields)
 	if err != nil {
-		return body
+		return body, false
 	}
-	return modified
+	return modified, true
 }

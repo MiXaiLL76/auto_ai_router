@@ -2057,14 +2057,16 @@ func (p *Proxy) sendToCredential(
 	httputil.AttemptsFrom(proxyReq.Context()).Begin(cred.Name)
 	// useFastHeaderClient: true only when this attempt's body actually carries
 	// "stream": true to the provider — the client asked for it, or
-	// force_stream_for_ttft injected it (forcedChatNonStream/forcedNativeNonStream).
+	// force_stream_for_ttft injected it (forcedChatNonStream/forcedNativeNonStream/
+	// forcedPassthroughNonStream), or the loop gate's force_stream did.
 	// A provider that sees stream:true sends response headers almost
 	// immediately regardless of how long the generation itself takes, which is
 	// what makes a short ResponseHeaderTimeout safe here. Image/embeddings
 	// endpoints never emit early headers regardless of what we send upstream
 	// (there's no streaming API for them here), so they're excluded even if
 	// something upstream of this call mistakenly set the streaming flags.
-	useFastHeaderClient := (streaming || prepared.forcedChatNonStream || prepared.forcedNativeNonStream) &&
+	useFastHeaderClient := (streaming || prepared.forcedChatNonStream || prepared.forcedNativeNonStream ||
+		prepared.forcedPassthroughNonStream || loopGateForced != nil) &&
 		!logCtx.IsImageGeneration && !isImageEdit && !isEmbeddings
 	// sendClient/responseHeaderTimeoutEnabled: per-credential, not a single
 	// fleet-wide choice -- see attemptClient and config.CredentialConfig.

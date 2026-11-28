@@ -403,6 +403,9 @@ func (o *loopGateObserver) maxLine() int {
 func (o *loopGateObserver) observeLine(line []byte) {
 	payload, ok := sse.LinePayload(line)
 	if !ok {
+		if o.agg != nil && sse.IsDone(line) {
+			o.agg.sawDone = true
+		}
 		return
 	}
 	switch {

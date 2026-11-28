@@ -1437,7 +1437,7 @@ func (p *Proxy) finalizeStreamingLogParsed(logCtx *RequestLogContext, fallbackCo
 	// stamps CompletionStartTime the moment it does) — a stream that errored before
 	// any content, or wasn't streaming at all, has nothing to report here.
 	if logCtx.Credential != nil && !logCtx.CompletionStartTime.IsZero() {
-		p.metrics.RecordTTFT(logCtx.Credential.Name, endpointFromLogContext(logCtx),
+		p.metrics.RecordTTFT(logCtx.Credential.Name, logCtx.ModelID, endpointFromLogContext(logCtx),
 			logCtx.CompletionStartTime.Sub(logCtx.StartTime))
 	}
 	if err := p.logSpendToLiteLLMDB(logCtx); err != nil {

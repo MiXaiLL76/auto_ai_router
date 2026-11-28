@@ -87,7 +87,9 @@ upstream as a stream (`stream: true`, `stream_options.include_usage`, and for vL
 `force_stream_for_ttft` uses): text and reasoning concatenated, tool calls assembled by
 index, `content: null` next to a tool call, usage from the stream, and an error event inside
 the stream returned with its own status. A stream that ends without a single chunk fails
-the attempt (502, retried on the next credential), not an empty answer.
+the attempt (502, retried on the next credential), not an empty answer. So does a stream
+that ends before the answer is complete (no `data: [DONE]` and a choice without a
+`finish_reason`): the client never gets a cut answer as a 200.
 
 The client sees nothing until the answer is complete, so a loop is restarted **wherever** it
 is (reasoning or answer). When `max_attempts` or `retry_deadline` run out, the best attempt
@@ -105,7 +107,9 @@ have fired on), the response is not changed.
 
 With the server's `force_stream_for_ttft` on, a non-streamed request goes upstream as a
 stream anyway, and the gate watches that stream the same way: logged and counted, not
-changed. With the gate's `force_stream` on too, the gate takes the request (restarts and
+changed. That stream is read within `request_timeout`, like the body of a non-streamed
+reply, and one that ends before the answer is complete fails the attempt (retried on the
+next credential). With the gate's `force_stream` on too, the gate takes the request (restarts and
 trimming as above) and `force_stream_for_ttft` does not apply to it: no TTFT is measured
 for it.
 
@@ -118,8 +122,10 @@ non-streamed request:
 - **Tool calls** come from vLLM's streaming tool parser, which is less reliable than the
   non-streamed one for some parsers (`hermes`, `qwen3_coder`, ...): malformed or missing
   `tool_calls` where the non-streamed request had them right.
-- **Rejected options:** vLLM refuses `best_of` and `use_beam_search` with `stream: true`
-  (400).
+- **Options that do not stream:** vLLM refuses `best_of` and `use_beam_search` with
+  `stream: true`. A request with `best_of` above 1 or `use_beam_search: true` is sent
+  as the client sent it (non-streamed) and only observed, as with `force_stream: false`.
+  `force_stream_for_ttft` leaves such a request non-streamed too: it has no TTFT.
 - **Dropped fields:** the rebuild keeps id, model, created, system_fingerprint,
   service_tier, web_search, usage, and per choice: role, content, reasoning, refusal,
   images, tool_calls, logprobs (`content`), finish_reason and stop_reason. It drops

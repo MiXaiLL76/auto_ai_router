@@ -3554,8 +3554,128 @@
       "type": "timeseries"
     },
     {
+      "description": "P95 time-to-first-token per model, over every credential that serves it",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+            "insertNulls": false,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": { "type": "linear" },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": { "group": "A", "mode": "none" },
+            "thresholdsStyle": { "mode": "off" }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{ "color": "green", "value": null }]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 193 },
+      "id": 1105,
+      "options": {
+        "legend": {
+          "calcs": ["mean", "max", "lastNotNull"],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "sortBy": "Mean",
+          "sortDesc": true
+        },
+        "tooltip": { "hideZeros": false, "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "histogram_quantile(0.95, sum(rate(auto_ai_router_time_to_first_token_seconds_bucket{service_name=~\"$service\",credential=~\"$credential\",model=~\"$model\"}[5m])) by (le, model))",
+          "legendFormat": "{{model}}",
+          "refId": "A"
+        }
+      ],
+      "title": "TTFT P95 by Model",
+      "type": "timeseries"
+    },
+    {
+      "description": "Average time-to-first-token per model, over every credential that serves it",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+            "insertNulls": false,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": { "type": "linear" },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": { "group": "A", "mode": "none" },
+            "thresholdsStyle": { "mode": "off" }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{ "color": "green", "value": null }]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 193 },
+      "id": 1106,
+      "options": {
+        "legend": {
+          "calcs": ["mean", "lastNotNull"],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "sortBy": "Mean",
+          "sortDesc": true
+        },
+        "tooltip": { "hideZeros": false, "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (model) (rate(auto_ai_router_time_to_first_token_seconds_sum{service_name=~\"$service\",credential=~\"$credential\",model=~\"$model\"}[5m])) / sum by (model) (rate(auto_ai_router_time_to_first_token_seconds_count{service_name=~\"$service\",credential=~\"$credential\",model=~\"$model\"}[5m]))",
+          "legendFormat": "{{model}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Average TTFT by Model",
+      "type": "timeseries"
+    },
+    {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 193 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 201 },
       "id": 1200,
       "panels": [],
       "title": "API Keys (monitoring.key_metrics)",
@@ -3570,7 +3690,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 194 },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 202 },
       "id": 1201,
       "options": {
         "colorMode": "value",
@@ -3604,7 +3724,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 194 },
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 202 },
       "id": 1202,
       "options": {
         "colorMode": "value",
@@ -3654,7 +3774,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 194 },
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 202 },
       "id": 1203,
       "options": {
         "colorMode": "value",
@@ -3695,7 +3815,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 194 },
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 202 },
       "id": 1204,
       "options": {
         "colorMode": "value",
@@ -3736,7 +3856,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 194 },
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 202 },
       "id": 1205,
       "options": {
         "colorMode": "value",
@@ -3777,7 +3897,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 194 },
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 202 },
       "id": 1206,
       "options": {
         "colorMode": "value",
@@ -3834,7 +3954,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 198 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 206 },
       "id": 1207,
       "options": {
         "legend": {
@@ -3893,7 +4013,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 198 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 206 },
       "id": 1208,
       "options": {
         "legend": {
@@ -3952,7 +4072,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 206 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 214 },
       "id": 1209,
       "options": {
         "legend": {
@@ -4011,7 +4131,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 206 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 214 },
       "id": 1210,
       "options": {
         "legend": {
@@ -4100,7 +4220,7 @@
           }
         ]
       },
-      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 214 },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 222 },
       "id": 1211,
       "options": {
         "cellHeight": "sm",
