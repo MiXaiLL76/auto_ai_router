@@ -26,8 +26,11 @@ const maxWebSearchResultsSSELineBytes = 16 << 20
 // webSearchResultsHiddenFromClient reports whether the client request enables
 // a Z.AI web_search tool without asking for its results. Only Chat Completions
 // carry that tool shape.
-func webSearchResultsHiddenFromClient(path string, body []byte) bool {
-	return isChatCompletionsPath(path) && openai.WebSearchResultsHidden(body)
+func webSearchResultsHiddenFromClient(logCtx *RequestLogContext, path string, body []byte) bool {
+	if !isChatCompletionsPath(path) || openai.NoWebSearchTool(logCtx.scanBody(body)) {
+		return false
+	}
+	return openai.WebSearchResultsHidden(body)
 }
 
 func isChatCompletionsPath(path string) bool {
@@ -37,8 +40,8 @@ func isChatCompletionsPath(path string) bool {
 // forceWebSearchResultsForPath asks for the results on a request forwarded
 // as-is to a remote router, so that router returns them for billing here
 // instead of stripping them as if this router were the end client.
-func forceWebSearchResultsForPath(path string, body []byte) []byte {
-	if !isChatCompletionsPath(path) {
+func forceWebSearchResultsForPath(logCtx *RequestLogContext, path string, body []byte) []byte {
+	if !isChatCompletionsPath(path) || openai.NoWebSearchTool(logCtx.scanBody(body)) {
 		return body
 	}
 	return openai.ForceWebSearchResults(body)

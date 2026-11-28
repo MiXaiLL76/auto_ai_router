@@ -1,6 +1,11 @@
 package anthropic
 
-import "encoding/json"
+import (
+	"bytes"
+	"encoding/json"
+
+	"github.com/mixaill76/auto_ai_router/internal/jsonscan"
+)
 
 // CacheMarkerCounts is how many cache_control markers a request body carries,
 // broken down by where they sit -- system/instructions, messages/input, or
@@ -41,7 +46,96 @@ func (c CacheMarkerCounts) Total() int {
 // looking for a "cache_control" key, which finds a marker regardless of how
 // deeply nested the content block, tool definition, or image/file part
 // holding it is for that shape. Malformed JSON reports all-zero counts.
+//
+// The body is not decoded to find them. A body that cannot contain the key
+// at all is answered from a substring check; otherwise only the three
+// sections are walked, and the only values ever decoded are
+// the cache_control objects themselves. The full decode (countCacheMarkersFullDecode)
+// remains as the reference, and as the fallback for the inputs where a token
+// walk and a decode could disagree.
 func CountCacheMarkers(body []byte) CacheMarkerCounts {
+	return CountCacheMarkersScanned(body, func() *jsonscan.Top {
+		top, _ := jsonscan.ScanTop(body)
+		return top
+	})
+}
+
+// CountCacheMarkersScanned is CountCacheMarkers for a caller that may already
+// hold a scan of body; scan returns it (nil for a body that is not a JSON
+// object).
+func CountCacheMarkersScanned(body []byte, scan func() *jsonscan.Top) CacheMarkerCounts {
+	// A marker's key is either written as the text cache_control or spelled
+	// with an escape. The first is a substring search; the second the scan
+	// already knows (Top.EscapedASCII). With neither there is no marker.
+	literal := bytes.Contains(body, cacheControlKeyBytes)
+	top := scan()
+	if top == nil || (!literal && !top.EscapedASCII()) {
+		return CacheMarkerCounts{}
+	}
+	sysCount, sysTTL1h, okSys := countSectionMarkers(top, firstNonNull(top, "system", "instructions"))
+	msgCount, msgTTL1h, okMsg := countSectionMarkers(top, firstNonNull(top, "messages", "input"))
+	toolsRaw, _ := top.Raw("tools")
+	toolsCount, toolsTTL1h, okTools := countSectionMarkers(top, toolsRaw)
+	if !okSys || !okMsg || !okTools {
+		return countCacheMarkersFullDecode(body)
+	}
+	return CacheMarkerCounts{
+		System:   sysCount,
+		Messages: msgCount,
+		Tools:    toolsCount,
+		TTL1h:    sysTTL1h + msgTTL1h + toolsTTL1h,
+	}
+}
+
+var cacheControlKeyBytes = []byte("cache_control")
+
+// firstNonNull returns the value of top-level key primary, or of fallback
+// when primary is absent or null -- the same choice the full decode makes
+// with `v := req[primary]; if v == nil { v = req[fallback] }`.
+func firstNonNull(top *jsonscan.Top, primary, fallback string) []byte {
+	if raw, ok := top.Raw(primary); ok && !jsonscan.IsNull(raw) {
+		return raw
+	}
+	raw, _ := top.Raw(fallback)
+	return raw
+}
+
+// countSectionMarkers counts the markers in one section (the raw JSON of
+// "messages", "system" or "tools"; empty for an absent section) the way
+// countCacheControlMarkers counts them in the decoded value, without
+// building that value: jsonscan.FindKey walks the section and hands back the
+// cache_control values, and only those few dozen bytes each are decoded and
+// judged, by the same rule as everywhere else.
+//
+// ok=false means "decode the body instead": FindKey could not promise the
+// answer a decode would give (see its doc: a repeated or escaped object name,
+// a number a decode rejects, a section that does not parse).
+func countSectionMarkers(top *jsonscan.Top, section []byte) (count, ttl1h int, ok bool) {
+	if len(section) == 0 || (!top.EscapedASCII() && !bytes.Contains(section, cacheControlKeyBytes)) {
+		return 0, 0, true
+	}
+	markers, ok := jsonscan.FindKey(section, "cache_control")
+	if !ok {
+		return 0, 0, false
+	}
+	for _, raw := range markers {
+		var marker interface{}
+		if err := json.Unmarshal(raw, &marker); err != nil {
+			return 0, 0, false
+		}
+		if cc, isMarker := asEphemeralCacheControl(marker); isMarker {
+			count++
+			if ttl, _ := cc["ttl"].(string); ttl == "1h" {
+				ttl1h++
+			}
+		}
+	}
+	return count, ttl1h, true
+}
+
+// countCacheMarkersFullDecode is the reference implementation: decode the
+// whole body and walk the decoded value.
+func countCacheMarkersFullDecode(body []byte) CacheMarkerCounts {
 	var req map[string]interface{}
 	if err := json.Unmarshal(body, &req); err != nil {
 		return CacheMarkerCounts{}

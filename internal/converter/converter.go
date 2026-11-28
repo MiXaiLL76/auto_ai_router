@@ -281,16 +281,11 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 		case config.ProviderTypeBedrock:
 			return nil, converterutil.NewRequestValidationError("model", "model does not support embeddings")
 		default:
-			if c.shouldStripCacheSalt() {
-				body = openaiconv.StripCacheSalt(body)
-			}
-			if c.shouldStripOpenRouterOnlyFields() {
-				body = openaiconv.StripOpenRouterOnlyFields(body)
-			}
-			if c.shouldStripVLLMOnlySamplingParams() {
-				body = openaiconv.StripVLLMOnlySamplingParams(body)
-			}
-			return body, nil
+			return openaiconv.RequestRules{
+				StripCacheSalt:              c.shouldStripCacheSalt(),
+				StripOpenRouterOnlyFields:   c.shouldStripOpenRouterOnlyFields(),
+				StripVLLMOnlySamplingParams: c.shouldStripVLLMOnlySamplingParams(),
+			}.Apply(body), nil
 		}
 	}
 
@@ -314,17 +309,16 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 			// field, not just unrecognized keys inside it) -- a client can still
 			// send it directly on a /v1/messages request since the ingress
 			// sanitizer already skips stream_options injection for isMessagesAPI.
-			if c.shouldStripCacheSalt() {
-				body = openaiconv.StripCacheSalt(body)
-			}
-			if c.shouldStripOpenRouterOnlyFields() {
-				body = openaiconv.StripOpenRouterOnlyFields(body)
-			}
-			// No shouldStripVLLMOnlySamplingParams call here: providerType is
+			//
+			// No shouldStripVLLMOnlySamplingParams rule here: providerType is
 			// always Anthropic/CometAPI/ProMan in this branch, never
 			// ProviderTypeOpenAI, so it would always be a no-op (see that
 			// method's doc comment).
-			return openaiconv.StripStreamOptions(body), nil
+			return openaiconv.RequestRules{
+				StripCacheSalt:            c.shouldStripCacheSalt(),
+				StripOpenRouterOnlyFields: c.shouldStripOpenRouterOnlyFields(),
+				StripStreamOptions:        true,
+			}.Apply(body), nil
 		}
 		return anthropic.OpenAIToAnthropic(body, c.mode.ModelID, c.providerType == config.ProviderTypeAnthropic, c.mode.ImageBudget)
 	case config.ProviderTypeBedrock:
@@ -334,61 +328,52 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 		if isAnthropicBedrockModel(c.mode.ModelID) {
 			return anthropic.OpenAIToBedrock(body, c.mode.ModelID, c.mode.ImageBudget)
 		}
-		if c.shouldStripCacheSalt() {
-			body = openaiconv.StripCacheSalt(body)
-		}
-		if c.mode.IsStreaming && c.shouldStripStreamOptionsExtras() {
-			body = openaiconv.RebuildStreamOptionsIncludeUsageOnly(body)
-		}
-		if c.shouldStripOpenRouterOnlyFields() {
-			body = openaiconv.StripOpenRouterOnlyFields(body)
-		}
-		// No shouldStripVLLMOnlySamplingParams call here: providerType is
+		// No shouldStripVLLMOnlySamplingParams rule here: providerType is
 		// always ProviderTypeBedrock in this branch, never ProviderTypeOpenAI,
 		// so it would always be a no-op (see that method's doc comment).
-		return body, nil
+		return openaiconv.RequestRules{
+			StripCacheSalt:                c.shouldStripCacheSalt(),
+			StreamOptionsIncludeUsageOnly: c.mode.IsStreaming && c.shouldStripStreamOptionsExtras(),
+			StripOpenRouterOnlyFields:     c.shouldStripOpenRouterOnlyFields(),
+		}.Apply(body), nil
 	default:
 		// ProviderTypeOpenAI, ProviderTypeProxy, ProviderTypeAIR, and others:
 		// Chat Completions and Responses have different built-in tool contracts.
 		// Native Responses requests must pass through unchanged, while Chat
 		// Completions requests need their tool list normalized.
-		if !c.mode.IsResponsesAPI {
-			body = openaiconv.ConvertWebSearchTools(body)
-			body = openaiconv.ForceWebSearchResults(body)
-		}
+		//
+		// The five rules below are applied as one run (openaiconv.RequestRules):
+		// the body is read once for all of them instead of once per rule. They
+		// take effect in the order listed.
+		body = openaiconv.RequestRules{
+			// ConvertWebSearchTools, then ForceWebSearchResults.
+			ChatTools: !c.mode.IsResponsesAPI,
 
-		// See shouldStripCacheSalt: strip for everyone in this default bucket
-		// (aggregators, strict OpenAI-shaped deployments, genuine
-		// api.openai.com, ...) except self-hosted vLLM.
-		if c.shouldStripCacheSalt() {
-			body = openaiconv.StripCacheSalt(body)
-		}
+			// See shouldStripCacheSalt: strip for everyone in this default bucket
+			// (aggregators, strict OpenAI-shaped deployments, genuine
+			// api.openai.com, ...) except self-hosted vLLM.
+			StripCacheSalt: c.shouldStripCacheSalt(),
 
-		// See shouldStripStreamOptionsExtras: the ingress sanitizer preserves
-		// whatever stream_options object the client sent (plus a guaranteed
-		// include_usage=true); strip it down to just include_usage here for
-		// every destination except vLLM, which understands the extra keys.
-		if c.mode.IsStreaming && c.shouldStripStreamOptionsExtras() {
-			body = openaiconv.RebuildStreamOptionsIncludeUsageOnly(body)
-		}
+			// See shouldStripStreamOptionsExtras: the ingress sanitizer preserves
+			// whatever stream_options object the client sent (plus a guaranteed
+			// include_usage=true); strip it down to just include_usage here for
+			// every destination except vLLM, which understands the extra keys.
+			StreamOptionsIncludeUsageOnly: c.mode.IsStreaming && c.shouldStripStreamOptionsExtras(),
 
-		// See shouldStripOpenRouterOnlyFields: plugins/provider are genuine
-		// OpenRouter features that every other destination in this bucket
-		// either rejects outright or silently ignores -- strip for everyone
-		// except genuine OpenRouter.
-		if c.shouldStripOpenRouterOnlyFields() {
-			body = openaiconv.StripOpenRouterOnlyFields(body)
-		}
+			// See shouldStripOpenRouterOnlyFields: plugins/provider are genuine
+			// OpenRouter features that every other destination in this bucket
+			// either rejects outright or silently ignores -- strip for everyone
+			// except genuine OpenRouter.
+			StripOpenRouterOnlyFields: c.shouldStripOpenRouterOnlyFields(),
 
-		// See shouldStripVLLMOnlySamplingParams: chat_template_kwargs/
-		// repetition_penalty/length_penalty are vLLM sampling extensions --
-		// strip only when this bucket's provider is confirmed genuine OpenAI,
-		// never for ProviderTypeProxy/ProviderTypeAIR (IsProxyLike), which
-		// forward to a router this one doesn't control and could itself be
-		// fronting vLLM.
-		if c.shouldStripVLLMOnlySamplingParams() {
-			body = openaiconv.StripVLLMOnlySamplingParams(body)
-		}
+			// See shouldStripVLLMOnlySamplingParams: chat_template_kwargs/
+			// repetition_penalty/length_penalty are vLLM sampling extensions --
+			// strip only when this bucket's provider is confirmed genuine OpenAI,
+			// never for ProviderTypeProxy/ProviderTypeAIR (IsProxyLike), which
+			// forward to a router this one doesn't control and could itself be
+			// fronting vLLM.
+			StripVLLMOnlySamplingParams: c.shouldStripVLLMOnlySamplingParams(),
+		}.Apply(body)
 
 		// A provider that speaks the OpenAI wire protocol but fronts a
 		// Claude model does not read "reasoning_effort": "none" as "no

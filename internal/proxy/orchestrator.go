@@ -18,6 +18,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
 	"github.com/mixaill76/auto_ai_router/internal/deepseektools"
+	"github.com/mixaill76/auto_ai_router/internal/jsonscan"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/auth"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
@@ -174,7 +175,12 @@ func (p *Proxy) orchestrateRequest(
 
 	logCtx.RequestEndpoint = r.URL.Path
 	logCtx.IsSystemOne = isSystemOnePath(r.URL.Path)
-	logCtx.ReasoningRequested, logCtx.ReasoningSource, logCtx.ThinkingMode = requestReasoningDetails(body)
+	// One scan of the body's top-level layout answers every question asked
+	// about it below (reasoning fields, Responses API shape, Responses
+	// metadata); the conversation itself is not decoded for any of them.
+	// nil when the body is not a JSON object (multipart, malformed).
+	bodyTop := logCtx.scanBody(body)
+	logCtx.ReasoningRequested, logCtx.ReasoningSource, logCtx.ThinkingMode = requestReasoningDetailsTop(bodyTop)
 	var policyDenylist []string
 	if logCtx.OrganizationPolicy != nil {
 		policyDenylist = logCtx.OrganizationPolicy.CredentialDenylist()
@@ -230,7 +236,7 @@ func (p *Proxy) orchestrateRequest(
 	basePath := r.URL.Path
 
 	// Detect Responses API requests and select credential before conversion.
-	isResponsesAPI := responses.IsResponsesAPI(body) && strings.Contains(r.URL.Path, "/responses")
+	isResponsesAPI := responses.IsResponsesAPITop(bodyTop) && strings.Contains(r.URL.Path, "/responses")
 	isMessagesAPI := r.URL.Path == "/v1/messages"
 
 	var responsesMetadata *responses.ResponsesMetadata
@@ -240,7 +246,7 @@ func (p *Proxy) orchestrateRequest(
 
 	if isResponsesAPI {
 		// Extract Responses-API-only metadata before the fields are deleted.
-		meta := responses.ExtractResponsesMetadata(body)
+		meta := responses.ExtractResponsesMetadataTop(bodyTop)
 		responsesMetadata = &meta
 
 		if meta.PreviousResponseID != "" && p.responseStore != nil && nativeWSRoutingFromContext(r.Context()) == nil {
@@ -293,7 +299,15 @@ func (p *Proxy) orchestrateRequest(
 		// Capture the full accumulated input (history + current) for storage.
 		// This must happen after any history prepending but before RequestToChat removes
 		// "input", and before the vision fallback: the stored history keeps the images.
-		responsesMetadata.AccumulatedInput = responses.ExtractInputArray(baseBody)
+		//
+		// Its only reader is the save-on-completion callback in proxyRequest,
+		// which exists under exactly this condition (store=true and a response
+		// store configured). Without it the copy would be built -- a full
+		// decode and re-encode of the conversation -- and held for the whole
+		// stream for nobody.
+		if responsesMetadata.Store && p.responseStore != nil {
+			responsesMetadata.AccumulatedInput = responses.ExtractInputArray(baseBody)
+		}
 	}
 	p.bindPromptSession(logCtx, baseBody)
 
@@ -487,24 +501,22 @@ func (p *Proxy) sanitizeClientParams(r *http.Request, modelID string, cred *conf
 		(!chatShaped && !req.passthroughResponses && !req.nativeResponses && !req.convertedToResponses) {
 		return req.body
 	}
-	body := openai.DropEmptyTools(req.body)
+	// DropEmptyTools, MapReasoningEffort and the reasoning-model parameter
+	// rules, applied as one run so the body is read once for all three.
+	rules := openai.ClientParamRules{ModelID: req.realModelID, Chat: chatShaped}
 	if p.modelManager != nil {
 		if effortMap := p.modelManager.GetReasoningEffortMap(modelID, cred.Name); effortMap != nil {
-			body = openai.MapReasoningEffort(body, func(v string) (string, bool) {
+			rules.MapEffort = func(v string) (string, bool) {
 				mapped, changed := effortMap.Resolve(v)
 				if changed {
 					p.logger.DebugContext(r.Context(), "Rewrote reasoning effort via reasoning_effort_map",
 						"model", modelID, "credential", cred.Name, "from", v, "to", mapped)
 				}
 				return mapped, changed
-			})
+			}
 		}
 	}
-	if chatShaped {
-		body = openai.ReplaceBodyParam(req.realModelID, body)
-	} else {
-		body = openai.ReplaceResponsesBodyParam(req.realModelID, body)
-	}
+	body := rules.Apply(req.body)
 	// DeepSeek's flash model cannot run the built-in web search/fetch tools
 	// itself (web_search is rejected outright, web_fetch is ignored), so the
 	// router takes them over: the built-in tools become function tools the
@@ -1312,13 +1324,53 @@ func (p *Proxy) authenticateCaller(
 	return true
 }
 
+// scanBody returns the top-level layout of a JSON request body, scanning it
+// only if the scan this request already holds is of a different slice. nil
+// for a body that is not a JSON object.
+func (logCtx *RequestLogContext) scanBody(body []byte) *jsonscan.Top {
+	if logCtx != nil && logCtx.bodyScan.Describes(body) {
+		return logCtx.bodyScan
+	}
+	top, ok := jsonscan.ScanTop(body)
+	if !ok {
+		return nil
+	}
+	if logCtx != nil {
+		logCtx.bodyScan = top
+	}
+	return top
+}
+
+// maxPresizedRequestBody caps how much memory readRequestBody reserves on the
+// strength of a Content-Length header alone, before any of the body has
+// arrived. Above it the buffer grows as the bytes come in, as io.ReadAll does.
+const maxPresizedRequestBody = 8 << 20
+
+// readRequestBody reads at most limit bytes of body, like
+// io.ReadAll(io.LimitReader(body, limit)), into a buffer sized from the
+// declared Content-Length. io.ReadAll starts at 512 bytes and grows by
+// reallocating and copying, which for a 1 MB body allocates about 2.4x the
+// body; a buffer of the right size is allocated once. contentLength <= 0
+// (unknown, chunked) reads exactly as before.
+func readRequestBody(body io.Reader, contentLength, limit int64) ([]byte, error) {
+	src := io.LimitReader(body, limit)
+	if contentLength <= 0 {
+		return io.ReadAll(src)
+	}
+	size := min(contentLength, limit, maxPresizedRequestBody)
+	// bytes.MinRead of headroom lets ReadFrom see EOF without growing.
+	buf := bytes.NewBuffer(make([]byte, 0, size+bytes.MinRead))
+	_, err := buf.ReadFrom(src)
+	return buf.Bytes(), err
+}
+
 func (p *Proxy) readRequestBodyAndSelectModel(
 	w http.ResponseWriter,
 	r *http.Request,
 	logCtx *RequestLogContext,
 ) ([]byte, string, string, bool, bool) {
 	maxBodyBytes := int64(p.maxBodySizeMB) * 1024 * 1024
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
+	body, err := readRequestBody(r.Body, r.ContentLength, maxBodyBytes+1)
 	if err != nil {
 		// Client-side transport problem while sending the body
 		p.logger.WarnContext(r.Context(), "Failed to read request body",
@@ -1362,6 +1414,7 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		return nil, "", "", false, false
 	}
 	body = sanitized.Body
+	logCtx.bodyScan = sanitized.scan
 	logCtx.clientServiceTiers = sanitized.ServiceTiers
 	if p.rawBodyStoreRawBody {
 		// Opt-in only (kafka.raw_bodies.store_raw_body, default false) --
@@ -1444,7 +1497,7 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 	// one at all) ends up serving the request. See CacheMarkersIn's doc
 	// comment on RequestLogContext for why this exists alongside
 	// CacheControlOutcome.
-	logCtx.CacheMarkersIn = anthropicconv.CountCacheMarkers(body)
+	logCtx.CacheMarkersIn = anthropicconv.CountCacheMarkersScanned(body, func() *jsonscan.Top { return logCtx.scanBody(body) })
 
 	if modelID == "" {
 		p.logger.WarnContext(r.Context(), "Model not specified in request body",

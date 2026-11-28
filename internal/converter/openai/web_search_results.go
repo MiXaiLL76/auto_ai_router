@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"strings"
+
+	"github.com/mixaill76/auto_ai_router/internal/jsonscan"
 )
 
 // Z.AI (Zhipu GLM) Chat Completions take a built-in search tool shaped
@@ -36,17 +38,46 @@ func ForceWebSearchResults(body []byte) []byte {
 	return forced
 }
 
+// NoWebSearchTool reports whether a scanned Chat Completions body provably
+// has no Z.AI-style web_search tool, so that WebSearchResultsHidden is false
+// and ForceWebSearchResults changes nothing, without either of them searching
+// the whole body. Such a tool is a member of the top-level tools array whose
+// type is the string web_search; when no string in the body is written with
+// an escaped ASCII character, that text has to appear in the tools array
+// itself. false means "not known" and the caller asks the functions above.
+func NoWebSearchTool(top *jsonscan.Top) bool {
+	if top == nil || top.EscapedASCII() {
+		return false
+	}
+	tools, _ := top.Raw("tools")
+	return !bytes.Contains(tools, webSearchNeedle)
+}
+
 func forceWebSearchResults(body []byte, rewrite bool) ([]byte, bool) {
 	if !bytes.Contains(body, webSearchNeedle) {
 		return body, false
 	}
-	var data map[string]json.RawMessage
-	if err := json.Unmarshal(body, &data); err != nil {
+	obj, ok := jsonscan.ParseObject(body)
+	if !ok {
 		return body, false
 	}
+	if !forceWebSearchResultsFields(obj.Fields, rewrite) {
+		return body, false
+	}
+	if !rewrite {
+		return body, true
+	}
+	return obj.Encode(), true
+}
+
+// forceWebSearchResultsFields is forceWebSearchResults on a request's
+// top-level members: it reports whether some Z.AI-style web_search tool does
+// not ask for its results and, with rewrite, makes every such tool ask.
+// Without rewrite, and whenever it reports false, the members are untouched.
+func forceWebSearchResultsFields(data map[string]json.RawMessage, rewrite bool) bool {
 	var tools []json.RawMessage
 	if err := json.Unmarshal(data["tools"], &tools); err != nil {
-		return body, false
+		return false
 	}
 
 	changed := false
@@ -68,34 +99,30 @@ func forceWebSearchResults(body []byte, rewrite bool) ([]byte, bool) {
 		}
 		changed = true
 		if !rewrite {
-			return body, true
+			return true
 		}
 		options["search_result"] = json.RawMessage("true")
 		encodedOptions, err := marshalWithoutHTMLEscape(options)
 		if err != nil {
-			return body, false
+			return false
 		}
 		tool["web_search"] = encodedOptions
 		encodedTool, err := marshalWithoutHTMLEscape(tool)
 		if err != nil {
-			return body, false
+			return false
 		}
 		tools[i] = encodedTool
 	}
 	if !changed {
-		return body, false
+		return false
 	}
 
 	encodedTools, err := marshalWithoutHTMLEscape(tools)
 	if err != nil {
-		return body, false
+		return false
 	}
 	data["tools"] = encodedTools
-	out, err := marshalWithoutHTMLEscape(data)
-	if err != nil {
-		return body, false
-	}
-	return out, true
+	return true
 }
 
 func isJSONTrue(raw json.RawMessage) bool {

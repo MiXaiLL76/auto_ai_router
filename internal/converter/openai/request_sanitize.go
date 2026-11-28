@@ -3,6 +3,8 @@ package openai
 import (
 	"bytes"
 	"encoding/json"
+
+	"github.com/mixaill76/auto_ai_router/internal/jsonscan"
 )
 
 // DropEmptyTools removes "tools": [] together with the fields that only make sense
@@ -14,23 +16,27 @@ func DropEmptyTools(body []byte) []byte {
 	if !bytes.Contains(body, []byte(`"tools"`)) {
 		return body
 	}
-	var top map[string]json.RawMessage
-	if err := json.Unmarshal(body, &top); err != nil || top == nil {
+	obj, ok := jsonscan.ParseObject(body)
+	if !ok {
 		return body
 	}
+	dropEmptyToolsFields(obj.Fields)
+	if !obj.Changed() {
+		return body
+	}
+	return obj.Encode()
+}
+
+// dropEmptyToolsFields is DropEmptyTools on a request's top-level members.
+func dropEmptyToolsFields(top map[string]json.RawMessage) {
 	var tools []json.RawMessage
 	raw, ok := top["tools"]
 	if !ok || json.Unmarshal(raw, &tools) != nil || tools == nil || len(tools) > 0 {
-		return body
+		return
 	}
 	delete(top, "tools")
 	delete(top, "tool_choice")
 	delete(top, "parallel_tool_calls")
-	out, err := json.Marshal(top)
-	if err != nil {
-		return body
-	}
-	return out
 }
 
 // DropNullParams removes the listed top-level keys whose value is JSON null. A client
@@ -41,10 +47,11 @@ func DropNullParams(body []byte, keys ...string) []byte {
 	if !bytes.Contains(body, []byte("null")) {
 		return body
 	}
-	var top map[string]json.RawMessage
-	if err := json.Unmarshal(body, &top); err != nil || top == nil {
+	obj, ok := jsonscan.ParseObject(body)
+	if !ok {
 		return body
 	}
+	top := obj.Fields
 	changed := false
 	for _, key := range keys {
 		if raw, ok := top[key]; ok && bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
@@ -55,11 +62,7 @@ func DropNullParams(body []byte, keys ...string) []byte {
 	if !changed {
 		return body
 	}
-	out, err := json.Marshal(top)
-	if err != nil {
-		return body
-	}
-	return out
+	return obj.Encode()
 }
 
 // MapReasoningEffort rewrites every reasoning effort the request carries through
@@ -70,21 +73,26 @@ func MapReasoningEffort(body []byte, resolve func(string) (string, bool)) []byte
 	if resolve == nil || !bytes.Contains(body, []byte("effort")) {
 		return body
 	}
-	var top map[string]json.RawMessage
-	if err := json.Unmarshal(body, &top); err != nil || top == nil {
+	obj, ok := jsonscan.ParseObject(body)
+	if !ok {
 		return body
 	}
-	changed := mapEffortField(top, "reasoning_effort", resolve)
-	changed = mapNestedEffortField(top, "chat_template_kwargs", "reasoning_effort", resolve) || changed
-	changed = mapNestedEffortField(top, "reasoning", "effort", resolve) || changed
-	if !changed {
+	mapReasoningEffortFields(obj.Fields, resolve)
+	if !obj.Changed() {
 		return body
 	}
-	out, err := json.Marshal(top)
-	if err != nil {
-		return body
+	return obj.Encode()
+}
+
+// mapReasoningEffortFields is MapReasoningEffort on a request's top-level
+// members.
+func mapReasoningEffortFields(top map[string]json.RawMessage, resolve func(string) (string, bool)) {
+	if resolve == nil {
+		return
 	}
-	return out
+	mapEffortField(top, "reasoning_effort", resolve)
+	mapNestedEffortField(top, "chat_template_kwargs", "reasoning_effort", resolve)
+	mapNestedEffortField(top, "reasoning", "effort", resolve)
 }
 
 func mapEffortField(obj map[string]json.RawMessage, key string, resolve func(string) (string, bool)) bool {

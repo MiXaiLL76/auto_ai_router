@@ -7,6 +7,9 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode/utf8"
+
+	"github.com/mixaill76/auto_ai_router/internal/jsonscan"
 )
 
 // ModelParamsMapping defines parameter transformations for a model family.
@@ -19,20 +22,37 @@ type ModelParamsMapping struct {
 }
 
 // UpdateJSONField applies parameter transformations (rename + remove) to a JSON body.
+//
+// Only the top-level members are looked at: the ones the mapping names are
+// renamed or removed, every other member (the conversation among them) is
+// passed on as the client sent it, without being decoded.
 func UpdateJSONField(body []byte, mapping ModelParamsMapping) []byte {
-	var data map[string]any
+	obj, ok := jsonscan.ParseObject(body)
+	if !ok {
+		return body
+	}
+	if !utf8.Valid(body) {
+		return updateJSONFieldDecode(body, mapping)
+	}
+	applyMapping(obj.Fields, mapping)
+	return obj.Encode()
+}
 
+// updateJSONFieldDecode is UpdateJSONField by decoding the whole body and
+// encoding it again. Besides applying the mapping, that round trip replaces
+// invalid UTF-8 in the body's strings -- whether or not the mapping changed
+// anything. A body that has any still goes through it, so what is sent on
+// is what always was.
+func updateJSONFieldDecode(body []byte, mapping ModelParamsMapping) []byte {
+	var data map[string]any
 	if err := json.Unmarshal(body, &data); err != nil {
 		return body
 	}
-
 	applyMapping(data, mapping)
-
 	updatedBody, err := json.Marshal(data)
 	if err != nil {
 		return body
 	}
-
 	return updatedBody
 }
 
@@ -112,11 +132,11 @@ var quotedModelKeyBytes = []byte(`"model"`)
 // pass is enough: every other field (messages, tools, ...) is carried through
 // untouched as raw bytes, so this doesn't pay to re-parse or re-encode them.
 func replaceModelFieldViaParse(body []byte, oldModel string, newToken []byte) []byte {
-	var top map[string]json.RawMessage
-	if err := json.Unmarshal(body, &top); err != nil {
+	obj, ok := jsonscan.ParseObject(body)
+	if !ok {
 		return body
 	}
-	raw, ok := top["model"]
+	raw, ok := obj.Fields["model"]
 	if !ok {
 		return body
 	}
@@ -124,12 +144,8 @@ func replaceModelFieldViaParse(body []byte, oldModel string, newToken []byte) []
 	if err := json.Unmarshal(raw, &current); err != nil || current != oldModel {
 		return body
 	}
-	top["model"] = newToken
-	out, err := json.Marshal(top)
-	if err != nil {
-		return body
-	}
-	return out
+	obj.Fields["model"] = newToken
+	return obj.Encode()
 }
 
 // defaultParamSynonymGroups lists sets of request keys that set the same value. A
@@ -174,10 +190,11 @@ func ApplyDefaultParams(body []byte, defaults map[string]any) []byte {
 	if len(defaults) == 0 || len(body) == 0 {
 		return body
 	}
-	var top map[string]json.RawMessage
-	if err := json.Unmarshal(body, &top); err != nil || top == nil {
+	obj, ok := jsonscan.ParseObject(body)
+	if !ok {
 		return body
 	}
+	top := obj.Fields
 	changed := false
 	for key, value := range defaults {
 		if clientSetParam(top, key) {
@@ -193,11 +210,7 @@ func ApplyDefaultParams(body []byte, defaults map[string]any) []byte {
 	if !changed {
 		return body
 	}
-	out, err := json.Marshal(top)
-	if err != nil {
-		return body
-	}
-	return out
+	return obj.Encode()
 }
 
 // clientSetParam reports whether the request already carries key or a synonym of it.
@@ -382,9 +395,18 @@ func ReplaceBodyParam(modelID string, body []byte) []byte {
 	if !IsReasoningModel(modelID) {
 		return body
 	}
-	var data map[string]json.RawMessage
-	if err := json.Unmarshal(body, &data); err != nil {
+	obj, ok := jsonscan.ParseObject(body)
+	if !ok {
 		return body
+	}
+	replaceBodyParamFields(modelID, obj.Fields)
+	return obj.Encode()
+}
+
+// replaceBodyParamFields is ReplaceBodyParam on a request's top-level members.
+func replaceBodyParamFields(modelID string, data map[string]json.RawMessage) {
+	if !IsReasoningModel(modelID) {
+		return
 	}
 	mapping := ModelParamsMapping{
 		KeysToReplace: map[string]string{"max_tokens": "max_completion_tokens"},
@@ -394,11 +416,6 @@ func ReplaceBodyParam(modelID string, body []byte) []byte {
 		mapping.KeysToRemove = slices.Concat(chatLogprobsParams, samplingParams)
 	}
 	applyMapping(data, mapping)
-	updated, err := json.Marshal(data)
-	if err != nil {
-		return body
-	}
-	return updated
 }
 
 // NormalizeDeveloperRole downgrades a "developer"-role Chat Completions message
@@ -411,7 +428,60 @@ func ReplaceBodyParam(modelID string, body []byte) []byte {
 // generic path (DeepSeek and other OpenAI-compatible backends) only
 // recognize the classic role set and reject "developer" outright. Returns
 // body unchanged if there's no "messages" array or nothing to rename.
+//
+// The body is scanned, not decoded: only a message whose text contains the
+// word "developer" (or an escape that could spell it) is decoded to look at
+// its role, and only a renamed message is re-encoded.
+// normalizeDeveloperRoleDecode is the whole-body implementation this replaced
+// and the reference it is tested against.
 func NormalizeDeveloperRole(body []byte) []byte {
+	if !bytes.Contains(body, developerWord) && !jsonscan.HasEscapedASCII(body) {
+		return body
+	}
+	obj, ok := jsonscan.ParseObject(body)
+	if !ok {
+		return body
+	}
+	messages, ok := jsonscan.ScanArray(obj.Fields["messages"])
+	if !ok {
+		return body // absent or not an array
+	}
+	changed := false
+	for i, raw := range messages {
+		if len(raw) == 0 || raw[0] != '{' ||
+			(!bytes.Contains(raw, developerWord) && !jsonscan.HasEscapedASCII(raw)) {
+			continue
+		}
+		var msg map[string]any
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			return normalizeDeveloperRoleDecode(body)
+		}
+		if role, ok := msg["role"].(string); !ok || role != "developer" {
+			continue
+		}
+		msg["role"] = "system"
+		encoded, err := json.Marshal(msg)
+		if err != nil {
+			return body
+		}
+		messages[i] = encoded
+		changed = true
+	}
+	if !changed {
+		return body
+	}
+	if !utf8.Valid(body) {
+		return normalizeDeveloperRoleDecode(body) // see updateJSONFieldDecode
+	}
+	obj.Fields["messages"] = jsonscan.JoinArray(messages)
+	return obj.Encode()
+}
+
+var developerWord = []byte("developer")
+
+// normalizeDeveloperRoleDecode applies the same rename by decoding the whole
+// body and encoding it again.
+func normalizeDeveloperRoleDecode(body []byte) []byte {
 	var data map[string]any
 	if err := json.Unmarshal(body, &data); err != nil {
 		return body
@@ -464,35 +534,111 @@ func NormalizeDeveloperRole(body []byte) []byte {
 //   - If a non-function tool_choice remains after tools are filtered, it is
 //     also removed so the provider defaults to "auto" (unless it references
 //     a preserved web_search tool, see above).
+//
+// The rules read four top-level fields (model, tools, tool_choice,
+// web_search_options); only those are decoded, and only the ones a rule
+// changed are written back. The conversation is never decoded.
+// convertWebSearchToolsDecode is the whole-body implementation and the
+// reference this one is tested against.
 func ConvertWebSearchTools(body []byte) []byte {
+	// Both keys the rules act on must be present literally, or be spelled
+	// with an escape.
 	if !bytes.Contains(body, []byte(`"tools"`)) &&
 		!bytes.Contains(body, []byte(`"tool_choice"`)) &&
-		bytes.IndexByte(body, '\\') < 0 {
+		!jsonscan.HasEscapedASCII(body) {
 		return body
 	}
+	obj, ok := jsonscan.ParseObject(body)
+	if !ok {
+		return body
+	}
+	if !convertWebSearchToolsFields(obj.Fields) {
+		return body
+	}
+	if !utf8.Valid(body) {
+		return convertWebSearchToolsDecode(body) // see updateJSONFieldDecode
+	}
+	return obj.Encode()
+}
+
+// convertWebSearchToolsFields is ConvertWebSearchTools on a request's
+// top-level members. It reports whether it changed them; when it does not,
+// they are left exactly as they were.
+func convertWebSearchToolsFields(fields map[string]json.RawMessage) bool {
+	// The four fields the rules read, decoded as a whole-body decode would
+	// have decoded them.
+	data := make(map[string]any, 4)
+	for _, key := range [...]string{"model", "tools", "tool_choice", "web_search_options"} {
+		raw, present := fields[key]
+		if !present {
+			continue
+		}
+		var value any
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return false
+		}
+		data[key] = value
+	}
+	if !convertWebSearchToolsIn(data) {
+		return false
+	}
+	// tools and web_search_options are rebuilt by the rules and written back
+	// in their new form; tool_choice is only ever removed.
+	encoded := make(map[string]json.RawMessage, 2)
+	for _, key := range [...]string{"tools", "web_search_options"} {
+		if value, present := data[key]; present {
+			raw, err := json.Marshal(value)
+			if err != nil {
+				return false
+			}
+			encoded[key] = raw
+		}
+	}
+	for _, key := range [...]string{"tools", "web_search_options"} {
+		if raw, present := encoded[key]; present {
+			fields[key] = raw
+		} else {
+			delete(fields, key)
+		}
+	}
+	if _, kept := data["tool_choice"]; !kept {
+		delete(fields, "tool_choice")
+	}
+	return true
+}
+
+// convertWebSearchToolsDecode applies the same rules by decoding the whole
+// body and encoding it again.
+func convertWebSearchToolsDecode(body []byte) []byte {
 	var data map[string]any
 	if err := json.Unmarshal(body, &data); err != nil {
 		return body
 	}
+	if !convertWebSearchToolsIn(data) {
+		return body
+	}
+	result, err := json.Marshal(data)
+	if err != nil {
+		return body
+	}
+	return result
+}
 
+// convertWebSearchToolsIn applies ConvertWebSearchTools' rules to a decoded
+// request (or to just the four fields the rules read) and reports whether
+// they changed anything.
+func convertWebSearchToolsIn(data map[string]any) bool {
 	modelID, _ := data["model"].(string)
 	preserveWebSearch := !isOpenAIModel(modelID) || !isWebSearchModel(modelID)
 
 	toolsRaw, ok := data["tools"]
 	if !ok {
 		// No tools array; still clean up a stray non-function tool_choice.
-		if dropNonFunctionToolChoice(data, preserveWebSearch) {
-			result, err := json.Marshal(data)
-			if err != nil {
-				return body
-			}
-			return result
-		}
-		return body
+		return dropNonFunctionToolChoice(data, preserveWebSearch)
 	}
 	toolsArr, ok := toolsRaw.([]any)
 	if !ok {
-		return body
+		return false
 	}
 
 	var retainedTools []any
@@ -538,7 +684,7 @@ func ConvertWebSearchTools(body []byte) []byte {
 
 	if !hasWebSearch && !nonFunctionDropped {
 		// Nothing changed.
-		return body
+		return false
 	}
 
 	if hasWebSearch && isWebSearchModel(modelID) {
@@ -562,12 +708,7 @@ func ConvertWebSearchTools(body []byte) []byte {
 
 	// If tool_choice still references a non-function built-in, remove it.
 	dropNonFunctionToolChoice(data, preserveWebSearch)
-
-	result, err := json.Marshal(data)
-	if err != nil {
-		return body
-	}
-	return result
+	return true
 }
 
 func isWebSearchModel(modelID string) bool {
@@ -673,19 +814,24 @@ func RebuildStreamOptionsIncludeUsageOnly(body []byte) []byte {
 	if !bytes.Contains(body, []byte(`"stream_options"`)) {
 		return body
 	}
-	var data map[string]json.RawMessage
-	if err := json.Unmarshal(body, &data); err != nil {
+	obj, ok := jsonscan.ParseObject(body)
+	if !ok {
 		return body
 	}
-	if _, exists := data["stream_options"]; !exists {
+	if _, exists := obj.Fields["stream_options"]; !exists {
 		return body
 	}
-	data["stream_options"] = streamOptionsIncludeUsageOnly
-	marshaled, err := json.Marshal(data)
-	if err != nil {
-		return body
+	// A body that already carries exactly this object comes back as it is.
+	rebuildStreamOptionsFields(obj.Fields)
+	return obj.Encode()
+}
+
+// rebuildStreamOptionsFields is RebuildStreamOptionsIncludeUsageOnly on a
+// request's top-level members.
+func rebuildStreamOptionsFields(fields map[string]json.RawMessage) {
+	if _, exists := fields["stream_options"]; exists {
+		fields["stream_options"] = streamOptionsIncludeUsageOnly
 	}
-	return marshaled
 }
 
 // StripStreamOptions removes the stream_options field from a JSON request
@@ -774,9 +920,22 @@ func ReplaceResponsesBodyParam(modelID string, body []byte) []byte {
 	if !IsReasoningModel(modelID) {
 		return body
 	}
-	var data map[string]json.RawMessage
-	if json.Unmarshal(body, &data) != nil {
+	obj, ok := jsonscan.ParseObject(body)
+	if !ok {
 		return body
+	}
+	replaceResponsesBodyParamFields(modelID, obj.Fields)
+	if !obj.Changed() {
+		return body
+	}
+	return obj.Encode()
+}
+
+// replaceResponsesBodyParamFields is ReplaceResponsesBodyParam on a
+// request's top-level members.
+func replaceResponsesBodyParamFields(modelID string, data map[string]json.RawMessage) {
+	if !IsReasoningModel(modelID) {
+		return
 	}
 	var reasoning struct {
 		Effort any `json:"effort"`
@@ -785,16 +944,13 @@ func ReplaceResponsesBodyParam(modelID string, body []byte) []byte {
 		_ = json.Unmarshal(raw, &reasoning) // a non-object reasoning leaves the effort unset
 	}
 	if reasoningOff(modelID, reasoning.Effort) {
-		return body
+		return
 	}
-	changed := false
-	for _, key := range responsesSamplingParams {
-		if _, exists := data[key]; exists {
-			delete(data, key)
-			changed = true
-		}
-	}
+	// The include list is worked out before anything is removed, so the
+	// members are changed together or not at all.
 	var include []string
+	var newInclude json.RawMessage
+	dropInclude := false
 	if json.Unmarshal(data["include"], &include) == nil {
 		filtered := make([]string, 0, len(include))
 		for _, item := range include {
@@ -803,24 +959,24 @@ func ReplaceResponsesBodyParam(modelID string, body []byte) []byte {
 			}
 		}
 		if len(filtered) != len(include) {
-			changed = true
 			if len(filtered) == 0 {
-				delete(data, "include")
+				dropInclude = true
 			} else {
 				encoded, err := json.Marshal(filtered)
 				if err != nil {
-					return body
+					return
 				}
-				data["include"] = encoded
+				newInclude = encoded
 			}
 		}
 	}
-	if !changed {
-		return body
+	for _, key := range responsesSamplingParams {
+		delete(data, key)
 	}
-	updated, err := json.Marshal(data)
-	if err != nil {
-		return body
+	switch {
+	case dropInclude:
+		delete(data, "include")
+	case newInclude != nil:
+		data["include"] = newInclude
 	}
-	return updated
 }

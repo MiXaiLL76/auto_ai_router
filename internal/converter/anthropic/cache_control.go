@@ -43,7 +43,9 @@ func InjectCacheControlOutcome(body []byte) ([]byte, CacheControlOutcome) {
 	return injectCacheControl(body)
 }
 
-func injectCacheControl(body []byte) ([]byte, CacheControlOutcome) {
+// injectCacheControlDecode is injectCacheControl by decoding the whole body
+// and encoding it again.
+func injectCacheControlDecode(body []byte) ([]byte, CacheControlOutcome) {
 	var req map[string]interface{}
 	if err := json.Unmarshal(body, &req); err != nil {
 		return body, CacheControlNone
