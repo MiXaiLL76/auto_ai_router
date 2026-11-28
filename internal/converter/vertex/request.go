@@ -73,6 +73,10 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, isImageEdit bool,
 		}
 	}
 
+	// toolCallNames resolves a tool result to the function it answers; built
+	// on first use (see indexToolCallNames).
+	var toolCallNames map[string]string
+
 	// Messages → Contents + SystemInstruction
 	for _, msg := range req.Messages {
 		if msg.Role != "tool" && msg.Role != "function" {
@@ -103,7 +107,11 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, isImageEdit bool,
 			funcName := msg.Name
 			if funcName == "" && msg.ToolCallID != "" {
 				// Look up function name from preceding assistant message's tool_calls
-				funcName = findFunctionNameByToolCallID(req.Messages, msg.ToolCallID)
+				if toolCallNames == nil {
+					toolCallNames = indexToolCallNames(req.Messages)
+				}
+				baseToolCallID, _ := converterutil.SplitToolCallIDSignature(msg.ToolCallID)
+				funcName = toolCallNames[baseToolCallID]
 			}
 			if funcName == "" {
 				funcName = "tool_result" // last resort default if Name not set
@@ -283,6 +291,10 @@ func isImagePart(part *genai.Part) bool {
 // in tool result messages. Without the correct name, Vertex API receives "tool_result"
 // as FunctionResponse.Name which doesn't match any FunctionDeclaration, causing the model
 // to waste reasoning tokens trying to figure out the context.
+//
+// It walks every assistant tool call for each lookup; a conversion that
+// resolves many tool results uses indexToolCallNames instead, which gives the
+// same answers from one walk.
 func findFunctionNameByToolCallID(messages []openai.OpenAIMessage, toolCallID string) string {
 	for _, msg := range messages {
 		if msg.Role != "assistant" || len(msg.ToolCalls) == 0 {
@@ -311,4 +323,39 @@ func findFunctionNameByToolCallID(messages []openai.OpenAIMessage, toolCallID st
 		}
 	}
 	return ""
+}
+
+// indexToolCallNames maps every assistant tool-call ID (without its thought
+// signature suffix) to the function name findFunctionNameByToolCallID returns
+// for it: the name of the first tool call with that ID that has one. A
+// conversation of N tool calls is walked once instead of once per tool
+// result.
+func indexToolCallNames(messages []openai.OpenAIMessage) map[string]string {
+	names := make(map[string]string)
+	for _, msg := range messages {
+		if msg.Role != "assistant" || len(msg.ToolCalls) == 0 {
+			continue
+		}
+		for _, tc := range msg.ToolCalls {
+			tcMap, ok := tc.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			id, _ := tcMap["id"].(string)
+			id, _ = converterutil.SplitToolCallIDSignature(id)
+			if _, known := names[id]; known {
+				continue
+			}
+			if funcObj, ok := tcMap["function"].(map[string]interface{}); ok {
+				if name, ok := funcObj["name"].(string); ok && name != "" {
+					names[id] = name
+					continue
+				}
+			}
+			if name, ok := tcMap["name"].(string); ok && name != "" {
+				names[id] = name
+			}
+		}
+	}
+	return names
 }

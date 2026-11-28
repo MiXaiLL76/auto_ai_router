@@ -205,9 +205,9 @@ func TestWebSearchResultsStripReader(t *testing.T) {
 
 func TestWebSearchResultsHiddenFromClient(t *testing.T) {
 	body := []byte(`{"model":"glm","tools":[{"type":"web_search","web_search":{"enable":true}}]}`)
-	assert.True(t, webSearchResultsHiddenFromClient("/v1/chat/completions", body))
-	assert.True(t, webSearchResultsHiddenFromClient("/chat/completions", body))
-	assert.False(t, webSearchResultsHiddenFromClient("/v1/responses", body))
-	assert.False(t, webSearchResultsHiddenFromClient("/v1/chat/completions",
+	assert.True(t, webSearchResultsHiddenFromClient(nil, "/v1/chat/completions", body))
+	assert.True(t, webSearchResultsHiddenFromClient(nil, "/chat/completions", body))
+	assert.False(t, webSearchResultsHiddenFromClient(nil, "/v1/responses", body))
+	assert.False(t, webSearchResultsHiddenFromClient(nil, "/v1/chat/completions",
 		[]byte(`{"model":"glm","tools":[{"type":"web_search","web_search":{"enable":true,"search_result":true}}]}`)))
 }

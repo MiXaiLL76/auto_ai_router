@@ -10,13 +10,17 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
+	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	// Also used by request ingress sanitization below. RawMessage keeps large
 	// numbers and provider-specific fields byte-for-byte while the request map
@@ -26,6 +30,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
+	"github.com/mixaill76/auto_ai_router/internal/jsonscan"
 )
 
 type usageTotalTokens struct {
@@ -433,6 +438,9 @@ type sanitizedRequestBody struct {
 	// ServiceTiers are the client's service_tier values (top level, then
 	// extra_body), removed from Body.
 	ServiceTiers []string
+	// scan is the top-level layout of Body when it is already known (a JSON
+	// body the scanner accepted); nil otherwise.
+	scan *jsonscan.Top
 }
 
 var errInvalidMultipartRequestBody = errors.New("invalid multipart request body")
@@ -484,7 +492,103 @@ func sanitizeAndExtractRequestBody(body []byte, contentType string, isMessagesAP
 	return sanitizeJSONRequestBody(body, isMessagesAPI)
 }
 
+// sanitizeJSONRequestBody reads the handful of top-level fields the router
+// acts on and removes or rewrites the ones it must. The body is scanned, not
+// decoded: the fields are read in place, and a body that has to change is
+// rebuilt by copying every untouched member as it is (jsonscan.Top.Rewrite)
+// rather than decoding and re-encoding the conversation.
 func sanitizeJSONRequestBody(body []byte, isMessagesAPI bool) (sanitizedRequestBody, error) {
+	top, ok := jsonscan.ScanTop(body)
+	if !ok {
+		// Not a JSON object by the scanner's reading. The decode-based path
+		// keeps deciding what happens to such a body, exactly as before.
+		return sanitizeJSONRequestBodyDecode(body, isMessagesAPI)
+	}
+	reqBody := make(map[string]goccyjson.RawMessage, 16)
+	top.Range(func(name string, raw []byte) { reqBody[name] = raw })
+	original := maps.Clone(reqBody)
+
+	result, changed, err := sanitizeRequestFields(body, reqBody, isMessagesAPI)
+	if err != nil {
+		return result, err
+	}
+	result.scan = top
+	if !changed {
+		return result, nil
+	}
+
+	edits := requestFieldEdits(original, reqBody)
+	// A body that is sent on changed used to be encoded again from its
+	// decoded members, which also keeps one of each duplicated name and
+	// repairs a name that is not valid UTF-8; so is one that needs either.
+	if len(edits) > 0 || top.HasDuplicates() || top.HasInvalidNames() {
+		result.scan = top.RewriteTop(edits...)
+		result.Body = result.scan.Bytes()
+	}
+	// Changed is reported exactly when the decode-based path reported it,
+	// including the case where the fields already had the values the router
+	// wants and the bytes above are the client's own: callers key header
+	// clean-up off it, not only the body.
+	result.Changed = true
+	return result, nil
+}
+
+// requestFieldEdits lists what sanitizeRequestFields did to the fields:
+// removals, replacements and additions, in a stable order.
+func requestFieldEdits(original, current map[string]goccyjson.RawMessage) []jsonscan.Edit {
+	var edits []jsonscan.Edit
+	for _, name := range slices.Sorted(maps.Keys(original)) {
+		now, kept := current[name]
+		switch {
+		case !kept:
+			edits = append(edits, jsonscan.Edit{Name: name})
+		case !bytes.Equal(now, original[name]):
+			if name == "stream_options" && streamOptionsIncludeUsage(original[name]) && streamOptionsIncludeUsage(now) &&
+				sameJSONObject(original[name], now) {
+				continue // already what the router asks for: keep the client's bytes
+			}
+			edits = append(edits, jsonscan.Edit{Name: name, Raw: now})
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(current)) {
+		if _, existed := original[name]; !existed {
+			edits = append(edits, jsonscan.Edit{Name: name, Raw: current[name]})
+		}
+	}
+	return edits
+}
+
+// streamOptionsIncludeUsage reports whether raw is an object whose
+// include_usage is true.
+func streamOptionsIncludeUsage(raw []byte) bool {
+	var options map[string]goccyjson.RawMessage
+	if goccyjson.Unmarshal(raw, &options) != nil {
+		return false
+	}
+	on, isBool := rawJSONBool(options["include_usage"])
+	return isBool && on
+}
+
+// sameJSONObject reports whether client, a JSON object the client sent, says
+// exactly what rewritten says: the same value once decoded, and no repeated
+// member that a decode would have silently dropped. Used only on
+// stream_options, a few dozen bytes.
+func sameJSONObject(client, rewritten []byte) bool {
+	var cv, rv interface{}
+	if json.Unmarshal(client, &cv) != nil || json.Unmarshal(rewritten, &rv) != nil {
+		return false
+	}
+	// Invalid UTF-8 counts as a difference too: the rewritten object has it
+	// replaced, and decoding hides that.
+	top, ok := jsonscan.ScanTop(client)
+	return ok && !top.HasDuplicates() && utf8.Valid(client) && reflect.DeepEqual(cv, rv)
+}
+
+// sanitizeJSONRequestBodyDecode is the decode-based implementation: the whole
+// body is decoded into raw members and, when anything changes, encoded again.
+// It handles the bodies the scanner refuses and is the reference the scanning
+// path is tested against.
+func sanitizeJSONRequestBodyDecode(body []byte, isMessagesAPI bool) (sanitizedRequestBody, error) {
 	result := sanitizedRequestBody{Body: body}
 
 	// Parse JSON body — RawMessage sub-slices instead of interface{} boxing:
@@ -495,15 +599,38 @@ func sanitizeJSONRequestBody(body []byte, isMessagesAPI bool) (sanitizedRequestB
 		return result, nil // Existing invalid-body handling reports missing model.
 	}
 
-	changed, serviceTiers, err := stripClientControlledBillingParams(reqBody)
+	result, changed, err := sanitizeRequestFields(body, reqBody, isMessagesAPI)
+	if err != nil || !changed {
+		return result, err
+	}
+	// Marshal back to JSON — untouched fields (messages/input, etc.) pass
+	// through as raw bytes, no re-encoding cost.
+	modifiedBody, err := goccyjson.Marshal(reqBody)
 	if err != nil {
 		return sanitizedRequestBody{}, err
+	}
+
+	result.Body = modifiedBody
+	result.Changed = true
+	return result, nil
+}
+
+// sanitizeRequestFields is the decision part shared by both paths: it reads
+// what the router needs from reqBody (the request's top-level members) and
+// applies the removals and rewrites to that map. changed reports whether the
+// request has to be sent on in a different form than it arrived.
+func sanitizeRequestFields(body []byte, reqBody map[string]goccyjson.RawMessage, isMessagesAPI bool) (sanitizedRequestBody, bool, error) {
+	result := sanitizedRequestBody{Body: body}
+
+	changed, serviceTiers, err := stripClientControlledBillingParams(reqBody)
+	if err != nil {
+		return sanitizedRequestBody{}, false, err
 	}
 	result.ServiceTiers = serviceTiers
 
 	model, ok := rawJSONString(reqBody["model"])
 	if !ok {
-		return result, nil
+		return result, false, nil
 	}
 	result.ModelID = model
 
@@ -529,7 +656,7 @@ func sanitizeJSONRequestBody(body []byte, isMessagesAPI bool) (sanitizedRequestB
 	stream, _ := rawJSONBool(reqBody["stream"])
 	result.Streaming = stream
 	if !stream && !changed {
-		return result, nil
+		return result, false, nil
 	}
 
 	// Responses API (/v1/responses) uses "input" instead of "messages" and does NOT
@@ -546,24 +673,12 @@ func sanitizeJSONRequestBody(body []byte, isMessagesAPI bool) (sanitizedRequestB
 	if stream && !isResponsesAPI && !isMessagesAPI {
 		// Ensure stream_options exists and include_usage is true (Chat Completions only)
 		if err := injectIncludeUsageRaw(reqBody); err != nil {
-			return sanitizedRequestBody{}, err
+			return sanitizedRequestBody{}, false, err
 		}
 		changed = true
 	}
 
-	if !changed {
-		return result, nil
-	}
-	// Marshal back to JSON — untouched fields (messages/input, etc.) pass
-	// through as raw bytes, no re-encoding cost.
-	modifiedBody, err := goccyjson.Marshal(reqBody)
-	if err != nil {
-		return sanitizedRequestBody{}, err
-	}
-
-	result.Body = modifiedBody
-	result.Changed = true
-	return result, nil
+	return result, changed, nil
 }
 
 func sanitizeMultipartRequestBody(body []byte, params map[string]string) (sanitizedRequestBody, error) {
@@ -764,17 +879,58 @@ func hasMultipartClosingBoundary(body []byte, boundary string) bool {
 	return len(after) == 0 || bytes.HasPrefix(after, []byte("\r\n"))
 }
 
+// webSearchRequestUsage is extractWebSearchRequestUsage reusing the scan the
+// request already holds for this body, if it holds one.
+func webSearchRequestUsage(logCtx *RequestLogContext, body []byte, contentType string) (bool, string) {
+	if len(body) == 0 || strings.HasPrefix(strings.ToLower(contentType), "multipart/form-data") {
+		return false, ""
+	}
+	return webSearchRequestUsageFromScan(logCtx.scanBody(body))
+}
+
 func extractWebSearchRequestUsage(body []byte, contentType string) (bool, string) {
 	if len(body) == 0 || strings.HasPrefix(strings.ToLower(contentType), "multipart/form-data") {
 		return false, ""
 	}
 
-	var req struct {
-		WebSearchOptions map[string]interface{}   `json:"web_search_options,omitempty"`
-		Tools            []map[string]interface{} `json:"tools,omitempty"`
-		Plugins          []map[string]interface{} `json:"plugins,omitempty"`
+	// Only three fields are read, so only they are decoded: the body is
+	// scanned for its top-level layout and the conversation next to them is
+	// skipped. Each field is filled from every key encoding/json would match
+	// to it, in document order, which is what decoding the whole body into
+	// a struct of the three does.
+	top, _ := jsonscan.ScanTop(body)
+	return webSearchRequestUsageFromScan(top)
+}
+
+// webSearchRequestUsageFromScan is extractWebSearchRequestUsage for a JSON
+// body that has already been scanned (nil for one that is not a JSON object).
+func webSearchRequestUsageFromScan(top *jsonscan.Top) (bool, string) {
+	if top == nil {
+		// Not a JSON object. A full decode accepts one more document, the
+		// literal null, and finds nothing in it either.
+		return false, ""
 	}
-	if err := json.Unmarshal(body, &req); err != nil {
+	var req struct {
+		WebSearchOptions map[string]interface{}
+		Tools            []map[string]interface{}
+		Plugins          []map[string]interface{}
+	}
+	decoded := true
+	for _, field := range [...]struct {
+		name string
+		dst  interface{}
+	}{
+		{"web_search_options", &req.WebSearchOptions},
+		{"tools", &req.Tools},
+		{"plugins", &req.Plugins},
+	} {
+		for _, raw := range top.RawFoldAll(field.name) {
+			if err := json.Unmarshal(raw, field.dst); err != nil {
+				decoded = false
+			}
+		}
+	}
+	if !decoded {
 		return false, ""
 	}
 

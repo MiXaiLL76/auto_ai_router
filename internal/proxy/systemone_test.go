@@ -173,17 +173,23 @@ func TestSystemOne_FallsBackOnRetryableStatus(t *testing.T) {
 }
 
 func TestSystemOne_FallsBackOnNetworkError(t *testing.T) {
-	dead := newIPv4Server(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	deadURL := dead.URL
-	dead.Close()
+	// Keep the primary port bound so another test server cannot reuse it.
+	var attempts atomic.Int32
+	primary := newIPv4Server(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		attempts.Add(1)
+		panic(http.ErrAbortHandler)
+	}))
+	defer primary.Close()
 	fallback := newSystemOneUpstream(t, http.StatusOK, systemOneTestReply)
 	chat := newSystemOneUpstream(t, http.StatusOK, `{}`)
-	prx := newSystemOneTestProxy(t, deadURL, fallback.server.URL, chat.server.URL)
+	prx := newSystemOneTestProxy(t, primary.URL, fallback.server.URL, chat.server.URL)
 
 	w := httptest.NewRecorder()
 	prx.ProxyRequest(w, systemOneRequest("/v1/systemone", systemOneTestBody))
 
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Positive(t, attempts.Load())
+	assert.Zero(t, chat.calls.Load())
 	assert.Equal(t, int32(1), fallback.calls.Load())
 }
 

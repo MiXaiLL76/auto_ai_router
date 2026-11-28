@@ -2,10 +2,10 @@ package proxy
 
 import (
 	"bytes"
-	"encoding/json"
 	"strconv"
 	"strings"
 
+	"github.com/mixaill76/auto_ai_router/internal/jsonscan"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 )
 
@@ -43,13 +43,35 @@ func requestReasoning(body []byte) (bool, string) {
 }
 
 func requestReasoningDetails(body []byte) (bool, string, string) {
+	// Every key read below contains "reasoning" or "thinking". A key can also
+	// be spelled with escaped ASCII characters, so their absence rules a
+	// request out only when the body has no such escape either.
 	if !bytes.Contains(body, []byte("reasoning")) &&
 		!bytes.Contains(body, []byte("thinking")) &&
-		bytes.IndexByte(body, '\\') < 0 {
+		!jsonscan.HasEscapedASCII(body) {
 		return false, "", thinkingModeUnspecified
 	}
-	var request map[string]interface{}
-	if json.Unmarshal(body, &request) != nil {
+	top, _ := jsonscan.ScanTop(body)
+	return requestReasoningDetailsTop(top)
+}
+
+// reasoningTopLevelKeys are the only top-level keys mapReasoningSource and
+// mapThinkingMode read; everything else they look at is nested under these.
+var reasoningTopLevelKeys = []string{
+	"reasoning_effort", "reasoning", "thinking",
+	"thinking_budget", "thinkingBudget", "thinking_level", "thinkingLevel",
+	"thinking_config", "thinkingConfig", "extra_body",
+}
+
+// requestReasoningDetailsTop is requestReasoningDetails for a body that has
+// already been scanned (nil for a body that is not a JSON object). Only the
+// reasoning fields are decoded, never the conversation.
+func requestReasoningDetailsTop(top *jsonscan.Top) (bool, string, string) {
+	if top == nil {
+		return false, "", thinkingModeUnspecified
+	}
+	request, ok := top.Project(reasoningTopLevelKeys...)
+	if !ok {
 		return false, "", thinkingModeUnspecified
 	}
 	requested, source := mapReasoningSource(request, "")

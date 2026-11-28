@@ -32,6 +32,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
 	"github.com/mixaill76/auto_ai_router/internal/deepseektools"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
+	"github.com/mixaill76/auto_ai_router/internal/jsonscan"
 	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/budget"
@@ -435,6 +436,11 @@ func (logCtx *RequestLogContext) spendModelGroup() string {
 // RequestLogContext holds all data needed for logging a request to LiteLLM DB
 // Filled throughout request processing and logged at the end via defer
 type RequestLogContext struct {
+	// bodyScan is the most recent scan of a request body made for this
+	// request (see scanBody). Several steps ask about the same body one after
+	// another; the scan is made once and reused while the body is the same
+	// slice.
+	bodyScan            *jsonscan.Top
 	RequestID           string        // Internal request UUID; may be adopted from a trusted inbound traceparent (see requestid.Middleware), so two distinct requests can share this value
 	EventID             string        // Always server-minted, never client-influenced; used as AirEventID so spend-log collision resolution stays meaningful even when RequestID collides
 	ClientResponseID    string        // ID returned to the client
@@ -1343,7 +1349,7 @@ func (p *Proxy) executeProxyRequest(
 	if r.URL.Path == "/v1/messages" {
 		body, anthropicBetas = anthropicconv.ExtractBetaHeader(body)
 	}
-	body = forceWebSearchResultsForPath(r.URL.Path, body)
+	body = forceWebSearchResultsForPath(logCtx, r.URL.Path, body)
 	proxyReq, err := http.NewRequestWithContext(httputil.WithProxyURL(upstreamCtx, cred.ProxyURL), r.Method, targetURL, bytes.NewReader(body)) //nolint:gosec // G704: targetURL's host is proxyBaseURL from a configured credential, not attacker-controlled — only the path/query comes from the incoming request
 	if err != nil {
 		p.logger.ErrorContext(r.Context(), "Failed to create proxy request", "error", upstreamErrorForLog(err, targetURL), "url", security.RedactURLForLog(targetURL))
@@ -2344,11 +2350,11 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 	if logCtx.IsImageGeneration {
 		logCtx.ImageCount, logCtx.imageBillingRequest = imageRequestFromBody(body, r.Header.Get("Content-Type"), isImageEdit)
 	}
-	if webSearchRequested, webSearchContextSize := extractWebSearchRequestUsage(body, r.Header.Get("Content-Type")); webSearchRequested {
+	if webSearchRequested, webSearchContextSize := webSearchRequestUsage(logCtx, body, r.Header.Get("Content-Type")); webSearchRequested {
 		logCtx.WebSearchRequested = true
 		logCtx.WebSearchContextSize = webSearchContextSize
 	}
-	logCtx.HideWebSearchResults = webSearchResultsHiddenFromClient(r.URL.Path, body)
+	logCtx.HideWebSearchResults = webSearchResultsHiddenFromClient(logCtx, r.URL.Path, body)
 
 	if !p.applyCredentialCompatibilityRouting(w, r, prepared, logCtx, start) {
 		return

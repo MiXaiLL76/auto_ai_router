@@ -1,6 +1,10 @@
 package anthropic
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"encoding/json/jsontext"
+	jsonv2 "encoding/json/v2"
+)
 
 // AnthropicRequest represents a request to the Anthropic Messages API.
 // Serialized directly to JSON for HTTP requests (no SDK dependency).
@@ -66,6 +70,23 @@ func (b ContentBlock) MarshalJSON() ([]byte, error) {
 		return json.Marshal(plain(b))
 	}
 	return json.Marshal(struct {
+		plain
+		Thinking string `json:"thinking"`
+	}{plain(b), b.Thinking})
+}
+
+// MarshalJSONTo is MarshalJSON writing straight into the encoder that is
+// producing the enclosing request. encoding/json prefers it: with only
+// MarshalJSON, every content block is encoded into a buffer of its own and
+// the result is then validated and copied into the request, which for a long
+// conversation is the bulk of the conversion's time. The output is the same
+// bytes (see TestContentBlockMarshalersAgree).
+func (b ContentBlock) MarshalJSONTo(enc *jsontext.Encoder) error {
+	type plain ContentBlock
+	if b.Type != "thinking" {
+		return jsonv2.MarshalEncode(enc, plain(b))
+	}
+	return jsonv2.MarshalEncode(enc, struct {
 		plain
 		Thinking string `json:"thinking"`
 	}{plain(b), b.Thinking})

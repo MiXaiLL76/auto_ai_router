@@ -4,13 +4,19 @@ package anthropic
 import (
 	"encoding/json"
 	"strings"
+
+	"github.com/mixaill76/auto_ai_router/internal/jsonscan"
 )
 
+// ExtractBetaHeader takes the anthropic_beta field out of a request body and
+// returns its values for the anthropic-beta header. The body is scanned for
+// the field, not decoded; a body without it is returned as it is.
 func ExtractBetaHeader(body []byte) ([]byte, []string) {
-	var request map[string]json.RawMessage
-	if err := json.Unmarshal(body, &request); err != nil {
+	obj, ok := jsonscan.ParseObject(body)
+	if !ok {
 		return body, nil
 	}
+	request := obj.Fields
 	raw, ok := request["anthropic_beta"]
 	if !ok {
 		return body, nil
@@ -40,9 +46,5 @@ func ExtractBetaHeader(body []byte) ([]byte, []string) {
 	}
 
 	delete(request, "anthropic_beta")
-	cleaned, err := json.Marshal(request)
-	if err != nil {
-		return body, nil
-	}
-	return cleaned, betas
+	return obj.Encode(), betas
 }

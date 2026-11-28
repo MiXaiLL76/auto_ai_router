@@ -15,6 +15,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	"github.com/mixaill76/auto_ai_router/internal/converter/publicrefusal"
+	"github.com/mixaill76/auto_ai_router/internal/jsonscan"
 )
 
 const maxOpenAIToolNameLength = 64
@@ -184,11 +185,83 @@ func MessagesToChat(body []byte) ([]byte, MessagesAdapterMetadata, error) {
 // CometAPI/ProMan) keep working without paying for the full round trip. The client's
 // output_config is kept as sent; an effort derived from budget_tokens fills it only when
 // it has none.
+//
+// Everything this reads or writes is one of seven small top-level fields
+// (passthroughFields). The body is scanned, those fields are decoded, the
+// rules run on them unchanged (normalizePassthroughFields), and only a field
+// a rule actually changed is written back; the conversation is copied as the
+// client sent it. normalizeMessagesForPassthroughDecode is the whole-body
+// implementation, kept for bodies the scanner refuses (it produces their
+// validation error) and as the reference in tests.
 func NormalizeMessagesForPassthrough(body []byte, model string, isRealAnthropicBackend bool) ([]byte, error) {
+	obj, ok := jsonscan.ParseObject(body)
+	if !ok {
+		return normalizeMessagesForPassthroughDecode(body, model, isRealAnthropicBackend)
+	}
+	// A body with invalid UTF-8 in it goes the whole-body way: decoding into
+	// interface{} and encoding again replaces the invalid bytes, and that
+	// repaired text is what has always been sent on from here.
+	if !utf8.Valid(body) {
+		return normalizeMessagesForPassthroughDecode(body, model, isRealAnthropicBackend)
+	}
+	request := make(map[string]interface{}, len(passthroughFields))
+	before := make(map[string][]byte, len(passthroughFields))
+	for _, name := range passthroughFields {
+		raw, present := obj.Fields[name]
+		if !present {
+			continue
+		}
+		var value interface{}
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return normalizeMessagesForPassthroughDecode(body, model, isRealAnthropicBackend)
+		}
+		request[name] = value
+		// How the value encodes before any rule touches it: a field is
+		// written back only if it encodes differently afterwards.
+		if encoded, err := json.Marshal(value); err == nil {
+			before[name] = encoded
+		}
+	}
+	if err := normalizePassthroughFields(request, model, isRealAnthropicBackend); err != nil {
+		return nil, err
+	}
+	for _, name := range passthroughFields {
+		value, present := request[name]
+		if !present {
+			delete(obj.Fields, name)
+			continue
+		}
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return nil, err
+		}
+		if old, existed := before[name]; !existed || !bytes.Equal(old, encoded) {
+			obj.Fields[name] = encoded
+		}
+	}
+	return obj.Encode(), nil
+}
+
+// passthroughFields are the only top-level fields
+// NormalizeMessagesForPassthrough's rules read or write.
+var passthroughFields = [...]string{"temperature", "top_p", "top_k", "thinking", "output_config", "max_tokens", "anthropic_beta"}
+
+// normalizeMessagesForPassthroughDecode applies the same rules by decoding
+// the whole body and encoding it again.
+func normalizeMessagesForPassthroughDecode(body []byte, model string, isRealAnthropicBackend bool) ([]byte, error) {
 	var request map[string]interface{}
 	if err := json.Unmarshal(body, &request); err != nil {
 		return nil, converterutil.RequestJSONValidationError(err)
 	}
+	if err := normalizePassthroughFields(request, model, isRealAnthropicBackend); err != nil {
+		return nil, err
+	}
+	return json.Marshal(request)
+}
+
+// normalizePassthroughFields is the rule set itself, on a decoded request or
+// on just its passthroughFields.
+func normalizePassthroughFields(request map[string]interface{}, model string, isRealAnthropicBackend bool) error {
 
 	// Models that no longer accept sampling params (Claude Opus 4.7+ — see
 	// SamplingRemoved) reject temperature/top_p/top_k. Drop any client-supplied
@@ -204,10 +277,10 @@ func NormalizeMessagesForPassthrough(body []byte, model string, isRealAnthropicB
 	outputConfig, _ := request["output_config"].(map[string]interface{})
 	effort, _ := outputConfig["effort"].(string)
 	if err := validateBetweenTools(tc, effort); err != nil {
-		return nil, err
+		return err
 	}
 	if err := validateThinkingOffEffort(tc, effort, model); err != nil {
-		return nil, err
+		return err
 	}
 	if tc != nil {
 		request["thinking"] = tc
@@ -240,8 +313,7 @@ func NormalizeMessagesForPassthrough(body []byte, model string, isRealAnthropicB
 			delete(request, "thinking")
 		}
 	}
-
-	return json.Marshal(request)
+	return nil
 }
 
 func extractBetaStrings(raw interface{}) []string {

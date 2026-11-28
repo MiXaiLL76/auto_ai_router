@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
+	"github.com/mixaill76/auto_ai_router/internal/jsonscan"
 )
 
 // ResponsesMetadata holds Responses-API-only fields that are extracted from
@@ -26,8 +28,22 @@ type ResponsesMetadata struct {
 // and the text.format to echo from a Responses API request body without
 // modifying it.
 func ExtractResponsesMetadata(body []byte) ResponsesMetadata {
-	var raw map[string]interface{}
-	if err := json.Unmarshal(body, &raw); err != nil {
+	top, _ := jsonscan.ScanTop(body)
+	return ExtractResponsesMetadataTop(top)
+}
+
+// responsesMetadataKeys are the only top-level keys ExtractResponsesMetadata reads.
+var responsesMetadataKeys = []string{"store", "previous_response_id", "metadata", "ttl", "text"}
+
+// ExtractResponsesMetadataTop is ExtractResponsesMetadata for a body that has
+// already been scanned. Only the five small fields it reads are decoded; the
+// "input" array is never touched.
+func ExtractResponsesMetadataTop(top *jsonscan.Top) ResponsesMetadata {
+	if top == nil {
+		return ResponsesMetadata{}
+	}
+	raw, ok := top.Project(responsesMetadataKeys...)
+	if !ok {
 		return ResponsesMetadata{}
 	}
 	var meta ResponsesMetadata
@@ -437,7 +453,302 @@ func outputToInputItems(output []OutputItem) []interface{} {
 //  7. reasoning items missing a valid "summary" list → recovered from a
 //     non-standard "content" field; given an empty list if they only carry
 //     encrypted_content; dropped only if nothing usable remains.
+//
+// The body is scanned, not decoded. Every rule above reads a small top-level
+// field or individual input items of two types; those are decoded, changed by
+// the same code as before and written back, and everything else -- the
+// conversation -- is copied as the client sent it. prepareCodexPassthroughDecode
+// is the whole-body implementation these rules came from: it still handles a
+// body the scanner refuses and is the reference this one is tested against.
 func PrepareCodexPassthrough(body []byte, prevEntryHandled bool) []byte {
+	top, ok := jsonscan.ScanTop(body)
+	if !ok {
+		return prepareCodexPassthroughDecode(body, prevEntryHandled)
+	}
+	// A body with invalid UTF-8 in it goes the whole-body way: decoding into
+	// interface{} and encoding again replaces the invalid bytes, and that
+	// repaired text is what has always been sent on from here.
+	if !utf8.Valid(body) {
+		return prepareCodexPassthroughDecode(body, prevEntryHandled)
+	}
+	// The small fields the rules read, decoded exactly as a whole-body decode
+	// would have decoded them.
+	small, ok := top.Project("model", "instructions", "reasoning", "tools", "additional_tools")
+	if !ok {
+		return prepareCodexPassthroughDecode(body, prevEntryHandled)
+	}
+	var edits []jsonscan.Edit
+	remove := func(name string) {
+		if top.Has(name) {
+			edits = append(edits, jsonscan.Edit{Name: name})
+		}
+	}
+	replace := func(name string, value interface{}) bool {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return false
+		}
+		edits = append(edits, jsonscan.Edit{Name: name, Raw: encoded})
+		return true
+	}
+
+	// 1 & 2. Strip proxy-internal and conditionally previous_response_id.
+	remove("store")
+	remove("metadata")
+	remove("ttl")
+	if prevEntryHandled {
+		remove("previous_response_id")
+	}
+
+	// 4. Normalize instructions: array → plain string.
+	if instArr, ok := small["instructions"].([]interface{}); ok {
+		if joined, ok := joinInstructionContents(instArr); ok {
+			if !replace("instructions", joined) {
+				return prepareCodexPassthroughDecode(body, prevEntryHandled)
+			}
+		} else {
+			remove("instructions")
+		}
+	}
+
+	// 4.5. Drop reasoning.effort="none" where the model rejects it.
+	if reasoningMap, ok := small["reasoning"].(map[string]interface{}); ok {
+		model, _ := small["model"].(string)
+		if effort, ok := reasoningMap["effort"].(string); ok && effort == "none" && !openai.SupportsReasoningEffortNone(model) {
+			remove("reasoning")
+		}
+	}
+
+	// 5. Normalize tools.
+	if toolsArr, ok := small["tools"].([]interface{}); ok {
+		if len(toolsArr) == 0 {
+			remove("tools")
+			additionalTools, _ := small["additional_tools"].([]interface{})
+			if len(additionalTools) == 0 {
+				remove("tool_choice")
+			}
+		} else if normalized, changed := flattenFunctionTools(toolsArr); changed {
+			if !replace("tools", normalized) {
+				return prepareCodexPassthroughDecode(body, prevEntryHandled)
+			}
+		}
+	}
+
+	// 3, 6 & 7. input: a single object becomes a one-element array; compaction
+	// and reasoning items are normalized. Only items of those two types are
+	// decoded.
+	if inputRaw, ok := top.Raw("input"); ok {
+		newInput, changed, ok := normalizeCodexInput(inputRaw)
+		if !ok {
+			return prepareCodexPassthroughDecode(body, prevEntryHandled)
+		}
+		if changed {
+			edits = append(edits, jsonscan.Edit{Name: "input", Raw: newInput})
+		}
+	}
+
+	if len(edits) == 0 && !top.HasDuplicates() {
+		return body
+	}
+	return top.Rewrite(edits...)
+}
+
+// joinInstructionContents is rule 4: the non-empty string contents of an
+// instructions array joined with newlines. ok=false when there is none.
+func joinInstructionContents(instArr []interface{}) (string, bool) {
+	var parts []string
+	for _, item := range instArr {
+		if m, ok := item.(map[string]interface{}); ok {
+			if content, ok := m["content"].(string); ok && content != "" {
+				parts = append(parts, content)
+			}
+		}
+	}
+	if len(parts) == 0 {
+		return "", false
+	}
+	return strings.Join(parts, "\n"), true
+}
+
+// flattenFunctionTools is rule 5 for a non-empty tools array: nested Chat
+// Completions function tools become flat Responses API tools. changed reports
+// whether any tool was rewritten.
+func flattenFunctionTools(toolsArr []interface{}) ([]interface{}, bool) {
+	normalized := make([]interface{}, len(toolsArr))
+	changed := false
+	for i, t := range toolsArr {
+		toolMap, ok := t.(map[string]interface{})
+		if !ok {
+			normalized[i] = t
+			continue
+		}
+		if toolMap["type"] == "function" {
+			if funcDef, ok := toolMap["function"].(map[string]interface{}); ok {
+				flat := make(map[string]interface{}, len(toolMap)+len(funcDef))
+				for k, v := range toolMap {
+					if k != "function" {
+						flat[k] = v
+					}
+				}
+				for k, v := range funcDef {
+					flat[k] = v
+				}
+				normalized[i] = flat
+				changed = true
+				continue
+			}
+		}
+		normalized[i] = t
+	}
+	return normalized, changed
+}
+
+// normalizeCodexInput applies rules 3, 6 and 7 to the raw "input" value.
+// changed=false means the value is already what the rules produce and can be
+// forwarded as it is. ok=false means "decode the body instead".
+func normalizeCodexInput(inputRaw []byte) (out []byte, changed, ok bool) {
+	if len(inputRaw) == 0 {
+		return nil, false, true
+	}
+	// One pass over the array finds the items and the "type" of each. Only
+	// items of the two types the rules act on are looked into; the rest (tool
+	// calls, tool output, messages -- nearly all of the bytes) are kept as
+	// they are without being read again.
+	var items, types [][]byte
+	switch inputRaw[0] {
+	case '{':
+		items, types, ok = jsonscan.ScanArrayMembers(jsonscan.JoinArray([][]byte{inputRaw}), "type")
+		changed = true // rule 3
+	case '[':
+		items, types, ok = jsonscan.ScanArrayMembers(inputRaw, "type")
+	default:
+		return nil, false, true // string, null, ...: untouched by every rule
+	}
+	if !ok {
+		return nil, false, false
+	}
+
+	kept := make([][]byte, 0, len(items))
+	for i, item := range items {
+		itemType, typeOK := codexItemType(types[i])
+		if !typeOK {
+			return nil, false, false
+		}
+		if itemType != "compaction" && itemType != "reasoning" {
+			kept = append(kept, item)
+			continue
+		}
+		replacement, drop, touched, itemOK := normalizeCodexInputItem(item, itemType)
+		if !itemOK {
+			return nil, false, false
+		}
+		if !touched {
+			kept = append(kept, item)
+			continue
+		}
+		changed = true
+		if !drop {
+			kept = append(kept, replacement)
+		}
+	}
+	if !changed {
+		return nil, false, true
+	}
+	return jsonscan.JoinArray(kept), true, true
+}
+
+// codexItemType returns the string an item's raw "type" value decodes to, ""
+// when the item has no type or it is not a string. ok=false: the value does
+// not decode (the caller decodes the body instead).
+func codexItemType(typeRaw []byte) (itemType string, ok bool) {
+	switch {
+	case len(typeRaw) == 0 || typeRaw[0] != '"':
+		return "", true
+	case bytes.IndexByte(typeRaw, '\\') < 0:
+		return string(typeRaw[1 : len(typeRaw)-1]), true
+	}
+	if err := json.Unmarshal(typeRaw, &itemType); err != nil {
+		return "", false
+	}
+	return itemType, true
+}
+
+// normalizeCodexInputItem applies rules 6 and 7 to one input item of type
+// "compaction" or "reasoning". touched=false: the item stays as it is.
+func normalizeCodexInputItem(item []byte, itemType string) (replacement []byte, drop, touched, ok bool) {
+	if itemType == "reasoning" {
+		// Rule 7 leaves a reasoning item whose summary is already a list
+		// alone -- by far the common case, and such items carry the bulky
+		// encrypted content. Seeing that takes a scan, not a decode.
+		if itemTop, scanned := jsonscan.ScanTop(item); scanned {
+			if summary, has := itemTop.Raw("summary"); has && len(summary) > 0 && summary[0] == '[' {
+				return nil, false, false, true
+			}
+		}
+	}
+	var itemMap map[string]interface{}
+	if err := json.Unmarshal(item, &itemMap); err != nil {
+		return nil, false, false, false
+	}
+
+	var result interface{}
+	switch itemType {
+	case "compaction": // rule 6
+		ec, _ := itemMap["encrypted_content"].(string)
+		if ec == "" {
+			return nil, true, true, true
+		}
+		result = map[string]interface{}{
+			"type": "message",
+			"role": "user",
+			"content": []interface{}{
+				map[string]interface{}{
+					"type": "input_text",
+					"text": "[Conversation context summary]: " + ec,
+				},
+			},
+		}
+	case "reasoning": // rule 7
+		if _, isList := itemMap["summary"].([]interface{}); isList {
+			return nil, false, false, true
+		}
+		var recovered []interface{}
+		if content, ok := itemMap["content"].([]interface{}); ok {
+			for _, c := range content {
+				cm, ok := c.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				if text, _ := cm["text"].(string); text != "" {
+					recovered = append(recovered, map[string]interface{}{
+						"type": "summary_text",
+						"text": text,
+					})
+				}
+			}
+		}
+		switch {
+		case len(recovered) > 0:
+			itemMap["summary"] = recovered
+			delete(itemMap, "content")
+		default:
+			if ec, ok := itemMap["encrypted_content"].(string); !ok || ec == "" {
+				return nil, true, true, true // nothing useful: drop
+			}
+			itemMap["summary"] = []interface{}{}
+		}
+		result = itemMap
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		return nil, false, false, false
+	}
+	return encoded, false, true, true
+}
+
+// prepareCodexPassthroughDecode applies the same rules by decoding the whole
+// body and encoding it again.
+func prepareCodexPassthroughDecode(body []byte, prevEntryHandled bool) []byte {
 	var raw map[string]interface{}
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return body
@@ -641,16 +952,14 @@ func PrepareCodexPassthrough(body []byte, prevEntryHandled bool) []byte {
 // IsResponsesAPI checks if the body is a Responses API request.
 // Returns true if body has "input" field and does NOT have "messages" field.
 func IsResponsesAPI(body []byte) bool {
-	if !bytes.Contains(body, []byte(`"input"`)) && bytes.IndexByte(body, '\\') < 0 {
-		return false
-	}
-	var raw map[string]interface{}
-	if err := json.Unmarshal(body, &raw); err != nil {
-		return false
-	}
-	_, hasInput := raw["input"]
-	_, hasMessages := raw["messages"]
-	return hasInput && !hasMessages
+	top, _ := jsonscan.ScanTop(body)
+	return IsResponsesAPITop(top)
+}
+
+// IsResponsesAPITop is IsResponsesAPI for a body that has already been
+// scanned (nil for a body that is not a JSON object).
+func IsResponsesAPITop(top *jsonscan.Top) bool {
+	return top.Has("input") && !top.Has("messages")
 }
 
 // RequestToChat converts a Responses API request body to Chat Completions format.
