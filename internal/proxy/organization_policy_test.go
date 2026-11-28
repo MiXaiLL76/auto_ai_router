@@ -140,6 +140,23 @@ func TestOrganizationPolicy_ShadowMappingUsesExactPriceAndMetadata(t *testing.T)
 	assert.Equal(t, "public/shared", spendMetadata["billing_price_model_name"])
 	assert.Equal(t, "org-1", spendMetadata["billing_organization_id"])
 	assert.NotEmpty(t, spendMetadata["billing_profile_sha256"])
+
+	// The same public alias retains its organization route and base input price
+	// when a team negotiates only its output rate.
+	db.tokens["team-token"] = &dbmodels.TokenInfo{Token: "team-hash", TeamID: "team", TeamOrganizationID: "org-1"}
+	prx.priceRegistry = routermodels.NewModelPriceRegistry()
+	_, err := prx.priceRegistry.LoadPriceDocument(writeProxyPolicyPrices(t, `{"$overrides":{"teams":{"team":{"public/shared":{"output_cost_per_token":0}}}}}`))
+	require.NoError(t, err)
+	req = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", stringsReader(`{"model":"public/shared","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Authorization", "Bearer team-token")
+	w = httptest.NewRecorder()
+	prx.ProxyRequest(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	require.Len(t, db.logs, 2)
+	assert.InDelta(t, 0.020, db.logs[0].Spend, 1e-9)
+	assert.InDelta(t, 0.010, db.logs[1].Spend, 1e-9)
+	assert.Equal(t, "route-b", db.logs[1].Model)
+
 }
 
 func TestOrganizationPolicy_MissingExactPriceRejectsBeforeProvider(t *testing.T) {

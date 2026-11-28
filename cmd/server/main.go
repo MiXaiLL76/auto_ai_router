@@ -1425,7 +1425,7 @@ func loadAndUpdateModelPrices(
 	log *slog.Logger,
 	context string, // "startup" or "update" for logging
 ) error {
-	prices, err := models.LoadModelPrices(link)
+	count, err := registry.LoadPriceDocument(link)
 	if err != nil {
 		logMessage := "Failed to load model prices"
 		if context != "" {
@@ -1434,11 +1434,10 @@ func loadAndUpdateModelPrices(
 		log.Warn(logMessage, "error", err)
 		return err
 	}
-	registry.Update(prices)
 	if context == "startup" {
-		log.Info("Model prices loaded on startup", "count", len(prices), "link", link)
+		log.Info("Model prices loaded on startup", "count", count, "link", link)
 	} else {
-		log.Debug("Model prices updated", "count", len(prices))
+		log.Debug("Model prices updated", "count", count)
 	}
 	return nil
 }

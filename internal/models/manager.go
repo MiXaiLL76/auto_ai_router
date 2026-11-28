@@ -192,6 +192,7 @@ type ModelPrice struct {
 
 // ModelPriceRegistry stores and manages cached model prices
 type ModelPriceRegistry struct {
+	overrides  priceOverrides
 	mu         sync.RWMutex
 	prices     map[string]*ModelPrice // key: normalized model name
 	lastUpdate time.Time
@@ -245,32 +246,21 @@ func (r *ModelPriceRegistry) GetPriceAny(modelNames ...string) (string, *ModelPr
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	for _, modelName := range modelNames {
-		if modelName == "" {
-			continue
-		}
-		raw := strings.ToLower(strings.TrimSpace(modelName))
-		if price := r.prices[raw]; price != nil {
-			return modelName, price
-		}
-		if price := r.prices[NormalizeModelName(modelName)]; price != nil {
-			return modelName, price
-		}
-	}
-
-	return "", nil
+	return (&BillingPrices{prices: r.prices}).Lookup(modelNames...)
 }
 
 // Update safely updates the registry with new prices
-func (r *ModelPriceRegistry) Update(prices map[string]*ModelPrice) {
+func (r *ModelPriceRegistry) Update(prices map[string]*ModelPrice) { r.update(prices, nil) }
+func (r *ModelPriceRegistry) update(prices map[string]*ModelPrice, overrides priceOverrides) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.overrides = overrides
 	r.prices = make(map[string]*ModelPrice)
 	for k, v := range prices {
 		// The router's own tool prices ride along on the model's row, so
 		// the ordinary cost calculation prices them like any other tool
 		// charge.
-		r.applyMoonshotToolPrices(k, v)
+		v = r.applyMoonshotToolPrices(k, v)
 		r.prices[k] = v
 		// Store raw lowercase key so that provider-prefixed model names
 		// (e.g. "openrouter/gpt-5-mini") can be matched in GetPriceAny's
@@ -319,13 +309,16 @@ func (r *ModelPriceRegistry) MoonshotToolPrices() (*ToolPricesProvider, bool) {
 //
 // The caller holds the registry's lock, so the prices are read straight from
 // the field -- taking the lock again here would deadlock.
-func (r *ModelPriceRegistry) applyMoonshotToolPrices(modelName string, price *ModelPrice) {
+func (r *ModelPriceRegistry) applyMoonshotToolPrices(modelName string, price *ModelPrice) *ModelPrice {
 	if price == nil || r.moonshotToolPrices == nil {
-		return
+		return price
 	}
 	if !isMoonshotModelName(modelName) {
-		return
+		return price
 	}
+	row := *price
+	row.ToolCostPerCall = maps.Clone(price.ToolCostPerCall)
+	price = &row
 	prices := r.moonshotToolPrices
 	// The prices go into the row's own tool price map, the same place the
 	// built-in tools' prices live: one map, one lookup, and the next
@@ -336,6 +329,7 @@ func (r *ModelPriceRegistry) applyMoonshotToolPrices(modelName string, price *Mo
 	price.ToolCostPerCall[ToolMoonshotSearch] = prices.SearchCostPerCall
 	price.ToolCostPerCall[ToolMoonshotSearchPro] = prices.SearchProCostPerCall
 	price.ToolCostPerCall[ToolMoonshotFetch] = prices.FetchCostPerCall
+	return price
 }
 
 // isMoonshotModelName reports whether the model is one of Moonshot's own
@@ -362,11 +356,12 @@ func isMoonshotModelName(modelName string) bool {
 func (r *ModelPriceRegistry) MergeDB(dbPrices map[string]*ModelPrice) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.prices = maps.Clone(r.prices)
 	for k, v := range dbPrices {
 		// The router's own tool prices ride along on the model's row here
 		// too, the same way they do in Update: a DB-sourced price must not
 		// lose them.
-		r.applyMoonshotToolPrices(k, v)
+		v = r.applyMoonshotToolPrices(k, v)
 		r.prices[k] = v
 		// Store raw lowercase key (same logic as Update) so that DB-sourced
 		// provider-prefixed entries are also findable in GetPriceAny pass 1.

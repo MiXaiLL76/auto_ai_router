@@ -132,10 +132,10 @@ func (p *Proxy) admitOrganizationModel(
 	}
 	logCtx.RealModelID = resolution.RealModelID
 	logCtx.PriceModelID = resolution.PriceModelID
-	logCtx.ModelPrice = resolution.ModelPrice
+	logCtx.ModelPrice = p.requestBillingPrices(logCtx).Apply(resolution.PriceModelID, resolution.ModelPrice)
 	logCtx.billingPriceResolved = true
 	logCtx.billingPriceModelID = resolution.PriceModelID
-	logCtx.billingPrice = resolution.ModelPrice
+	logCtx.billingPrice = logCtx.ModelPrice
 
 	return body, resolution.ModelID, resolution.RealModelID, true
 }
@@ -171,7 +171,11 @@ func (p *Proxy) resolveRetryBillingPrice(
 	if logCtx != nil && logCtx.OrganizationPolicy.HasCustomPricing() {
 		return logCtx.PriceModelID, logCtx.ModelPrice
 	}
-	return lookupBillingModelPrice(p.priceRegistry, publicModelID, modelID, realModelID)
+	id, price := p.requestBillingPrices(logCtx).Lookup(publicModelID, modelID, realModelID)
+	if price == nil {
+		return modelID, nil
+	}
+	return id, price
 }
 
 func replaceModelInBodyPreserveContentType(body []byte, contentType, oldModel, newModel string) []byte {

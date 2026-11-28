@@ -596,3 +596,22 @@ credentials:
 The adapter is off for every request that did not ask for one of the built-in tools, and for every credential without the opt-in. `server.moonshot_tools.enabled: false` is the kill-switch: the adapter stops entirely, for a provider outage or a runaway cost.
 
 The whole exchange — the client's request, the router's call to Moonshot, the tool result going back to the model and the spend row — is shown with real bodies in [docs/moonshot-tools.md](../moonshot-tools.md).
+
+## Organization, team and key price overrides
+
+The global price document accepts an optional `$overrides` object. Use LiteLLM organization and team IDs and the stored SHA-256 token hash for key IDs.
+
+```json
+{
+  "model-a": { "input_cost_per_token": 0.000002, "output_cost_per_token": 0.000008 },
+  "$overrides": {
+    "organizations": { "org-42": { "model-a": { "input_cost_per_token": 0.0000015 } } },
+    "teams": { "team-7": { "model-a": { "output_cost_per_token": 0.000006 } } },
+    "keys": { "<token-hash>": { "model-a": { "input_cost_per_token": 0 } } }
+  }
+}
+```
+
+Each request starts with its usual billing row, including a strict organization tariff when configured. Use the name of that price row in the override. Each scalar cost field inherits independently from the base row, then the organization, team and key in that order. Master keys use base pricing. Overrides apply to accessible models only. The existing calculator's fallback rules for zero-valued specialized rates still apply. Object and array fields such as tool price maps and image tiers belong in the base row.
+
+Deploy the updated router before publishing an extended price file. A running router retains its previous prices if a refresh rejects an invalid override.
