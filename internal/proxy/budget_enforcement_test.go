@@ -443,3 +443,65 @@ func BenchmarkEstimateRequestCostWithoutTiktoken(b *testing.B) {
 		})
 	}
 }
+
+func TestBillingPriceOverridesAcrossRetry(t *testing.T) {
+	proxy := NewTestProxyBuilder().Build()
+	proxy.tiktokenEnabled = false
+	registry := routermodels.NewModelPriceRegistry()
+	proxy.priceRegistry = registry
+	path := t.TempDir() + "/prices.json"
+	const doc = `{"alias":{"input_cost_per_token":2,"output_cost_per_token":8},
+ "$overrides":{"organizations":{"org":{"alias":{"input_cost_per_token":1}}},
+ "teams":{"team":{"alias":{"output_cost_per_token":6}}},
+ "keys":{"hash":{"alias":{"input_cost_per_token":0}}}}}`
+	require.NoError(t, os.WriteFile(path, []byte(doc), 0600))
+	_, err := registry.LoadPriceDocument(path)
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		info          dbmodels.TokenInfo
+		input, output float64
+	}{
+		{dbmodels.TokenInfo{TeamOrganizationID: "org", TeamID: "team", Token: "hash"}, 0, 6},
+		{dbmodels.TokenInfo{DirectOrganizationID: "org", TeamID: "team"}, 1, 6},
+		{dbmodels.TokenInfo{TeamID: "other"}, 2, 8},
+		{dbmodels.TokenInfo{TeamOrganizationID: "org", TeamID: "team", TeamDangling: true}, 2, 8},
+		{dbmodels.TokenInfo{IsMasterKey: true, TeamID: "team"}, 2, 8},
+	} {
+		ctx := &RequestLogContext{TokenInfo: &tc.info, PublicModelID: "alias"}
+		reserve, ok := proxy.estimateRequestCost(ctx, "alias", "model", "deployment", []byte(`{"max_completion_tokens":10}`))
+		require.True(t, ok)
+		require.Equal(t, 10*tc.output, reserve)
+		id, price := proxy.resolveRetryBillingPrice(ctx, "alias", "model", "other-deployment")
+		require.Equal(t, "alias", id)
+		require.Equal(t, tc.input, price.InputCostPerToken)
+		require.Equal(t, tc.output, price.OutputCostPerToken)
+		cost, ok := proxy.clientFacingCost(ctx, &converter.TokenUsage{PromptTokens: 1, CompletionTokens: 1})
+		require.True(t, ok)
+		require.Equal(t, tc.input+tc.output, cost)
+		spend := &stubKafkaManager{enabled: true}
+		proxy.kafkaLog = spend
+		ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		ctx.Credential = &config.CredentialConfig{Name: "upstream"}
+		ctx.TokenUsage = &converter.TokenUsage{PromptTokens: 1, CompletionTokens: 1}
+		ctx.OrganizationPolicy = &routermodels.OrganizationPolicy{ResponseCostMode: config.ResponseCostModeTotal}
+		ctx.ModelPrice = price
+		ctx.PriceModelID = id
+		require.NoError(t, proxy.logSpendToLiteLLMDB(ctx))
+		require.Len(t, spend.events, 1)
+		require.Equal(t, cost, spend.events[0].TotalCost)
+		response := httptest.NewRecorder()
+		proxy.setResponseCostHeader(response, ctx)
+		require.Equal(t, strconv.FormatFloat(cost, 'f', -1, 64), response.Header().Get(HeaderResponseCost))
+	}
+	snapshot := registry.BillingPrices("", "", "")
+	for _, invalid := range []string{"null", "-1", "1, \"unknown\": 2"} {
+		require.NoError(t, os.WriteFile(path, []byte(strings.Replace(doc, "\"input_cost_per_token\":0", "\"input_cost_per_token\":"+invalid, 1)), 0600))
+		_, err := registry.LoadPriceDocument(path)
+		require.Error(t, err)
+	}
+	_, price := registry.BillingPrices("org", "team", "hash").Lookup("alias")
+	require.Equal(t, 0.0, price.InputCostPerToken)
+	registry.MergeDB(map[string]*routermodels.ModelPrice{"alias": {InputCostPerToken: 99}})
+	_, base := snapshot.Lookup("alias")
+	require.Equal(t, 8.0, base.OutputCostPerToken)
+}

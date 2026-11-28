@@ -51,12 +51,14 @@ var missingPriceReferenceWarnings sync.Map
 func (p *Proxy) billingPriceResolver(logCtx *RequestLogContext) models.PriceResolver {
 	return func(modelID string) *models.ModelPrice {
 		var price *models.ModelPrice
+		snapshot := p.requestBillingPrices(logCtx)
 		priceSource := "default"
 		if logCtx != nil && logCtx.OrganizationPolicy.HasCustomPricing() {
 			price, _ = logCtx.OrganizationPolicy.Price(modelID)
+			price = snapshot.Apply(modelID, price)
 			priceSource = logCtx.OrganizationPolicy.CacheKey()
 		} else if p.priceRegistry != nil {
-			price = p.priceRegistry.GetPrice(modelID)
+			_, price = snapshot.Lookup(modelID)
 		}
 		if price != nil || p.logger == nil {
 			return price
@@ -82,9 +84,37 @@ func (p *Proxy) resolveBillingPrice(logCtx *RequestLogContext, publicModelID, mo
 	if logCtx.billingPriceResolved {
 		return logCtx.billingPriceModelID, logCtx.billingPrice
 	}
-	priceModelID, modelPrice := lookupBillingModelPrice(p.priceRegistry, publicModelID, modelID, realModelID)
+	priceModelID, modelPrice := p.requestBillingPrices(logCtx).Lookup(publicModelID, modelID, realModelID)
+	if modelPrice == nil {
+		priceModelID = modelID
+	}
 	logCtx.billingPriceResolved = true
 	logCtx.billingPriceModelID = priceModelID
 	logCtx.billingPrice = modelPrice
 	return priceModelID, modelPrice
+}
+
+func (p *Proxy) requestBillingPrices(ctx *RequestLogContext) *models.BillingPrices {
+	if ctx == nil {
+		return p.priceRegistry.BillingPrices("", "", "")
+	}
+	if ctx.billingPrices != nil {
+		return ctx.billingPrices
+	}
+	var org, team, key string
+	if info := ctx.TokenInfo; info != nil && !info.IsMasterKey {
+		key = info.Token
+		if !info.TeamDangling {
+			team = info.TeamID
+		}
+		if info.DirectOrganizationID != "" {
+			if !info.DirectOrganizationDangling {
+				org = info.DirectOrganizationID
+			}
+		} else if !info.TeamDangling && !info.TeamOrganizationDangling {
+			org = info.TeamOrganizationID
+		}
+	}
+	ctx.billingPrices = p.priceRegistry.BillingPrices(org, team, key)
+	return ctx.billingPrices
 }

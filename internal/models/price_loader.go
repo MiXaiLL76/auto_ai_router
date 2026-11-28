@@ -22,22 +22,47 @@ const (
 
 // LoadModelPrices loads model prices from a link (file:// or http(s)://)
 func LoadModelPrices(link string) (map[string]*ModelPrice, error) {
-	if link == "" {
-		return nil, fmt.Errorf("empty link")
-	}
+	prices, _, err := loadPriceDocument(link)
+	return prices, err
+}
 
+func (r *ModelPriceRegistry) LoadPriceDocument(link string) (int, error) {
+	prices, overrides, err := loadPriceDocument(link)
+	if err != nil {
+		return 0, err
+	}
+	r.update(prices, overrides)
+	return len(prices), nil
+}
+
+func loadPriceDocument(link string) (map[string]*ModelPrice, priceOverrides, error) {
 	data, err := LoadModelPriceBytes(link)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-
-	// Parse JSON
-	var rawPrices map[string]*ModelPrice
-	if err := json.Unmarshal(data, &rawPrices); err != nil {
-		return nil, fmt.Errorf("failed to parse model prices JSON: %w", err)
+	var rows map[string]json.RawMessage
+	if err := json.Unmarshal(data, &rows); err != nil {
+		return nil, nil, fmt.Errorf("failed to parse model prices JSON: %w", err)
 	}
-
-	return normalizeModelPrices(rawPrices), nil
+	var overrides priceOverrides
+	if raw, ok := rows["$overrides"]; ok {
+		if err := rejectDuplicateJSONKeys(data); err != nil {
+			return nil, nil, err
+		}
+		if err := json.Unmarshal(raw, &overrides); err != nil {
+			return nil, nil, err
+		}
+		delete(rows, "$overrides")
+	}
+	prices := make(map[string]*ModelPrice, len(rows))
+	for id, raw := range rows {
+		var price *ModelPrice
+		if err := json.Unmarshal(raw, &price); err != nil {
+			return nil, nil, fmt.Errorf("failed to parse model prices JSON: %w", err)
+		}
+		prices[id] = price
+	}
+	return normalizeModelPrices(prices), overrides, nil
 }
 
 func LoadModelPriceBytes(link string) ([]byte, error) {

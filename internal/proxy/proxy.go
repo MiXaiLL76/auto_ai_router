@@ -597,6 +597,7 @@ type RequestLogContext struct {
 	// on the same price row instead of independently re-querying the price
 	// registry, which could observe two different registry generations if a
 	// reload lands between the two calls.
+	billingPrices        *models.BillingPrices
 	billingPriceResolved bool
 	billingPriceModelID  string
 	billingPrice         *models.ModelPrice
