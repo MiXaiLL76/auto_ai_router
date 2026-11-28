@@ -1707,6 +1707,11 @@ type LiteLLMDBConfig struct {
 	// team and organization on top of the calculated cost. Off by default so an
 	// existing LiteLLM DB with margins configured keeps billing the raw cost.
 	EnableCostMargin bool `yaml:"enable_cost_margin"` // default: false (opt-in)
+
+	// EnableTeamModelPrices bills a team's requests at the ready model prices
+	// of the team's metadata.air_model_prices instead of the price list and
+	// cost margin. Off by default: the field is not read.
+	EnableTeamModelPrices bool `yaml:"enable_team_model_prices"` // default: false (opt-in)
 }
 
 // KafkaConfig holds configuration for the Kafka spend-log analytics write-path
@@ -2054,6 +2059,7 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 		BudgetTimezone                   string `yaml:"budget_timezone"`
 		BudgetResetTime                  string `yaml:"budget_reset_time"`
 		EnableCostMargin                 string `yaml:"enable_cost_margin"`
+		EnableTeamModelPrices            string `yaml:"enable_team_model_prices"`
 	}
 
 	var temp tempConfig
@@ -2094,6 +2100,9 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if l.EnableCostMargin, err = parseField(temp.EnableCostMargin, false, strconv.ParseBool, "litellm_db.enable_cost_margin"); err != nil {
+		return err
+	}
+	if l.EnableTeamModelPrices, err = parseField(temp.EnableTeamModelPrices, false, strconv.ParseBool, "litellm_db.enable_team_model_prices"); err != nil {
 		return err
 	}
 
@@ -2511,6 +2520,7 @@ func defaultLiteLLMDBConfig() LiteLLMDBConfig {
 		DailySpendTimezone:               time.UTC,
 		BudgetTimezone:                   time.UTC,
 		EnableCostMargin:                 false,
+		EnableTeamModelPrices:            false,
 	}
 }
 

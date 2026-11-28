@@ -1479,6 +1479,29 @@ func TestModelPriceRegistry_MergeDB_ScopedToExactKey(t *testing.T) {
 	assert.Equal(t, 1.22353e-05, yandex.InputCostPerToken, "yandex/gpt-5.1 must be untouched — the DB override didn't name it")
 }
 
+func TestModelPriceRegistry_GetPriceAnyWithImageToolRow(t *testing.T) {
+	general := &ModelPrice{InputCostPerToken: 1, ImageGenerationToolModel: "alias"}
+	image := &ModelPrice{OutputCostPerImage: 0.04}
+	registry := NewModelPriceRegistry()
+	registry.Update(map[string]*ModelPrice{"m1": general, "alias": general, "m2": {ImageGenerationToolModel: "image"}, "image": image, "m3": {}})
+
+	matched, price, imageTool := registry.GetPriceAnyWithImageToolRow("missing", "m1")
+	assert.Equal(t, "m1", matched)
+	assert.Same(t, general, price)
+	assert.Same(t, general, imageTool)
+
+	_, _, imageTool = registry.GetPriceAnyWithImageToolRow("m2")
+	assert.Same(t, image, imageTool)
+
+	_, price, imageTool = registry.GetPriceAnyWithImageToolRow("m3")
+	assert.NotNil(t, price)
+	assert.Nil(t, imageTool)
+
+	_, price, imageTool = registry.GetPriceAnyWithImageToolRow("missing")
+	assert.Nil(t, price)
+	assert.Nil(t, imageTool)
+}
+
 func TestModelPriceRegistry_GetPrice_NotFound(t *testing.T) {
 	registry := NewModelPriceRegistry()
 

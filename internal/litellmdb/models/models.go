@@ -157,6 +157,10 @@ type Config struct {
 	// TokenInfo.CostMarginConfigs. Off by default: no margin is applied.
 	EnableCostMargin bool
 
+	// EnableTeamModelPrices loads the team's metadata.air_model_prices into
+	// TokenInfo.TeamModelPrices. Off by default: team prices are not read.
+	EnableTeamModelPrices bool
+
 	// Logger
 	Logger *slog.Logger
 }
@@ -352,6 +356,13 @@ type TokenInfo struct {
 	// Cost margin layers in priority order: key, then team and organization
 	// (or user for a personal key) (see CostMargin)
 	CostMarginConfigs []CostMarginConfig
+
+	// TeamModelPrices is the team's metadata.air_model_prices exactly as
+	// stored, nil when the feature is off, the key has no team or the team
+	// has no such field. It stays raw: the proxy parses it strictly, and a
+	// map[string]interface{} decode (TeamMetadata) would drop the whole
+	// metadata on a number float64 cannot hold.
+	TeamModelPrices json.RawMessage
 }
 
 // ==================== Cost Margin ====================
@@ -508,6 +519,7 @@ func (t *TokenInfo) Clone() *TokenInfo {
 	clone.TeamMemberModels = append([]string(nil), t.TeamMemberModels...)
 	clone.Tags = append([]string(nil), t.Tags...)
 	clone.BudgetWindows = slices.Clone(t.BudgetWindows)
+	clone.TeamModelPrices = slices.Clone(t.TeamModelPrices)
 	if t.Metadata != nil {
 		clone.Metadata = cloneMetadataValue(t.Metadata).(map[string]interface{})
 	}

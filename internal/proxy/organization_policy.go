@@ -84,6 +84,12 @@ func (p *Proxy) admitOrganizationModel(
 	if !ok {
 		return nil, "", "", false
 	}
+	// The team price is checked against the policy chosen here, and before
+	// the model is resolved, so a team whose field is unusable gets 503 on
+	// every model.
+	if !p.admitTeamModelPrice(w, r, publicModelID, logCtx) {
+		return nil, "", "", false
+	}
 	if !policy.HasCustomPricing() {
 		return body, "", "", true
 	}
@@ -170,6 +176,9 @@ func (p *Proxy) resolveRetryBillingPrice(
 ) (string, *routermodels.ModelPrice) {
 	if logCtx != nil && logCtx.OrganizationPolicy.HasCustomPricing() {
 		return logCtx.PriceModelID, logCtx.ModelPrice
+	}
+	if logCtx != nil && logCtx.teamModelPrice != nil {
+		return p.resolveBillingPrice(logCtx, publicModelID, modelID, realModelID)
 	}
 	return lookupBillingModelPrice(p.priceRegistry, publicModelID, modelID, realModelID)
 }

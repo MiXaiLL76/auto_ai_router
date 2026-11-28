@@ -320,6 +320,7 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 			"enforce_key_rate_limits", cfg.LiteLLMDB.EnforceKeyRateLimits,
 			"default_estimated_completion_tokens", cfg.LiteLLMDB.DefaultEstimatedCompletionTokens,
 			"enable_cost_margin", cfg.LiteLLMDB.EnableCostMargin,
+			"enable_team_model_prices", cfg.LiteLLMDB.EnableTeamModelPrices,
 		)
 	} else {
 		logger.Info("litellm_db", "status", "DISABLED")

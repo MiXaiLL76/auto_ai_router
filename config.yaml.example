@@ -416,6 +416,7 @@ litellm_db:
   budget_timezone: "Europe/Moscow"  # Calendar of the key budget windows (budget_limits) (default: UTC)
   budget_reset_time: "00:00"  # Time of day day/week/month key budget windows reset at (default: 00:00)
   enable_cost_margin: false  # Apply metadata.cost_margin_config markup of key/user/team/org (default: false)
+  enable_team_model_prices: false  # Bill team requests at the team's metadata.air_model_prices (default: false)
 
 # Optional: POST /v1/search/yandex passthrough to Yandex Cloud's Search API
 # (WebSearch.Search, v2/web/search). The router injects its own Yandex

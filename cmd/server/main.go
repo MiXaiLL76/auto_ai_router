@@ -1238,6 +1238,7 @@ func initializeLiteLLMDB(cfg *config.Config, log *slog.Logger) litellmdb.Manager
 		BudgetTimezone:              cfg.LiteLLMDB.BudgetTimezone,
 		BudgetResetTime:             cfg.LiteLLMDB.BudgetResetTime,
 		EnableCostMargin:            cfg.LiteLLMDB.EnableCostMargin,
+		EnableTeamModelPrices:       cfg.LiteLLMDB.EnableTeamModelPrices,
 		Logger:                      log,
 	}
 

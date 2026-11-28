@@ -226,7 +226,8 @@ func (p *Proxy) buildKafkaSpendEvent(
 		ImageToolGenerations:      usage.ImageToolGenerations,
 		ImageToolEdits:            usage.ImageToolEdits,
 
-		TotalCost: cost,
+		TotalCost:          cost,
+		BillingPriceSource: logCtx.billingPriceSource(),
 
 		APIKeyHash:        hashedToken,
 		UserID:            userID,

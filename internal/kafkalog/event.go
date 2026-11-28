@@ -164,6 +164,9 @@ type SpendEvent struct {
 	// a breakdown figure already contained in total_cost.
 	ToolUsageCost float64 `json:"tool_usage_cost"`
 	TotalCost     float64 `json:"total_cost"`
+	// BillingPriceSource is "team_model_prices" when total_cost is at the
+	// team's own model price (metadata.air_model_prices), empty otherwise.
+	BillingPriceSource string `json:"billing_price_source,omitempty"`
 	// ProviderReportedCost is the provider's own cost of the request (xAI
 	// cost_in_usd_ticks, aggregators' usage.cost) for reconciliation; absent
 	// (NULL in ClickHouse) when the provider did not report one. Not part of

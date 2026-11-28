@@ -1011,6 +1011,54 @@ func TestAuthenticator_TokenFromRow_IgnoresBudgetLimitsWhenDisabled(t *testing.T
 	assert.Empty(t, info.BudgetWindows)
 }
 
+// teamRow is a columnRow whose team_metadata column holds metadata and, with
+// noTeam, whose key has no team.
+type teamRow struct {
+	columnRow
+	metadata []byte
+	noTeam   bool
+}
+
+func (r teamRow) Scan(dest ...any) error {
+	if err := r.columnRow.Scan(dest...); err != nil {
+		return err
+	}
+	*dest[slices.Index(r.columnRow, "team_metadata")].(*[]byte) = r.metadata
+	if r.noTeam {
+		reflect.ValueOf(dest[slices.Index(r.columnRow, "team_id")]).Elem().SetZero()
+	}
+	return nil
+}
+
+func TestAuthenticator_TokenFromRow_TeamModelPrices(t *testing.T) {
+	tests := []struct {
+		name     string
+		enabled  bool
+		noTeam   bool
+		metadata string
+		want     string
+	}{
+		{"disabled", false, false, `{"air_model_prices": {"m1": {"input_cost_per_token": 1}}}`, ""},
+		{"no field", true, false, `{"cost_margin_config": {"global": 0.1}}`, ""},
+		{"key in another case", true, false, `{"AIR_MODEL_PRICES": {"m1": {"input_cost_per_token": 1}}}`, ""},
+		{"no team", true, true, `{"air_model_prices": {"m1": {"input_cost_per_token": 1}}}`, ""},
+		{"empty object", true, false, `{"air_model_prices": {}}`, `{}`},
+		{"null", true, false, `{"air_model_prices": null}`, `null`},
+		{"row", true, false, `{"air_model_prices": {"m1": {"input_cost_per_token": 1}}}`, `{"m1": {"input_cost_per_token": 1}}`},
+		// Such a price drops the whole decoded TeamMetadata: the prices are
+		// kept as stored for the proxy to refuse them.
+		{"price float64 cannot hold", true, false, `{"air_model_prices": {"m1": {"input_cost_per_token": 1e309}}}`, `{"m1": {"input_cost_per_token": 1e309}}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			row := teamRow{columnRow: tokenQueryColumns(t), metadata: []byte(tt.metadata), noTeam: tt.noTeam}
+			info, err := NewAuthenticator(nil, nil, slog.Default()).WithTeamModelPrices(tt.enabled).tokenFromRow(row, "hash")
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, string(info.TeamModelPrices))
+		})
+	}
+}
+
 // A cached token carries the spend of the budget window it was loaded in.
 // Once that window has ended the cache entry is not checked against it: the
 // token is reloaded (here the reload fails, as there is no database).

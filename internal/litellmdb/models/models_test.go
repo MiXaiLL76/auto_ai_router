@@ -37,6 +37,18 @@ func TestTokenInfo_Clone_NilTeamAndOrganizationMetadata(t *testing.T) {
 	assert.Nil(t, clone.OrganizationMetadata)
 }
 
+func TestTokenInfo_Clone_CopiesTeamModelPrices(t *testing.T) {
+	original := &TokenInfo{TeamModelPrices: []byte(`{"m1": {"input_cost_per_token": 1}}`)}
+
+	clone := original.Clone()
+	require.NotNil(t, clone)
+	assert.Equal(t, original.TeamModelPrices, clone.TeamModelPrices)
+
+	clone.TeamModelPrices[0] = '['
+	assert.Equal(t, `{"m1": {"input_cost_per_token": 1}}`, string(original.TeamModelPrices))
+	assert.Nil(t, (&TokenInfo{}).Clone().TeamModelPrices)
+}
+
 // ==================== DefaultConfig Tests ====================
 
 func TestDefaultConfig(t *testing.T) {

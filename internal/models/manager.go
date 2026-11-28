@@ -217,6 +217,10 @@ func NewModelPriceRegistry() *ModelPriceRegistry {
 func (r *ModelPriceRegistry) GetPrice(modelName string) *ModelPrice {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	return r.getPriceLocked(modelName)
+}
+
+func (r *ModelPriceRegistry) getPriceLocked(modelName string) *ModelPrice {
 	raw := strings.ToLower(strings.TrimSpace(modelName))
 	if price := r.prices[raw]; price != nil {
 		return price
@@ -244,16 +248,31 @@ func (r *ModelPriceRegistry) GetPrice(modelName string) *ModelPrice {
 func (r *ModelPriceRegistry) GetPriceAny(modelNames ...string) (string, *ModelPrice) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	return r.getPriceAnyLocked(modelNames)
+}
 
+// GetPriceAnyWithImageToolRow is GetPriceAny that also returns the row the
+// found row names as its image tool's price (ImageGenerationToolModel), nil
+// without one. Both come from the same generation of the prices.
+func (r *ModelPriceRegistry) GetPriceAnyWithImageToolRow(modelNames ...string) (string, *ModelPrice, *ModelPrice) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	matched, price := r.getPriceAnyLocked(modelNames)
+	if price == nil {
+		return matched, nil, nil
+	}
+	if imageTool := strings.TrimSpace(price.ImageGenerationToolModel); imageTool != "" {
+		return matched, price, r.getPriceLocked(imageTool)
+	}
+	return matched, price, nil
+}
+
+func (r *ModelPriceRegistry) getPriceAnyLocked(modelNames []string) (string, *ModelPrice) {
 	for _, modelName := range modelNames {
 		if modelName == "" {
 			continue
 		}
-		raw := strings.ToLower(strings.TrimSpace(modelName))
-		if price := r.prices[raw]; price != nil {
-			return modelName, price
-		}
-		if price := r.prices[NormalizeModelName(modelName)]; price != nil {
+		if price := r.getPriceLocked(modelName); price != nil {
 			return modelName, price
 		}
 	}
@@ -309,6 +328,14 @@ func (r *ModelPriceRegistry) MoonshotToolPrices() (*ToolPricesProvider, bool) {
 	return &prices, true
 }
 
+// moonshotToolPrices are the router's own Moonshot tools and their prices in
+// the tool price document, which prices them rather than a model's row.
+var moonshotToolPrices = map[string]func(*ToolPricesProvider) float64{
+	ToolMoonshotSearch:    func(p *ToolPricesProvider) float64 { return p.SearchCostPerCall },
+	ToolMoonshotSearchPro: func(p *ToolPricesProvider) float64 { return p.SearchProCostPerCall },
+	ToolMoonshotFetch:     func(p *ToolPricesProvider) float64 { return p.FetchCostPerCall },
+}
+
 // applyMoonshotToolPrices copies the registry's Moonshot tool prices into
 // the model's own row, so the ordinary cost calculation prices the router's
 // tool calls like any other tool charge.
@@ -331,11 +358,11 @@ func (r *ModelPriceRegistry) applyMoonshotToolPrices(modelName string, price *Mo
 	// built-in tools' prices live: one map, one lookup, and the next
 	// provider's billable tool is a key rather than a new field.
 	if price.ToolCostPerCall == nil {
-		price.ToolCostPerCall = make(map[string]float64, 3)
+		price.ToolCostPerCall = make(map[string]float64, len(moonshotToolPrices))
 	}
-	price.ToolCostPerCall[ToolMoonshotSearch] = prices.SearchCostPerCall
-	price.ToolCostPerCall[ToolMoonshotSearchPro] = prices.SearchProCostPerCall
-	price.ToolCostPerCall[ToolMoonshotFetch] = prices.FetchCostPerCall
+	for tool, cost := range moonshotToolPrices {
+		price.ToolCostPerCall[tool] = cost(prices)
+	}
 }
 
 // isMoonshotModelName reports whether the model is one of Moonshot's own

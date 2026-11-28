@@ -668,11 +668,14 @@ func (p *ModelPrice) CalculateCostsWithResolver(usage *converter.TokenUsage, res
 	return CalculateTokenCostsWithResolver(usage, p, resolve)
 }
 
+// searchContextSizeKeyPrefix starts every key of search_context_cost_per_query.
+const searchContextSizeKeyPrefix = "search_context_size_"
+
 func (p *ModelPrice) webSearchCostPerQuery(contextSize string) float64 {
 	if p == nil || len(p.SearchContextCostPerQuery) == 0 {
 		return 0
 	}
-	key := "search_context_size_" + converter.NormalizeWebSearchContextSize(contextSize)
+	key := searchContextSizeKeyPrefix + converter.NormalizeWebSearchContextSize(contextSize)
 	return p.SearchContextCostPerQuery[key]
 }
 

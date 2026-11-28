@@ -63,6 +63,15 @@ func TestLiteLLMDBEnableCostMarginParsesExplicitSetting(t *testing.T) {
 	assert.True(t, cfg.EnableCostMargin)
 }
 
+func TestLiteLLMDBEnableTeamModelPricesParsesExplicitSetting(t *testing.T) {
+	var cfg LiteLLMDBConfig
+	require.NoError(t, yaml.Unmarshal([]byte("enabled: false\n"), &cfg))
+	assert.False(t, cfg.EnableTeamModelPrices)
+
+	require.NoError(t, yaml.Unmarshal([]byte("enable_team_model_prices: true\n"), &cfg))
+	assert.True(t, cfg.EnableTeamModelPrices)
+}
+
 func TestLiteLLMDBBudgetTimezoneParsesExplicitSetting(t *testing.T) {
 	var cfg LiteLLMDBConfig
 	require.NoError(t, yaml.Unmarshal([]byte("enabled: false\n"), &cfg))

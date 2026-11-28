@@ -183,6 +183,7 @@ func New(cfg *models.Config) (Manager, error) {
 	// Create authenticator
 	authenticator := auth.NewAuthenticator(pool, cache, cfg.Logger).
 		WithCostMargin(cfg.EnableCostMargin).
+		WithTeamModelPrices(cfg.EnableTeamModelPrices).
 		WithBudgetWindows(cfg.EnforceKeyBudgetWindows).
 		WithBudgetCalendar(cfg.BudgetCalendar())
 	var logger *spendlog.Logger
