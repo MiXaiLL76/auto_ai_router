@@ -483,6 +483,39 @@ func TestProviderConverter_RequestFrom_PreservesVLLMOnlySamplingParamsForProxyLi
 	}
 }
 
+// TestProviderConverter_RequestFrom_ConvertsDocumentParts covers the router's
+// PDF document part on OpenAI-wire destinations, and its exception: an AIR or
+// proxy peer gets the part as it is and converts it for its own provider.
+func TestProviderConverter_RequestFrom_ConvertsDocumentParts(t *testing.T) {
+	body := []byte(`{"model":"m","messages":[{"role":"user","content":[{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"JVBERi0="}}]}]}`)
+
+	for _, tc := range []struct {
+		providerType config.ProviderType
+		modelID      string
+	}{
+		{config.ProviderTypeOpenAI, "gpt-5-mini"},
+		{config.ProviderTypeBedrock, "zai.glm-4.7-flash"},
+	} {
+		got, err := New(tc.providerType, RequestMode{ModelID: tc.modelID}).RequestFrom(body)
+		if err != nil {
+			t.Fatalf("%s: RequestFrom error: %v", tc.providerType, err)
+		}
+		if !bytes.Contains(got, []byte(`"type":"file"`)) {
+			t.Fatalf("%s: expected the document to become a file part, got %s", tc.providerType, string(got))
+		}
+	}
+
+	for _, providerType := range []config.ProviderType{config.ProviderTypeProxy, config.ProviderTypeAIR} {
+		got, err := New(providerType, RequestMode{ModelID: "gpt-5-mini"}).RequestFrom(body)
+		if err != nil {
+			t.Fatalf("%s: RequestFrom error: %v", providerType, err)
+		}
+		if !bytes.Equal(got, body) {
+			t.Fatalf("%s: expected the body to be left untouched, got %s", providerType, string(got))
+		}
+	}
+}
+
 // TestProviderConverter_RequestFrom_StripsVLLMOnlySamplingParamsForEmbeddings
 // covers the IsEmbeddings default branch.
 func TestProviderConverter_RequestFrom_StripsVLLMOnlySamplingParamsForEmbeddings(t *testing.T) {

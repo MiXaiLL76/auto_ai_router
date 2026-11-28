@@ -67,6 +67,29 @@ func TestConvertInputFilePart_KnownExtensionStillWorks(t *testing.T) {
 	assert.Equal(t, "application/pdf", parts[0].FileData.MIMEType)
 }
 
+func TestConvertInputFilePart_FileData(t *testing.T) {
+	parts, err := convertInputFilePart(map[string]interface{}{
+		"file_data": "data:application/pdf;base64,JVBERi0=",
+		"filename":  "report.pdf",
+	})
+	require.NoError(t, err)
+	require.Len(t, parts, 1)
+	require.NotNil(t, parts[0].InlineData)
+	assert.Equal(t, "application/pdf", parts[0].InlineData.MIMEType)
+	assert.Equal(t, []byte("%PDF-"), parts[0].InlineData.Data)
+}
+
+func TestConvertInputFilePart_FileURLComesFirst(t *testing.T) {
+	parts, err := convertInputFilePart(map[string]interface{}{
+		"file_url":  "https://example.com/report.pdf",
+		"file_data": "data:application/pdf;base64,JVBERi0=",
+	})
+	require.NoError(t, err)
+	require.Len(t, parts, 1)
+	require.NotNil(t, parts[0].FileData)
+	assert.Equal(t, "https://example.com/report.pdf", parts[0].FileData.FileURI)
+}
+
 func TestParseDataURLToPart_EmptyPayloadIsNotUsable(t *testing.T) {
 	// Base64 of "" decodes without error; the resulting blob has no bytes and is
 	// rejected by Gemini with "required oneof field 'data' must have one

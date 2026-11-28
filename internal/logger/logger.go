@@ -340,6 +340,15 @@ func sanitizePayloadForLog(value interface{}) interface{} {
 				out[key] = redactPayloadString(item)
 				continue
 			}
+			// Gemini's inline media: {"inlineData": {"mimeType": ..., "data": ...}}.
+			if blob, ok := item.(map[string]interface{}); ok && (lowerKey == "inlinedata" || lowerKey == "inline_data") {
+				redacted := sanitizePayloadForLog(blob).(map[string]interface{})
+				if data, ok := redacted["data"]; ok {
+					redacted["data"] = redactPayloadString(data)
+				}
+				out[key] = redacted
+				continue
+			}
 			out[key] = sanitizePayloadForLog(item)
 		}
 		return out

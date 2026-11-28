@@ -70,7 +70,7 @@ Anthropic-compatible providers that expect `Authorization: Bearer <token>`.
 
 ## Responses API
 
-Anthropic is fully supported via the [Responses API](../advanced/responses.md). Requests are converted natively to the Anthropic Messages API — no Chat Completions intermediate format is used.
+Anthropic is fully supported via the [Responses API](../advanced/responses.md). By default, requests are converted natively to the Anthropic Messages API — no Chat Completions intermediate format is used. A model with `passthrough_responses: false` goes through Chat Completions.
 
 Supported features: streaming, `store` / `previous_response_id` multi-turn, tools, thinking/reasoning, `text.format` (mapped like `response_format`).
 

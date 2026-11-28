@@ -196,6 +196,20 @@ func chatContentPartsToInput(parts []interface{}) ([]interface{}, error) {
 				}
 				result = append(result, entry)
 			}
+		case "document":
+			// The router's PDF part (docs/getting-started/api.md, "PDF documents"):
+			// base64 goes as file_data, a URL as file_url.
+			entry := map[string]interface{}{"type": "input_file"}
+			source, _ := partMap["source"].(map[string]interface{})
+			if file, ok := openai.DocumentFile(partMap); ok {
+				entry["file_data"] = file["file_data"]
+				entry["filename"] = file["filename"]
+			} else if url, _ := source["url"].(string); source["type"] == "url" && url != "" {
+				entry["file_url"] = url
+			} else {
+				return nil, converterutil.NewRequestValidationError("content[].document.source", "unsupported document source")
+			}
+			result = append(result, entry)
 		default:
 			// Unknown content part type -- skip rather than forward something
 			// the Responses API would reject outright (mirrors

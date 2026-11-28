@@ -754,14 +754,43 @@ func TestRequestToChat_InputFileUnsupported(t *testing.T) {
 	assert.Equal(t, "file_id is not supported for this route", validationErr.Message)
 }
 
-func TestRequestToChat_InputFileDataUnsupported(t *testing.T) {
+func TestRequestToChat_InputFile(t *testing.T) {
 	body := `{
 		"model": "gpt-4o",
 		"input": [
 			{
 				"role": "user",
 				"content": [
-					{"type": "input_file", "file_data": "data:application/pdf;base64,JVBERi0="}
+					{"type": "input_file", "file_data": "data:application/pdf;base64,JVBERi0=", "filename": "test.pdf"},
+					{"type": "input_file", "file_url": "https://example.com/report.PDF?download=1"}
+				]
+			}
+		]
+	}`
+	result, err := RequestToChat([]byte(body))
+	require.NoError(t, err)
+
+	var parsed struct {
+		Messages []struct {
+			Content []map[string]interface{} `json:"content"`
+		} `json:"messages"`
+	}
+	require.NoError(t, json.Unmarshal(result, &parsed))
+	require.Len(t, parsed.Messages, 1)
+	assert.Equal(t, []map[string]interface{}{
+		{"type": "file", "file": map[string]interface{}{"file_data": "data:application/pdf;base64,JVBERi0=", "filename": "test.pdf"}},
+		{"type": "document", "source": map[string]interface{}{"type": "url", "url": "https://example.com/report.PDF?download=1"}},
+	}, parsed.Messages[0].Content)
+}
+
+func TestRequestToChat_InputFileURLNotPDFUnsupported(t *testing.T) {
+	body := `{
+		"model": "gpt-4o",
+		"input": [
+			{
+				"role": "user",
+				"content": [
+					{"type": "input_file", "file_url": "https://example.com/attachment"}
 				]
 			}
 		]
@@ -770,8 +799,8 @@ func TestRequestToChat_InputFileDataUnsupported(t *testing.T) {
 	require.Error(t, err)
 	var validationErr *converterutil.RequestValidationError
 	require.True(t, errors.As(err, &validationErr))
-	assert.Equal(t, "input_file", validationErr.Param)
-	assert.Equal(t, "input_file is not supported in chat completions", validationErr.Message)
+	assert.Equal(t, "input_file.file_url", validationErr.Param)
+	assert.Equal(t, "file_url is not supported for this route", validationErr.Message)
 }
 
 func TestRequestToChat_Reasoning(t *testing.T) {

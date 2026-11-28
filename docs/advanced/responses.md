@@ -115,6 +115,18 @@ AIR does not implement a Files API resolver or OpenAI/LiteLLM file ID to Anthrop
 
 Malformed PDF data URIs, non-base64 encodings, empty document sources, and unsupported document source types are rejected as client request validation errors (`400 Bad Request`) rather than internal conversion failures.
 
+### Gemini and Vertex AI `input_file`
+
+| Form                                                                       | Status      | Provider mapping                         |
+| -------------------------------------------------------------------------- | ----------- | ---------------------------------------- |
+| `{"type":"input_file","file_data":"data:application/pdf;base64,<BASE64>"}` | Supported   | `inlineData`                             |
+| `{"type":"input_file","file_url":"https://example.com/document.pdf"}`      | Supported   | `fileData`, MIME type from the extension |
+| `{"type":"input_file","file_id":"file-abc"}`                               | Unsupported | Returns `400 Bad Request`                |
+
+### `input_file` with `passthrough_responses: false`
+
+The request goes through Chat Completions. `file_data` becomes a Chat `file` part with the same `filename`. A `file_url` whose path ends in `.pdf` becomes a [PDF `document` part](../getting-started/api.md#pdf-documents), which Anthropic and Gemini/Vertex AI routes deliver and an OpenAI Chat Completions upstream refuses. Any other `file_url` and `file_id` return `400 Bad Request`.
+
 Input items can also be function call / function call output items for multi-turn tool use:
 
 ```json
@@ -439,6 +451,8 @@ Limitations of the `/v1/chat/completions` conversion:
 - **Custom tools** (`{"type":"custom"}` in `tools` or `tool_choice`) and **`input_audio`**
   content parts are rejected with 400: the Responses API has no way to carry them back as
   Chat Completions output.
+- **PDF**: a `file` part and a [PDF `document` part](../getting-started/api.md#pdf-documents)
+  become `input_file` (`file_data`, or `file_url` for a document given by URL).
 - **Hosted tools** (`image_generation`, `web_search`, `file_search`, `code_interpreter`,
   `mcp`, ...) are forwarded as-is. Only `image_generation` results reach the client (as
   `message.images` / `delta.images`); other hosted-tool calls are not shown, but their cost

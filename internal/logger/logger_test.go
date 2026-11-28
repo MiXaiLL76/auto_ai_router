@@ -60,6 +60,17 @@ func TestSanitizeRequestBodyForLogRedactsDocumentPayloads(t *testing.T) {
 	assert.Contains(t, got, `"media_type":"application/pdf"`)
 }
 
+func TestSanitizeRequestBodyForLogRedactsGeminiInlineData(t *testing.T) {
+	body := []byte(`{"contents":[{"parts":[{"inlineData":{"mimeType":"application/pdf","data":"JVBERi0="}},{"inline_data":{"file_data":"JVBERi0="}}]}]}`)
+
+	got := SanitizeRequestBodyForLog(body, 500)
+
+	assert.NotContains(t, got, "JVBERi0=")
+	assert.Contains(t, got, `"data":"<redacted bytes=8>"`)
+	assert.Contains(t, got, `"file_data":"<redacted bytes=8>"`)
+	assert.Contains(t, got, `"mimeType":"application/pdf"`)
+}
+
 func TestTruncateLongFields_EmbeddingField(t *testing.T) {
 	longEmbedding := strings.Repeat("x", 200)
 	input := `{"embedding":"` + longEmbedding + `"}`

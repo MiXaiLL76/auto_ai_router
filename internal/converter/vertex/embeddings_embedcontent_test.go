@@ -160,6 +160,14 @@ func TestOpenAIEmbeddingToVertexEmbedContent_BareBase64FileNeedsMIMEType(t *test
 	requireValidationError(t, err, "input[0].file.file_data")
 }
 
+func TestOpenAIEmbeddingToVertexEmbedContent_DataURLTakesMIMETypeFromThePart(t *testing.T) {
+	bodies, err := OpenAIEmbeddingToVertexEmbedContent([]byte(fmt.Sprintf(
+		`{"input":{"type":"file","file":{"file_data":"data:;base64,%s","mime_type":"application/pdf"}}}`, testPDF)))
+	require.NoError(t, err)
+	assert.Equal(t, map[string]any{"mimeType": "application/pdf", "data": testPDF},
+		wireParts(t, decodeVertexEmbedContent(t, bodies[0]))[0]["inlineData"])
+}
+
 func TestOpenAIEmbeddingToVertexEmbedContent_RefusesWhatItCannotEmbed(t *testing.T) {
 	tooMany := make([]string, MaxEmbedContentInputs+1)
 	for i := range tooMany {

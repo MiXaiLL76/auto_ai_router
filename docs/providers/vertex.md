@@ -71,7 +71,7 @@ Requests are distributed across credentials using round-robin. See [Load Balanci
 
 ## Responses API
 
-Vertex AI is fully supported via the [Responses API](../advanced/responses.md). Requests are converted natively to the Vertex AI GenerateContent API — no Chat Completions intermediate format is used.
+Vertex AI is fully supported via the [Responses API](../advanced/responses.md). By default, requests are converted natively to the Vertex AI GenerateContent API — no Chat Completions intermediate format is used. A model with `passthrough_responses: false` goes through Chat Completions.
 
 Supported features: streaming, `store` / `previous_response_id` multi-turn, tools, thinking/reasoning.
 
@@ -394,14 +394,16 @@ For Gemini 2.5, `budget_tokens` is passed directly as `ThinkingBudget`. For Gemi
 
 The router supports multi-modal input:
 
-| Content Type   | Format                                                                     | Example                   |
-| -------------- | -------------------------------------------------------------------------- | ------------------------- |
-| Text           | string or `{"type": "text"}` block                                         | Standard text messages    |
-| Image (URL)    | `{"type": "image_url", "image_url": {"url": "https://..."}}`               | HTTP, HTTPS, `gs://` URLs |
-| Image (inline) | `{"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}` | Base64 encoded            |
-| Audio          | `{"type": "input_audio", "input_audio": {"data": "...", "format": "wav"}}` | Base64 encoded audio      |
-| Video          | `{"type": "video_url", "video_url": {"url": "https://..."}}`               | HTTP, HTTPS, `gs://` URLs |
-| File           | `{"type": "file", "file": {"file_id": "gs://bucket/path"}}`                | Cloud Storage or URLs     |
+| Content Type   | Format                                                                                            | Example                                                                       |
+| -------------- | ------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| Text           | string or `{"type": "text"}` block                                                                | Standard text messages                                                        |
+| Image (URL)    | `{"type": "image_url", "image_url": {"url": "https://..."}}`                                      | HTTP, HTTPS, `gs://` URLs                                                     |
+| Image (inline) | `{"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}`                        | Base64 encoded                                                                |
+| Audio          | `{"type": "input_audio", "input_audio": {"data": "...", "format": "wav"}}`                        | Base64 encoded audio                                                          |
+| Video          | `{"type": "video_url", "video_url": {"url": "https://..."}}`                                      | HTTP, HTTPS, `gs://` URLs                                                     |
+| File (inline)  | `{"type": "file", "file": {"file_data": "data:application/pdf;base64,...", "filename": "a.pdf"}}` | `data:` URL, or base64 with the MIME type from `mime_type` or `filename`      |
+| File (link)    | `{"type": "file", "file": {"file_id": "gs://bucket/path"}}`                                       | Cloud Storage or URLs                                                         |
+| PDF document   | `{"type": "document", "source": {"type": "url", "url": "https://..."}}`                           | [PDF `document` part](../getting-started/api.md#pdf-documents), base64 or URL |
 
 Supported MIME types:
 

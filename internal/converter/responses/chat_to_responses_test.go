@@ -105,6 +105,32 @@ func TestChatRequestToResponses_FileContent(t *testing.T) {
 	assert.NotContains(t, filePart, "file_id")
 }
 
+func TestChatRequestToResponses_DocumentContent(t *testing.T) {
+	body := `{"model":"gpt-5-pro","messages":[
+		{"role":"user","content":[
+			{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"AAAA"}},
+			{"type":"document","source":{"type":"url","url":"https://example.com/doc.pdf"}}
+		]}
+	]}`
+
+	out, err := ChatRequestToResponses([]byte(body))
+	require.NoError(t, err)
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(out, &raw))
+	parts := raw["input"].([]interface{})[0].(map[string]interface{})["content"].([]interface{})
+	require.Len(t, parts, 2)
+	assert.Equal(t, map[string]interface{}{
+		"type":      "input_file",
+		"file_data": "data:application/pdf;base64,AAAA",
+		"filename":  "document.pdf",
+	}, parts[0])
+	assert.Equal(t, map[string]interface{}{
+		"type":     "input_file",
+		"file_url": "https://example.com/doc.pdf",
+	}, parts[1])
+}
+
 func TestChatRequestToResponses_FileContentByID(t *testing.T) {
 	body := `{"model":"gpt-5-pro","max_tokens":50,"messages":[
 		{"role":"user","content":[
