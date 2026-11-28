@@ -170,8 +170,10 @@ func TestProxyRequest_StructurallyExcludedCredentialRateLimited_Stays502(t *test
 // Retry-After to pace its retries -- without one it hammers the pool.
 func TestProxyRequest_ProviderRateLimitedThenTransportFailure_Returns429(t *testing.T) {
 	var hits atomic.Int32
+	var lastLimited atomic.Value
 	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if hits.Add(1) <= 3 {
+			lastLimited.Store(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
 			// The upstream account is over its own rate limit.
 			w.WriteHeader(http.StatusTooManyRequests)
 			_, _ = w.Write([]byte(`{"error":{"code":"rate_limit_exceeded","message":"exceeded token rate limit"}}`))
@@ -186,9 +188,11 @@ func TestProxyRequest_ProviderRateLimitedThenTransportFailure_Returns429(t *test
 	// and reach the transport failures.
 	creds := make([]config.CredentialConfig, 0, 7)
 	for i := range 7 {
+		label := string(rune('a' + i))
 		creds = append(creds, config.CredentialConfig{
 			Name: "azure-cred-" + string(rune('a'+i)), Type: config.ProviderTypeOpenAI, BaseURL: upstream.URL,
-			APIKey: "k", RPM: 100, TPM: 100000,
+			ResponseHeaders: map[string]string{"X-Pool": label},
+			APIKey:          label, RPM: 100, TPM: 100000,
 		})
 	}
 	prx := NewTestProxyBuilder().WithCredentials(creds...).WithMaxProviderRetries(6).Build()
@@ -201,6 +205,7 @@ func TestProxyRequest_ProviderRateLimitedThenTransportFailure_Returns429(t *test
 
 	assert.Equal(t, http.StatusTooManyRequests, rec.Code,
 		"a model whose upstream accounts are rate limited must answer 429, not 502: body: %s", rec.Body.String())
+	assert.Equal(t, lastLimited.Load(), rec.Result().Header.Get("X-Pool"))
 	assert.NotEmpty(t, rec.Header().Get("Retry-After"),
 		"a 429 must tell the client when to come back")
 	assert.NotContains(t, rec.Body.String(), "All provider attempts failed")

@@ -62,6 +62,13 @@ func TestCredentialResponseHeadersOnWire(t *testing.T) {
 			if tc.stream {
 				require.Contains(t, w.Result().Header.Get("Content-Type"), "text/event-stream")
 			}
+			if !tc.stream {
+				w = httptest.NewRecorder()
+				req = newRequestHeadersClientRequest("/v1/responses/compact", `{"model":"gpt-4","input":"hi"}`)
+				prx.HandleCompactResponse(w, req)
+				require.Equal(t, tc.status, w.Code, w.Body.String())
+				require.Equal(t, []string{"public"}, w.Result().Header.Values("X-Pool"))
+			}
 			w = httptest.NewRecorder()
 			req = newRequestHeadersClientRequest("/v1/chat/completions", body)
 			req.Header.Del("Authorization")

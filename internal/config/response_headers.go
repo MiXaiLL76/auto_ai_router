@@ -35,11 +35,11 @@ func validateCredentialResponseHeaders(name string, provider ProviderType, heade
 func reservedCredentialResponseHeader(key string) bool {
 	switch key {
 	case "Connection", "Keep-Alive", "Proxy-Connection", "Proxy-Authenticate", "Proxy-Authorization",
-		"Te", "Trailer", "Transfer-Encoding", "Upgrade", "Content-Length", "Content-Encoding", "Content-Type",
-		"Content-Md5", "Content-Digest", "Digest", "Repr-Digest", "Etag", "Retry-After",
+		"Te", "Trailer", "Transfer-Encoding", "Upgrade", "X-Frame-Options", "X-Content-Type-Options",
+		"Set-Cookie", "Www-Authenticate", "Location", "Digest", "Repr-Digest", "Etag", "Retry-After",
 		"X-Credential-Name", "X-Request-Id", "X-Total-Cost", "X-Cost-Breakdown", "X-Accel-Buffering",
 		"X-Aar-Proxy-Client":
 		return true
 	}
-	return strings.HasPrefix(key, "Air-") || strings.HasPrefix(key, "Sec-Websocket-")
+	return strings.HasPrefix(key, "Content-") || strings.HasPrefix(key, "Air-") || strings.HasPrefix(key, "Sec-Websocket-")
 }

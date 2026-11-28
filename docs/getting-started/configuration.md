@@ -179,7 +179,7 @@ Common fields for all credentials:
 | `type`             | string | Provider type: `openai`, `anthropic`, `cometapi`, `vertex-ai`, `gemini`, `bedrock`, `vllm`, `proxy`                              |
 | `proxy_url`        | string | Optional outbound proxy URL for this credential (HTTP, HTTPS, SOCKS5)                                                            |
 | `request_headers`  | map    | Optional fixed headers for upstream requests of direct providers ([details](#fixed-upstream-request-headers))                    |
-| `response_headers` | map    | Optional literal headers returned to the caller ([details](#fixed-response-headers))                                             |
+| `response_headers` | map    | Optional public headers returned to the caller ([details](#fixed-response-headers))                                              |
 | `rpm`              | int    | Requests per minute limit (-1 = unlimited); a Vertex AI embeddings request counts each of its upstream calls                     |
 | `tpm`              | int    | Tokens per minute limit (-1 = unlimited)                                                                                         |
 | `is_fallback`      | bool   | Use as fallback when primary credentials are exhausted                                                                           |
@@ -278,7 +278,7 @@ credentials:
       X-Workload: interactive
 ```
 
-Values are literal strings. Each configured field replaces any provider values
+AIR resolves `os.environ/VAR` when loading the configuration. If the variable is unset, empty, or contains only whitespace, AIR skips that label. Other values are literal strings. Each configured field replaces any provider values
 under the same name, including in allowlist and LiteLLM compatibility modes.
 Use public values because callers can read them. AIR validates names and values
 and reserves transport, body framing and router-managed headers.

@@ -219,6 +219,10 @@ func applyCredentialResponseHeaders(w http.ResponseWriter, cred *config.Credenti
 	}
 	if compat, ok := w.(*responseCompatibilityWriter); ok {
 		compat.credentialHeaders = cred.ResponseHeaders
+		w = compat.Unwrap()
+	}
+	if capture, ok := w.(*captureResponseWriter); ok {
+		capture.credential = cred
 	}
 }
 

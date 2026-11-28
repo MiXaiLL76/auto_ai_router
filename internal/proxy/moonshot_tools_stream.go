@@ -74,12 +74,12 @@ func (p *Proxy) runMoonshotStreamToolLoop(
 		// that ends without a finish_reason is what a broken provider's
 		// answer looks like, and the client can use the text it got.
 		if result != nil && result.partial {
-			p.replayToolStream(w, resp, r, modelID, logCtx, result.body)
+			p.replayToolStream(w, r, modelID, logCtx, result.body)
 		}
 		return result, err
 	}
 	// The final step's stream is what the client gets.
-	p.replayToolStream(w, resp, r, modelID, logCtx, result.body)
+	p.replayToolStream(w, r, modelID, logCtx, result.body)
 	return result, nil
 }
 

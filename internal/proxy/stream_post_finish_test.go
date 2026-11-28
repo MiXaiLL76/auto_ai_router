@@ -89,7 +89,7 @@ func TestChatPostFinishProxyStreamingResponse(t *testing.T) {
 			var w http.ResponseWriter = recorder
 			body := postFinishTerminal + postFinishLate + postFinishDone
 			if name == "tool replay" {
-				p.replayToolStream(w, &http.Response{}, req, "model", nil, []byte(body))
+				p.replayToolStream(w, req, "model", nil, []byte(body))
 			} else {
 				if name == "non-flushing" {
 					w = nonFlushingChatWriter{w}

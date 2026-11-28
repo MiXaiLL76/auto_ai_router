@@ -9,11 +9,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
 )
 
 // captureResponseWriter is a simple http.ResponseWriter that buffers the response.
 type captureResponseWriter struct {
+	credential *config.CredentialConfig
 	header     http.Header
 	body       bytes.Buffer
 	statusCode int
@@ -81,6 +83,7 @@ func (p *Proxy) HandleCompactResponse(w http.ResponseWriter, r *http.Request) {
 
 	capture := newCaptureResponseWriter()
 	p.ProxyRequest(capture, internalReq)
+	applyCredentialResponseHeaders(w, capture.credential)
 
 	if capture.statusCode >= 400 {
 		w.Header().Set("Content-Type", "application/json")

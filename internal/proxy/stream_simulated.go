@@ -821,7 +821,7 @@ func (p *Proxy) finishSimulatedNonStream(
 		p.setPromptTokensEstimate(logCtx, requestBody, realModelID)
 		failureStatus := simulatedFailureStatus(result.streamErr)
 		p.finalizeStreamingLog(logCtx, completionEstimate, lastChunk, providerLabel, failureStatus, !tokenUsageOptions.AudioInputIncludesCachedAudio)
-		p.writeSimulatedError(w, logCtx, failureStatus, targetURL)
+		p.writeSimulatedError(w, cred, logCtx, failureStatus, targetURL)
 		return
 	}
 
@@ -1465,7 +1465,7 @@ func (p *Proxy) finishSimulatedNativeNonStream(
 		p.setPromptTokensEstimate(logCtx, requestBody, realModelID)
 		failureStatus := simulatedFailureStatus(result.streamErr)
 		p.finalizeStreamingLog(logCtx, completionEstimate, lastChunk, providerLabel, failureStatus, true)
-		p.writeSimulatedError(w, logCtx, failureStatus, targetURL)
+		p.writeSimulatedError(w, cred, logCtx, failureStatus, targetURL)
 		return
 	}
 
@@ -1498,7 +1498,7 @@ func (p *Proxy) finishSimulatedNativeNonStream(
 		p.setPromptTokensEstimate(logCtx, requestBody, realModelID)
 		failureStatus := simulatedFailureStatus(streamErr)
 		p.finalizeStreamingLog(logCtx, completionEstimate, lastChunk, providerLabel, failureStatus, true)
-		p.writeSimulatedError(w, logCtx, failureStatus, targetURL)
+		p.writeSimulatedError(w, cred, logCtx, failureStatus, targetURL)
 		return
 	}
 
@@ -2032,7 +2032,7 @@ func (p *Proxy) finishSimulatedPassthroughNonStream(
 		p.setPromptTokensEstimate(logCtx, requestBody, realModelID)
 		failureStatus := simulatedFailureStatus(result.streamErr)
 		p.finalizeStreamingLog(logCtx, completionEstimate, lastChunk, providerLabel, failureStatus, true)
-		p.writeSimulatedError(w, logCtx, failureStatus, targetURL)
+		p.writeSimulatedError(w, cred, logCtx, failureStatus, targetURL)
 		return
 	}
 
@@ -2223,7 +2223,8 @@ func resetSimulatedAttemptState(logCtx *RequestLogContext) (outcome string) {
 
 // writeSimulatedError writes a masked JSON error for a failed simulated
 // non-stream response (stream-level provider error or reassembly failure).
-func (p *Proxy) writeSimulatedError(w http.ResponseWriter, logCtx *RequestLogContext, statusCode int, targetURL string) {
+func (p *Proxy) writeSimulatedError(w http.ResponseWriter, cred *config.CredentialConfig, logCtx *RequestLogContext, statusCode int, targetURL string) {
+	applyCredentialResponseHeaders(w, cred)
 	body := maskedUpstreamErrorBody(statusCode, logCtx.RequestID)
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))

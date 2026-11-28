@@ -2936,7 +2936,7 @@ dispatch:
 		// normally once the window rolls over -- so the client gets a 429
 		// with a Retry-After instead of a 502 that blames the provider for
 		// being broken.
-		providerRateLimited bool
+		providerRateLimitedCred *config.CredentialConfig
 		// providerRequestRejected: an attempt got a 4xx from the provider
 		// that describes the REQUEST rather than the credential -- a bad
 		// prompt, a content-policy refusal, an unknown model. It matters for
@@ -3202,7 +3202,7 @@ dispatch:
 		// request could not be served even if a later attempt fails on the
 		// transport and leaves no response to relay (see providerRateLimited).
 		if resp.StatusCode == http.StatusTooManyRequests {
-			providerRateLimited = true
+			providerRateLimitedCred = cred
 		}
 		// The same for a status that describes the REQUEST (a bad prompt, a
 		// content-policy refusal, a model that does not exist): it stays the
@@ -3338,7 +3338,7 @@ dispatch:
 		// window rolls over. Answering 502 here would blame the provider for
 		// being broken and leave the client without the Retry-After it needs
 		// to back off instead of hammering the pool.
-		providerRateLimit := providerRateLimited
+		providerRateLimit := providerRateLimitedCred != nil
 		switch {
 		case clientCanceled:
 			// The client left before any credential attempt produced a
@@ -3355,6 +3355,7 @@ dispatch:
 			errorMsg = "Credential rate limits ran out before every embeddings input was sent"
 			errorOrigin = ErrorOriginFanOutRateLimited
 		case providerRateLimit:
+			applyCredentialResponseHeaders(w, providerRateLimitedCred)
 			statusCode = http.StatusTooManyRequests
 			statusMessage = "Rate limit exceeded"
 			errorMsg = "All provider attempts were rate limited"

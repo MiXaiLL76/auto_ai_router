@@ -1278,7 +1278,7 @@ type CredentialConfig struct {
 	// client User-Agents (Novita's Cloudflare answers Python-urllib with 403/1010).
 	RequestHeaders map[string]string `yaml:"request_headers,omitempty"`
 
-	// ResponseHeaders are public literal values returned with this provider's final HTTP response.
+	// ResponseHeaders are public values returned with this provider's final HTTP response.
 	ResponseHeaders map[string]string `yaml:"response_headers,omitempty"`
 
 	// LoopGate overrides the loop_gate settings for every model of this
@@ -1510,6 +1510,18 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 	c.ResponseHeaders = temp.ResponseHeaders
 	if err := validateCredentialResponseHeaders(c.Name, c.Type, c.ResponseHeaders); err != nil {
 		return err
+	}
+
+	for key, raw := range c.ResponseHeaders {
+		value := resolveEnvString(raw)
+		if !validHeaderFieldValue(value) {
+			return fmt.Errorf("credential %s: invalid response_headers value for %q", c.Name, key)
+		}
+		if strings.HasPrefix(raw, "os.environ/") && strings.TrimSpace(value) == "" {
+			delete(c.ResponseHeaders, key)
+			continue
+		}
+		c.ResponseHeaders[key] = value
 	}
 
 	if _, err := ParseProxyURL(c.ProxyURL); err != nil {

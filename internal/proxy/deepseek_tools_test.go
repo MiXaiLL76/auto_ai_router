@@ -1377,11 +1377,16 @@ func TestDeepSeekStreamWithOurToolStillRunsTheLoop(t *testing.T) {
 			"url":   "https://example.com/v4",
 		}},
 	}
-	server := httptest.NewServer(fake.handler())
+	handler := fake.handler()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Set-Cookie", "upstream=value")
+		handler.ServeHTTP(w, r)
+	}))
 	defer server.Close()
 	fake.baseURL = server.URL
 
 	prx, _ := deepSeekTestProxy(t, fake)
+	prx.responseHeaderMode = config.ResponseHeaderModeAllowlist
 
 	body := `{
 		"model": "deepseek-flash",
@@ -1395,6 +1400,9 @@ func TestDeepSeekStreamWithOurToolStillRunsTheLoop(t *testing.T) {
 	rec := httptest.NewRecorder()
 	prx.ProxyRequest(rec, req)
 
+	if values := rec.Result().Header.Values("Set-Cookie"); len(values) != 0 {
+		t.Fatalf("unexpected upstream cookies in replay: %v", values)
+	}
 	out := rec.Body.String()
 	if fake.searchCalls != 1 {
 		t.Errorf("the router made %d search calls, want 1", fake.searchCalls)
