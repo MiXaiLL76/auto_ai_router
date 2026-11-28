@@ -469,6 +469,7 @@ func TestHandleSimulatedNonStream_MidStreamTransportError(t *testing.T) {
 	start := time.Now().Add(-time.Second)
 	logCtx := &RequestLogContext{StartTime: start, RequestID: "test-req", Request: req}
 	cred := &config.CredentialConfig{Name: "openai", Type: config.ProviderTypeOpenAI}
+	cred.ResponseHeaders = map[string]string{"X-Pool": "west"}
 	prepared := &orchestratedRequest{streaming: false}
 	w := httptest.NewRecorder()
 
@@ -476,6 +477,7 @@ func TestHandleSimulatedNonStream_MidStreamTransportError(t *testing.T) {
 		logCtx, nil, "http://upstream", []byte(`{"model":"gpt-4o","messages":[]}`),
 		false, false, false, start, map[string]bool{}, map[string]bool{})
 
+	require.Equal(t, "west", w.Result().Header.Get("X-Pool"))
 	require.Equal(t, http.StatusBadGateway, w.Code)
 	assert.Equal(t, "failure", logCtx.Status)
 	assert.Equal(t, "stream_error", logCtx.StreamOutcome)
@@ -2569,12 +2571,14 @@ func TestHandleSimulatedPassthroughNonStream_RateLimitErrorReturns429(t *testing
 	start := time.Now()
 	logCtx := &RequestLogContext{StartTime: start, RequestID: "pt-ratelimit", Request: req}
 	cred := &config.CredentialConfig{Name: "c", Type: config.ProviderTypeOpenAI, BaseURL: "http://upstream"}
+	cred.ResponseHeaders = map[string]string{"X-Pool": "west"}
 	prepared := &orchestratedRequest{streaming: false, passthroughResponses: true, forcedPassthroughNonStream: true, body: []byte(`{}`)}
 	w := httptest.NewRecorder()
 
 	prx.handleSimulatedPassthroughNonStream(w, req, resp, prepared, cred, "m", "m", logCtx, nil, "http://upstream", prepared.body,
 		false, false, false, start, map[string]bool{}, map[string]bool{})
 
+	require.Equal(t, "west", w.Result().Header.Get("X-Pool"))
 	require.Equal(t, http.StatusTooManyRequests, w.Code, "body: %s", w.Body.String())
 	assert.Contains(t, w.Body.String(), "rate_limit_error")
 	assert.NotEmpty(t, w.Header().Get("Retry-After"), "a 429 must tell the client when to come back")
@@ -2597,6 +2601,7 @@ func TestHandleSimulatedNativeNonStream_RateLimitErrorReturns429(t *testing.T) {
 	start := time.Now()
 	logCtx := &RequestLogContext{StartTime: start, RequestID: "native-ratelimit", Request: req}
 	cred := &config.CredentialConfig{Name: "c", Type: config.ProviderTypeAnthropic, BaseURL: "http://upstream"}
+	cred.ResponseHeaders = map[string]string{"X-Pool": "west"}
 	prepared := &orchestratedRequest{streaming: false, nativeResponses: true, forcedNativeNonStream: true, body: []byte(`{}`)}
 	w := httptest.NewRecorder()
 
@@ -2604,6 +2609,7 @@ func TestHandleSimulatedNativeNonStream_RateLimitErrorReturns429(t *testing.T) {
 		logCtx, nil, "http://upstream", prepared.body,
 		false, false, false, start, map[string]bool{}, map[string]bool{})
 
+	require.Equal(t, "west", w.Result().Header.Get("X-Pool"))
 	require.Equal(t, http.StatusTooManyRequests, w.Code, "body: %s", w.Body.String())
 	assert.Contains(t, w.Body.String(), "rate_limit_error")
 	assert.NotEmpty(t, w.Header().Get("Retry-After"), "a 429 must tell the client when to come back")

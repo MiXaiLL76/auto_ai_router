@@ -2936,7 +2936,7 @@ dispatch:
 		// normally once the window rolls over -- so the client gets a 429
 		// with a Retry-After instead of a 502 that blames the provider for
 		// being broken.
-		providerRateLimited bool
+		providerRateLimitedCred *config.CredentialConfig
 		// providerRequestRejected: an attempt got a 4xx from the provider
 		// that describes the REQUEST rather than the credential -- a bad
 		// prompt, a content-policy refusal, an unknown model. It matters for
@@ -2953,6 +2953,7 @@ dispatch:
 		// is masked for the client like any other provider error.
 		providerRequestRejected     int
 		providerRequestRejectedBody []byte
+		providerRequestRejectedCred *config.CredentialConfig
 		// Replies of a fanned-out embeddings request kept across attempts, so
 		// a retry only re-sends the inputs that did not get one.
 		embedFanOutReplies embedContentFanOutReplies
@@ -3201,7 +3202,7 @@ dispatch:
 		// request could not be served even if a later attempt fails on the
 		// transport and leaves no response to relay (see providerRateLimited).
 		if resp.StatusCode == http.StatusTooManyRequests {
-			providerRateLimited = true
+			providerRateLimitedCred = cred
 		}
 		// The same for a status that describes the REQUEST (a bad prompt, a
 		// content-policy refusal, a model that does not exist): it stays the
@@ -3219,6 +3220,7 @@ dispatch:
 		if isRequestScopedStatus(resp.StatusCode) {
 			providerRequestRejected = resp.StatusCode
 			providerRequestRejectedBody = responseBody
+			providerRequestRejectedCred = cred
 		}
 
 		p.recordProviderResponse(r.Context(), cred, modelID, realModelID, resp.StatusCode, resp.Header, responseBody)
@@ -3336,7 +3338,7 @@ dispatch:
 		// window rolls over. Answering 502 here would blame the provider for
 		// being broken and leave the client without the Retry-After it needs
 		// to back off instead of hammering the pool.
-		providerRateLimit := providerRateLimited
+		providerRateLimit := providerRateLimitedCred != nil
 		switch {
 		case clientCanceled:
 			// The client left before any credential attempt produced a
@@ -3353,6 +3355,7 @@ dispatch:
 			errorMsg = "Credential rate limits ran out before every embeddings input was sent"
 			errorOrigin = ErrorOriginFanOutRateLimited
 		case providerRateLimit:
+			applyCredentialResponseHeaders(w, providerRateLimitedCred)
 			statusCode = http.StatusTooManyRequests
 			statusMessage = "Rate limit exceeded"
 			errorMsg = "All provider attempts were rate limited"
@@ -3442,7 +3445,8 @@ dispatch:
 				// classification does, so a content-policy refusal arrives as
 				// the content-policy message and not as a bare "Bad Request".
 				clientBody, _, _ := clientResponseBodyForCredential(
-					statusCode, providerRequestRejectedBody, cred, modelID, logCtx.RequestID)
+					statusCode, providerRequestRejectedBody, providerRequestRejectedCred, modelID, logCtx.RequestID)
+				applyCredentialResponseHeaders(w, providerRequestRejectedCred)
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("Content-Length", fmt.Sprintf("%d", len(clientBody)))
 				w.WriteHeader(statusCode)

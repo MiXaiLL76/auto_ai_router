@@ -4,7 +4,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
@@ -69,12 +68,12 @@ func (p *Proxy) runDeepSeekStreamToolLoop(
 		// that ends without a finish_reason is what a broken provider's
 		// answer looks like, and the client can use the text it got.
 		if result != nil && result.partial {
-			p.replayToolStream(w, resp, r, modelID, logCtx, result.body)
+			p.replayToolStream(w, r, modelID, logCtx, result.body)
 		}
 		return result, err
 	}
 	// The final step's stream is what the client gets.
-	p.replayToolStream(w, resp, r, modelID, logCtx, result.body)
+	p.replayToolStream(w, r, modelID, logCtx, result.body)
 	return result, nil
 }
 
@@ -262,20 +261,15 @@ func (p *Proxy) runDeepSeekStreamToolStep(
 }
 
 // replayToolStream writes the buffered final step of the tool loop.
-func (p *Proxy) replayToolStream(w http.ResponseWriter, resp *http.Response, r *http.Request, modelID string, logCtx *RequestLogContext, raw []byte) {
+func (p *Proxy) replayToolStream(w http.ResponseWriter, r *http.Request, modelID string, logCtx *RequestLogContext, raw []byte) {
 	header := w.Header()
-	for name, values := range resp.Header {
-		if strings.EqualFold(name, "Content-Length") {
-			continue
-		}
-		for _, value := range values {
-			header.Add(name, value)
-		}
-	}
 	header.Set("Content-Type", "text/event-stream")
 	header.Set("Cache-Control", "no-cache")
 	header.Set("Connection", "keep-alive")
 	header.Del("Content-Length")
+	if logCtx != nil {
+		applyCredentialResponseHeaders(w, logCtx.Credential)
+	}
 	finishFilter := p.newChatPostFinishFilter(r.Context(), header, endpointFromRequest(r), http.StatusOK, modelID, logCtx)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(finishFilter.filter(raw, true)) //nolint:gosec // G705: proxied SSE

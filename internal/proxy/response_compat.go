@@ -66,9 +66,10 @@ func applyLiteLLMRequestCompatibility(path string, body []byte) []byte {
 }
 
 type responseCompatibilityWriter struct {
-	target      http.ResponseWriter
-	transformer *compatlitellm.Transformer
-	request     *http.Request
+	credentialHeaders map[string]string
+	target            http.ResponseWriter
+	transformer       *compatlitellm.Transformer
+	request           *http.Request
 	// endpoint is the client-facing path, captured before proxying. The
 	// orchestrator rewrites request.URL.Path to the provider path (e.g.
 	// /v1/responses -> /v1/chat/completions when converting), and the URL is
@@ -298,6 +299,10 @@ func (w *responseCompatibilityWriter) splitHeaders() (http.Header, http.Header) 
 			preserved[key] = append([]string(nil), provider.Values(key)...)
 			provider.Del(key)
 		}
+	}
+	for name, value := range w.credentialHeaders {
+		provider.Del(name)
+		preserved.Set(name, value)
 	}
 	return provider, preserved
 }
